@@ -106,6 +106,16 @@ pub struct Datagram {
     pub len: usize,
 }
 
+/// The buffer goes with the client: unmapped, and its handle closed. A
+/// receive still waiting in the network service keeps its own duplicate
+/// until it is answered (ADR 0069).
+impl Drop for NetClient {
+    fn drop(&mut self) {
+        let _ = sys::mmio_unmap(self.buf);
+        let _ = sys::handle_close(self.dma);
+    }
+}
+
 impl NetClient {
     pub fn new(service: Handle, hardware: Handle) -> Result<Self, Error> {
         let dma = sys::dma_alloc(hardware, MAX_DATAGRAM as u64)?;
@@ -328,6 +338,8 @@ impl NetClient {
     /// (`ipc_receive_any`). The caller closes it once the reply is taken
     /// (or given up). The data lands in this client's buffer: until
     /// [`Self::tcp_recv_finish`], no other call of this client may carry it.
+    /// A receive given up still holds the buffer in the service until it is
+    /// answered: by its deadline, or by `tcp_close` of the socket.
     pub fn tcp_recv_start(
         &self,
         sock: u16,

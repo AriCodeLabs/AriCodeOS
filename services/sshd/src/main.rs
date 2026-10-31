@@ -474,6 +474,10 @@ fn serve(
     // the member and length of what the last wait received (ADR 0069).
     let mut pending: Option<Handle> = None;
     let mut woken: Option<(usize, usize)> = None;
+    // When the pending receive's reply is overdue: netd answers by
+    // `RECV_WAIT_MS`, and a service that does not is given up on, as
+    // `tcp_recv` does (audit of ADR 0069, L2).
+    let mut reply_due = 0;
     'conn: loop {
         // Shell output the wait took: before anything reuses `msg`.
         if let Some((OUTPUT, len)) = woken {
@@ -492,6 +496,7 @@ fn serve(
                 Ok(h) => pending = Some(h),
                 Err(_) => break,
             }
+            reply_due = now_ms() + RECV_WAIT_MS as u64 + sys::rpc::GRACE_MS;
         }
         // The client's bytes: the reply the wait took, or one already there.
         let reply = match (woken.take(), pending) {
@@ -649,15 +654,21 @@ fn serve(
             members[OUTPUT] = s.output;
             n = 2;
         }
+        let now = now_ms();
+        if now >= reply_due {
+            say(b"network service did not answer a receive: connection dropped");
+            break;
+        }
         let timeout = if !input.is_empty() {
             INPUT_RETRY_MS
         } else if session.is_some() {
             SESSION_CHECK_MS
         } else if !server.is_authenticated() {
-            (started + AUTH_DEADLINE_MS + 1).saturating_sub(now_ms())
+            (started + AUTH_DEADLINE_MS + 1).saturating_sub(now)
         } else {
             sys::TIMEOUT_INFINITE
-        };
+        }
+        .min(reply_due - now);
         match sys::ipc_receive_any(&members[..n], &mut msg, &mut handles, timeout) {
             Ok((index, len, nh)) => {
                 // Neither the network service nor the shell sends handles.
@@ -927,7 +938,19 @@ fn main(_arg: u64) -> u64 {
             &rng.0,
             keys.clone(),
         );
-        let _ = net.tcp_close(sock);
+        // The close also ends the receive still waiting for this socket.
+        // If it does not reach the network service, that receive may still
+        // hold `recv_net`'s buffer: the next connection gets a new one, so
+        // late bytes of this one cannot land in it (audit of ADR 0069, L1).
+        if net.tcp_close(sock).is_err() {
+            match NetClient::new(NET, HW) {
+                Ok(fresh) => recv_net = fresh,
+                Err(_) => {
+                    say(b"no network client");
+                    return 2;
+                }
+            }
+        }
         say(b"connection closed");
         // Reread between connections so a key added or removed from the
         // console counts, without delaying the next client's banner behind

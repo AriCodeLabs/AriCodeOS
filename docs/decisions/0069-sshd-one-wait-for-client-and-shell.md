@@ -89,6 +89,34 @@ session open, the CPU stayed 97% idle (`cpus --detail`).
   the session shell would need a flush before every point where it
   blocks.
 
+## Audit (2026-10-31)
+
+An independent audit found no high or medium findings. It checked:
+- the other users of `tcp_recv` (unchanged behaviour);
+- every handle path, in sshd and in netd;
+- the two DMA buffers within a connection;
+- the order of requests across both clients;
+- the shared message buffer and the `woken` handling;
+- lost wakeups, busy loops, and ADR 0025's properties.
+
+Applied:
+- **L1.** If `tcp_close` did not reach netd, the receive it should have
+  ended could hold `recv_net`'s buffer into the next connection. That
+  connection now gets a new client. `NetClient` frees its buffer when
+  dropped, so the old one is not leaked.
+- **L2.** Nothing in sshd bounded the wait for the pending receive's
+  reply. Past `RECV_WAIT_MS` plus `rpc::GRACE_MS` the connection is
+  dropped and said, as `tcp_recv` gives up.
+
+Recorded:
+- **I1.** A wait woken by output makes that pass's burst 17 messages.
+- **I2.** With typed input pending and the client's window full, the
+  10 ms bound can repeat until the window opens. Bounded, not a busy loop.
+- **I3.** Nothing in the type system stops a caller of `tcp_recv_start`
+  from using the same client's buffer meanwhile; sshd uses a client of
+  its own.
+- **I4.** sshd takes two of netd's eight client-buffer mappings.
+
 ## Tests
 
 - QEMU: the `ssh` and `network` areas, 45 scenarios: `ssh.exec`,
