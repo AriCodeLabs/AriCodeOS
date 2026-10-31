@@ -1736,8 +1736,9 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
 
 - `aricode-crypto`: shared GF(2^255-19) field, X25519 (constant-time
   ladder), Poly1305 and `chacha20-poly1305@openssh.com`.
-- `aricode-ssh`: SSH-2 server state machine (curve25519-sha256 with strict
-  KEX, ssh-ed25519, chacha20-poly1305, publickey auth, one session channel),
+- `aricode-ssh`: SSH-2 server state machine (mlkem768x25519-sha256 or
+  curve25519-sha256 with strict KEX and key re-exchange (ADR 0068),
+  ssh-ed25519, chacha20-poly1305, publickey auth, one session channel),
   tested on the host against the OpenSSH client.
 - `services/sshd`: port 22 over the network service; host key and
   `authorized_keys` in AriFS. For `shell`/`exec` it asks init (session

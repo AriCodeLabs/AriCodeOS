@@ -95,7 +95,8 @@ The owner's meaning of "from scratch", in their words (2026-10-29):
       crates. Done in ADR 0066.
    4. TLS and X.509: compare with rustls and rustls-webpki. Done in
       ADR 0067.
-   5. SSH: compare with sunset and Dropbear's design.
+   5. SSH: compare with sunset and Dropbear's design. Done in ADR 0068:
+      the server stays, with ML-KEM and key re-exchange.
    6. TCP/IP, then the WASM interpreter: compare with smoltcp and wasmi.
 
 ## Consequences

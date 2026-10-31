@@ -81,8 +81,7 @@ const REKEY_PACKETS: u32 = 1 << 28;
 /// keeps asking instead of answering is disconnected: memory stays bounded
 /// (Dropbear 2026.92 fixed the same unbounded growth).
 const MAX_DEFERRED: usize = 64;
-/// ML-KEM-768 encapsulation key and ciphertext sizes (FIPS 203).
-const MLKEM_EK_LEN: usize = 1184;
+const MLKEM_EK_LEN: usize = aricode_crypto::mlkem::ENCAPSULATION_KEY_LEN;
 const STRICT_C: &[u8] = b"kex-strict-c-v00@openssh.com";
 const HOSTKEY: &[u8] = b"ssh-ed25519";
 const CIPHER: &[u8] = b"chacha20-poly1305@openssh.com";
@@ -745,10 +744,12 @@ impl Server {
             msg::IGNORE | msg::DEBUG | msg::UNIMPLEMENTED if !self.in_strict_kex() => {}
             msg::EXT_INFO if !self.in_strict_kex() && !self.receiving_kex() => {}
             msg::KEXINIT if !self.receiving_kex() && self.phase != Phase::Closed => {
-                // A re-exchange the client starts: ours goes first.
+                // A re-exchange the client starts: ours goes first. Only
+                // after authentication: before it, each one would only make
+                // the server compute (audit of ADR 0068, I4).
                 if self.kex.is_none() {
-                    if !matches!(self.phase, Phase::Auth | Phase::Connected) {
-                        return Err(Error::Protocol("unexpected KEXINIT"));
+                    if self.phase != Phase::Connected {
+                        return Err(Error::Protocol("key re-exchange before authentication"));
                     }
                     self.send_kexinit(out);
                 }
@@ -948,8 +949,8 @@ impl Server {
                 let (ek, x) = q_c.split_at(MLKEM_EK_LEN);
                 let mut m = SecretBytes([0u8; 32]);
                 self.rng.fill(&mut m.0);
-                let (ct, k_pq) =
-                    mlkem_encapsulate(ek, &m).ok_or(Error::Protocol("bad ML-KEM client key"))?;
+                let (ct, k_pq) = aricode_crypto::mlkem::encapsulate(ek, &m)
+                    .ok_or(Error::Protocol("bad ML-KEM client key"))?;
                 let (x_s, k_cl) = self.x25519(x)?;
                 let mut h = Sha256::new();
                 h.update(&k_pq.0);
@@ -960,6 +961,10 @@ impl Server {
                 ([ct.as_slice(), &x_s].concat(), SecretVec(enc.0))
             }
         };
+        // This exchange's secrets are drawn: the generator forgets the key
+        // they came from, so reading its state later cannot recover them
+        // (audit of ADR 0068, L2).
+        self.rng.ratchet();
         let k_s = ed25519_blob(&self.host_public);
         let Some(kex) = self.kex.as_ref() else {
             return Err(Error::Protocol("unexpected ECDH_INIT"));
@@ -1212,24 +1217,6 @@ impl Server {
         }
         Ok(())
     }
-}
-
-/// ML-KEM-768 encapsulation to the client's key `ek` with the randomness
-/// `m`: the ciphertext and the shared key, or `None` for a key that fails
-/// the FIPS 203 checks. Out of line, so the large frames of `ml-kem` exist
-/// only during this call and never add to the packet loop's (the stack
-/// budget, incident 0018).
-#[inline(never)]
-fn mlkem_encapsulate(ek: &[u8], m: &SecretBytes<32>) -> Option<(Vec<u8>, SecretBytes<32>)> {
-    let ek = ml_kem::array::Array::try_from(ek).ok()?;
-    let ek = ml_kem::EncapsulationKey768::new(&ek).ok()?;
-    let mut m = ml_kem::B32::from(m.0);
-    let (ct, mut k) = ek.encapsulate_deterministic(&m);
-    wipe(m.as_mut_slice());
-    let mut shared = SecretBytes([0u8; 32]);
-    shared.0.copy_from_slice(&k);
-    wipe(k.as_mut_slice());
-    Some((ct.to_vec(), shared))
 }
 
 /// Messages allowed while a key exchange is in progress (RFC 4253 7.1):
@@ -1662,13 +1649,124 @@ mod tests {
             s.handle(&kexinit, &mut out, &mut ev),
             Err(Error::Protocol("unexpected KEXINIT"))
         );
-        // An ML-KEM key of the wrong size or failing the FIPS 203 check.
-        let mut init = Writer::new(msg::KEX_ECDH_INIT);
-        init.string(&[0xff; MLKEM_EK_LEN + 32]);
+        // An ML-KEM key failing the FIPS 203 check, or of the wrong size.
+        for key in [
+            &[0xff; MLKEM_EK_LEN + 32][..],
+            &[0; MLKEM_EK_LEN + 31],
+            &[0; 32],
+        ] {
+            let mut s = connected();
+            s.handle(&kexinit, &mut out, &mut ev).unwrap();
+            let mut init = Writer::new(msg::KEX_ECDH_INIT);
+            init.string(key);
+            assert_eq!(
+                s.handle(&init.0, &mut out, &mut ev),
+                Err(Error::Protocol("bad ML-KEM client key"))
+            );
+        }
+    }
+
+    /// Audit of ADR 0068, I4: before authentication a re-exchange only
+    /// makes the server compute; the client may not start one.
+    #[test]
+    fn no_client_rekey_before_authentication() {
+        let mut s = connected();
+        s.phase = Phase::Auth;
+        let (mut out, mut ev) = (Vec::new(), Vec::new());
         assert_eq!(
-            s.handle(&init.0, &mut out, &mut ev),
-            Err(Error::Protocol("bad ML-KEM client key"))
+            s.handle(&kexinit_payload(b"curve25519-sha256"), &mut out, &mut ev),
+            Err(Error::Protocol("key re-exchange before authentication"))
         );
+        assert!(out.is_empty());
+    }
+
+    /// Audit of ADR 0068, L2: drawing an exchange's secrets ratchets the
+    /// generator, so its later state does not give them back.
+    #[test]
+    fn a_key_exchange_ratchets_the_generator() {
+        let mut s = connected();
+        let (mut out, mut ev) = (Vec::new(), Vec::new());
+        s.handle(&kexinit_payload(b"curve25519-sha256"), &mut out, &mut ev)
+            .unwrap();
+        let mut init = Writer::new(msg::KEX_ECDH_INIT);
+        init.string(&x25519::public_key(&[9; 32]));
+        s.handle(&init.0, &mut out, &mut ev).unwrap();
+        // Without the ratchet the server's generator would still be the
+        // seed's stream, a few blocks on.
+        let mut stream = [0u8; 4096];
+        Rng::new([2; 32]).fill(&mut stream);
+        let mut next = [0u8; 64];
+        s.rng.fill(&mut next);
+        assert!(!stream.windows(64).any(|w| w == next));
+    }
+
+    /// Random packets through `feed`, in clear before the first NEWKEYS:
+    /// framing, the KEXINIT lists, key exchanges with keys of the right
+    /// sizes (so X25519, ML-KEM and the host signature run), then what the
+    /// encrypted side makes of packets in clear (audit of ADR 0068, L4).
+    #[test]
+    fn random_packets_through_feed_never_panic() {
+        extern crate std;
+        let rounds: u64 = std::env::var("SSH_FUZZ_ITERATIONS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2_000)
+            / 10;
+        let mut x = 0xD1B5_4A32_D192_ED03u64;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let frame = |payload: &[u8], pad: usize| {
+            let mut p = ((1 + payload.len() + pad) as u32).to_be_bytes().to_vec();
+            p.push(pad as u8);
+            p.extend_from_slice(payload);
+            p.extend(core::iter::repeat_n(0, pad));
+            p
+        };
+        const KEX_LISTS: &[&[u8]] = &[
+            b"mlkem768x25519-sha256,kex-strict-c-v00@openssh.com",
+            b"curve25519-sha256,kex-strict-c-v00@openssh.com",
+            b"curve25519-sha256",
+            b"x,y",
+        ];
+        for _ in 0..rounds.max(1) {
+            let mut s = Server::new([1; 32], [2; 32], alloc::vec![[4; 32]]);
+            let (mut out, mut ev) = (Vec::new(), Vec::new());
+            s.start(&mut out);
+            let mut input = b"SSH-2.0-fuzz\r\n".to_vec();
+            let r = next();
+            input.extend(client_kexinit(KEX_LISTS[(r % 4) as usize]));
+            let key_len = [32, MLKEM_EK_LEN + 32, 31, 0][((r >> 8) % 4) as usize];
+            let key: Vec<u8> = (0..key_len).map(|_| next() as u8).collect();
+            let mut init = Writer::new(msg::KEX_ECDH_INIT);
+            init.string(&key);
+            input.extend(frame(&init.0, 4 + (r >> 16) as usize % 8));
+            for _ in 0..(r >> 24) % 6 {
+                let v = next();
+                let body: Vec<u8> = (0..v % 40).map(|_| next() as u8).collect();
+                let pad = (v >> 32) as usize % 12;
+                let mut p = frame(&[&[(v >> 40) as u8][..], &body].concat(), pad);
+                if v >> 63 == 1 {
+                    // A broken length or padding.
+                    let at = (v >> 48) as usize % p.len();
+                    p[at] ^= 1 << ((v >> 56) % 8);
+                }
+                input.extend(p);
+            }
+            // Fed in random pieces.
+            let mut rest = &input[..];
+            while !rest.is_empty() {
+                let n = (1 + next() % 300) as usize;
+                let (a, b) = rest.split_at(n.min(rest.len()));
+                if s.feed(a, &mut out, &mut ev).is_err() || s.is_closed() {
+                    break;
+                }
+                rest = b;
+            }
+        }
     }
 
     /// Random messages in every phase never panic: the parser runs before

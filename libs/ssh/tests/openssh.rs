@@ -254,8 +254,15 @@ fn large_output_is_delivered_whole() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// One connection whose command gets `size` bytes, produced as the
-/// client's window allows (never more than 1 MiB waiting), then exit 0.
+/// Byte `i` of a streamed output: a position pattern, so data out of order
+/// or repeated is seen, not only data lost (audit of ADR 0068, L3).
+fn pattern(i: u64) -> u8 {
+    (i % 251) as u8
+}
+
+/// One connection whose command gets `size` bytes of [`pattern`], produced
+/// as the client's window allows (never more than 1 MiB waiting), then
+/// exit 0.
 fn serve_stream(listener: TcpListener, authorized: Vec<[u8; 32]>, size: u64) {
     let (mut sock, _) = listener.accept().unwrap();
     sock.set_read_timeout(Some(Duration::from_secs(20)))
@@ -263,7 +270,8 @@ fn serve_stream(listener: TcpListener, authorized: Vec<[u8; 32]>, size: u64) {
     let mut server = Server::new([0x42; 32], [0x17; 32], authorized);
     let mut out = Vec::new();
     server.start(&mut out);
-    let chunk = vec![b'x'; 64 * 1024];
+    // Chunks of a multiple of 251 bytes, so each starts the pattern anew.
+    let chunk: Vec<u8> = (0..251 * 261).map(pattern).collect();
     let mut left: Option<u64> = None;
     let mut buf = vec![0u8; 64 * 1024];
     let mut events = Vec::new();
@@ -330,7 +338,10 @@ fn stream(name: &str, size: u64, extra: &[&str]) -> (u64, Option<i32>, String) {
         match stdout.read(&mut buf) {
             Ok(0) | Err(_) => break,
             Ok(n) => {
-                assert!(buf[..n].iter().all(|&b| b == b'x'), "output corrupted");
+                for (i, &b) in buf[..n].iter().enumerate() {
+                    let at = got + i as u64;
+                    assert_eq!(b, pattern(at), "byte {at} wrong");
+                }
                 got += n as u64;
             }
         }
@@ -348,23 +359,33 @@ fn post_quantum_and_classic_key_exchanges() {
     if !tools() {
         return;
     }
+    // Whether this client has the hybrid (OpenSSH 9.9 and later): the
+    // default must then be it (audit of ADR 0068, L4).
+    let q = Command::new("ssh").args(["-Q", "kex"]).output().unwrap();
+    let pq = String::from_utf8_lossy(&q.stdout)
+        .lines()
+        .any(|l| l == "mlkem768x25519-sha256");
     let (got, status, log) = stream("kex-default", 1000, &[]);
     assert_eq!((got, status), (1000, Some(0)), "{log}");
-    let pq = "kex: algorithm: mlkem768x25519-sha256";
-    // Older clients do not offer it; they fall back below.
-    if log.contains("mlkem768x25519-sha256") {
-        assert!(log.contains(pq), "{log}");
-    }
+    let expected = if pq {
+        "mlkem768x25519-sha256"
+    } else {
+        "curve25519-sha256"
+    };
+    assert!(
+        log.contains(&format!("kex: algorithm: {expected}")),
+        "{log}"
+    );
     for kex in [
         "mlkem768x25519-sha256",
         "curve25519-sha256",
         "curve25519-sha256@libssh.org",
     ] {
+        if kex.starts_with("mlkem") && !pq {
+            continue;
+        }
         let option = format!("KexAlgorithms={kex}");
         let (got, status, log) = stream("kex-one", 1000, &["-o", &option]);
-        if kex.starts_with("mlkem") && log.contains("Bad SSH2 KexAlgorithms") {
-            continue; // a client older than OpenSSH 9.9
-        }
         assert_eq!((got, status), (1000, Some(0)), "{kex}: {log}");
         assert!(log.contains(&format!("kex: algorithm: {kex}")), "{log}");
     }

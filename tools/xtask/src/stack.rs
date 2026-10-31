@@ -68,12 +68,13 @@ pub const DEFAULT_BUDGET: Budget = Budget {
 pub const EXCEPTIONS: &[(&str, Budget, &str)] = &[(
     "sshd",
     Budget {
-        path: 34 * 1024,
+        path: 38 * 1024,
         frame: 23 * 1024,
     },
     "ML-KEM-768 encryption in ml-kem 0.3.3 keeps its matrix on the stack \
-     (22.7 KB frame in release, 32.9 KB path in dev; libcrux-ml-kem uses as \
-     much); run out of line, only during a key exchange (ADR 0068, incident 0055)",
+     (23.5 KB frame in release, 37.1 KB path in dev with the frame that \
+     isolates it for the scrub; libcrux-ml-kem uses as much); only during a \
+     key exchange (ADR 0068, incident 0055)",
 )];
 
 /// Budget of the initrd program `bin`.

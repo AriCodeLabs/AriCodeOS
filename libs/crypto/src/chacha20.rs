@@ -68,6 +68,19 @@ impl Rng {
         self.used = 64;
     }
 
+    /// Replaces the key with output of the current one and drops the
+    /// unread output (fast key erasure): whoever reads the state afterwards
+    /// cannot recompute what was drawn before. The SSH server calls it
+    /// after drawing each key exchange's secrets (audit of ADR 0068, L2).
+    pub fn ratchet(&mut self) {
+        let mut next = block(&self.key, &self.nonce, u32::MAX - 1);
+        self.key.copy_from_slice(&next[..32]);
+        crate::wipe(&mut next);
+        crate::wipe(&mut self.buf);
+        self.counter = 0;
+        self.used = 64;
+    }
+
     pub fn fill(&mut self, out: &mut [u8]) {
         for byte in out {
             if self.used == 64 {
@@ -103,6 +116,38 @@ impl Drop for Rng {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Audit of ADR 0068, L2: after `ratchet` the key is new, derived from
+    /// the old one, and no unread output survives.
+    #[test]
+    fn ratchet_replaces_the_key_and_drops_unread_output() {
+        let mut a = Rng::new([3; 32]);
+        let mut b = Rng::new([3; 32]);
+        let mut x = [0u8; 10];
+        a.fill(&mut x);
+        b.fill(&mut x);
+        let before = a.key;
+        a.ratchet();
+        assert_ne!(a.key, before);
+        assert_eq!(a.key[..], block(&before, &[0; 12], u32::MAX - 1)[..32]);
+        assert_eq!((a.buf, a.used, a.counter), ([0; 64], 64, 0));
+        let (mut ya, mut yb) = ([0u8; 32], [0u8; 32]);
+        a.fill(&mut ya);
+        b.fill(&mut yb);
+        assert_ne!(ya, yb, "the stream changes");
+        b.ratchet();
+        let mut yb2 = [0u8; 32];
+        b.fill(&mut yb2);
+        let mut c = Rng::new([3; 32]);
+        c.fill(&mut [0u8; 42]);
+        c.ratchet();
+        let mut yc = [0u8; 32];
+        c.fill(&mut yc);
+        assert_eq!(
+            yb2, yc,
+            "deterministic from the state, not from what was read"
+        );
+    }
 
     #[test]
     fn rfc7539_block_vector() {

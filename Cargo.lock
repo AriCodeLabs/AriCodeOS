@@ -336,10 +336,12 @@ dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
  "ghash",
+ "ml-kem",
  "poly1305",
  "polyval",
  "serde_json",
  "sha2",
+ "sha3",
  "x25519-dalek",
 ]
 
@@ -474,7 +476,6 @@ name = "aricode-ssh"
 version = "0.16.0"
 dependencies = [
  "aricode-crypto",
- "ml-kem",
 ]
 
 [[package]]
