@@ -184,9 +184,9 @@ It is the better choice once `libcrux-platform` drops `libc` on x86-64.
   - sshd waits up to 20 ms for the network between passes, and session
     output does not wake it.
 
-  The same wait can delay the echo of a typed key. A single wait for the
-  socket and the session endpoint (as ADR 0044 did for IPC, interrupts
-  and deadlines) is future work.
+  The same wait can delay the echo of a typed key. (ADR 0069 made it one
+  wait for the client and the shell: 3.76 MB/s, and the echo of a key
+  down from 30.6 to 9.7 ms.)
 - **One connection at a time.** Dropbear serves up to 30 unauthenticated
   ones. Here a client that connects again and again can hold the only
   slot for 30 seconds each time.

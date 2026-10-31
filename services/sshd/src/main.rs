@@ -304,6 +304,18 @@ const OUTPUT_PENDING_MAX: usize = 64 * 1024;
 /// Session messages taken per pass, so the client's input and window
 /// adjusts are read in between.
 const OUTPUT_BURST: usize = 16;
+/// Members of the connection's wait (ADR 0069): the receive waiting in the
+/// network service, then the session shell's output.
+const NETWORK: usize = 0;
+const OUTPUT: usize = 1;
+/// How long the network service holds a receive before answering it
+/// empty; sshd asks again.
+const RECV_WAIT_MS: u32 = 60_000;
+/// Bound of the wait while a session runs: a shell that died is noticed
+/// within it, since its closed output does not end a wait on two members.
+const SESSION_CHECK_MS: u64 = 1_000;
+/// Bound of the wait while typed input waits for room in the shell's queue.
+const INPUT_RETRY_MS: u64 = 10;
 /// Typed input the shell has not taken yet (it reads none while a program
 /// runs); sent without waiting, so output keeps flowing meanwhile (audit
 /// of ADR 0047, L4). Input past this is dropped and said.
@@ -402,8 +414,41 @@ fn send(net: &mut NetClient, sock: u16, out: &mut Vec<u8>) -> bool {
     ok
 }
 
+/// One message from the session shell's output: data for the client, or
+/// the session's end. An empty message means the shell exited; the output
+/// endpoint closing without one (`PeerClosed`: sshd holds only its receive
+/// side) means it died, and the session ends with `SHELL_DIED_STATUS`
+/// instead of hanging until the client disconnects.
+fn deliver_output(
+    server: &mut Server,
+    session: &mut Option<Session>,
+    input: &mut Vec<u8>,
+    got: Result<usize, Error>,
+    msg: &[u8],
+    out: &mut Vec<u8>,
+) {
+    let status = match got {
+        Ok(0) => 0,
+        Ok(n) => return server.send_data(&msg[..n], out),
+        Err(_) => {
+            say(b"session shell died without ending the session");
+            SHELL_DIED_STATUS
+        }
+    };
+    server.exit(status, out);
+    input.clear();
+    if let Some(s) = session.take() {
+        let _ = sys::handle_close(s.input);
+        let _ = sys::handle_close(s.output);
+    }
+}
+
+/// `net` sends; `recv_net`, with a buffer of its own, keeps one receive
+/// waiting in the network service so its reply and the shell's output end
+/// one wait (ADR 0069).
 fn serve(
     net: &mut NetClient,
+    recv_net: &mut NetClient,
     sock: u16,
     peer: [u8; 4],
     seed: &[u8; 32],
@@ -422,97 +467,136 @@ fn serve(
     let mut session: Option<Session> = None;
     let mut buf = [0u8; 1400];
     let mut msg = [0u8; abi::IPC_MAX_DATA];
+    let mut handles = [Handle(0); abi::IPC_MAX_HANDLES];
     let mut events = Vec::new();
     let mut input = Vec::new();
-    // More session output was waiting when the last pass stopped taking it.
-    let mut more_output = false;
+    // The receive waiting in the network service (its reply endpoint), and
+    // the member and length of what the last wait received (ADR 0069).
+    let mut pending: Option<Handle> = None;
+    let mut woken: Option<(usize, usize)> = None;
     'conn: loop {
-        let wait_ms = if more_output { 1 } else { 20 };
-        match net.tcp_recv(sock, wait_ms, &mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                events.clear();
-                let r = server.feed(&buf[..n], &mut out, &mut events);
-                for e in events.drain(..) {
-                    match e {
-                        Event::Authenticated { user } => {
-                            let mut safe = [0u8; 32];
-                            sys::print(b"sshd: user '");
-                            sys::print(log_safe(user.as_bytes(), &mut safe));
-                            sys::print(b"' authenticated from ");
-                            print_ip(peer);
-                            sys::print(b"\n");
-                        }
-                        Event::AuthFailed { user } => {
-                            let mut safe = [0u8; 32];
-                            sys::print(b"sshd: refused key for '");
-                            sys::print(log_safe(user.as_bytes(), &mut safe));
-                            sys::print(b"' from ");
-                            print_ip(peer);
-                            sys::print(b"\n");
-                        }
-                        Event::TooManyAuthAttempts { user } => {
-                            let mut safe = [0u8; 32];
-                            sys::print(b"sshd: too many authentication attempts for '");
-                            sys::print(log_safe(user.as_bytes(), &mut safe));
-                            sys::print(b"' from ");
-                            print_ip(peer);
-                            sys::print(b": disconnected\n");
-                        }
-                        Event::Shell { .. } | Event::Exec { .. } if session.is_some() => {}
-                        Event::Shell { .. } => match open_session(session::Kind::Shell) {
-                            Ok(s) => session = Some(s),
-                            Err(_) => {
-                                server.send_data(b"sshd: no session available\n", &mut out);
-                                server.exit(1, &mut out);
+        // Shell output the wait took: before anything reuses `msg`.
+        if let Some((OUTPUT, len)) = woken {
+            woken = None;
+            deliver_output(
+                &mut server,
+                &mut session,
+                &mut input,
+                Ok(len),
+                &msg,
+                &mut out,
+            );
+        }
+        if pending.is_none() {
+            match recv_net.tcp_recv_start(sock, RECV_WAIT_MS, buf.len()) {
+                Ok(h) => pending = Some(h),
+                Err(_) => break,
+            }
+        }
+        // The client's bytes: the reply the wait took, or one already there.
+        let reply = match (woken.take(), pending) {
+            (Some((NETWORK, len)), _) => Some(len),
+            (_, Some(h)) => match sys::ipc_receive(h, &mut msg, &mut [], 0) {
+                Ok((len, _)) => Some(len),
+                Err(Error::Timeout) => None,
+                // The network service dropped the request (ADR 0030).
+                Err(_) => break,
+            },
+            _ => None,
+        };
+        let mut received = false;
+        if let Some(len) = reply {
+            if let Some(h) = pending.take() {
+                let _ = sys::handle_close(h);
+            }
+            match recv_net.tcp_recv_finish(&msg[..len], &mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    received = true;
+                    events.clear();
+                    let r = server.feed(&buf[..n], &mut out, &mut events);
+                    for e in events.drain(..) {
+                        match e {
+                            Event::Authenticated { user } => {
+                                let mut safe = [0u8; 32];
+                                sys::print(b"sshd: user '");
+                                sys::print(log_safe(user.as_bytes(), &mut safe));
+                                sys::print(b"' authenticated from ");
+                                print_ip(peer);
+                                sys::print(b"\n");
                             }
-                        },
-                        Event::Exec { command, .. } => match open_session(session::Kind::Exec) {
-                            Ok(s) => {
-                                // The quiet shell runs the command, then `exit`.
-                                input.clear();
-                                if !queue_input(&mut input, &command)
-                                    || !queue_input(&mut input, b"\nexit\n")
-                                {
-                                    say(b"exec command too long: dropped");
-                                    input.clear();
-                                    let _ = queue_input(&mut input, b"exit\n");
+                            Event::AuthFailed { user } => {
+                                let mut safe = [0u8; 32];
+                                sys::print(b"sshd: refused key for '");
+                                sys::print(log_safe(user.as_bytes(), &mut safe));
+                                sys::print(b"' from ");
+                                print_ip(peer);
+                                sys::print(b"\n");
+                            }
+                            Event::TooManyAuthAttempts { user } => {
+                                let mut safe = [0u8; 32];
+                                sys::print(b"sshd: too many authentication attempts for '");
+                                sys::print(log_safe(user.as_bytes(), &mut safe));
+                                sys::print(b"' from ");
+                                print_ip(peer);
+                                sys::print(b": disconnected\n");
+                            }
+                            Event::Shell { .. } | Event::Exec { .. } if session.is_some() => {}
+                            Event::Shell { .. } => match open_session(session::Kind::Shell) {
+                                Ok(s) => session = Some(s),
+                                Err(_) => {
+                                    server.send_data(b"sshd: no session available\n", &mut out);
+                                    server.exit(1, &mut out);
                                 }
-                                session = Some(s);
+                            },
+                            Event::Exec { command, .. } => {
+                                match open_session(session::Kind::Exec) {
+                                    Ok(s) => {
+                                        // The quiet shell runs the command, then `exit`.
+                                        input.clear();
+                                        if !queue_input(&mut input, &command)
+                                            || !queue_input(&mut input, b"\nexit\n")
+                                        {
+                                            say(b"exec command too long: dropped");
+                                            input.clear();
+                                            let _ = queue_input(&mut input, b"exit\n");
+                                        }
+                                        session = Some(s);
+                                    }
+                                    Err(_) => {
+                                        server.send_data(b"sshd: no session available\n", &mut out);
+                                        server.exit(1, &mut out);
+                                    }
+                                }
                             }
-                            Err(_) => {
-                                server.send_data(b"sshd: no session available\n", &mut out);
-                                server.exit(1, &mut out);
+                            Event::Data(d) => {
+                                if session.is_some() && !queue_input(&mut input, &d) {
+                                    say(b"session input dropped: the shell is not reading it");
+                                }
                             }
-                        },
-                        Event::Data(d) => {
-                            if session.is_some() && !queue_input(&mut input, &d) {
-                                say(b"session input dropped: the shell is not reading it");
+                            Event::Eof => {}
+                            Event::Closed => {
+                                send(net, sock, &mut out);
+                                break 'conn;
                             }
-                        }
-                        Event::Eof => {}
-                        Event::Closed => {
-                            send(net, sock, &mut out);
-                            break 'conn;
                         }
                     }
+                    if let Err(e) = r {
+                        sys::print(b"sshd: connection dropped: ");
+                        sys::print(match e {
+                            aricode_ssh::Error::Protocol(m)
+                            | aricode_ssh::Error::Negotiation(m) => m.as_bytes(),
+                            aricode_ssh::Error::Mac => b"packet authentication failed",
+                            aricode_ssh::Error::Disconnected => b"client disconnected",
+                        });
+                        sys::print(b"\n");
+                        send(net, sock, &mut out);
+                        break;
+                    }
                 }
-                if let Err(e) = r {
-                    sys::print(b"sshd: connection dropped: ");
-                    sys::print(match e {
-                        aricode_ssh::Error::Protocol(m) | aricode_ssh::Error::Negotiation(m) => {
-                            m.as_bytes()
-                        }
-                        aricode_ssh::Error::Mac => b"packet authentication failed",
-                        aricode_ssh::Error::Disconnected => b"client disconnected",
-                    });
-                    sys::print(b"\n");
-                    send(net, sock, &mut out);
-                    break;
-                }
+                Err(NetError::Status(Status::Timeout)) => {}
+                Err(_) => break,
             }
-            Err(NetError::Status(Status::Timeout)) => {}
-            Err(_) => break,
         }
         if !server.is_authenticated() && now_ms().saturating_sub(started) > AUTH_DEADLINE_MS {
             sys::print(b"sshd: authentication timeout from ");
@@ -525,43 +609,70 @@ fn serve(
         if let Some(s) = &session {
             pump_input(s, &mut input);
         }
-        // Shell output to the client; an empty message means it exited.
-        // The output endpoint closing without one (`PeerClosed`: sshd holds
-        // only its receive side) means the shell died: the session ends
-        // with `SHELL_DIED_STATUS` instead of hanging until the client
-        // disconnects. At most `OUTPUT_BURST` messages per pass, and none
-        // while the client's window holds `OUTPUT_PENDING_MAX` back.
+        // Shell output to the client, at most `OUTPUT_BURST` messages per
+        // pass, and none while the client's window holds
+        // `OUTPUT_PENDING_MAX` back.
         let mut taken = 0;
-        more_output = false;
+        let mut more_output = false;
         while let Some(s) = &session {
             if taken == OUTPUT_BURST || server.pending_len() >= OUTPUT_PENDING_MAX {
                 more_output = server.pending_len() < OUTPUT_PENDING_MAX;
                 break;
             }
             let mut none = [Handle(0); 1];
-            let status = match sys::ipc_receive(s.output, &mut msg, &mut none, 0) {
-                Ok((0, _)) => 0,
-                Ok((n, _)) => {
-                    server.send_data(&msg[..n], &mut out);
-                    taken += 1;
-                    continue;
-                }
-                Err(Error::PeerClosed) => {
-                    say(b"session shell died without ending the session");
-                    SHELL_DIED_STATUS
-                }
+            let got = match sys::ipc_receive(s.output, &mut msg, &mut none, 0) {
+                Ok((n, _)) => Ok(n),
+                Err(Error::PeerClosed) => Err(Error::PeerClosed),
                 Err(_) => break,
             };
-            server.exit(status, &mut out);
-            input.clear();
-            if let Some(s) = session.take() {
-                let _ = sys::handle_close(s.input);
-                let _ = sys::handle_close(s.output);
-            }
+            taken += 1;
+            deliver_output(&mut server, &mut session, &mut input, got, &msg, &mut out);
         }
         if !send(net, sock, &mut out) || server.is_closed() {
             break;
         }
+        // One wait for the client and the shell (ADR 0069), skipped while
+        // either left work. A shell that dies or a network service that
+        // drops the receive does not end it while the other member is open,
+        // hence the bound while a session runs; typed input the shell has
+        // not taken yet is offered again every `INPUT_RETRY_MS`.
+        if received || more_output {
+            continue;
+        }
+        let Some(h) = pending else { continue };
+        let mut members = [h, h];
+        let mut n = 1;
+        if let Some(s) = session
+            .as_ref()
+            .filter(|_| server.pending_len() < OUTPUT_PENDING_MAX)
+        {
+            members[OUTPUT] = s.output;
+            n = 2;
+        }
+        let timeout = if !input.is_empty() {
+            INPUT_RETRY_MS
+        } else if session.is_some() {
+            SESSION_CHECK_MS
+        } else if !server.is_authenticated() {
+            (started + AUTH_DEADLINE_MS + 1).saturating_sub(now_ms())
+        } else {
+            sys::TIMEOUT_INFINITE
+        };
+        match sys::ipc_receive_any(&members[..n], &mut msg, &mut handles, timeout) {
+            Ok((index, len, nh)) => {
+                // Neither the network service nor the shell sends handles.
+                for h in &handles[..nh] {
+                    let _ = sys::handle_close(*h);
+                }
+                woken = Some((index, len));
+            }
+            Err(Error::Timeout) => {}
+            // Every member closed: the network service is gone.
+            Err(_) => break,
+        }
+    }
+    if let Some(h) = pending.take() {
+        let _ = sys::handle_close(h);
     }
     if let Some(s) = session.take() {
         s.hang_up();
@@ -700,7 +811,7 @@ fn main(_arg: u64) -> u64 {
         say(b"no file client");
         return 1;
     };
-    let Ok(mut net) = NetClient::new(NET, HW) else {
+    let (Ok(mut net), Ok(mut recv_net)) = (NetClient::new(NET, HW), NetClient::new(NET, HW)) else {
         say(b"no network client");
         return 2;
     };
@@ -807,7 +918,15 @@ fn main(_arg: u64) -> u64 {
             seed_saved = entropy.save_next(&mut fs);
         }
         let rng = SecretBytes(entropy.next());
-        serve(&mut net, sock, peer, &seed, &rng.0, keys.clone());
+        serve(
+            &mut net,
+            &mut recv_net,
+            sock,
+            peer,
+            &seed,
+            &rng.0,
+            keys.clone(),
+        );
         let _ = net.tcp_close(sock);
         say(b"connection closed");
         // Reread between connections so a key added or removed from the
