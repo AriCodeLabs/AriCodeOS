@@ -1,5 +1,7 @@
 # WebAssembly runtime: reads the module from its private directory and lends it
-# a clock and the console. The module's linear memory comes from its quota.
+# a clock and the console. Its heap grows by three 2 MiB DMA buffers from its
+# quota (ADR 0071): wasmi's state and the module's memories live there. The
+# seventh MiB is for the filesystem client's buffer.
 name = wasm_runner
 caps = system, fs
-memory = 512K
+memory = 7M

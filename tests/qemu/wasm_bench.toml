@@ -1,0 +1,25 @@
+# ADR 0071: the sample module's benchmark (`run wasm_runner 99`) times five
+# workloads with `uptime_ms`: recursive calls, a sieve over 100 000 bytes,
+# SHA-256 over 16 KiB, a 64x64 integer matrix product and a `br_table`
+# dispatch loop. The results are pinned (the same in every engine); the
+# times are read from the log, not compared here.
+name = "wasm.bench"
+description = "WASM benchmark: five workloads timed inside the module, results checked"
+level = "full"
+areas = ["wasm", "perf"]
+cmdline = "qemu_exit shell"
+timeout_secs = 120
+stdin = ["run wasm_runner 99", "shutdown"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "wasm bench: fib(22) = 17711 in ",
+    "wasm bench: sieve(100000) = 9592 in ",
+    "wasm bench: sha256 16 KiB = 1962330266 in ",
+    "wasm bench: matmul 64 = 4294967008 in ",
+    "wasm bench: vm 500000 = 685554845 in ",
+    "run: wasm_runner exited with 0",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "panic in user program", "module failed"]

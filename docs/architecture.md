@@ -61,7 +61,6 @@ libs/virtio/         aricode-virtio: split virtqueue over DMA, modern virtio-pci
 libs/gpt/            aricode-gpt: CRC32, GPT header and entries, writer for the test disk (no_std, host tests)
 libs/ab/             aricode-ab: A/B boot state, signed system images and slot policy (no_std, host tests)
 libs/crypto/         aricode-crypto: SHA-256, SHA-512, Ed25519 and ChaCha20 from scratch with official vectors (no_std, host tests)
-libs/wasm/           aricode-wasm: WebAssembly MVP interpreter with integers, bounded memory and imports (no_std + alloc, host tests)
 libs/manifest/       aricode-manifest: application manifests (name, capabilities, memory) (no_std, host tests)
 libs/gfx/            aricode-gfx: 0x00RRGGBB canvases, clipping, text, cursor and window desktop (no_std, host tests)
 libs/input/          aricode-input: evdev events and US keyboard (no_std, host tests)
@@ -1283,32 +1282,34 @@ latter briefly to add the region.
   character by character. With interrupts disabled the lock is only tried,
   so that a handler never waits for a thread that cannot run.
 
-## WebAssembly runtime (Phase 29)
+## WebAssembly runtime (Phase 29, ADR 0071)
 
-- `aricode-wasm` parses the binary once (`Module::parse`: types,
-  imports, functions, table, memory, globals, exports,
-  elements and data) and executes byte by byte with a `u64` value stack and
-  a label stack. Block ends are located by skipping immediates on
-  entering each block; `br` trims the stack to the label's height and
-  keeps the arity; the function's implicit label acts as `return`.
-  Limits: 64 nested calls, 16 K values, 50 M steps (`Fuel`). Every
-  load, store, `memory.copy` and `memory.fill` is checked against
-  the `&mut [u8]` supplied by the host; floating point returns
-  `Unsupported`. The host tests use a minimal module assembler
-  to cover arithmetic, loops, `if/else` with a result, recursion,
-  `br_table`, globals, `call_indirect`, traps and limits.
-- `Module::parse` validates the whole module before returning it (ADR 0019:
-  typing of each function with an operand stack and control frames, indices
-  of types, functions, table, globals, exports and `start`); whatever the
-  interpreter does not execute is rejected there. The accepted profile is in
-  `docs/wasm-profile.md`.
+- Since ADR 0071 the interpreter is wasmi 2.0 (crates.io, MIT or
+  Apache-2.0), with wasmparser validating the whole module before it is
+  instantiated. It replaced `aricode-wasm`, which ADR 0063's comparison
+  found 13 to 38 times slower and accepting 315 invalid or malformed
+  modules of the spec testsuite.
+- The profile (`docs/wasm-profile.md`, v2) is the stable WebAssembly
+  features except SIMD, extended constants and multiple memories. Every call runs on fuel: 50 M units for `start`
+  and 50 M for `main`, one per 64 bytes that bulk operations move, and
+  imports priced by the runner before they run (ADR 0055).
 - `wasm_runner` is a normal broker application: it receives `SYSTEM`, its
-  private directory and `HARDWARE`; it reads `demo.wasm` (xtask compiles it with
-  `-C target-cpu=mvp -C target-feature=+sign-ext,+bulk-memory` and leaves it in
-  `build/`, and `write_test_disk` copies it to `wasm_runner/demo.wasm`), resolves
-  imports by name (`aricode.print`, `aricode.uptime_ms`) and
-  reserves the linear memory as a DMA buffer within its quota. The module has
-  no way to name anything the runner has not imported for it.
+  private directory and `HARDWARE`.
+  - It reads `demo.wasm`. xtask compiles the sample with `-C target-cpu=mvp
+    -C target-feature=+sign-ext,+bulk-memory` and leaves it in `build/`,
+    and `write_test_disk` copies it to `wasm_runner/demo.wasm`.
+  - It resolves imports by name and by the module manifest's
+    capabilities: `aricode.print`, `uptime_ms`, `file_read` and
+    `file_write`, each with an exact signature.
+  - It extends its heap with three 2 MiB DMA buffers from its quota. There
+    wasmi keeps its state and the module's memory.
+  - What a module holds is bounded in three places:
+    - `StoreLimits`: one memory of 1 MiB, four tables of 16 Ki elements,
+      a 512 KiB value stack and 1024 nested calls;
+    - wasmi's strict limits on functions, globals and segments;
+    - nesting of at most 1024 blocks.
+  - The module has no way to name anything the runner has not imported
+    for it.
 - AriFS files grow to 32 KiB capacity to hold modules.
 
 ## Cryptography (Phase 31)

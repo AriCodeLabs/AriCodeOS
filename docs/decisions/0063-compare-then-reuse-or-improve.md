@@ -99,7 +99,7 @@ The owner's meaning of "from scratch", in their words (2026-10-29):
       the server stays, with ML-KEM and key re-exchange.
    6. TCP/IP, then the WASM interpreter: compare with smoltcp and wasmi.
       TCP done in ADR 0070: ours stays, its transmission rebuilt (smoltcp's
-      ISNs are predictable).
+      ISNs are predictable). WASM done in ADR 0071: wasmi adopted.
 
 ## Consequences
 
