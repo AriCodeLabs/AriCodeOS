@@ -17,7 +17,9 @@ use aricode_rtl8169::{ack_interrupts, link_state, reg, rx_take, Desc, Regs, TX_P
 
 const NAME: &str = "rtl-net";
 const RX_SLOTS: usize = 16;
-const TX_SLOTS: usize = 8;
+/// Enough for a full send window of ADR 0070 (32 KiB, 23 segments) and the
+/// ACKs of other connections; a full ring holds TCP back (incident 0057).
+const TX_SLOTS: usize = 32;
 const SLOT: u64 = 2048;
 /// Rings at the start (256-aligned), buffers from 4 KiB onwards.
 const RX_RING_OFF: u64 = 0;
@@ -155,6 +157,10 @@ impl Nic {
 impl Link for Nic {
     fn mac(&self) -> MacAddr {
         self.mac
+    }
+
+    fn tx_room(&mut self) -> bool {
+        self.read_desc(TX_RING_OFF, self.tx_next).opts1 & aricode_rtl8169::desc::OWN == 0
     }
 
     fn send_frame(&mut self, frame: &[u8]) -> bool {

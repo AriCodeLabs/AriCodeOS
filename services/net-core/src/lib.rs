@@ -85,6 +85,10 @@ const DHCP_PROBE_MS: u64 = 600;
 /// Pause before asking again after declining an address in use.
 const DHCP_DECLINE_PAUSE_MS: u64 = 10_000;
 const ARP_WAIT_MS: u64 = 1000;
+/// How soon a connection held back by a full transmit ring is tried again
+/// (incident 0057): the ring empties in microseconds, and an ACK from the
+/// peer usually wakes the service first.
+const TX_RETRY_MS: u64 = 1;
 
 /// What the service records in the kernel event ring (ADR 0028): why it
 /// refused a request or lost a frame (incident 0012), and what it cleaned
@@ -235,6 +239,10 @@ pub trait Link {
     fn mac(&self) -> MacAddr;
     /// Transmits a frame; `false` if there is no free slot (the caller loses it).
     fn send_frame(&mut self, frame: &[u8]) -> bool;
+    /// Whether `send_frame` has a free slot now (incident 0057): TCP is
+    /// asked for a segment only then, so a full ring holds segments back
+    /// instead of losing segments TCP counted as sent.
+    fn tx_room(&mut self) -> bool;
     /// Next received frame copied into `out`, or `None` if there is none.
     /// `Some(0)` is a receive slot consumed without a usable frame (an
     /// errored one): it counts toward the round's budget and is ignored.
@@ -541,6 +549,9 @@ pub struct Stack<L: Link> {
     dns: Owned<PendingDns, MAX_DNS>,
     /// On the heap, with their buffers in `pool` (ADR 0070).
     tcp: Owned<Box<TcpSock>, MAX_TCP>,
+    /// When to emit again what a full transmit ring held back (incident
+    /// 0057); cleared at every round of `tcp_poll`.
+    tx_retry_at: Option<u64>,
     /// Per-boot key of the initial sequence numbers and the ephemeral
     /// ports (`aricode_net::isn`, ADR 0034), from the kernel's entropy.
     tcp_secret: isn::Secret,
@@ -729,6 +740,7 @@ impl<L: Link> Stack<L> {
             sockets: Owned::new(),
             dns: Owned::new(),
             tcp: Owned::new(),
+            tx_retry_at: None,
             tcp_port_count: 0,
             tcp_syn_dropped: 0,
             deferred: core::array::from_fn(|_| Parking {
@@ -891,7 +903,8 @@ impl<L: Link> Stack<L> {
                 self.deferred
                     .iter()
                     .filter_map(|slot| slot.waiting.map(|p| p.deadline)),
-            );
+            )
+            .chain(self.tx_retry_at);
         Deadline::at(timers::next_deadline(
             self.last_sweep + SWEEP_MS,
             timers::dhcp_due(self.dhcp.state(), self.probe_deadline, self.dhcp_next),
@@ -1643,7 +1656,9 @@ impl<L: Link> Stack<L> {
     }
 
     /// Emits pending segments and resolves waits on every connection.
-    /// Sends what connection `i` has to send now.
+    /// Sends what connection `i` has to send now, while the NIC has room
+    /// (incident 0057): what does not fit stays in the connection, unsent,
+    /// and goes in a later round (`tx_retry_at`).
     fn tcp_emit(&mut self, i: usize, now: u64) {
         let mut seg = [0u8; tcp::MAX_SEGMENT];
         // Take the socket out of its slot while emitting: `send_ipv4` needs
@@ -1652,7 +1667,14 @@ impl<L: Link> Stack<L> {
             return;
         };
         let (remote, _) = sock.conn.remote();
-        while let Some(n) = sock.conn.poll(now, &mut seg) {
+        loop {
+            if !self.link.tx_room() {
+                self.tx_retry_at = Some(now + TX_RETRY_MS);
+                break;
+            }
+            let Some(n) = sock.conn.poll(now, &mut seg) else {
+                break;
+            };
             let _ = self.send_ipv4(remote, ipv4::PROTO_TCP, &seg[..n], now);
             if sock.conn.is_closed() {
                 break;
@@ -1662,6 +1684,7 @@ impl<L: Link> Stack<L> {
     }
 
     fn tcp_poll(&mut self, now: u64) {
+        self.tx_retry_at = None;
         for i in 0..MAX_TCP {
             if self.tcp.at(i).is_none_or(|s| s.listening) {
                 continue;
