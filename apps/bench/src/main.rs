@@ -34,6 +34,8 @@ const BULK_BYTES: usize = 1 << 20;
 const ECHO_BYTES: usize = 256 * 1024;
 const ECHO_ROUND: usize = 16 * 1024;
 const TCP_TIMEOUT_MS: u32 = 10_000;
+/// How long the probe for the host test servers waits.
+const PROBE_TIMEOUT_MS: u32 = 2_000;
 const CHUNK: usize = 4096;
 /// Bytes hashed or encrypted per sample, and samples per algorithm.
 const CRYPTO_BYTES: usize = 16 * 1024;
@@ -292,29 +294,17 @@ fn main(_arg: u64) -> u64 {
         samples.push(rdtsc() - t0);
     }
     report(b"ipc net info", &mut samples, per_us, b"us");
-    // 4b. TCP throughput: a download, and an exchange in both directions.
+    // 4b. TCP throughput: a download, and an exchange in both directions,
+    // when the host test servers are there (QEMU's user networking); on
+    // real hardware there are none, and the rest still runs.
     let mut net = net;
-    let mut buf = alloc::vec![0u8; ECHO_ROUND];
-    let mut samples = Vec::with_capacity(TCP_RUNS);
-    for _ in 0..TCP_RUNS {
-        let t0 = rdtsc();
-        if download(&mut net, &mut buf) != Some(BULK_BYTES) {
-            sys::print(b"bench: tcp download failed\n");
-            return 11;
+    if host_servers(&net) {
+        if let Err(code) = tcp(&mut net, per_us) {
+            return code;
         }
-        samples.push(rdtsc() - t0);
+    } else {
+        sys::print(b"bench: tcp skipped (no test server at 10.0.2.2)\n");
     }
-    report(b"tcp download 1 MiB", &mut samples, per_us * 1000, b"ms");
-    let mut samples = Vec::with_capacity(TCP_RUNS);
-    for _ in 0..TCP_RUNS {
-        let t0 = rdtsc();
-        if echo(&mut net, &mut buf).is_none() {
-            sys::print(b"bench: tcp echo failed\n");
-            return 12;
-        }
-        samples.push(rdtsc() - t0);
-    }
-    report(b"tcp echo 256 KiB", &mut samples, per_us * 1000, b"ms");
     // 5. Computation: hashing, encryption, signatures, key agreement and
     // copies on fixed inputs.
     compute(per_us);
@@ -324,6 +314,43 @@ fn main(_arg: u64) -> u64 {
     }
     sys::print(b"bench: done\n");
     0
+}
+
+/// Whether the host test HTTP server answers a connection.
+fn host_servers(net: &NetClient) -> bool {
+    match net.tcp_connect(HOST, aricode_proto::net::TEST_HTTP_PORT, PROBE_TIMEOUT_MS) {
+        Ok(sock) => {
+            let _ = net.tcp_close(sock);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// The TCP figures; the exit code when a transfer fails.
+fn tcp(net: &mut NetClient, per_us: u64) -> Result<(), u64> {
+    let mut buf = alloc::vec![0u8; ECHO_ROUND];
+    let mut samples = Vec::with_capacity(TCP_RUNS);
+    for _ in 0..TCP_RUNS {
+        let t0 = rdtsc();
+        if download(net, &mut buf) != Some(BULK_BYTES) {
+            sys::print(b"bench: tcp download failed\n");
+            return Err(11);
+        }
+        samples.push(rdtsc() - t0);
+    }
+    report(b"tcp download 1 MiB", &mut samples, per_us * 1000, b"ms");
+    let mut samples = Vec::with_capacity(TCP_RUNS);
+    for _ in 0..TCP_RUNS {
+        let t0 = rdtsc();
+        if echo(net, &mut buf).is_none() {
+            sys::print(b"bench: tcp echo failed\n");
+            return Err(12);
+        }
+        samples.push(rdtsc() - t0);
+    }
+    report(b"tcp echo 256 KiB", &mut samples, per_us * 1000, b"ms");
+    Ok(())
 }
 
 /// `BULK_BYTES` from the host's `/bulk`: the bytes after the headers.
