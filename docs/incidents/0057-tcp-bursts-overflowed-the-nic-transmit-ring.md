@@ -51,5 +51,13 @@ recorded as `net tx busy` when the ring is full.
 ## Tests
 
 - QEMU: the `network`, `ssh`, `perf` and `update` areas.
-- The laptop, after the fix: the same benchmark, with `diag` showing no
-  `net tx busy` (figures below).
+- The laptop, after the fix (dev build 19), the same benchmark and LAN,
+  three runs each:
+
+| | Old TCP (9acf9de) | ADR 0070 before the fix | After the fix |
+|---|---|---|---|
+| `repeat 1000 help` over SSH | 0.11 to 0.13 MB/s | 0.61 to 0.88 MB/s | 1.11 to 1.18 MB/s |
+| `net tx busy` in `diag` | none | 25 to 30 a second | none |
+
+  The round trip to the laptop varied between 4 and 42 ms during the runs:
+  the key-echo latency follows the LAN, not the stack.
