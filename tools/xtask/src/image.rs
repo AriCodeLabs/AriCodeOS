@@ -582,6 +582,10 @@ pub enum DiskVariant {
     /// `demo.wasm` loops forever: the runner, built with wasmi's tail-call
     /// dispatch, must run out of fuel and not out of stack (ADR 0071).
     WasmEndless,
+    /// `demo.wasm` loops on `memory.grow`, whose handler the release runner
+    /// calls instead of tail-jumping to: the runner, and only it, is killed
+    /// by its stack guard (audit of ADR 0071, H1).
+    WasmGrowLoop,
     /// USB stick image: the ESP lives inside the disk (no `fat:` in QEMU).
     UsbImage,
     /// Slot A and UPDATE hold images padded past the updater's memory
@@ -638,6 +642,7 @@ impl DiskVariant {
             "wasm-bad-import" => Self::WasmBadImport,
             "wasm-many-blocks" => Self::WasmManyBlocks,
             "wasm-endless" => Self::WasmEndless,
+            "wasm-grow-loop" => Self::WasmGrowLoop,
             "usb-image" => Self::UsbImage,
             "large-a" => Self::LargeA,
             "oversized-package" => Self::OversizedPackage,
@@ -894,6 +899,9 @@ pub fn write_test_disk(
         DiskVariant::WasmEndless => {
             overwrite_arifs(&mut img, PART_ARI0, WASM_MODULE_FILE, ENDLESS_WASM)?
         }
+        DiskVariant::WasmGrowLoop => {
+            overwrite_arifs(&mut img, PART_ARI0, WASM_MODULE_FILE, GROW_LOOP_WASM)?
+        }
         DiskVariant::FsNearlyFull => fill_arifs(&mut img, PART_ARI0, FS_FREE_ENTRIES)?,
         DiskVariant::FsOneShort => fill_arifs(&mut img, PART_ARI0, FS_FREE_ENTRIES - 1)?,
         DiskVariant::OversizedPackage => install_files(
@@ -968,6 +976,7 @@ pub fn write_test_disk(
             | DiskVariant::WasmBadImport
             | DiskVariant::WasmManyBlocks
             | DiskVariant::WasmEndless
+            | DiskVariant::WasmGrowLoop
             | DiskVariant::LargeA
             | DiskVariant::OversizedPackage => {}
         }
@@ -1184,6 +1193,20 @@ const ENDLESS_WASM: &[u8] = &[
     0x03, 0x02, 0x01, 0x00, // function: type 0
     0x07, 0x08, 0x01, 0x04, 0x6D, 0x61, 0x69, 0x6E, 0x00, 0x00, // export "main"
     0x0A, 0x0B, 0x01, 0x09, 0x00, 0x03, 0x40, 0x0C, 0x00, 0x0B, 0x41, 0x00, 0x0B, // code
+];
+
+/// One page of memory and `main(i64) -> i32` whose body is `loop
+/// (drop (memory.grow (i32.wrap_i64 (local.get 0)))) br 0 end; i32.const 0`:
+/// a grow by the argument (0, not a constant the translator would fold)
+/// forever (audit of ADR 0071, H1).
+const GROW_LOOP_WASM: &[u8] = &[
+    0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, // header
+    0x01, 0x06, 0x01, 0x60, 0x01, 0x7E, 0x01, 0x7F, // type: (i64) -> i32
+    0x03, 0x02, 0x01, 0x00, // function: type 0
+    0x05, 0x03, 0x01, 0x00, 0x01, // memory: 1 page
+    0x07, 0x08, 0x01, 0x04, 0x6D, 0x61, 0x69, 0x6E, 0x00, 0x00, // export "main"
+    0x0A, 0x11, 0x01, 0x0F, 0x00, 0x03, 0x40, 0x20, 0x00, 0xA7, 0x40, 0x00, 0x1A, 0x0C, 0x00, 0x0B,
+    0x41, 0x00, 0x0B, // code
 ];
 
 /// Valid module as large as an AriFS file (32 KiB): `main(i64) -> i32`

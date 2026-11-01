@@ -18,13 +18,12 @@ use aricode_rt::fmt_u64;
 use aricode_rt::sys::fs::FsClient;
 use aricode_rt::sys::{self, kind, permissions, time, Handle};
 use aricode_wasm_host::{
-    bytes_cost, charge, engine, file_name, granted, is_main, limits, parse_caps, Api, Cap,
-    CLOCK_COST, FILE_READ_COST, FILE_WRITE_COST, FUEL, MAX_FILE_NAME, MAX_MODULE, PRINT_COST,
+    bytes_cost, charge, check_nesting, engine, file_name, granted, is_main, limits, parse_caps,
+    writable, Api, Cap, CLOCK_COST, FILE_READ_COST, FILE_WRITE_COST, FUEL, MANIFEST_FILE,
+    MAX_FILE_NAME, MAX_MODULE, MODULE_FILE, PRINT_COST,
 };
 use wasmi::{Caller, Error, Extern, ExternType, Linker, Module, Store, StoreLimits, TrapCode};
 
-const MODULE_FILE: &str = "demo.wasm";
-const MANIFEST_FILE: &str = "demo.manifest";
 /// The heap the runner adds to its own (ADR 0071), in DMA buffers counted
 /// against its quota: physically contiguous, so it asks for several
 /// smaller ones rather than one. Each holds a 1 MiB memory with room.
@@ -117,6 +116,10 @@ fn define(linker: &mut Linker<HostState>, api: Api) -> Result<(), Error> {
                 let (data, state) = mem.data_and_store_mut(&mut caller);
                 let (name, n) = name_from(data, name, name_len)?;
                 let name = core::str::from_utf8(&name[..n]).map_err(|_| trap("file name"))?;
+                if !writable(name) {
+                    // Its own code or manifest (audit of ADR 0071, L4).
+                    return Ok(-1);
+                }
                 let bytes = &data[range(data, ptr, len, "data out of memory")?];
                 let Ok(fd) = state.fs.open(name).or_else(|_| state.fs.create(name)) else {
                     return Ok(-1);
@@ -278,6 +281,10 @@ fn main(arg: u64) -> u64 {
         return 8;
     }
     // 3. Parse and validate; resolve imports by name and capability.
+    if let Err(why) = check_nesting(&bytes) {
+        sys::print(format!("wasm_runner: invalid module ({why})\n").as_bytes());
+        return 6;
+    }
     let engine = engine();
     let module = match Module::new(&engine, &bytes[..]) {
         Ok(m) => m,

@@ -118,15 +118,18 @@ that escaped wasmi would hold what the runner holds:
 
 1. **The runner uses wasmi 2.0.0**, pinned, with its validator.
    `aricode-wasm` is removed.
-2. **Profile v2** (`docs/wasm-profile.md`): every stable feature except
+2. **Profile v2** (`docs/wasm-profile.md`): the stable features except
    SIMD:
    - floating point;
    - all of bulk memory;
    - reference types;
-   - multiple memories;
+   - multiple tables;
    - tail calls;
-   - extended constants;
    - 64-bit memories.
+
+   The audit took two features back:
+   - **extended constants:** wasmi evaluates them recursively (H2);
+   - **multiple memories:** wasmi's strict limits allow one (M2).
 
    Imports stay functions of the `aricode` module, granted by the module's
    manifest.
@@ -137,15 +140,19 @@ that escaped wasmi would hold what the runner holds:
    - translating a function also costs fuel.
 4. **Memory comes from the quota.** The runner adds three 2 MiB DMA
    buffers to its heap (`aricode_rt::extend_heap`). wasmi's state and the
-   module's memories live there. `StoreLimits` and the engine bound what a
-   module may hold:
-   - 1 MiB per memory, four memories;
-   - four tables of 16 Ki elements;
-   - one instance;
-   - a 512 KiB value stack;
-   - 1024 nested calls.
+   module's memory live there. What a module may hold is bounded:
+   - by `StoreLimits` and the engine: one memory of 1 MiB, four tables of
+     16 Ki elements, one instance, a 512 KiB value stack, 1024 nested
+     calls;
+   - by wasmi's strict limits when the module is parsed: 10 000 functions
+     of 40 bytes on average, 1000 globals, 1000 element and data segments,
+     32 parameters and results;
+   - by the runner before that: blocks nested at most 1024 deep, since
+     wasmi's translator cannot fail gracefully when its control stack runs
+     out of heap.
 
-   The quota grows from 512 KiB to 7 MiB.
+   The quota grows from 512 KiB to 7 MiB. The DMA buffers are allocated,
+   physically contiguous and zeroed, at every run.
 5. **The policy is a library** (`libs/wasm-host`), tested on the host with
    wasmi: the engine, the limits, the charging of imports, the manifest,
    the Capability API's names and signatures. The runner keeps the system
@@ -158,6 +165,19 @@ that escaped wasmi would hold what the runner holds:
    the optimizer, grow the stack per instruction: the host test of an
    endless loop overflowed. The loop alone is 2 to 4 times slower
    (`portable-dispatch`, measured).
+
+   In the release runner two of the 1106 handlers, `memory.grow` and
+   `table.grow`, call the next handler instead of jumping to it (audit,
+   H1). The trade-off is accepted:
+   - a module that loops on them exhausts the runner's 64 KiB stack after
+     a few hundred grows;
+   - the guard page stops it, and the kernel kills the runner and nothing
+     else (`wasm.grow_loop`);
+   - the module ends its own run, which it could do anyway.
+
+   `cargo xtask stack-check` disassembles the release runner and fails if
+   any other handler dispatches with a call, so a wasmi or compiler
+   upgrade cannot add more unnoticed.
 7. **Watching wasmi.** Its version is pinned in `Cargo.lock`. A new
    advisory against the version in use is a release blocker.
 
@@ -168,7 +188,7 @@ that escaped wasmi would hold what the runner holds:
 - The validator refuses everything the testsuite says is invalid or
   malformed.
 - The runner's binary grows by 821 KB, and its quota to 7 MiB of DMA
-  memory, backed only when used.
+  memory, allocated at every run.
 - The sample module's benchmark is part of the full suite (`wasm.bench`),
   with pinned results.
 
@@ -178,17 +198,26 @@ that escaped wasmi would hold what the runner holds:
   runner's isolation and its few capabilities.
 - **Optimized builds rely on the compiler turning the dispatch's calls into
   tail calls.** Stable Rust has no guarantee (`become` is unstable).
-  `wasm.fuel` runs 50 M units of an endless loop on the release build and
-  must end out of fuel, not out of stack.
+  - `memory.grow` and `table.grow` are not turned (decision 6).
+  - `stack-check` holds the rest.
+  - `wasm.fuel` runs 50 M units of an endless loop on the release build
+    and ends out of fuel, not out of stack.
+- **`print` costs one unit per byte**, as ADR 0055 accepted: 50 M units
+  still buy about 50 MB of console output.
 - **NaN payload bits** may differ between machines, as the specification
   allows.
 
 ## Tests
 
-- Host (`libs/wasm-host`, 12 tests):
+- Host (`libs/wasm-host`, 16 tests), on a build without the optimizer (the
+  dispatch loop):
   - floating point and multiple results run;
   - SIMD, exceptions and GC are refused;
-  - an endless loop ends out of fuel, in dev and release builds;
+  - extended constants and blocks nested past 1024 are refused;
+  - wasmi's strict limits on functions and globals, and a value stack that
+    holds 1000 calls with 16 locals each;
+  - a module cannot write its own code or manifest;
+  - an endless loop ends out of fuel;
   - an import the module cannot pay for never runs;
   - memories grow to the limit and no further;
   - modules over the limits are not instantiated;
@@ -196,11 +225,59 @@ that escaped wasmi would hold what the runner holds:
   - bulk memory pays for its bytes;
   - an ill-typed module is refused;
   - the manifest, the API's signatures and file names.
-- QEMU, the `wasm` area, 7 scenarios:
+- QEMU, the `wasm` area, 8 scenarios:
   - `wasm.demo`, `wasm.restricted`, `wasm.bad_import`, `wasm.invalid` and
     `wasm.many_blocks`, as before, with wasmparser's message for the
     invalid module;
   - `wasm.bench`, the benchmark with its results pinned;
-  - `wasm.fuel`, the endless loop.
+  - `wasm.fuel`, the endless loop, on the release build's tail-call
+    dispatch;
+  - `wasm.grow_loop`: on the release build only the runner is killed, by
+    its stack guard; on a dev build it ends out of fuel.
 
-  On release and dev builds.
+  All eight on release and dev builds.
+- `cargo xtask stack-check`: the release runner's handlers dispatch with a
+  tail jump, `memory.grow` and `table.grow` excepted (unit test of the
+  check on a sample disassembly).
+
+## Audit (2026-11-01)
+
+An independent audit reproduced the runner on the host: the same engine,
+heap and limits, a 64 KiB stack, and the release profile. It checked and
+found correct:
+- the host functions' bounds (i32 pointers through u32, `checked_add`);
+- every price charged before its effect;
+- a missing or wrong `memory` export;
+- memory64 and multiple memories in the API;
+- the import checks;
+- the private directory;
+- the refused features (wasmi starts from no feature);
+- fuel on translation, grows and bulk operations;
+- the `extend_heap` contract and the multi-region heap;
+- that no advisory applies to wasmi 2.0.0.
+
+Applied:
+- **H1 (high).** `memory.grow` and `table.grow` are not tail-dispatched in
+  the release runner, so a module overflows the runner's stack with almost
+  no fuel. Accepted, as decision 6 says: only the runner dies, by its guard
+  page (`wasm.grow_loop`), and `stack-check` fails if any other handler
+  does the same.
+- **H2 (high).** A 4 KB extended constant expression overflowed the stack
+  at instantiation (wasmi's recursive evaluation): the feature is off.
+- **M1.** 17 000 nested blocks made wasmi's translator exhaust the heap,
+  and the runner panic: nesting is limited to 1024 before wasmi parses
+  the module.
+- **M2.** Nothing bounded functions, globals or segments: wasmi's strict
+  limits are on, so the module has one memory.
+- **L1.** The value stack limit is in bytes; it was 64 KiB, and is now the
+  intended 512 KiB.
+- **L2.** Four memories of 1 MiB could not all grow in three separate
+  chunks. Now there is one memory.
+- **L4.** A module with `files` could rewrite its own manifest or code
+  (this predates ADR 0071): `demo.wasm` and `demo.manifest` are no longer
+  writable.
+- Two corrections to this ADR: the DMA buffers are allocated at every run,
+  not on use; and the host tests run without the optimizer, so they cover
+  the dispatch loop, not the tail calls.
+
+Recorded: L3 (`print`'s price, ADR 0055) under Limits.

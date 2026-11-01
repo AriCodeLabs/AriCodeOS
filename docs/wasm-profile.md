@@ -6,9 +6,10 @@ Component Model: a module written for this profile assumes nothing from
 POSIX, and a WASI module does not work here. Anything not listed on this
 page does not exist for the module.
 
-Version 2 (ADR 0071, 2026-11-01) runs modules with wasmi 2.0 and accepts
-every stable WebAssembly feature except SIMD. Version 1 (ADR 0019) was the
-integer-only subset of the system's own interpreter.
+Version 2 (ADR 0071, 2026-11-01) runs modules with wasmi 2.0. It accepts the
+stable WebAssembly features except SIMD and extended constant expressions,
+within wasmi's strict limits. Version 1 (ADR 0019) was the integer-only
+subset of the system's own interpreter.
 
 ## Binary format and features
 
@@ -21,11 +22,13 @@ integer-only subset of the system's own interpreter.
   - bulk memory (all of it, `memory.init`, `data.drop` and `table.*`
     included);
   - reference types (`funcref`, `externref`);
-  - multiple memories and tables;
+  - multiple tables;
   - tail calls;
-  - extended constant expressions;
   - 64-bit memories (`memory64`).
 - Refused when the module is validated:
+  - extended constant expressions: wasmi evaluates them recursively, and a
+    4 KB initializer exhausted the runner's stack (audit of ADR 0071, H2);
+  - more than one memory (wasmi's strict limits);
   - SIMD and relaxed SIMD;
   - threads;
   - exceptions;
@@ -45,13 +48,20 @@ the runner's memory:
 | What | Limit |
 |---|---|
 | module size | 64 KiB |
-| each memory | 1 MiB (16 pages of 64 KiB) |
-| memories | 4 |
+| memory | one, of at most 1 MiB (16 pages of 64 KiB) |
 | tables | 4, of at most 16 Ki elements |
 | instances | 1 |
-| value stack | 64 Ki slots (512 KiB) |
+| functions | 10 000, of 40 bytes of code on average once there are 1000 bytes |
+| globals, element segments, data segments | 1000 each |
+| parameters and results of a function type | 32 each |
+| blocks nested in a function | 1024 |
+| value stack | 512 KiB |
 | nested calls | 1024 |
 | fuel | 50 M units for `start`, 50 M for `main` |
+
+The counts of functions, globals, segments, parameters and results are
+wasmi's strict limits (`EnforcedLimits::strict`), checked when the module is
+parsed. Nesting is checked before that, by the runner.
 
 `memory.grow` and `table.grow` past a limit return -1, as the
 specification says for a failed grow; they do not trap.
@@ -109,7 +119,7 @@ calls it.
 |---|---|---|
 | `print` | `(ptr: i32, len: i32)` | Writes `len` bytes of the module's memory to the console. Range outside memory: trap. |
 | `uptime_ms` | `() -> i64` | Milliseconds since boot (0 if the runner lacks `SYSTEM`). |
-| `file_write` | `(name: i32, name_len: i32, data: i32, len: i32) -> i32` | Creates or wholly replaces (atomic and durable, ADR 0014) a file in the runner's private directory. Returns the bytes written or -1. Name of 1 to 32 UTF-8 bytes without `/`; otherwise, trap. |
+| `file_write` | `(name: i32, name_len: i32, data: i32, len: i32) -> i32` | Creates or wholly replaces (atomic and durable, ADR 0014) a file in the runner's private directory. Returns the bytes written or -1. Name of 1 to 32 UTF-8 bytes without `/`; otherwise, trap. `demo.wasm` and `demo.manifest` cannot be written (-1): a module does not change its own code or capabilities. |
 | `file_read` | `(name: i32, name_len: i32, buf: i32, len: i32) -> i32` | Reads the file into `buf` (up to `len`). Returns the bytes read or -1 if it does not exist. |
 
 Functions that talk to a service (`file_*`) inherit the SDK timeouts
@@ -135,7 +145,7 @@ audit M-a):
 | 3 | no `demo.wasm` |
 | 4 | error reading `demo.wasm` |
 | 5 | module larger than 64 KiB |
-| 6 | malformed, unsupported or invalid module (wasmparser's reason is printed) |
+| 6 | malformed, unsupported or invalid module, or blocks nested deeper than 1024 (the reason is printed) |
 | 7 | unknown import: not a function, or not from `aricode` |
 | 8 | no memory: the quota did not give the three heap buffers |
 | 9 | instantiation failed: a memory, table or data segment over the limits |
@@ -143,5 +153,6 @@ audit M-a):
 | 11 | missing or invalid manifest |
 | 12 | import not granted by the manifest |
 | 13 | trap, fuel exhausted or stack exhausted during `main` |
+| killed | the runner's own stack exhausted by a loop of `memory.grow` or `table.grow` (ADR 0071, Limits) |
 | 14 | import with a signature other than the host's |
 | 15 | `main` is not `main(i64) -> i32` |

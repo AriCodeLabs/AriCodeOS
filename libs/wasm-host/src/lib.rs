@@ -11,21 +11,33 @@
 extern crate alloc;
 
 use wasmi::{
-    Caller, CompilationMode, Config, Engine, Error, FuncType, StoreLimits, StoreLimitsBuilder,
-    TrapCode, ValType,
+    Caller, CompilationMode, Config, EnforcedLimits, Engine, Error, FuncType, StoreLimits,
+    StoreLimitsBuilder, TrapCode, ValType,
 };
 
+/// The module and its manifest in the runner's private directory. A module
+/// may not write either (audit of ADR 0071, L4): it would change its own
+/// code or capabilities for the next run.
+pub const MODULE_FILE: &str = "demo.wasm";
+pub const MANIFEST_FILE: &str = "demo.manifest";
 /// Largest module the runner loads.
 pub const MAX_MODULE: usize = 64 * 1024;
-/// What a module may hold, so the heap is never exhausted by it: memories
-/// of at most 1 MiB, four of them, four tables of 16 Ki elements, one
-/// instance, a value stack of 64 Ki slots (512 KiB) and 1024 nested calls.
+/// What a module may hold, so the heap is never exhausted by it: one
+/// memory of at most 1 MiB (wasmi's strict limits allow one), four tables
+/// of 16 Ki elements, one instance, a value stack of 512 KiB and 1024
+/// nested calls. `EnforcedLimits::strict` bounds the rest when the module
+/// is parsed: 10 000 functions of 40 bytes on average, 1000 globals, 1000
+/// element and data segments, 32 parameters and results.
 pub const MEMORY_LIMIT: usize = 1024 * 1024;
-pub const MEMORIES: usize = 4;
+pub const MEMORIES: usize = 1;
 pub const TABLES: usize = 4;
 pub const TABLE_ELEMENTS: usize = 16 * 1024;
-pub const STACK_SLOTS: usize = 64 * 1024;
+pub const STACK_BYTES: usize = 512 * 1024;
 pub const CALL_DEPTH: usize = 1024;
+/// Deepest nesting of blocks in a function: wasmi's translator holds a
+/// frame of about 250 bytes per level and cannot fail gracefully when that
+/// runs out (audit of ADR 0071, M1).
+pub const MAX_NESTING: usize = 1024;
 /// Fuel for the `start` function and for `main`, each.
 pub const FUEL: u64 = 50_000_000;
 /// Bytes per unit of fuel that bulk operations and imports move (wasmi's
@@ -46,14 +58,16 @@ pub const PRINT_COST: u64 = 1_000;
 /// An `uptime_ms`: one system call.
 pub const CLOCK_COST: u64 = 100;
 
-/// The engine: every stable WebAssembly feature except SIMD (profile v2),
-/// fuel on, lazy translation with eager validation, bounded stacks.
+/// The engine: the stable WebAssembly features except SIMD and extended
+/// constant expressions (profile v2), fuel on, lazy translation with eager
+/// validation, bounded stacks, wasmi's strict limits on module contents.
 pub fn engine() -> Engine {
     let mut cfg = Config::default();
     cfg.consume_fuel(true)
         .compilation_mode(CompilationMode::LazyTranslation)
+        .enforced_limits(EnforcedLimits::strict())
         .set_max_recursion_depth(CALL_DEPTH)
-        .set_max_stack_height(STACK_SLOTS)
+        .set_max_stack_height(STACK_BYTES)
         .floats(true)
         .wasm_mutable_global(true)
         .wasm_sign_extension(true)
@@ -63,7 +77,10 @@ pub fn engine() -> Engine {
         .wasm_bulk_memory(true)
         .wasm_reference_types(true)
         .wasm_tail_call(true)
-        .wasm_extended_const(true)
+        // Off (audit of ADR 0071, H2): wasmi evaluates and drops a
+        // constant expression recursively, one native frame per operator,
+        // so a 4 KB global initializer overflowed the runner's stack.
+        .wasm_extended_const(false)
         .wasm_memory64(true)
         .wasm_custom_page_sizes(false)
         .wasm_wide_arithmetic(false);
@@ -202,6 +219,44 @@ pub fn granted(granted: &[bool; 3], cap: Cap) -> bool {
 pub fn file_name(bytes: &[u8]) -> Option<&str> {
     let name = core::str::from_utf8(bytes).ok()?;
     (!name.is_empty() && name.len() <= MAX_FILE_NAME && !name.contains('/')).then_some(name)
+}
+
+/// Whether a module may write `name`: not its own code or manifest.
+pub fn writable(name: &str) -> bool {
+    name != MODULE_FILE && name != MANIFEST_FILE
+}
+
+/// Refuses a module whose functions nest blocks deeper than
+/// `MAX_NESTING`, before wasmi parses it. A module wasmparser cannot read
+/// is left to `Module::new`, which says why.
+pub fn check_nesting(bytes: &[u8]) -> Result<(), &'static str> {
+    use wasmparser::{Operator, Parser, Payload};
+    for payload in Parser::new(0).parse_all(bytes) {
+        let Ok(Payload::CodeSectionEntry(body)) = payload else {
+            if payload.is_err() {
+                return Ok(());
+            }
+            continue;
+        };
+        let Ok(mut ops) = body.get_operators_reader() else {
+            return Ok(());
+        };
+        let mut depth = 0usize;
+        while !ops.eof() {
+            match ops.read() {
+                Ok(Operator::Block { .. } | Operator::Loop { .. } | Operator::If { .. }) => {
+                    depth += 1;
+                    if depth > MAX_NESTING {
+                        return Err("blocks nested deeper than 1024");
+                    }
+                }
+                Ok(Operator::End) => depth = depth.saturating_sub(1),
+                Ok(_) => {}
+                Err(_) => return Ok(()),
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

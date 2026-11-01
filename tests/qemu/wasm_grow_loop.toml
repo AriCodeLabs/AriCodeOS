@@ -1,0 +1,26 @@
+# Audit of ADR 0071, H1, accepted: in the release runner wasmi's handler
+# for `memory.grow` calls the next handler instead of tail-jumping to it,
+# so a module that grows in a loop exhausts the runner's 64 KiB stack after
+# a few hundred grows; the guard page stops it and the kernel kills the
+# runner ("run: wasm_runner: was killed by the kernel"). A dev build
+# dispatches in a loop and ends out of fuel instead. Either way the runner
+# ends, nothing else is touched, and the shell goes on (`ls` lists the
+# runner's directory). `cargo xtask stack-check` fails if any other handler
+# starts calling the next one.
+name = "wasm.grow_loop"
+description = "WASM module looping on memory.grow: the runner ends (stack guard or fuel); the system goes on"
+level = "full"
+areas = ["wasm", "sandbox", "shell"]
+cmdline = "qemu_exit shell"
+disk = "wasm-grow-loop"
+timeout_secs = 120
+stdin = ["run wasm_runner 0", "ls", "shutdown"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "wasm_runner: module demo.wasm loaded (54 bytes)",
+    "wasm_runner/demo.manifest 27 bytes",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "wasm_runner: main returned"]

@@ -1289,8 +1289,8 @@ latter briefly to add the region.
   instantiated. It replaced `aricode-wasm`, which ADR 0063's comparison
   found 13 to 38 times slower and accepting 315 invalid or malformed
   modules of the spec testsuite.
-- The profile (`docs/wasm-profile.md`, v2) is every stable WebAssembly
-  feature except SIMD. Every call runs on fuel: 50 M units for `start`
+- The profile (`docs/wasm-profile.md`, v2) is the stable WebAssembly
+  features except SIMD, extended constants and multiple memories. Every call runs on fuel: 50 M units for `start`
   and 50 M for `main`, one per 64 bytes that bulk operations move, and
   imports priced by the runner before they run (ADR 0055).
 - `wasm_runner` is a normal broker application: it receives `SYSTEM`, its
@@ -1302,9 +1302,12 @@ latter briefly to add the region.
     capabilities: `aricode.print`, `uptime_ms`, `file_read` and
     `file_write`, each with an exact signature.
   - It extends its heap with three 2 MiB DMA buffers from its quota. There
-    wasmi keeps its state and the module's memories, bounded by
-    `StoreLimits`: memories of 1 MiB, four of them, four tables of 16 Ki
-    elements, a 512 KiB value stack and 1024 nested calls.
+    wasmi keeps its state and the module's memory.
+  - What a module holds is bounded in three places:
+    - `StoreLimits`: one memory of 1 MiB, four tables of 16 Ki elements,
+      a 512 KiB value stack and 1024 nested calls;
+    - wasmi's strict limits on functions, globals and segments;
+    - nesting of at most 1024 blocks.
   - The module has no way to name anything the runner has not imported
     for it.
 - AriFS files grow to 32 KiB capacity to hold modules.

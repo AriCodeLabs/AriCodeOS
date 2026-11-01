@@ -3,6 +3,8 @@
 extern crate std;
 
 use super::*;
+use std::format;
+use std::string::String;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use wasmi::{Linker, Module, Store, TrapCode};
@@ -130,7 +132,7 @@ fn memory_grows_to_the_limit_and_no_further() {
 fn modules_over_the_limits_are_not_instantiated() {
     for text in [
         r#"(module (memory 17) (func (export "main") (param i64) (result i32) (i32.const 0)))"#,
-        r#"(module (memory 1) (memory 1) (memory 1) (memory 1) (memory 1)
+        r#"(module (memory 1) (memory 1)
             (func (export "main") (param i64) (result i32) (i32.const 0)))"#,
         r#"(module (table 20000 funcref) (func (export "main") (param i64) (result i32) (i32.const 0)))"#,
     ] {
@@ -170,6 +172,80 @@ fn bulk_memory_pays_for_its_bytes() {
     main.call(&mut s, 0).unwrap();
     let spent = FUEL - s.get_fuel().unwrap();
     assert!(spent >= (1 << 20) / WORK_BYTES, "spent {spent}");
+}
+
+/// Audit of ADR 0071, H2: extended constant expressions are refused (wasmi
+/// evaluated them recursively); a plain one still works.
+#[test]
+fn extended_constant_expressions_are_refused() {
+    let engine = engine();
+    let deep = format!(
+        "(module (global i32 (i32.const 1) {}))",
+        "(i32.const 1) i32.add ".repeat(2000)
+    );
+    assert!(module(&engine, &deep).is_err());
+    assert!(module(&engine, "(module (global i32 (i32.const 1)))").is_ok());
+}
+
+/// Audit of ADR 0071, M1: nesting past `MAX_NESTING` is refused before
+/// wasmi sees the module; at the limit it runs.
+#[test]
+fn deep_nesting_is_refused_before_translation() {
+    let nested = |n: usize| {
+        wat::parse_str(format!(
+            "(module (func (export \"main\") (param i64) (result i32) {} (i32.const 7)))",
+            "(block ".repeat(n) + &")".repeat(n)
+        ))
+        .unwrap()
+    };
+    assert_eq!(
+        check_nesting(&nested(MAX_NESTING + 1)),
+        Err("blocks nested deeper than 1024")
+    );
+    let ok = nested(MAX_NESTING);
+    assert_eq!(check_nesting(&ok), Ok(()));
+    let engine = engine();
+    let m = Module::new(&engine, &ok[..]).unwrap();
+    let mut s = store(&engine);
+    let i = Linker::new(&engine)
+        .instantiate_and_start(&mut s, &m)
+        .unwrap();
+    assert_eq!(
+        i.get_typed_func::<i64, i32>(&s, "main")
+            .unwrap()
+            .call(&mut s, 0)
+            .unwrap(),
+        7
+    );
+    // Garbage is left to wasmi, which says why.
+    assert_eq!(check_nesting(b"not wasm"), Ok(()));
+}
+
+/// Audit of ADR 0071, M2 and L1: wasmi's strict limits on what a module
+/// contains, and a value stack that holds 1024 calls with a few locals.
+#[test]
+fn module_contents_and_stack_are_bounded() {
+    let engine = engine();
+    let many = format!("(module {})", "(func)".repeat(12_000));
+    assert!(module(&engine, &many).is_err(), "too many functions");
+    let globals = format!("(module {})", "(global i32 (i32.const 0))".repeat(1001));
+    assert!(module(&engine, &globals).is_err(), "too many globals");
+    let r = run_main(
+        r#"(module
+            (func $f (param i32) (result i32) (local i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64)
+                (if (result i32) (local.get 0)
+                    (then (call $f (i32.sub (local.get 0) (i32.const 1))))
+                    (else (i32.const 9))))
+            (func (export "main") (param i64) (result i32) (call $f (i32.const 1000))))"#,
+    );
+    assert_eq!(r.unwrap(), 9, "1000 nested calls with 16 locals each");
+}
+
+/// Audit of ADR 0071, L4: a module cannot write its own code or manifest.
+#[test]
+fn a_module_cannot_rewrite_itself() {
+    assert!(!writable(MODULE_FILE) && !writable(MANIFEST_FILE));
+    assert!(writable("notas"));
 }
 
 /// An invalid module is refused when it is loaded, with the reason.

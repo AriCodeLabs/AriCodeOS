@@ -14,6 +14,8 @@ path = "src/lib.rs"
 # which optimized builds use, grows the stack per instruction without the
 # optimizer (the host tests overflowed).
 wasmi = { version = "=2.0.0", default-features = false, features = ["validate", "memory64", "auto-dispatch"] }
+# The nesting check before wasmi sees a module (audit of ADR 0071, M1).
+wasmparser = { version = "=0.228.0", default-features = false }
 
 [dev-dependencies]
 # Test modules written as text (host tests only).

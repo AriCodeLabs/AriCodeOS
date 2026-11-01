@@ -546,6 +546,7 @@ name = "aricode-wasm-host"
 version = "0.16.0"
 dependencies = [
  "wasmi",
+ "wasmparser",
  "wat",
 ]
 
