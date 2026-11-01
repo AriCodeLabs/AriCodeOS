@@ -20,7 +20,9 @@ const FEATURE_MAC: u64 = 1 << 5;
 const NET_HDR: u64 = 12;
 const SLOT: u64 = 2048;
 const RX_SLOTS: u16 = 16;
-const TX_SLOTS: u16 = 8;
+/// Enough for a full send window of ADR 0070 and the ACKs of other
+/// connections; a full queue holds TCP back (incident 0057).
+const TX_SLOTS: u16 = 32;
 /// Exit code when the device returned a buffer it never held: its queue
 /// state cannot be trusted; init relaunches the driver, which resets it.
 const EXIT_DEVICE_LIED: u64 = 50;
@@ -143,6 +145,10 @@ impl Link for Nic {
     }
     fn send_frame(&mut self, frame: &[u8]) -> bool {
         Nic::send_frame(self, frame)
+    }
+    fn tx_room(&mut self) -> bool {
+        self.reclaim_tx();
+        self.tx_inflight < self.tx.vq.size().min(TX_SLOTS)
     }
     fn recv_frame(&mut self, out: &mut [u8; MAX_FRAME]) -> Option<usize> {
         Nic::recv_frame(self, out)
