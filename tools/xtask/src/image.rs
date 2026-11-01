@@ -471,6 +471,11 @@ pub fn build_usb_image(
         cmdline,
         &Default::default(),
     )?;
+    // What the image's third-party code asks for (MIT, BSD, Apache-2.0).
+    io(
+        fs::write(esp.join(crate::notices::FILE), crate::notices::generate()?),
+        "write the third-party notices",
+    )?;
     let mut extra = Vec::new();
     if let Some(key) = authorized_key {
         let text = io(fs::read(key), "read the public key")?;
