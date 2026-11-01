@@ -98,6 +98,8 @@ The owner's meaning of "from scratch", in their words (2026-10-29):
    5. SSH: compare with sunset and Dropbear's design. Done in ADR 0068:
       the server stays, with ML-KEM and key re-exchange.
    6. TCP/IP, then the WASM interpreter: compare with smoltcp and wasmi.
+      TCP done in ADR 0070: ours stays, its transmission rebuilt (smoltcp's
+      ISNs are predictable).
 
 ## Consequences
 

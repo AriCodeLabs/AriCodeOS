@@ -473,12 +473,16 @@ const EARLY_HINTS: &[u8] = b"HTTP/1.1 103 Early Hints\r\nLink: </style.css>; rel
 /// runs out before the interim-response limit (8) is reached.
 const EARLY_HINTS_PAUSE: Duration = Duration::from_secs(5);
 
+/// Body of `/bulk`: what `bench` downloads to measure TCP (ADR 0070).
+const BULK_BYTES: usize = 1 << 20;
+
 /// Test HTTP server: `/hola` (Content-Length), `/chunked`
 /// (Transfer-Encoding: chunked), `/big-headers` (5 KiB of headers, the
 /// size github.com sends), `/early-hints` (a `103` every five seconds and
 /// never a final response: the server of incident 0009, which the
 /// client's budget must cut), `/early-hints-flood` (twenty `103` at once,
-/// then a 200: the interim-response limit), `/update/NAME` from `update`
+/// then a 200: the interim-response limit), `/bulk` (1 MiB for `bench`),
+/// `/update/NAME` from `update`
 /// (a scenario's own update source; 404 without one), the same source
 /// under the public source's URL shape ([`mirror_route`], ADR 0048), the
 /// redirect limits (`/redirect-loop` redirects to itself and `/to-ftp` to
@@ -536,6 +540,15 @@ fn http_serve(mut stream: std::net::TcpStream, update: Option<&Path>) {
                 MirrorRoute::Redirect(r) => r,
                 MirrorRoute::Asset(name) => file_response(update.expect("checked"), name),
             }
+        }
+        // The TCP throughput figure of `bench` (ADR 0070).
+        "/bulk" => {
+            let mut r = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {BULK_BYTES}\r\nConnection: close\r\n\r\n"
+            )
+            .into_bytes();
+            r.extend((0..BULK_BYTES).map(|i| (i % 251) as u8));
+            r
         }
         "/redirect-loop" => redirect("302 Found", "/redirect-loop", 0),
         "/to-ftp" => redirect("301 Moved Permanently", "ftp://10.0.2.2/index", 0),

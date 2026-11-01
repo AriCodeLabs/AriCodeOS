@@ -1,5 +1,6 @@
 # Stage 5 (measurements): `bench` measures syscalls, IPC to fsd, files, a
-# metadata call to the network service, and computation (aricode-crypto
+# metadata call to the network service, TCP transfers to the host test
+# servers (a 1 MiB download, 256 KiB echoed; ADR 0070), and computation (aricode-crypto
 # and memcpy on fixed inputs, ADR 0063) with percentiles, and the idle time
 # of every CPU over a quiet interval; `cpus` shows per-CPU idle time and
 # `diag` gathers a report. `bench` runs twice and the second run is the one
@@ -8,7 +9,7 @@
 # required is that the measurements are produced and that the system is not
 # saturated when idle. `--cpus 4` gives the SMP figures of the same build.
 name = "perf.bench"
-description = "bench twice: syscall, IPC, file, network-info and computation percentiles; quiet idle; per-CPU idle; diag report"
+description = "bench twice: syscall, IPC, file, network-info, TCP and computation percentiles; quiet idle; per-CPU idle; diag report"
 level = "full"
 areas = ["perf", "shell", "sandbox", "network"]
 cmdline = "qemu_exit shell"
@@ -24,6 +25,8 @@ serial_contains = [
     "bench: replace 4 KiB (100): p50 ",
     "bench: read 4 KiB (100): p50 ",
     "bench: ipc net info (200): p50 ",
+    "bench: tcp download 1 MiB (5): p50 ",
+    "bench: tcp echo 256 KiB (5): p50 ",
     "bench: sha256 16 KiB (20): p50 ",
     "bench: chacha20poly1305 16 KiB (20): p50 ",
     "bench: aes128gcm 16 KiB (20): p50 ",

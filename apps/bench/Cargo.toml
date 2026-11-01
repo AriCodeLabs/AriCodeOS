@@ -15,6 +15,7 @@ bench = false
 [dependencies]
 aricode-rt = { path = "../../sdk/runtime" }
 aricode-crypto = { path = "../../libs/crypto" }
+aricode-proto = { path = "../../sdk/proto" }
 
 [build-dependencies]
 aricode-build = { path = "../../sdk/build" }

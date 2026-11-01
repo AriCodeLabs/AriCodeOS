@@ -24,6 +24,16 @@ const SYSCALLS: usize = 10_000;
 const IPC_CALLS: usize = 1_000;
 const FILE_OPS: usize = 100;
 const NET_CALLS: usize = 200;
+/// TCP transfers through the network service (ADR 0070), each timed.
+const TCP_RUNS: usize = 5;
+/// The host test servers at the virtual host's address (QEMU user
+/// networking): `/bulk` of the HTTP one sends `BULK_BYTES`, the echo one
+/// returns what it gets.
+const HOST: [u8; 4] = [10, 0, 2, 2];
+const BULK_BYTES: usize = 1 << 20;
+const ECHO_BYTES: usize = 256 * 1024;
+const ECHO_ROUND: usize = 16 * 1024;
+const TCP_TIMEOUT_MS: u32 = 10_000;
 const CHUNK: usize = 4096;
 /// Bytes hashed or encrypted per sample, and samples per algorithm.
 const CRYPTO_BYTES: usize = 16 * 1024;
@@ -282,6 +292,29 @@ fn main(_arg: u64) -> u64 {
         samples.push(rdtsc() - t0);
     }
     report(b"ipc net info", &mut samples, per_us, b"us");
+    // 4b. TCP throughput: a download, and an exchange in both directions.
+    let mut net = net;
+    let mut buf = alloc::vec![0u8; ECHO_ROUND];
+    let mut samples = Vec::with_capacity(TCP_RUNS);
+    for _ in 0..TCP_RUNS {
+        let t0 = rdtsc();
+        if download(&mut net, &mut buf) != Some(BULK_BYTES) {
+            sys::print(b"bench: tcp download failed\n");
+            return 11;
+        }
+        samples.push(rdtsc() - t0);
+    }
+    report(b"tcp download 1 MiB", &mut samples, per_us * 1000, b"ms");
+    let mut samples = Vec::with_capacity(TCP_RUNS);
+    for _ in 0..TCP_RUNS {
+        let t0 = rdtsc();
+        if echo(&mut net, &mut buf).is_none() {
+            sys::print(b"bench: tcp echo failed\n");
+            return 12;
+        }
+        samples.push(rdtsc() - t0);
+    }
+    report(b"tcp echo 256 KiB", &mut samples, per_us * 1000, b"ms");
     // 5. Computation: hashing, encryption, signatures, key agreement and
     // copies on fixed inputs.
     compute(per_us);
@@ -291,6 +324,67 @@ fn main(_arg: u64) -> u64 {
     }
     sys::print(b"bench: done\n");
     0
+}
+
+/// `BULK_BYTES` from the host's `/bulk`: the bytes after the headers.
+fn download(net: &mut NetClient, buf: &mut [u8]) -> Option<usize> {
+    let sock = net
+        .tcp_connect(HOST, aricode_proto::net::TEST_HTTP_PORT, TCP_TIMEOUT_MS)
+        .ok()?;
+    let sent = net.tcp_send_all(sock, b"GET /bulk HTTP/1.1\r\nHost: 10.0.2.2\r\n\r\n");
+    let mut total = 0;
+    let mut header = Some(0usize);
+    while sent.is_ok() {
+        let n = match net.tcp_recv(sock, TCP_TIMEOUT_MS, buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        total += n;
+        // The header ends at the first blank line; it fits a first read.
+        if let Some(0) = header {
+            header = buf[..n]
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+                .map(|i| i + 4);
+        }
+    }
+    let _ = net.tcp_close(sock);
+    total.checked_sub(header?)
+}
+
+/// `ECHO_BYTES` to the host's echo server and back, `ECHO_ROUND` at a time.
+fn echo(net: &mut NetClient, buf: &mut [u8]) -> Option<()> {
+    let sock = net
+        .tcp_connect(HOST, aricode_proto::net::TEST_TCP_ECHO_PORT, TCP_TIMEOUT_MS)
+        .ok()?;
+    let mut done = 0;
+    let ok = (|| {
+        while done < ECHO_BYTES {
+            for (i, b) in buf.iter_mut().enumerate() {
+                *b = ((done + i) % 251) as u8;
+            }
+            net.tcp_send_all(sock, buf).ok()?;
+            let mut back = 0;
+            while back < ECHO_ROUND {
+                let n = net.tcp_recv(sock, TCP_TIMEOUT_MS, &mut buf[back..]).ok()?;
+                if n == 0 {
+                    return None;
+                }
+                back += n;
+            }
+            if buf
+                .iter()
+                .enumerate()
+                .any(|(i, &b)| b != ((done + i) % 251) as u8)
+            {
+                return None;
+            }
+            done += ECHO_ROUND;
+        }
+        Some(())
+    })();
+    let _ = net.tcp_close(sock);
+    ok
 }
 
 aricode_rt::entry!(main);

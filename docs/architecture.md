@@ -909,17 +909,31 @@ latter briefly to add the region.
 ## TCP (Phase 23)
 
 - `aricode-net::tcp::Connection` is a pure state machine: `poll`
-  produces at most one segment per call (expired retransmission, SYN,
-  new data within the peer's window, FIN, pure ACK) and
-  `on_segment` consumes one; the caller transmits and keeps time. Fixed
-  4 KiB buffers per direction, retransmission from `snd_una` with exponential
-  RTO (500 ms to 8 s, `MAX_RETRIES = 6` → `CloseReason::Timeout`, about
-  31 s; a passive connection's SYN|ACK has the short budget
-  `SYN_ACK_MAX_RETRIES = 3`, about 7.5 s, so a SYN nobody completes frees
-  its slot soon: ADR 0035), 2 s TIME-WAIT, received RST or `abort` →
-  `CloseReason::Reset`. The host tests connect two `Connection`s through a
-  wire that drops chosen or random segments and pin both schedules.
-- In `netd` each TCP socket (`Box`, 8 KiB of buffers) lives in a slot of
+  produces at most one segment per call (expired retransmission, window
+  probe, SYN, a hole to resend, new data within the peer's window and the
+  congestion window, FIN, ACK) and `on_segment` consumes one; the caller
+  transmits and keeps time.
+  - Buffers come from the caller: in netd 32 KiB to send and 64 KiB to
+    receive (ADR 0070).
+  - Since ADR 0070 (incident 0056) it runs:
+    - the RTO of RFC 6298, 200 ms to 8 s, with go-back-N after a timeout;
+    - NewReno fast retransmit and recovery;
+    - SACK both ways, with out-of-order data kept;
+    - the peer's MSS honoured;
+    - window probes;
+    - ACKs delayed to every second segment or 20 ms;
+    - RFC 5961's checks against blind resets and injection.
+  - Unanswered data, a SYN or a probe gives up after `GIVE_UP_MS` (about
+    31 s) → `CloseReason::Timeout`. A passive connection's SYN|ACK has
+    the short budget `SYN_ACK_MAX_RETRIES = 3`, about 7.5 s, so a SYN
+    nobody completes frees its slot soon (ADR 0035).
+  - TIME-WAIT lasts 2 s. A received RST at the exact next sequence number,
+    or `abort`, gives `CloseReason::Reset`.
+  - The host tests connect two `Connection`s through a wire that drops
+    chosen or random segments, pin the schedules, and script exact
+    segments for each rule.
+- In `netd` each TCP socket (`Box`, its buffers lent by a static pool in
+  zero-fill memory, none for a listener: ADR 0070) lives in a slot of
   the table; segments are demultiplexed by 4-tuple and a SYN to a
   listening port creates a passive connection that `TcpAccept` delivers once
   established. `TcpConnect`/`TcpAccept`/`TcpRecv` stay pending with a
