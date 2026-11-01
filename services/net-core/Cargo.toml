@@ -15,3 +15,4 @@ aricode-proto = { path = "../../sdk/proto" }
 aricode-net = { path = "../../libs/net" }
 aricode-faults = { path = "../../libs/faults" }
 aricode-rt = { path = "../../sdk/runtime" }
+aricode-sync = { path = "../../libs/sync" }

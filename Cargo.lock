@@ -45,6 +45,7 @@ version = "0.16.0"
 dependencies = [
  "aricode-build",
  "aricode-crypto",
+ "aricode-proto",
  "aricode-rt",
 ]
 
@@ -172,6 +173,7 @@ dependencies = [
  "aricode-net",
  "aricode-proto",
  "aricode-rt",
+ "aricode-sync",
  "aricode-sys",
 ]
 

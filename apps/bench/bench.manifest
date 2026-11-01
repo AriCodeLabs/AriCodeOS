@@ -1,5 +1,6 @@
 # Benchmarks: system clock, a private directory for the file ones and a
-# network session for the metadata call to the network service.
+# network session for the metadata call to the network service and the
+# TCP transfers to the host test servers.
 name = bench
 caps = system, fs, net
 memory = 64K

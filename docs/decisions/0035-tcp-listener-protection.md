@@ -78,7 +78,8 @@ and visible in `diag`.
    is scaled to the table. The schedule of active opens and of data
    (`MAX_RETRIES = 6`, about 31 s) is unchanged: their callers have
    deadlines of their own and the loss of an established connection must
-   not be hurried.
+   not be hurried. (Since ADR 0070 it is a time, `GIVE_UP_MS`, so a
+   measured RTO shorter than 500 ms does not shorten it.)
 4. **A closed listener does not orphan its backlog.** `TcpClose` on a
    listener aborts the connections nobody accepted (a reset on the next
    poll) and frees their slots; before, they lingered until the peer gave
