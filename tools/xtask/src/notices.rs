@@ -104,7 +104,7 @@ pub fn generate() -> Result<String> {
     }
     let mut list = Vec::new();
     let mut missing = Vec::new();
-    for ((name, version), _) in &shipped {
+    for (name, version) in shipped.keys() {
         let Some(p) = meta
             .packages
             .iter()
