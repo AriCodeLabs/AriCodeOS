@@ -14,7 +14,7 @@ stdin = ["run wasm_runner 5", "shutdown"]
 [expect]
 exit = 33
 serial_contains = [
-    "AriInit: launch wasm_runner with manifest [system fs] memory 512 KiB",
+    "AriInit: launch wasm_runner with manifest [system fs] memory 7168 KiB",
     "wasm_runner: module demo.wasm loaded (",
     "wasm: hello from WebAssembly (arg 5)",
     "wasm: fib(24) = 46368",

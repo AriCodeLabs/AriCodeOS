@@ -43,7 +43,7 @@ hardware`, que se ha ejercitado en el portátil y la evidencia está en
 | Red IPv4: DHCP, ARP, ICMP, UDP, TCP, DNS, cliente HTTP | prototipo, validado en QEMU | `network.*`; sin TLS ni renovación DHCP |
 | Shell `arish` por consola serie, teclado PS/2 o teclados USB/virtio (puente de consola) | validado en QEMU | `shell.*`, `console.*` |
 | GUI: compositor, ventanas, entrada | prototipo, validado en QEMU | `gui.*` |
-| WASM: intérprete MVP con validador previo, perfil `aricode-wasm` v1 y manifiesto por módulo | validado en QEMU | `wasm.*`, `docs/wasm-profile.md`; no es WASI |
+| WASM: wasmi con combustible, perfil v2 (todo lo estable salvo SIMD) y manifiesto por módulo | validado en QEMU | `wasm.*`, `docs/wasm-profile.md`, ADR 0071; no es WASI |
 | Criptografía propia, RNG, imágenes firmadas, A/B con rollback | validado en QEMU | `crypto.*`, `update.*`; no es Secure Boot |
 | IOMMU VT-d con dominio por driver | validado en QEMU | `iommu.*` |
 | Imagen USB para pendrive | validado en QEMU (`usb.image_boot`) | pendiente en hardware |
@@ -223,7 +223,6 @@ apps/hello/      aplicacion de ejemplo del SDK con su manifiesto (ver docs/sdk.m
 libs/manifest/   manifiestos de aplicacion: capacidades pedidas y cuota de memoria
 libs/crypto/     SHA-256, SHA-512, Ed25519 y ChaCha20 desde cero con vectores oficiales
 keys/dev/        par Ed25519 de desarrollo (solo pruebas; ver su README)
-libs/wasm/       interprete WebAssembly MVP (enteros, memoria acotada, importaciones) con tests de host
 apps/wasm-demo/  modulo WebAssembly portable de ejemplo; apps/wasm-runner lo ejecuta con la Capability API
 apps/updater/    cliente de actualizacion: indices firmados de las fuentes del dueño, imagen del sistema al slot inactivo, paquetes de apps para el instalador (ADR 0029)
 libs/update-index/ fuentes de actualizacion, indice firmado, reglas de version y de downgrade (ADR 0029)

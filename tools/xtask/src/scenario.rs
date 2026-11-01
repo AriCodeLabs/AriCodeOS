@@ -420,7 +420,7 @@ pub struct Scenario {
     /// Initial state of the test disk (`image::DiskVariant`): `slots`
     /// (default), `update-empty`, `esp-only`, `pending-b`, `b-exhausted`, `b-corrupt`,
     /// `fs-pending-replace`, `fs-corrupt`, `wasm-restricted`, `wasm-invalid`,
-    /// `wasm-bad-import`, `wasm-many-blocks`.
+    /// `wasm-bad-import`, `wasm-many-blocks`, `wasm-endless`.
     #[serde(default = "default_disk")]
     pub disk: String,
     /// Presents the test disk as read-only (write failures).

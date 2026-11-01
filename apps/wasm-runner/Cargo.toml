@@ -3,7 +3,7 @@ name = "ari-app-wasm-runner"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "AriCodeOS WebAssembly runtime: runs a module from its private directory with the Capability API"
+description = "AriCodeOS WebAssembly runtime: runs a module from its private directory with the Capability API (wasmi)"
 publish = false
 
 [[bin]]
@@ -14,7 +14,9 @@ bench = false
 
 [dependencies]
 aricode-rt = { path = "../../sdk/runtime" }
-aricode-wasm = { path = "../../libs/wasm" }
+aricode-wasm-host = { path = "../../libs/wasm-host" }
+# ADR 0071: the interpreter (features as in aricode-wasm-host).
+wasmi = { version = "=2.0.0", default-features = false, features = ["validate", "memory64", "auto-dispatch"] }
 
 [build-dependencies]
 aricode-build = { path = "../../sdk/build" }

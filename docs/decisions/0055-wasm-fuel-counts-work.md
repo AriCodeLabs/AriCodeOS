@@ -47,3 +47,8 @@ panic it.
 - `print` costs one unit per byte: a run can still write about 50 MB to a
   slow console (accepted).
 - Hosts other than the runner must implement `Host::cost`.
+
+Since ADR 0071 (2026-11-01) wasmi meters the fuel, with the same 50 M units
+per call, one unit per 64 bytes of bulk work, and the runner's import prices
+charged before an import runs (`aricode_wasm_host::charge`). The limits of
+point 3 are replaced by those of `docs/wasm-profile.md` v2.

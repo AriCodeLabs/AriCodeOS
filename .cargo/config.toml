@@ -43,4 +43,7 @@ rustflags = [
     "-C", "target-cpu=mvp",
     "-C", "target-feature=+sign-ext,+bulk-memory",
     "-C", "link-arg=-zstack-size=16384",
+    # No debug sections: the module is data for the runner, and the
+    # benchmark of ADR 0071 tripled it past what an AriFS file holds.
+    "-C", "debuginfo=0",
 ]

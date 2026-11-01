@@ -13,7 +13,7 @@ stdin = ["run wasm_runner 5", "shutdown"]
 [expect]
 exit = 33
 serial_contains = [
-    "wasm_runner: invalid module (empty stack)",
+    "wasm_runner: invalid module (type mismatch: expected i32 but nothing on stack",
     "run: wasm_runner exited with 6",
     "ARICODEOS_SHUTDOWN",
 ]

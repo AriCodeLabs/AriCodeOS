@@ -1,0 +1,20 @@
+# ADR 0071: a module that loops forever. wasmi's dispatch in an optimized
+# runner chains its instruction handlers as tail calls; the run must end out
+# of fuel (50 M units), not out of stack, and the runner report it.
+name = "wasm.fuel"
+description = "WASM module that never returns: ends out of fuel, the runner survives to report it"
+level = "full"
+areas = ["wasm", "sandbox", "shell"]
+cmdline = "qemu_exit shell"
+disk = "wasm-endless"
+timeout_secs = 120
+stdin = ["run wasm_runner 5", "shutdown"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "wasm_runner: module failed: too many steps",
+    "run: wasm_runner exited with 13",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "panic in user program", "USER STACK OVERFLOW"]

@@ -78,6 +78,22 @@ mod user_heap {
         }
     }
 
+    /// Adds `[start, start + size)` to the heap (ADR 0071): a program that
+    /// needs more than the static arena (the WebAssembly runner, whose
+    /// modules' memory lives on the heap) gives it a DMA buffer of its own,
+    /// bounded by its quota.
+    ///
+    /// # Safety
+    ///
+    /// The region must be mapped writable for the rest of the program's
+    /// life, used by nothing else, not overlap the heap, and be aligned to
+    /// and a multiple of the allocator's granule (16 bytes; a page-aligned
+    /// buffer of whole pages always is).
+    pub unsafe fn extend(start: usize, size: usize) {
+        // SAFETY: the caller's contract is the allocator's.
+        HEAP.with(|h| unsafe { h.add_region(start, size) });
+    }
+
     // SAFETY: access serialized by the spinlock; pointers come from `alloc`.
     unsafe impl GlobalAlloc for UserHeap {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
@@ -93,6 +109,8 @@ mod user_heap {
         }
     }
 }
+
+pub use user_heap::extend as extend_heap;
 
 /// Exit code of the panic handler.
 pub const PANIC_EXIT_CODE: u64 = 255;
