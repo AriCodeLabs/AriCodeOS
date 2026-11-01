@@ -741,6 +741,9 @@ pub fn check() -> Result {
         .map(|(p, _)| *p)
         .collect();
     crate::deps::check(&user)?;
+    // Every shipped crate has its licence text for the notices.
+    crate::notices::generate()?;
+    println!("[xtask] third-party notices: a licence text for every shipped crate");
     // Every initrd program's stack budget (incident 0018).
     crate::stack::check()
 }

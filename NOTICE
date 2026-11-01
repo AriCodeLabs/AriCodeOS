@@ -58,4 +58,13 @@ programs) is adapted from compiler-builtins
 compiler-builtins contributors, available under the MIT or the Apache
 License, Version 2.0; AriCodeOS uses it under the latter.
 
+Third-party crates
+------------------
+The images (AriBoot, the kernel and the programs of the initrd) include
+crates from crates.io under the MIT, BSD, Apache-2.0 and other licences
+accepted by ADR 0063. Their names, versions, licences, authors and licence
+texts are in THIRD-PARTY-NOTICES.txt, which `cargo xtask notices` generates
+from Cargo.lock: it is on the EFI partition of every USB image and attached
+to every release.
+
 The rest of AriCodeOS is under the Apache License, Version 2.0.

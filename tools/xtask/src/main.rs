@@ -39,6 +39,7 @@ mod deps;
 mod fscat;
 mod image;
 mod keys;
+mod notices;
 mod parallel;
 mod perf;
 mod ports;
@@ -138,7 +139,7 @@ fn spec(cmd: &str) -> Option<Spec> {
             0,
         ),
         "perf" => (&[DEBUG, CPUS, ("--update-baseline", Opt::Flag)], 0),
-        "check" | "stack-check" => (&[], 0),
+        "check" | "stack-check" | "notices" => (&[], 0),
         "app-pack" => (&[DEBUG, ("--version", Opt::Value)], 1),
         "fs-cat" | "sign" => (&[], 2),
         "keygen" => (&[], 1),
@@ -248,7 +249,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().cloned().unwrap_or_else(|| "help".into());
     let Some(spec) = spec(&cmd) else {
-        eprintln!("usage: cargo xtask <build|image|run|test|perf|check|stack-check|usb-image|publish-update|serve-update|fs-cat|app-pack|keygen|sign|verify> [options] (see tools/xtask/src/main.rs)");
+        eprintln!("usage: cargo xtask <build|image|run|test|perf|check|stack-check|notices|usb-image|publish-update|serve-update|fs-cat|app-pack|keygen|sign|verify> [options] (see tools/xtask/src/main.rs)");
         return ExitCode::from(2);
     };
     let cli = match Cli::parse(&spec, &args[1.min(args.len())..]) {
@@ -302,6 +303,7 @@ fn main() -> ExitCode {
         "perf" => perf::run(&cli, release),
         "check" => build::check(),
         "stack-check" => stack::check(),
+        "notices" => notices::write().map(|p| println!("[xtask] third-party notices in {}", p.display())),
         "app-pack" => match cli.positional(1) {
             Some(dir) => cli
                 .number("--version", 1)
