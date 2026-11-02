@@ -597,6 +597,9 @@ impl Service {
                     }
                 }
             }
+            // Said before any lookup, so a client learns it without
+            // creating anything first.
+            Op::Delete | Op::Rename if self.fs.version() == 1 => Reply::status(Status::Unsupported),
             Op::Delete => {
                 let Some(index) =
                     qualified(prefix, req.name_str(), &mut qbuf).and_then(|q| self.fs.find(q))

@@ -25,7 +25,7 @@ OVMF (UEFI)
        processes with the SPAWNER capability, ACPI + I/O APIC, ring 3 drivers
        with IRQ/MMIO/DMA capabilities, PCIe enumeration via ECAM, init claims
        the virtio-blk (BARs, MSI-X) and launches its ring 3 driver as an IPC
-       block service (GPT disk), fsd mounts AriFS v1 on it and serves
+       block service (GPT disk), fsd mounts AriFS (v2, or v1 until migrated) on it and serves
        files over IPC; with `shell` on the cmdline init launches arish, which reads
        the serial console and powers off or reboots via `system_power`; netd
        (virtio-net) gets an IP via DHCP and serves ping, UDP and DNS over IPC;
@@ -67,7 +67,7 @@ libs/input/          aricode-input: evdev events and US keyboard (no_std, host t
 libs/http/           aricode-http: GET, response parsing, Content-Length and chunked without alloc (no_std, host tests)
 libs/net/            aricode-net: Ethernet, ARP, IPv4, ICMP, UDP, TCP, DHCP client and DNS without alloc (no_std, host tests)
 libs/faults/         aricode-faults: bounded fault reporting, one kernel event per kind per second with the count (netd, fsd; no_std, host tests)
-libs/arifs/          aricode-arifs: AriFS v1, flat directory with a fixed-capacity file table, CRC32 and replacement journal over `BlockDevice` (no_std, host tests with power cuts)
+libs/arifs/          aricode-arifs: AriFS v2 (extents, copy-on-write replace, two-copy table) and v1 (kept until migrated) over `BlockDevice` (no_std, host tests with power cuts)
 libs/pkg/            aricode-pkg: signed application packages (manifest with name, version and hashes; Ed25519 signature; ELF; application manifest)
 libs/update-index/   aricode-update-index: update sources, signed index, rollback serials, version and downgrade rules (ADR 0029)
 sdk/proto/           aricode-proto: versioned IPC protocols of the services (block v1, file v1, net v1, input v1, window v1, launch v1) (no_std, host tests)
@@ -750,7 +750,29 @@ latter briefly to add the region.
 
 ## File system (Phase 20)
 
-- AriFS v1 (`libs/arifs`, ADR 0014): LBA 0 superblock (magic `ARIFS`,
+- AriFS v2 (`libs/arifs::v2`, ADR 0072) is what new disks hold: up to
+  255 files of up to 16 MiB, each in up to four extents. The table is kept
+  in two copies of 32 sectors, each with a generation and a CRC over the
+  whole copy; every change is a commit that writes the whole table to the
+  copy not holding the current generation and flushes, and `open` takes the
+  valid copy with the higher generation. `replace` writes the new contents
+  to free sectors, flushes, and commits (data written once, two flushes);
+  `write` writes in place and grows files into free sectors; `delete` and
+  `rename` (over an existing name, in one commit) are commits too. Free
+  space is never stored: it is what the table does not cover. `open`
+  rejects a table that does not hold together (overlapping extents,
+  extents outside the data area, duplicate names) even under a valid CRC.
+  Host tests cut every write of replace, rename and migration, keeping any
+  subset of the unflushed writes.
+- Migration: a v1 volume becomes v2 in place without moving data (v1's
+  files are contiguous runs). The two table copies go to v1's journal data
+  area with a CRC-protected marker in v1's journal header, then the v2
+  superblock is written: the commit. init asks fsd for it (`ARG_MIGRATE`)
+  only when every slot holding a system declares `arifs = 2` in its
+  initrd's `features` file, so a rollback always finds a system that mounts
+  the disk; once the disk is v2 the updater refuses a system without it.
+  Until then fsd serves the v1 volume with v1's code (`aricode_arifs::Volume`).
+- AriFS v1 (`libs/arifs::v1`, ADR 0014): LBA 0 superblock (magic `ARIFS`,
   sectors, next free LBA, CRC32), LBA 1..4 table of 32 entries of
   64 bytes (name, starting LBA, capacity, size, per-entry CRC32), LBA
   5 replace journal header and 6..69 its data, data from LBA
@@ -779,7 +801,7 @@ latter briefly to add the region.
   (`sdk/proto::fs`): 64-byte requests and replies with `List`,
   `Open`, `Create`, `Read`, `Write`, `Close`, `Flush`, `Replace`
   (atomic replace of up to `MAX_IO`) and `ReplaceChunk`/`ReplaceCommit`
-  (chunks to the journal and commit: up to 32 KiB with the same guarantee; a
+  (chunks and commit: up to 16 MiB on v2, 32 KiB on a v1 volume, with the same guarantee; a
   single in-progress replace per service, `Busy` for the rest, released by
   the commit, an error or closing the descriptor; ADR 0018); data goes through the client's DMA
   buffer (up to 4 KiB per request), which fsd keeps mapped in a cache of 8
@@ -795,9 +817,11 @@ latter briefly to add the region.
   negotiated `flush`); `init.boot` requires the success message;
   `filesystem.replace_recovery` redoes on mount a replace cut after
   the commit and `filesystem.corrupt_detected` rejects a tampered table.
-- The test disk's raw area (LBA 4096 onwards, pattern
-  `ARIDISK\0`+LBA) lies beyond AriFS's maximum reach (70 + 32 × 64
-  sectors) so that `blk_client` and `fsd` do not step on each other.
+- The test disk's raw area (LBA 4096 to 6143, pattern `ARIDISK\0`+LBA)
+  lies outside any partition on a v2 disk, whose `ARI0` is last (81920
+  onwards); on the v1 variants it is the end of `ARI0`, beyond AriFS v1's
+  maximum reach (70 + 32 × 64 sectors), so `blk_client` and `fsd` never
+  step on each other.
 
 ## Shell and console input (Phase 21)
 

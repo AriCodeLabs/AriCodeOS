@@ -182,7 +182,8 @@ impl<D: BlockDevice> Volume<D> {
     pub fn needs_reopen(&self) -> bool {
         match self {
             Self::V1(fs) => fs.needs_reopen(),
-            Self::V2(fs) => fs.needs_reopen(),
+            // v2 resyncs the table itself before the next change.
+            Self::V2(_) => false,
         }
     }
 

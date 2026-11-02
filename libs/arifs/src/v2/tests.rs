@@ -491,20 +491,106 @@ fn metadata_that_does_not_hold_is_not_mounted() {
     );
 }
 
+/// A medium that fails one write (applied or not, as a device may still
+/// execute a request it reported as failed) or one flush, then works
+/// again: a transient error, as an injected USB transaction error.
+struct FlakyDisk {
+    disk: CuttingDisk,
+    bad_write: Option<(usize, bool)>,
+    bad_flush: Option<usize>,
+}
+
+impl BlockDevice for FlakyDisk {
+    fn read_sector(&mut self, lba: u64, buf: &mut [u8; SECTOR]) -> Result<(), FsError> {
+        self.disk.read_sector(lba, buf)
+    }
+    fn write_sector(&mut self, lba: u64, buf: &[u8; SECTOR]) -> Result<(), FsError> {
+        let n = self.disk.writes;
+        self.disk.write_sector(lba, buf)?;
+        match self.bad_write {
+            Some((bad, applied)) if bad == n => {
+                if !applied {
+                    self.disk.cache.pop();
+                }
+                Err(FsError::Io)
+            }
+            _ => Ok(()),
+        }
+    }
+    fn flush(&mut self) -> Result<(), FsError> {
+        let n = self.disk.flushes;
+        self.disk.flush()?;
+        if self.bad_flush == Some(n) {
+            return Err(FsError::Io);
+        }
+        Ok(())
+    }
+}
+
 #[test]
-fn a_failed_commit_poisons_until_reopened() {
-    let mut fs = AriFs::format(disk(400), 400).unwrap();
+fn a_failed_commit_is_resynced_before_the_next_change() {
+    let mut fs = AriFs::format(disk(1000), 1000).unwrap();
     let i = fs.create("a").unwrap();
-    fs.replace(i, b"old").unwrap();
+    let j = fs.create("b").unwrap();
+    fs.replace(i, &pattern(9000, 1)).unwrap();
+    fs.replace(j, b"b").unwrap();
     let base = fs.into_device().0;
-    // Cut inside the commit: the data was flushed, the table was not.
-    let mut fs = AriFs::open(CuttingDisk::new(&base, 3)).unwrap();
-    assert!(fs.replace(i, b"new").is_err());
-    assert!(fs.needs_reopen());
-    assert_eq!(fs.read(i, 0, &mut [0u8; 8]), Err(FsError::Io));
-    assert_eq!(fs.create("b"), Err(FsError::Io));
-    let mut fs = AriFs::open(fs.into_device().power_off(Kept::None)).unwrap();
-    assert_eq!(content(&mut fs, i), b"old");
+    let fs = AriFs::open(CuttingDisk::new(&base, usize::MAX)).unwrap();
+    let (writes, flushes) = {
+        let mut fs = fs;
+        fs.replace(i, &pattern(20_000, 2)).unwrap();
+        let d = fs.into_device();
+        (d.writes, d.flushes)
+    };
+    let mut failures: Vec<(Option<(usize, bool)>, Option<usize>)> = Vec::new();
+    for w in 0..writes {
+        failures.push((Some((w, true)), None));
+        failures.push((Some((w, false)), None));
+    }
+    for f in 0..flushes {
+        failures.push((None, Some(f)));
+    }
+    let olds = [pattern(9000, 1), pattern(20_000, 2)];
+    for (bad_write, bad_flush) in failures {
+        let flaky = FlakyDisk {
+            disk: CuttingDisk::new(&base, usize::MAX),
+            bad_write,
+            bad_flush,
+        };
+        let mut fs = AriFs::open(flaky).unwrap();
+        assert!(
+            fs.replace(i, &pattern(20_000, 2)).is_err(),
+            "{bad_write:?} {bad_flush:?}"
+        );
+        // Reads still serve, and the medium works again: the next change
+        // goes through, a new replace into sectors that may be the ones
+        // the failed one used.
+        let got = content(&mut fs, i);
+        assert!(olds.contains(&got));
+        fs.replace(j, &pattern(15_000, 3)).unwrap();
+        fs.replace(i, b"after").unwrap();
+        assert_eq!(content(&mut fs, i), b"after");
+        assert_eq!(content(&mut fs, j), pattern(15_000, 3));
+        let mut fs = AriFs::open(MemDisk(fs.into_device().disk.power_off(Kept::None).0)).unwrap();
+        assert_eq!(content(&mut fs, i), b"after");
+        assert_disjoint(&fs);
+        // A power cut right after the failure: either contents, whole.
+        for kept in KEPT {
+            let flaky = FlakyDisk {
+                disk: CuttingDisk::new(&base, usize::MAX),
+                bad_write,
+                bad_flush,
+            };
+            let mut fs = AriFs::open(flaky).unwrap();
+            let _ = fs.replace(i, &pattern(20_000, 2));
+            let mut fs = AriFs::open(fs.into_device().disk.power_off(kept)).unwrap();
+            assert!(
+                olds.contains(&content(&mut fs, i)),
+                "{bad_write:?} {bad_flush:?} {kept:?}"
+            );
+            assert_eq!(content(&mut fs, j), b"b");
+        }
+    }
 }
 
 fn v1_volume() -> (Vec<u8>, Vec<(&'static str, Vec<u8>)>) {

@@ -636,7 +636,7 @@ fn start_storage_stack(
             sup,
             "blk_client",
             service,
-            ari0_lba + RAW_AREA_OFFSET,
+            RAW_AREA_LBA,
             b"block service ok",
             11,
         )?;
@@ -1654,10 +1654,11 @@ fn restart_storm(sup: &mut Supervisor, fs: &mut FsClient) -> Result<(), u64> {
     Ok(())
 }
 
-/// Offset of the raw area inside ARI0 that `blk_client` (`selftest` only)
-/// checks and writes: the test disk has it at LBA 4096 with ARI0 at 34,
-/// over virtio-blk or USB. The USB stick image has no raw-area pattern.
-const RAW_AREA_OFFSET: u64 = 4096 - 34;
+/// The raw area that `blk_client` (`selftest` only) checks and writes: the
+/// test disk has it at LBA 4096, over virtio-blk or USB, outside `ARI0`
+/// since that partition went last (ADR 0072). The USB stick image has no
+/// raw-area pattern.
+const RAW_AREA_LBA: u64 = 4096;
 
 /// Launches a client of a service with its endpoint (WRITE only) and a
 /// hardware capability for its DMA buffer.

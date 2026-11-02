@@ -38,7 +38,8 @@
 //! - `open` rejects (`Corrupt`) metadata that does not hold together
 //!   (overlapping extents, extents outside the data area, duplicate names)
 //!   even under a valid CRC: a volume that cannot be trusted is not
-//!   mounted. A failed commit poisons the volume until it is opened again.
+//!   mounted. After a failed commit, the next change first writes the
+//!   table in memory over the copy that commit may have left.
 
 use alloc::boxed::Box;
 use alloc::vec;
@@ -333,9 +334,11 @@ pub struct AriFs<D: BlockDevice> {
     current: usize,
     recovery: Recovery,
     staged: Option<Staged>,
-    /// A commit failed: the disk may hold either generation, so every
-    /// operation fails until the volume is opened again.
-    poisoned: bool,
+    /// A commit failed: the copy it wrote may hold that newer generation
+    /// (written, not known to be flushed) or nothing valid. The next change
+    /// first writes the table in memory over it and flushes, so no sector is
+    /// written, and none reused, while a copy on disk may say otherwise.
+    resync: bool,
 }
 
 /// The entries, `MAX_FILES` long.
@@ -375,7 +378,7 @@ impl<D: BlockDevice> AriFs<D> {
             current: 0,
             recovery: Recovery::Clean,
             staged: None,
-            poisoned: false,
+            resync: false,
         }
     }
 
@@ -584,7 +587,8 @@ impl<D: BlockDevice> AriFs<D> {
     }
 
     /// A commit: the table with `changes`, one generation newer, into the
-    /// other copy, flushed; memory follows only then. A failure poisons.
+    /// other copy, flushed; memory follows only then. On a failure memory
+    /// stays as it was and the next change resyncs first ([`Self::ready`]).
     fn commit(&mut self, changes: &[Change]) -> Result<(), FsError> {
         let target = 1 - self.current;
         let generation = self.generation + 1;
@@ -592,7 +596,7 @@ impl<D: BlockDevice> AriFs<D> {
             .write_copy(target, generation, changes)
             .and_then(|()| self.dev.flush());
         if done.is_err() {
-            self.poisoned = true;
+            self.resync = true;
             return done;
         }
         for &(i, e) in changes {
@@ -600,20 +604,18 @@ impl<D: BlockDevice> AriFs<D> {
         }
         self.current = target;
         self.generation = generation;
+        self.resync = false;
         Ok(())
     }
 
-    /// A commit failed: the volume must be opened again before anything else.
-    pub fn needs_reopen(&self) -> bool {
-        self.poisoned
-    }
-
-    fn usable(&self) -> Result<(), FsError> {
-        if self.poisoned {
-            Err(FsError::Io)
-        } else {
-            Ok(())
+    /// Before a change: after a failed commit, the table in memory goes over
+    /// the copy that commit may have left, flushed. Until that succeeds no
+    /// change starts (a transient error of the medium ends once it does).
+    fn ready(&mut self) -> Result<(), FsError> {
+        if self.resync {
+            self.commit(&[])?;
         }
+        Ok(())
     }
 
     pub fn geometry(&self) -> Geometry {
@@ -700,7 +702,7 @@ impl<D: BlockDevice> AriFs<D> {
     /// Like `create`, with `sectors` already taken (xtask fills disks with
     /// it).
     pub fn create_sized(&mut self, name: &str, sectors: u32) -> Result<usize, FsError> {
-        self.usable()?;
+        self.ready()?;
         if !valid_name(name) {
             return Err(FsError::BadName);
         }
@@ -724,7 +726,6 @@ impl<D: BlockDevice> AriFs<D> {
     /// Reads up to `buf.len()` bytes from `offset`. Returns the bytes read
     /// (0 at end of file).
     pub fn read(&mut self, index: usize, offset: u32, buf: &mut [u8]) -> Result<usize, FsError> {
-        self.usable()?;
         let e = *self.entry(index).ok_or(FsError::NotFound)?;
         if offset >= e.size {
             return Ok(0);
@@ -739,7 +740,7 @@ impl<D: BlockDevice> AriFs<D> {
     /// the file grows into free sectors, and the new size is committed
     /// after the data is flushed.
     pub fn write(&mut self, index: usize, offset: u32, data: &[u8]) -> Result<usize, FsError> {
-        self.usable()?;
+        self.ready()?;
         let mut e = *self.entry(index).ok_or(FsError::NotFound)?;
         if offset > e.size {
             return Err(FsError::OutOfRange);
@@ -776,7 +777,7 @@ impl<D: BlockDevice> AriFs<D> {
     /// nothing changes until `replace_commit` (ADR 0018). A replace starts
     /// at offset 0 and continues without gaps.
     pub fn replace_chunk(&mut self, index: usize, offset: u32, data: &[u8]) -> Result<(), FsError> {
-        self.usable()?;
+        self.ready()?;
         self.entry(index).ok_or(FsError::NotFound)?;
         if offset == 0 {
             self.staged = Some(Staged {
@@ -827,7 +828,7 @@ impl<D: BlockDevice> AriFs<D> {
     /// the file's contents: they are flushed, then the table points at them
     /// and the old sectors are free.
     pub fn replace_commit(&mut self, index: usize, len: u32) -> Result<(), FsError> {
-        self.usable()?;
+        self.ready()?;
         let mut staged = match self.staged.take() {
             Some(s) if s.index == index && s.next == len => s,
             other => {
@@ -846,7 +847,7 @@ impl<D: BlockDevice> AriFs<D> {
 
     /// Truncates to zero bytes; the file keeps its sectors.
     pub fn truncate(&mut self, index: usize) -> Result<(), FsError> {
-        self.usable()?;
+        self.ready()?;
         let mut e = *self.entry(index).ok_or(FsError::NotFound)?;
         e.size = 0;
         self.commit(&[(index, Some(e))])
@@ -854,7 +855,7 @@ impl<D: BlockDevice> AriFs<D> {
 
     /// Deletes the file; its sectors are free once committed.
     pub fn delete(&mut self, index: usize) -> Result<(), FsError> {
-        self.usable()?;
+        self.ready()?;
         self.entry(index).ok_or(FsError::NotFound)?;
         self.commit(&[(index, None)])?;
         if self.staged.is_some_and(|s| s.index == index) {
@@ -867,7 +868,7 @@ impl<D: BlockDevice> AriFs<D> {
     /// commit: after a cut either both are as before or `name` holds this
     /// file (the atomic rename of temp + rename installers).
     pub fn rename(&mut self, index: usize, name: &str) -> Result<(), FsError> {
-        self.usable()?;
+        self.ready()?;
         if !valid_name(name) {
             return Err(FsError::BadName);
         }
@@ -892,7 +893,6 @@ impl<D: BlockDevice> AriFs<D> {
 
     /// Makes previous in-place writes durable.
     pub fn flush(&mut self) -> Result<(), FsError> {
-        self.usable()?;
         self.dev.flush()
     }
 

@@ -97,7 +97,47 @@ fn main(_arg: u64) -> u64 {
         return 11;
     }
     sys::print(b"fs_client: list, read, create and write over IPC ok\n");
+    // 6. Rename over and delete (AriFS v2, ADR 0072): `tmp.new` replaces
+    // `old.txt` in one commit, then goes; a volume still in v1 has neither.
+    match rename_and_delete(&mut fs) {
+        Ok(()) => sys::print(b"fs_client: rename over and delete ok\n"),
+        Err(FsError::Status(Status::Unsupported)) => {
+            sys::print(b"fs_client: rename and delete unsupported (AriFS v1)\n")
+        }
+        Err(_) => return 15,
+    }
     0
+}
+
+fn rename_and_delete(fs: &mut FsClient) -> Result<(), FsError> {
+    match fs.delete("absent.txt") {
+        Err(FsError::Status(Status::NotFound)) => {}
+        Err(e) => return Err(e),
+        Ok(()) => return Err(FsError::Status(Status::Io)),
+    }
+    for (name, text) in [("old.txt", &b"old"[..]), ("tmp.new", &b"new"[..])] {
+        let fd = fs.create(name).or_else(|_| fs.open(name))?;
+        fs.replace(fd, text)?;
+        fs.close(fd)?;
+    }
+    let tmp = fs.open("tmp.new")?;
+    let old = fs.open("old.txt")?;
+    fs.rename(tmp, "old.txt")?;
+    let mut buf = [0u8; 8];
+    // The replaced file's descriptor no longer works; the renamed one does.
+    if fs.read(old, 0, &mut buf).is_ok()
+        || fs.read(tmp, 0, &mut buf)? != 3
+        || &buf[..3] != b"new"
+        || fs.open("tmp.new").is_ok()
+    {
+        return Err(FsError::Status(Status::Io));
+    }
+    fs.close(tmp)?;
+    fs.delete("old.txt")?;
+    if fs.open("old.txt").is_ok() {
+        return Err(FsError::Status(Status::Io));
+    }
+    Ok(())
 }
 
 aricode_rt::entry!(main);

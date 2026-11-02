@@ -26,4 +26,4 @@ serial_contains = [
     "init exited with code 14",
     "ARICODEOS_KERNEL_READY",
 ]
-serial_absent = ["KERNEL PANIC", "AriFS mounted", "file service ok", "file service answers", "fs_client"]
+serial_absent = ["KERNEL PANIC", "fsd: AriFS v", "file service ok", "file service answers", "fs_client"]

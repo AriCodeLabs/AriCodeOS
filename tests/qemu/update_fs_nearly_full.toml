@@ -1,5 +1,5 @@
 # AriFS table nearly full (re-audit R3, final re-audit L-c): hello_ext v1 is
-# installed, a source is registered, and only five of the 32 entries are
+# installed, a source is registered, and only five of the 255 entries (32 before AriFS v2) are
 # free for the updater. The source offers system 2 and hello_ext 2. A first
 # `update` and an `upgrade` of both create exactly five files in the
 # updater's directory (state, indexes, last.log, history.log, one stage
@@ -39,7 +39,7 @@ serial_contains = [
     "updater: app hello_ext version 2 verified and staged as updater/pkg-1.aripkg",
     "installer: hello_ext 1 -> 2 installed (apps/hello_ext.aripkg)",
     "hello_ext v2: hello from outside the tree (arg 6)",
-    "32 file(s)",
+    "255 file(s)",
     "ARICODEOS_SHUTDOWN",
 ]
 serial_absent = [

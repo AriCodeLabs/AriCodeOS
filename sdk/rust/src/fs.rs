@@ -113,6 +113,26 @@ impl FsClient {
         self.call(req, false).map(|r| r.value as u32)
     }
 
+    /// Deletes `name` (AriFS v2, ADR 0072): descriptors open on it stop
+    /// working; `Unsupported` on a volume still in v1.
+    pub fn delete(&self, name: &str) -> Result<(), FsError> {
+        let req = Request::new(Op::Delete)
+            .with_name(name)
+            .ok_or(FsError::Status(Status::Invalid))?;
+        self.call(req, false).map(|_| ())
+    }
+
+    /// Renames the file open as `fd` to `name`, deleting a file already
+    /// called so in the same commit (AriFS v2, ADR 0072); `Unsupported` on
+    /// a volume still in v1.
+    pub fn rename(&self, fd: u32, name: &str) -> Result<(), FsError> {
+        let mut req = Request::new(Op::Rename)
+            .with_name(name)
+            .ok_or(FsError::Status(Status::Invalid))?;
+        req.fd = fd;
+        self.call(req, false).map(|_| ())
+    }
+
     pub fn close(&self, fd: u32) -> Result<(), FsError> {
         let mut req = Request::new(Op::Close);
         req.fd = fd;

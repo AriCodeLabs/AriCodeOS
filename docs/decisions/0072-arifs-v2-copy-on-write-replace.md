@@ -206,3 +206,37 @@ measured on the branch, see Tests):
   fsyncgate: https://lwn.net/Articles/752063/
 - SQLite: https://www.sqlite.org/atomiccommit.html, https://www.sqlite.org/psow.html
 - systemd-repart: https://man.archlinux.org/man/systemd-repart.8
+
+## Implementation, phase A (2026-11-03)
+
+- `libs/arifs`: `v1` (the previous code, unchanged but for the migration
+  marker it clears), `v2`, and `Volume`, which serves either. v2's table
+  is on the heap: 255 entries do not fit a frame of fsd's 16 KiB budget.
+- Protocol: `Delete`, `Rename` (`Unsupported` on a v1 volume, said before
+  any lookup), `MAX_REPLACE` = 16 MiB, and `ARG_MIGRATE` in fsd's launch
+  argument: init decides before fsd starts, so no client ever sees a
+  migration half done, and no file operation can ask for one.
+- `libs/ab`: `FEATURES_FILE` and `Image::features`, read piece by piece
+  with `aricode_initrd::locate`. init reads both slots; the updater checks
+  `UPDATE` before an install and the inactive slot before a rollback.
+- Disks: `ARI0` last on the test disk (8 MiB) and the stick (64 MiB; the
+  image grows to 166 MiB). The test disk's raw area stays at LBA 4096,
+  outside any partition. `arifs-v1`, `arifs-v1-old-slot` and
+  `fs-pending-replace` keep v1 in v1's place; `update-before-features`
+  holds a pre-0072 system in `UPDATE`.
+- Tests: 40 host tests of `libs/arifs` (every write of replace, rename
+  over and migration cut, with any subset of the unflushed writes kept;
+  a torn table copy; a torn migration superblock; forged tables);
+  `libs/ab` reads features; QEMU `filesystem.migrate_v1`,
+  `filesystem.v1_old_slot`, `update.refuses_v1_only_system`, and
+  `fs_client` renames over and deletes on every selftest boot.
+
+### Phase B (to do)
+
+`PACKAGE_MAX` stays 32 KiB: the broker verifies a package in a DMA buffer
+of that size, the installer holds the new package and reads the installed
+one, and the updater stages app packages in memory. Raising it means
+handling packages in pieces: the broker hashing while it loads, the
+installer copying with `ReplaceChunk` while it verifies and committing
+only a package that verified, the updater staging downloads into a file.
+Incident 0026 closes with phase B.

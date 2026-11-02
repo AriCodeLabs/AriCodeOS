@@ -9,7 +9,8 @@ cmdline = "qemu_exit"
 [expect]
 exit = 33
 serial_contains = [
-    "fsd: AriFS mounted, 4 files",
+    "fsd: AriFS v2 mounted, 4 files",
+    "fs_client: rename over and delete ok",
     "fsd: serving requests",
     "fs_client: hola.txt (17 bytes)",
     "fs_client: hola.txt says: Hola desde AriFS",
