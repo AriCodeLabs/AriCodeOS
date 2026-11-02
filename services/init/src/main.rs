@@ -21,6 +21,7 @@
 extern crate alloc;
 
 use aricode_manifest::{Caps, Manifest};
+use aricode_proto::fs::ARG_MIGRATE;
 use aricode_proto::launch::{
     Reply as LaunchReply, Request as LaunchRequest, Status as LaunchStatus,
 };
@@ -507,6 +508,55 @@ fn confirm_boot_slot(arg: u64, block_service: Handle) {
     }
 }
 
+/// Whether every slot that holds a system declares that it reads AriFS v2
+/// (ADR 0072): only then may fsd migrate a v1 volume, since a rollback to
+/// either slot finds a system that mounts it. An empty slot, or one whose
+/// container AriBoot would not boot (no header, malformed), holds no
+/// system to go back to; a slot that cannot be read counts as v1.
+fn slots_read_arifs_v2(blk: &mut BlockClient) -> bool {
+    use aricode_ab::{Image, ImageError};
+    for part in [aricode_ab::PART_SLOT_A, aricode_ab::PART_SLOT_B] {
+        let Some((first, last)) = find_partition(blk, part) else {
+            continue;
+        };
+        if blk.read(first, 1).is_err() {
+            return false;
+        }
+        let Ok(len) = Image::container_len(&blk.buffer()[..512]) else {
+            continue;
+        };
+        if len as u64 > (last - first) * 512 {
+            continue;
+        }
+        let features = Image::features(len as usize, |offset, buf| {
+            read_bytes(blk, first + 1, offset, buf)
+        });
+        match features {
+            Ok(f) if f.arifs >= 2 => {}
+            Ok(_) | Err(ImageError::Unreadable) => return false,
+            Err(_) => continue,
+        }
+    }
+    true
+}
+
+/// Fills `buf` from byte `offset` of the area that starts at `base` (LBA),
+/// up to the block client's batch at a time.
+fn read_bytes(blk: &mut BlockClient, base: u64, offset: usize, buf: &mut [u8]) -> Result<(), ()> {
+    let mut done = 0;
+    while done < buf.len() {
+        let at = offset + done;
+        let in_sector = at % 512;
+        let sectors = (in_sector + buf.len() - done).div_ceil(512).min(16);
+        blk.read(base + (at / 512) as u64, sectors as u16)
+            .map_err(|_| ())?;
+        let n = (sectors * 512 - in_sector).min(buf.len() - done);
+        buf[done..done + n].copy_from_slice(&blk.buffer()[in_sector..in_sector + n]);
+        done += n;
+    }
+    Ok(())
+}
+
 /// On top of an already running block service: fsd on the ARI0 partition
 /// (found by GPT name: the test disk and the USB image place it at different
 /// LBAs). The read-only health checks always run: the block service answers
@@ -529,8 +579,14 @@ fn start_storage_stack(
     };
     let disk = BlockClient::new(service, HARDWARE, 16)
         .ok()
-        .and_then(|mut blk| Some((blk.capacity().ok()?, find_partition(&mut blk, "ARI0"))));
-    let Some((capacity, ari0)) = disk else {
+        .and_then(|mut blk| {
+            Some((
+                blk.capacity().ok()?,
+                find_partition(&mut blk, "ARI0"),
+                slots_read_arifs_v2(&mut blk),
+            ))
+        });
+    let Some((capacity, ari0, migrate)) = disk else {
         say(b"block service does not answer Info");
         return Err(11);
     };
@@ -543,12 +599,15 @@ fn start_storage_stack(
     sys::print(b" sectors, GPT read, ARI0 at LBA ");
     sys::print(aricode_rt::fmt_u64(ari0_lba, &mut buf));
     sys::print(b"\n");
+    if !migrate {
+        say(b"a slot holds a system that reads only AriFS v1: ARI0 is not migrated");
+    }
     let launched = sup
         .register(
             "fsd",
             Kind::Fs {
                 block_service: service,
-                partition_lba: ari0_lba,
+                partition_lba: ari0_lba | if migrate { ARG_MIGRATE } else { 0 },
             },
             Probe::None,
             fs_ep,

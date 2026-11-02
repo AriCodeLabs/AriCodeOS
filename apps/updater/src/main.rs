@@ -147,6 +147,9 @@ mod code {
     /// The boot state in `ARIBOOT` was damaged (ADR 0060): rebuilt from
     /// what AriBoot booted, and nothing installed in that run.
     pub const STATE_DAMAGED: u64 = 60;
+    /// The system would not mount ARI0: it reads AriFS v1 only and ARI0
+    /// is v2 (ADR 0072).
+    pub const ARIFS_TOO_OLD: u64 = 56;
 }
 
 /// Everything printed, kept in `last.log` as the record of the last run
@@ -477,6 +480,73 @@ fn image_error(e: &ImageError) -> &'static str {
 
 /// The A/B layout of the boot disk and the `UPDATE` partition.
 /// Only opened when a system image is involved (audit 1, M5).
+/// Reads a slot's container through the block client, a chunk of sectors
+/// at a time, keeping the last chunk.
+struct ContainerReader {
+    first: u64,
+    sectors: u64,
+    cached: Option<u64>,
+}
+
+impl ContainerReader {
+    /// The container of the slot image whose header is at `first`.
+    fn new(first: u64, len: usize) -> Self {
+        Self {
+            first,
+            sectors: len.div_ceil(SECTOR) as u64,
+            cached: None,
+        }
+    }
+
+    fn read(&mut self, blk: &mut BlockClient, offset: usize, buf: &mut [u8]) -> Result<(), ()> {
+        let mut done = 0;
+        while done < buf.len() {
+            let pos = offset + done;
+            let chunk = (pos / SECTOR) as u64 / CHUNK as u64 * CHUNK as u64;
+            if self.cached != Some(chunk) {
+                let n = (self.sectors - chunk).min(CHUNK as u64) as u16;
+                blk.read(self.first + 1 + chunk, n).map_err(|_| ())?;
+                self.cached = Some(chunk);
+            }
+            let at = pos - chunk as usize * SECTOR;
+            let n = (CHUNK as usize * SECTOR - at).min(buf.len() - done);
+            buf[done..done + n].copy_from_slice(&blk.buffer()[at..at + n]);
+            done += n;
+        }
+        Ok(())
+    }
+}
+
+/// ARI0 read-only, for AriFS's version check.
+struct PartitionReader<'a> {
+    blk: &'a mut BlockClient,
+    first: u64,
+}
+
+impl aricode_arifs::BlockDevice for PartitionReader<'_> {
+    fn read_sector(
+        &mut self,
+        lba: u64,
+        buf: &mut [u8; aricode_arifs::SECTOR],
+    ) -> Result<(), aricode_arifs::FsError> {
+        self.blk
+            .read(self.first + lba, 1)
+            .map_err(|_| aricode_arifs::FsError::Io)?;
+        buf.copy_from_slice(&self.blk.buffer()[..aricode_arifs::SECTOR]);
+        Ok(())
+    }
+    fn write_sector(
+        &mut self,
+        _: u64,
+        _: &[u8; aricode_arifs::SECTOR],
+    ) -> Result<(), aricode_arifs::FsError> {
+        Err(aricode_arifs::FsError::Io)
+    }
+    fn flush(&mut self) -> Result<(), aricode_arifs::FsError> {
+        Err(aricode_arifs::FsError::Io)
+    }
+}
+
 struct Disk {
     blk: BlockClient,
     update: (u64, u64),
@@ -701,28 +771,53 @@ impl Disk {
         len: usize,
         keys: &Keys,
     ) -> Result<Manifest, ImageError> {
+        let mut reader = ContainerReader::new(first, len);
         let blk = &mut self.blk;
-        let sectors = len.div_ceil(SECTOR) as u64;
-        // The chunk of container sectors now in the client's buffer.
-        let mut cached: Option<u64> = None;
-        let read = |offset: usize, buf: &mut [u8]| {
-            let mut done = 0;
-            while done < buf.len() {
-                let pos = offset + done;
-                let chunk = (pos / SECTOR) as u64 / CHUNK as u64 * CHUNK as u64;
-                if cached != Some(chunk) {
-                    let n = (sectors - chunk).min(CHUNK as u64) as u16;
-                    blk.read(first + 1 + chunk, n).map_err(|_| ())?;
-                    cached = Some(chunk);
-                }
-                let at = pos - chunk as usize * SECTOR;
-                let n = (CHUNK as usize * SECTOR - at).min(buf.len() - done);
-                buf[done..done + n].copy_from_slice(&blk.buffer()[at..at + n]);
-                done += n;
+        Image::verify_streaming(len, |o, b| reader.read(blk, o, b), keys).map(|v| v.manifest)
+    }
+
+    /// Refuses a system that would not mount ARI0 (ADR 0072): when ARI0 is
+    /// AriFS v2, the image in `part` must declare `arifs = 2` in its
+    /// initrd, or it would boot without its keys and its updater state.
+    /// Not even `--allow-downgrade` lifts it. `what` names the install.
+    fn refuse_if_arifs_too_old(&mut self, part: (u64, u64), what: &str) -> Result<(), u64> {
+        if !self.arifs_is_v2() {
+            return Ok(());
+        }
+        let readable = self.blk.read(part.0, 1).is_ok();
+        let len = Image::container_len(&self.blk.buffer()[..SECTOR]).ok();
+        let features = match (readable, len) {
+            (true, Some(len)) => {
+                let mut reader = ContainerReader::new(part.0, len as usize);
+                let blk = &mut self.blk;
+                Image::features(len as usize, |o, b| reader.read(blk, o, b)).ok()
             }
-            Ok(())
+            _ => None,
         };
-        Image::verify_streaming(len, read, keys).map(|v| v.manifest)
+        match features {
+            Some(f) if f.arifs >= 2 => Ok(()),
+            _ => Err(fault(
+                code::ARIFS_TOO_OLD,
+                "upd-arifs-too-old",
+                &format!(
+                    "{what}: refused: that system reads only AriFS v1 and ARI0 is AriFS v2; it would boot without its files (ADR 0072)"
+                ),
+            )),
+        }
+    }
+
+    /// Whether ARI0 is AriFS v2 (or a migration to it that `open`
+    /// completes). An unreadable answer counts as v2: the refusal is the
+    /// safe side.
+    fn arifs_is_v2(&mut self) -> bool {
+        let Some((first, _)) = find_partition(&mut self.blk, "ARI0") else {
+            return false;
+        };
+        let mut dev = PartitionReader {
+            blk: &mut self.blk,
+            first,
+        };
+        aricode_arifs::v2::AriFs::is_v2(&mut dev).unwrap_or(true)
     }
 
     /// Verifies the slot image of `part` (header + container) with `keys`
@@ -861,6 +956,7 @@ impl Disk {
         keys: &Keys,
         indexed: Option<(&[u8; SECTOR], &[u8; 32])>,
     ) -> Result<(), u64> {
+        self.refuse_if_arifs_too_old(self.update, "system")?;
         let sectors = self.begin_install(total)?;
         let mut hash = indexed.map(|(header, _)| {
             let mut h = Sha256::new();
@@ -1360,6 +1456,9 @@ fn rollback(fs: Option<&mut FsClient>, keys: &Keys) -> u64 {
         "slot {} holds system {previous}, verified",
         disk.target.name()
     );
+    if let Err(code) = disk.refuse_if_arifs_too_old(target, "rollback") {
+        return code;
+    }
     // What the rollback does, named (audit of ADR 0045, L3): it may leave
     // the channel or go back to an older release or build. The slot holds
     // the system before the last install, or, after an install the loader

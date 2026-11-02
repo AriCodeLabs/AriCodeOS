@@ -200,6 +200,12 @@ fn build_initrd(user_bin: &Path) -> Result<Vec<u8>> {
     for (name, path) in crate::build::initrd_manifests()? {
         contents.push((name.clone(), io(fs::read(&path), &format!("read {name}"))?));
     }
+    // What this system reads (ADR 0072): init and the updater look for it
+    // in the other slot's initrd.
+    contents.push((
+        aricode_ab::FEATURES_FILE.to_string(),
+        aricode_ab::FEATURES.as_bytes().to_vec(),
+    ));
     let files: Vec<(&str, &[u8])> = contents
         .iter()
         .map(|(n, d)| (n.as_str(), d.as_slice()))
@@ -576,8 +582,12 @@ pub enum DiskVariant {
     /// AriFS v1 journal (power cut after commit): fsd replays it.
     FsPendingReplace,
     /// `ARI0` in AriFS v1, where disks made before ADR 0072 have it, with
-    /// the sample files: what a machine updated from 0.17 mounts.
+    /// the sample files: what a machine updated from 0.17 mounts. Both
+    /// slots read v2 (B is empty), so init asks for the migration.
     ArifsV1,
+    /// [`Self::ArifsV1`] with slot B holding a system from before ADR 0072
+    /// (no `features` file): the disk must stay v1.
+    ArifsV1OldSlot,
     /// Normal slots and a corrupted byte in the AriFS table: fsd does not mount.
     FsCorrupt,
     /// The WASM module's manifest grants only `print` (ADR 0019).
@@ -636,7 +646,10 @@ fn padded(container: &[u8], pad: usize) -> Result<Vec<u8>> {
 impl DiskVariant {
     /// Disks whose `ARI0` is AriFS v1, in v1's place.
     pub fn is_v1(self) -> bool {
-        matches!(self, Self::FsPendingReplace | Self::ArifsV1)
+        matches!(
+            self,
+            Self::FsPendingReplace | Self::ArifsV1 | Self::ArifsV1OldSlot
+        )
     }
 
     pub fn parse(s: &str) -> Option<Self> {
@@ -654,6 +667,7 @@ impl DiskVariant {
             "fs-one-short" => Self::FsOneShort,
             "fs-pending-replace" => Self::FsPendingReplace,
             "arifs-v1" => Self::ArifsV1,
+            "arifs-v1-old-slot" => Self::ArifsV1OldSlot,
             "fs-corrupt" => Self::FsCorrupt,
             "wasm-restricted" => Self::WasmRestricted,
             "wasm-invalid" => Self::WasmInvalid,
@@ -736,6 +750,9 @@ pub struct SystemSpec<'a> {
     /// The channel whose key signs it: its own, except in tests that need
     /// a build signed with the wrong key.
     pub sign_as: aricode_ab::Channel,
+    /// Without the initrd's `features` file: a system from before ADR
+    /// 0072, which reads AriFS v1 only.
+    pub before_features: bool,
 }
 
 impl SystemSpec<'_> {
@@ -745,6 +762,7 @@ impl SystemSpec<'_> {
             channel: aricode_ab::Channel::Stable,
             commit: None,
             sign_as: aricode_ab::Channel::Stable,
+            before_features: false,
         }
     }
 }
@@ -763,10 +781,13 @@ pub fn system_image(version: u32, corrupt: bool) -> Result<Vec<u8>> {
 pub fn system_image_for(spec: &SystemSpec, corrupt: bool) -> Result<Vec<u8>> {
     let esp = crate::build_dir().join("esp");
     let kernel = stripped_elf(&esp.join(KERNEL))?;
-    let initrd = io(
+    let mut initrd = io(
         fs::read(esp.join(INITRD)),
         "read initrd.img from the base ESP",
     )?;
+    if spec.before_features {
+        initrd = strip_initrd_files(&initrd, &[aricode_ab::FEATURES_FILE.to_string()])?;
+    }
     let commit = match spec.commit {
         Some(c) => Some(
             aricode_ab::Commit::parse(c)
@@ -980,6 +1001,13 @@ pub fn write_test_disk(
             DiskVariant::CorruptB => {
                 write_slot(&mut img, PART_SYSB, &system_image(2, true)?)?;
                 state = schedule(state, Slot::B);
+            }
+            DiskVariant::ArifsV1OldSlot => {
+                let old = SystemSpec {
+                    before_features: true,
+                    ..SystemSpec::stable(1)
+                };
+                write_slot(&mut img, PART_SYSB, &system_image_for(&old, false)?)?;
             }
             DiskVariant::Slots
             | DiskVariant::CorruptA
@@ -2181,6 +2209,7 @@ pub fn publish_channel(dir: &Path, channel: &Publication) -> Result<String> {
                 channel: channel.channel,
                 commit: commit.as_deref(),
                 sign_as,
+                before_features: false,
             },
         };
         let mut container = system_image_for(&spec, false)?;

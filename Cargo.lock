@@ -100,6 +100,7 @@ name = "ari-app-updater"
 version = "0.17.0"
 dependencies = [
  "aricode-ab",
+ "aricode-arifs",
  "aricode-build",
  "aricode-cmdline",
  "aricode-crypto",
