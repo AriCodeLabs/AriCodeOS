@@ -68,10 +68,12 @@ it, no downgrades unless asked, and every install logged.
    manifest (ADR 0017). At install time the download must match the index
    (size and SHA-256), then its own signature and hashes, and the version
    inside must equal the version in the index; only then is anything
-   written. The image is downloaded into the updater's memory buffer, not
-   into the `UPDATE` partition (6 MiB, `IMAGE_DOWNLOAD_MAX`, since incident
-   0021; images already on the disk are verified piece by piece, up to
-   the slot size). The installer and the broker verify a
+   written to a slot. Since ADR 0064 the system image is downloaded into
+   the `UPDATE` partition, its SHA-256 read back from the disk and checked
+   there, then copied into the slot as `update apply` does (until then, a
+   6 MiB memory buffer limited downloads, incident 0021). Images on the
+   disk are verified piece by piece, up to the slot size. The installer
+   and the broker verify a
    package again before installing or launching it.
 
 4. **`update` reports and plans, `upgrade` follows the plan.** `update`
@@ -300,9 +302,10 @@ a machine installed with `usb-image --dev-source`.
 - Limits: four sources, four staged packages per `upgrade`, a 4 KiB index,
   sixteen apps per index, 32 KiB packages (`aricode_pkg::PACKAGE_MAX`,
   shared with the broker and xtask since incident 0026), app names of 20
-  bytes, the
-  6 MiB download buffer (4 MiB before incident 0021; `publish-update`
-  refuses a larger image and warns past three quarters of it).
+  bytes, and system images up to the 12 MiB of the slot and `UPDATE`
+  partitions (`SYSTEM_IMAGE_MAX`, ADR 0064; a 6 MiB memory buffer before
+  it, 4 MiB before incident 0021; `publish-update` refuses a larger image
+  and warns past three quarters of it).
 - Open: key rotation and revocation (a signed key list in the index);
   freshness against a source that keeps serving one old index forever (an
   expiry date needs a trusted clock); binding an index to the source that

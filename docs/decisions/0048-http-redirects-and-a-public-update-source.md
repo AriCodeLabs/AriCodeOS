@@ -96,10 +96,12 @@ new Let's Encrypt `Root YR`).
   updater accept anything it would not accept from the first URL; it can
   only make the download fail. Binding an index to the source that serves
   it is still open (ADR 0029).
-- With `latest`, a release published between a machine's index fetch and
-  its image fetch moves the URL: the image named by the older index is not
-  in the new release (HTTP 404), the run fails and the next one sees the
-  new index.
+- With `latest`, a release published between a machine's `update` (which
+  stores the index) and its `upgrade` (which downloads what that index
+  names) moves the URL. That window can be days, not only the moment
+  between two fetches. The image the stored index names is not in the new
+  release (HTTP 404), so `upgrade` fails without writing anything and
+  says to run `update` again (incident 0052).
 - The plain `sys::http` client does not follow redirects; nothing in the
   system uses it for update sources.
 - A source can make a machine send a few blind `GET`s elsewhere, an

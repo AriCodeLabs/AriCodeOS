@@ -1,0 +1,33 @@
+# ADR 0064: a download that fails its check never touches the inactive
+# slot. B (version 2) boots and is confirmed, so A holds the system before
+# it (version 1), `update rollback`'s way back. The source offers version 3
+# with an image altered after indexing: it goes into UPDATE, its SHA-256
+# read back from the disk does not match the index, nothing is installed,
+# and A still verifies and can be scheduled.
+name = "update.failed_download_keeps_rollback"
+description = "an image refused after download leaves the inactive slot's previous system for update rollback"
+level = "full"
+areas = ["update", "network", "shell"]
+disk = "pending-b"
+timeout_secs = 150
+
+[host_update]
+system = 3
+tamper_image = true
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["update", "upgrade", "update rollback", "shutdown"]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "AriInit: boot confirmed on slot B",
+    "updater: system: installed 2, source 1 offers 3: upgrade available",
+    "updater: downloading aricodeos-3.img (",
+    "updater: system image SHA-256 does not match the signed index; not installing",
+    "update: updater exited with 42",
+    "updater: slot A holds system 1, verified",
+    "updater: reboot to boot system 1",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "installed into slot", "image version 3 verified"]

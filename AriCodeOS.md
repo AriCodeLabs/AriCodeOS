@@ -4050,6 +4050,15 @@ Still the owner's: agents outside the trusted base (ADR 0041), the driver
 licence (ADR 0042), downloads over 6 MiB and apps over 32 KiB. Accepted
 residuals are listed in each incident's "What remains".
 
+**0.16.1 (2026-11-02), tag `v0.16.1`: the bridge to 0.17.** The system
+image of 0.17 is 6.8 MB, and the updater of 0.16.0 downloads at most 6 MiB
+into memory: a 0.16.0 machine could not update to it over the network. This
+hotfix gives 0.16.0 only the updater of 0.17, so the update reaches it in
+two steps:
+- system images download into UPDATE and are verified there (ADR 0064);
+- `upgrade` says why it fails after a new release replaced the source
+  (incident 0052).
+
 ---
 
 # 95. Real hardware: the right moment

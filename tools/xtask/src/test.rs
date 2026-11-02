@@ -399,10 +399,15 @@ pub fn run_scenario(
                 legacy_manifest: false,
                 tamper_index: u.tamper_index,
                 tamper_image: u.tamper_image,
+                large_image: u.large_image,
                 ..image::Publication::default()
             };
             let dir = workdir.join("update");
             writeln!(report, "{}", image::publish_channel(&dir, &channel)?).expect("String");
+            if u.withdraw_image {
+                image::withdraw_system_image(&dir)
+                    .map_err(|e| format!("{}: host_update.withdraw_image: {e}", s.name))?;
+            }
             // The development source beside it (ADR 0045), served at /dev/
             // by the same server.
             if let Some(build) = u.dev_build {

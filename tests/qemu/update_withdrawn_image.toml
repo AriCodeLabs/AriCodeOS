@@ -1,0 +1,39 @@
+# Incident 0052: `upgrade` installs what the last `update` reported, from
+# the index it stored. A source at GitHub's `latest/download/` path moves
+# to each new release, so once a newer one is published the image that
+# stored index names is gone (HTTP 404). Here the source's signed index
+# still lists aricodeos-2.img but the source no longer serves it: the
+# upgrade fails before writing anything, and says why and what to run,
+# instead of a bare "HTTP 404". Slot B is never touched.
+name = "update.withdrawn_image"
+description = "an image the stored index names but the source no longer serves: upgrade fails closed and says to run update"
+level = "full"
+areas = ["update", "network", "shell"]
+disk = "update-empty"
+timeout_secs = 150
+
+[host_update]
+system = 2
+source = "none"
+withdraw_image = true
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = [
+    "update add 10.0.2.2:{update_port}/AriCodeLabs/AriCodeOS/releases/latest/download/",
+    "update",
+    "upgrade",
+    "diag",
+    "shutdown",
+]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "updater: system: installed 1, source 1 offers 2: upgrade available",
+    "updater: downloading aricodeos-2.img (",
+    "updater: download failed: HTTP 404: the source no longer serves aricodeos-2.img, most likely replaced by a newer release since the last update: run update, then upgrade",
+    "update: updater exited with 41",
+    ": upd-image-download (code 41)",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "installed into slot", "pending B", "image version 2 verified"]

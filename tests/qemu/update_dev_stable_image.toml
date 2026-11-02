@@ -3,7 +3,9 @@
 # number (audit of ADR 0045, L8): the image verifies on its own, but its
 # manifest names the stable channel and no commit while the index promised
 # development build 5 (commit 0123abc), so the updater refuses it before
-# writing anything; the channel does not change.
+# writing any slot; the channel does not change. The refused image is never
+# sealed in UPDATE (audit of ADR 0064, L1): `update apply` finds nothing to
+# install there.
 name = "update.dev_stable_image"
 description = "a dev index pointing at a stable image is refused at install; nothing written, no switch"
 level = "full"
@@ -19,7 +21,7 @@ dev_stable_image = true
 
 [[boots]]
 cmdline = "qemu_exit shell"
-stdin = ["update --channel dev", "upgrade --channel dev", "diag", "shutdown"]
+stdin = ["update --channel dev", "upgrade --channel dev", "update apply", "diag", "shutdown"]
 [boots.expect]
 exit = 33
 serial_contains = [
@@ -28,6 +30,8 @@ serial_contains = [
     "updater: downloading aricodeos-dev-5.img (",
     "updater: system image says version 5, the index says dev build 5 (commit 0123abc); not installing",
     "update: updater exited with 43",
+    "updater: UPDATE holds no valid system image: ",
+    "update: updater exited with 13",
     ": upd-image-version (code 43)",
     "system   version 1, slot A",
     "ARICODEOS_SHUTDOWN",
