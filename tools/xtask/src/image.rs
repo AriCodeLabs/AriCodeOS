@@ -588,6 +588,9 @@ pub enum DiskVariant {
     /// [`Self::ArifsV1`] with slot B holding a system from before ADR 0072
     /// (no `features` file): the disk must stay v1.
     ArifsV1OldSlot,
+    /// AriFS v2 and, in `UPDATE`, version 2 of a system from before ADR
+    /// 0072: the updater must refuse it, whatever the downgrade rule says.
+    UpdateBeforeFeatures,
     /// Normal slots and a corrupted byte in the AriFS table: fsd does not mount.
     FsCorrupt,
     /// The WASM module's manifest grants only `print` (ADR 0019).
@@ -668,6 +671,7 @@ impl DiskVariant {
             "fs-pending-replace" => Self::FsPendingReplace,
             "arifs-v1" => Self::ArifsV1,
             "arifs-v1-old-slot" => Self::ArifsV1OldSlot,
+            "update-before-features" => Self::UpdateBeforeFeatures,
             "fs-corrupt" => Self::FsCorrupt,
             "wasm-restricted" => Self::WasmRestricted,
             "wasm-invalid" => Self::WasmInvalid,
@@ -985,6 +989,13 @@ pub fn write_test_disk(
         match variant {
             DiskVariant::UpdateEmpty => {}
             DiskVariant::PendingBOlderUpdate => write_slot(&mut img, PART_UPDATE, &v1)?,
+            DiskVariant::UpdateBeforeFeatures => {
+                let old = SystemSpec {
+                    before_features: true,
+                    ..SystemSpec::stable(2)
+                };
+                write_slot(&mut img, PART_UPDATE, &system_image_for(&old, false)?)?
+            }
             _ => write_slot(&mut img, PART_UPDATE, &v2)?,
         }
         let mut state = BootState::fresh(Slot::A);
@@ -1019,6 +1030,7 @@ pub fn write_test_disk(
             | DiskVariant::UsbImage
             | DiskVariant::FsPendingReplace
             | DiskVariant::ArifsV1
+            | DiskVariant::UpdateBeforeFeatures
             | DiskVariant::FsCorrupt
             | DiskVariant::WasmRestricted
             | DiskVariant::WasmInvalid
