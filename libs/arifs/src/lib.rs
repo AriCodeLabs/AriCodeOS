@@ -14,14 +14,14 @@
 
 #![no_std]
 
+extern crate alloc;
+
 pub mod descriptors;
 pub mod v1;
 pub mod v2;
+pub mod volume;
 
-pub use v1::{AriFs, Entry, Journal, Recovery, Superblock};
-pub use v1::{
-    DATA_LBA, ENTRY_LEN, FILE_CAPACITY_SECTORS, JOURNAL_CAPACITY_BYTES, MAX_FILES, TABLE_LBA,
-};
+pub use volume::{Info, Mounted, Volume};
 
 pub const SECTOR: usize = 512;
 /// Longest file name, in both versions.
@@ -42,6 +42,9 @@ pub enum FsError {
     /// Commit of a chunked replace that did not start at zero, has gaps or
     /// does not cover the committed length (audit 6ee19fb, 1).
     BadTransaction,
+    /// The volume's version does not have the operation (v1: delete and
+    /// rename, ADR 0072).
+    Unsupported,
 }
 
 /// 512-byte block device. `flush` makes previous writes durable before

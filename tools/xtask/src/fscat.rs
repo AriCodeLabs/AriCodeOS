@@ -7,7 +7,7 @@
 //! read here.
 
 use crate::Result;
-use aricode_arifs::{AriFs, BlockDevice, FsError};
+use aricode_arifs::{BlockDevice, FsError, Volume};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -59,7 +59,7 @@ fn partition_lba(file: &mut File, name: &str) -> Result<u64> {
 pub fn read(disk: &Path, name: Option<&str>) -> Result<Vec<u8>> {
     let mut file = File::open(disk).map_err(|e| format!("{}: {e}", disk.display()))?;
     let base = partition_lba(&mut file, "ARI0")?;
-    let mut fs = AriFs::open(FileDisk { file, base })
+    let mut fs = Volume::open(FileDisk { file, base })
         .map_err(|e| format!("AriFS on {}: {e:?}", disk.display()))?;
     let Some(name) = name else {
         let mut out = String::new();
@@ -69,7 +69,7 @@ pub fn read(disk: &Path, name: Option<&str>) -> Result<Vec<u8>> {
         return Ok(out.into_bytes());
     };
     let index = fs.find(name).ok_or_else(|| format!("{name}: not found"))?;
-    let size = fs.entry(index).map(|e| e.size).unwrap_or(0) as usize;
+    let size = fs.info(index).map(|e| e.size).unwrap_or(0) as usize;
     let mut data = vec![0u8; size];
     let mut got = 0;
     while got < size {

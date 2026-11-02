@@ -67,6 +67,20 @@ impl Descriptors {
         n
     }
 
+    /// Releases every descriptor open on file `index`, whoever holds it
+    /// (the file was deleted, ADR 0072: its slot may soon hold another
+    /// file), and returns how many there were.
+    pub fn revoke_index(&mut self, index: usize) -> usize {
+        let mut n = 0;
+        for s in self.slots.iter_mut() {
+            if s.is_some_and(|(i, _)| i == index) {
+                *s = None;
+                n += 1;
+            }
+        }
+        n
+    }
+
     /// Descriptors in use, every owner together.
     pub fn used(&self) -> usize {
         self.slots.iter().flatten().count()
@@ -89,6 +103,19 @@ impl Descriptors {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_deleted_file_loses_every_descriptor() {
+        let mut d = Descriptors::new();
+        let a = d.open(3, 1).unwrap();
+        let b = d.open(3, 2).unwrap();
+        let c = d.open(4, 1).unwrap();
+        assert_eq!(d.revoke_index(3), 2);
+        assert_eq!(d.get(a, 1), None);
+        assert_eq!(d.get(b, 2), None);
+        assert_eq!(d.get(c, 1), Some(4));
+        assert_eq!(d.revoke_index(3), 0);
+    }
 
     #[test]
     fn a_descriptor_answers_only_its_owner() {

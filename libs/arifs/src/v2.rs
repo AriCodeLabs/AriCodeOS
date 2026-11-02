@@ -40,6 +40,9 @@
 //!   even under a valid CRC: a volume that cannot be trusted is not
 //!   mounted. A failed commit poisons the volume until it is opened again.
 
+use alloc::boxed::Box;
+use alloc::vec;
+
 use crate::{
     crc32_update, read_area, u32_at, u64_at, v1, valid_name, write_area, BlockDevice, FsError,
     BATCH_BYTES, MAX_BATCH_SECTORS, NAME_LEN, SECTOR,
@@ -323,7 +326,8 @@ struct Staged {
 pub struct AriFs<D: BlockDevice> {
     dev: D,
     geo: Geometry,
-    table: [Option<Entry>; MAX_FILES],
+    /// On the heap: 255 entries are too large for a frame of fsd's stack.
+    table: Table,
     generation: u64,
     /// The copy holding `generation`; the next commit writes the other.
     current: usize,
@@ -332,6 +336,14 @@ pub struct AriFs<D: BlockDevice> {
     /// A commit failed: the disk may hold either generation, so every
     /// operation fails until the volume is opened again.
     poisoned: bool,
+}
+
+/// The entries, `MAX_FILES` long.
+type Table = Box<[Option<Entry>]>;
+
+/// An empty table, built on the heap directly.
+fn empty_table() -> Table {
+    vec![None; MAX_FILES].into_boxed_slice()
 }
 
 /// One change to the table in a commit: slot and new value.
@@ -344,7 +356,7 @@ impl<D: BlockDevice> AriFs<D> {
         if !geo.valid() || total_sectors < FRESH_DATA + GROW_SECTORS as u64 {
             return Err(FsError::NoSpace);
         }
-        let mut fs = Self::new(dev, geo, [None; MAX_FILES]);
+        let mut fs = Self::new(dev, geo, empty_table());
         fs.write_copy(0, 1, &[])?;
         fs.write_copy(1, 1, &[])?;
         fs.dev.flush()?;
@@ -354,7 +366,7 @@ impl<D: BlockDevice> AriFs<D> {
         Ok(fs)
     }
 
-    fn new(dev: D, geo: Geometry, table: [Option<Entry>; MAX_FILES]) -> Self {
+    fn new(dev: D, geo: Geometry, table: Table) -> Self {
         Self {
             dev,
             geo,
@@ -365,6 +377,20 @@ impl<D: BlockDevice> AriFs<D> {
             staged: None,
             poisoned: false,
         }
+    }
+
+    /// Whether `dev` holds a v2 volume, or a migration to v2 whose
+    /// superblock write was cut (which `open` completes).
+    pub fn is_v2(dev: &mut D) -> Result<bool, FsError> {
+        let mut s = [0u8; SECTOR];
+        dev.read_sector(0, &mut s)?;
+        if Geometry::from_superblock(&s).is_ok() {
+            return Ok(true);
+        }
+        if v1::Superblock::is_valid(&s) {
+            return Ok(false);
+        }
+        Ok(Self::interrupted_migration(dev)?.is_some())
     }
 
     /// Opens a v2 volume. `BadMagic` for a v1 volume (or none at all).
@@ -383,7 +409,7 @@ impl<D: BlockDevice> AriFs<D> {
                 }
             }
         };
-        let mut fs = Self::new(dev, geo, [None; MAX_FILES]);
+        let mut fs = Self::new(dev, geo, empty_table());
         let generations = [fs.verify_copy(0)?, fs.verify_copy(1)?];
         let (current, generation) = match generations {
             [Some(a), Some(b)] => (if b > a { 1 } else { 0 }, a.max(b)),
@@ -440,7 +466,7 @@ impl<D: BlockDevice> AriFs<D> {
         if !geo.valid() {
             return Err(FsError::OutOfRange);
         }
-        let mut table = [None; MAX_FILES];
+        let mut table = empty_table();
         for (i, e) in old.entries() {
             let mut entry = Entry::new(e.name_str());
             entry.size = e.size;
@@ -878,7 +904,7 @@ impl<D: BlockDevice> AriFs<D> {
 /// The table must hold together, not just carry a CRC: names valid and
 /// unique, extents inside the data area and disjoint, sizes inside their
 /// extents and the file limit.
-fn check_layout(geo: &Geometry, table: &[Option<Entry>; MAX_FILES]) -> Result<(), FsError> {
+fn check_layout(geo: &Geometry, table: &[Option<Entry>]) -> Result<(), FsError> {
     let used = || table.iter().flatten();
     for (i, e) in table.iter().enumerate() {
         let Some(e) = e else { continue };

@@ -155,14 +155,19 @@ measured on the branch, see Tests):
 3. **Rollback stays safe.** An older system must never meet a v2 disk:
    it would not mount `ARI0`, and would lose its keys and its updater
    state.
-   - The updater, which knows the slots, asks fsd to migrate only when
-     both slots hold a system that reads v2 (or the other slot is empty).
+   - What a system reads is in its initrd, a `features` file
+     (`arifs = 2`): the signed manifest cannot carry it, since every
+     AriBoot already on an ESP refuses unknown manifest keys, and an image
+     without the file reads only v1 (ext4's feature flags, in a place old
+     loaders never parse).
+   - Migration is asked for only when both slots hold a system that reads
+     v2 (or the other slot is empty).
      After the first update to a v2 system the other slot still holds the
      old one, so the disk stays v1, and fsd keeps operating it with v1's
      code; it migrates after the next update.
    - Once the disk is v2, the updater refuses to install, even with
-     `--allow-downgrade`, a system older than the first one that reads v2,
-     and says why (ext4's incompatible feature flags, without leaving an
+     `--allow-downgrade`, a system whose initrd does not declare
+     `arifs = 2`, and says why (ext4's incompatible feature flags, without leaving an
      unbootable state).
 4. **Layout P2** in `usb-image` and the test disk; the update image and
    slots are unchanged.

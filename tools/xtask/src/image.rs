@@ -241,21 +241,27 @@ fn write_esp(esp: &Path, a: &Artifacts, cmdline: Option<&str>) -> Result {
     Ok(())
 }
 
-/// virtio-blk test disk: 12 MiB with GPT and five partitions. It is
+/// virtio-blk test disk: 48 MiB with GPT and five partitions. It is
 /// regenerated on every boot (the tests write to it).
 ///
 /// ```text
-/// ARI0     34..6143      AriFS with sample files (raw pattern from LBA 4096)
+/// raw      4096..6143    `ARIDISK` pattern of the raw block tests
 /// SYSA     6144..30719   signed system image, slot A (version 1), 12 MiB
 /// SYSB     30720..55295  slot B (empty, or the variant the scenario asks for)
 /// UPDATE   55296..79871  update image (version 2) that `updater` installs
 /// ARIBOOT  79872..79935  A/B boot state (sector 0)
+/// ARI0     81920..98270  AriFS v2 with sample files, 8 MiB, last (ADR 0072)
 /// ```
+///
+/// The v1 variants ([`DiskVariant::is_v1`]) keep `ARI0` where AriFS v1
+/// disks have it, 34..6143, with the raw pattern in its unused end.
 ///
 /// The images' kernel carries no debug info (`strip`) if the tool exists;
 /// with it the ELF exceeds 8 MiB.
 pub const DISK_SECTORS: u64 = 98304;
-pub const PART_ARI0: (u64, u64) = (34, 6143);
+pub const PART_ARI0: (u64, u64) = (81_920, 98_270);
+/// `ARI0` of the v1 variants: where AriFS v1 disks have it.
+pub const PART_ARI0_V1: (u64, u64) = (34, 6143);
 pub const PART_SYSA: (u64, u64) = (6144, 30719);
 pub const PART_SYSB: (u64, u64) = (30720, 55295);
 pub const PART_UPDATE: (u64, u64) = (55296, 79871);
@@ -263,23 +269,25 @@ pub const PART_ARIBOOT: (u64, u64) = (79872, 79935);
 
 /// Initial disk state a scenario asks for (`disk = "..."`).
 /// Image for a USB stick (Phase 34): GPT with the ESP (FAT32, 64 MiB) and the
-/// same AriCodeOS partitions as the test disk, aligned to 1 MiB.
+/// same AriCodeOS partitions as the test disk, aligned to 1 MiB. `ARI0` is
+/// last, so it can later grow to the end of the stick without moving
+/// anything (ADR 0072).
 ///
 /// ```text
 /// ESP      2048..133119     EFI/BOOT/BOOTX64.EFI, aricodeos/{kernel.elf,initrd.img,cmdline.txt}
-/// ARI0     133120..139263   AriFS with only `USB_FILES` (a README)
-/// SYSA     139264..163839   signed system image, slot A
-/// SYSB     163840..188415   slot B (empty)
-/// UPDATE   188416..212991   empty
-/// ARIBOOT  212992..213055   boot state: A active
+/// SYSA     133120..157695   signed system image, slot A
+/// SYSB     157696..182271   slot B (empty)
+/// UPDATE   182272..206847   empty
+/// ARIBOOT  206848..206911   boot state: A active
+/// ARI0     208896..339967   AriFS v2 (64 MiB) with only `USB_FILES` (a README)
 /// ```
-pub const USB_SECTORS: u64 = 213_120;
+pub const USB_SECTORS: u64 = 340_032;
 pub const USB_PART_ESP: (u64, u64) = (2048, 133_119);
-pub const USB_PART_ARI0: (u64, u64) = (133_120, 139_263);
-pub const USB_PART_SYSA: (u64, u64) = (139_264, 163_839);
-pub const USB_PART_SYSB: (u64, u64) = (163_840, 188_415);
-pub const USB_PART_UPDATE: (u64, u64) = (188_416, 212_991);
-pub const USB_PART_ARIBOOT: (u64, u64) = (212_992, 213_055);
+pub const USB_PART_SYSA: (u64, u64) = (133_120, 157_695);
+pub const USB_PART_SYSB: (u64, u64) = (157_696, 182_271);
+pub const USB_PART_UPDATE: (u64, u64) = (182_272, 206_847);
+pub const USB_PART_ARIBOOT: (u64, u64) = (206_848, 206_911);
+pub const USB_PART_ARI0: (u64, u64) = (208_896, 339_967);
 /// EFI system partition type GUID, in on-disk byte order.
 pub const ESP_TYPE_GUID: [u8; 16] = [
     0x28, 0x73, 0x2A, 0xC1, 0x1F, 0xF8, 0xD2, 0x11, 0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B,
@@ -344,11 +352,11 @@ pub fn write_usb_image(
         disk_guid,
         &[
             ("ESP", USB_PART_ESP.0, USB_PART_ESP.1, ESP_TYPE_GUID),
-            ("ARI0", USB_PART_ARI0.0, USB_PART_ARI0.1, guid),
             ("SYSA", USB_PART_SYSA.0, USB_PART_SYSA.1, guid),
             ("SYSB", USB_PART_SYSB.0, USB_PART_SYSB.1, guid),
             ("UPDATE", USB_PART_UPDATE.0, USB_PART_UPDATE.1, guid),
             ("ARIBOOT", USB_PART_ARIBOOT.0, USB_PART_ARIBOOT.1, guid),
+            ("ARI0", USB_PART_ARI0.0, USB_PART_ARI0.1, guid),
         ],
     )
     .map_err(|e| format!("gpt: {e:?}"))?;
@@ -357,11 +365,7 @@ pub fn write_usb_image(
     img[o..o + fat_img.len()].copy_from_slice(&fat_img);
     format_arifs(&mut img, USB_PART_ARI0, USB_FILES)?;
     if !extra.is_empty() {
-        let mut fs = aricode_arifs::AriFs::open(VecDisk {
-            data: &mut img,
-            base: USB_PART_ARI0.0,
-        })
-        .map_err(|e| format!("arifs: {e:?}"))?;
+        let mut fs = volume(&mut img, USB_PART_ARI0)?;
         for (name, content) in extra {
             let i = fs
                 .create(name)
@@ -569,8 +573,11 @@ pub enum DiskVariant {
     /// before installing anything.
     FsOneShort,
     /// Normal slots and a committed but unapplied `README` replacement in the
-    /// AriFS journal (power cut after commit): fsd replays it.
+    /// AriFS v1 journal (power cut after commit): fsd replays it.
     FsPendingReplace,
+    /// `ARI0` in AriFS v1, where disks made before ADR 0072 have it, with
+    /// the sample files: what a machine updated from 0.17 mounts.
+    ArifsV1,
     /// Normal slots and a corrupted byte in the AriFS table: fsd does not mount.
     FsCorrupt,
     /// The WASM module's manifest grants only `print` (ADR 0019).
@@ -627,6 +634,11 @@ fn padded(container: &[u8], pad: usize) -> Result<Vec<u8>> {
 }
 
 impl DiskVariant {
+    /// Disks whose `ARI0` is AriFS v1, in v1's place.
+    pub fn is_v1(self) -> bool {
+        matches!(self, Self::FsPendingReplace | Self::ArifsV1)
+    }
+
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "slots" => Self::Slots,
@@ -641,6 +653,7 @@ impl DiskVariant {
             "fs-nearly-full" => Self::FsNearlyFull,
             "fs-one-short" => Self::FsOneShort,
             "fs-pending-replace" => Self::FsPendingReplace,
+            "arifs-v1" => Self::ArifsV1,
             "fs-corrupt" => Self::FsCorrupt,
             "wasm-restricted" => Self::WasmRestricted,
             "wasm-invalid" => Self::WasmInvalid,
@@ -692,10 +705,11 @@ impl aricode_arifs::BlockDevice for VecDisk<'_> {
     }
 }
 
-/// First sector of the test disk's raw area: from here to the end of the
-/// partition every sector holds `ARIDISK\0` and its LBA, out of AriFS's
-/// reach (32 files x 64 sectors fit before it).
+/// The test disk's raw area: every sector holds `ARIDISK\0` and its LBA.
+/// Outside any partition on a v2 disk; on a v1 disk at the end of `ARI0`,
+/// out of AriFS v1's reach (32 files x 64 sectors fit before it).
 pub const RAW_PATTERN_LBA: u64 = 4096;
+pub const RAW_PATTERN_LAST: u64 = 6143;
 
 /// The only file of a stick's ARI0 besides what `usb-image` is asked to
 /// install (`authorized_keys`, host key, update source): the owner's disk
@@ -877,7 +891,12 @@ pub fn write_test_disk(
     }
     let mut img = vec![0u8; DISK_SECTORS as usize * 512];
     let guid = aricode_gpt::ARICODEOS_DATA_GUID;
-    let mut parts = vec![("ARI0", PART_ARI0.0, PART_ARI0.1, guid)];
+    let ari0 = if variant.is_v1() {
+        PART_ARI0_V1
+    } else {
+        PART_ARI0
+    };
+    let mut parts = vec![("ARI0", ari0.0, ari0.1, guid)];
     if variant != DiskVariant::EspOnly {
         parts.push(("SYSA", PART_SYSA.0, PART_SYSA.1, guid));
         parts.push(("SYSB", PART_SYSB.0, PART_SYSB.1, guid));
@@ -885,46 +904,42 @@ pub fn write_test_disk(
         parts.push(("ARIBOOT", PART_ARIBOOT.0, PART_ARIBOOT.1, guid));
     }
     aricode_gpt::write_disk(&mut img, &parts).map_err(|e| format!("gpt: {e:?}"))?;
-    populate_test_arifs(&mut img, PART_ARI0)?;
-    install_files(&mut img, PART_ARI0, installed)?;
+    populate_test_arifs(&mut img, ari0, variant.is_v1())?;
+    install_files(&mut img, ari0, installed)?;
     match variant {
-        DiskVariant::FsPendingReplace => stage_arifs_replace(&mut img, PART_ARI0)?,
+        DiskVariant::FsPendingReplace => stage_arifs_replace(&mut img, ari0)?,
         DiskVariant::WasmRestricted => {
-            overwrite_arifs(&mut img, PART_ARI0, WASM_MANIFEST_FILE, b"caps = print\n")?
+            overwrite_arifs(&mut img, ari0, WASM_MANIFEST_FILE, b"caps = print\n")?
         }
         DiskVariant::WasmInvalid => {
-            overwrite_arifs(&mut img, PART_ARI0, WASM_MODULE_FILE, INVALID_WASM)?
+            overwrite_arifs(&mut img, ari0, WASM_MODULE_FILE, INVALID_WASM)?
         }
         DiskVariant::WasmBadImport => {
-            overwrite_arifs(&mut img, PART_ARI0, WASM_MODULE_FILE, BAD_IMPORT_WASM)?
+            overwrite_arifs(&mut img, ari0, WASM_MODULE_FILE, BAD_IMPORT_WASM)?
         }
         DiskVariant::WasmManyBlocks => {
-            overwrite_arifs(&mut img, PART_ARI0, WASM_MODULE_FILE, &many_blocks_wasm())?
+            overwrite_arifs(&mut img, ari0, WASM_MODULE_FILE, &many_blocks_wasm())?
         }
         DiskVariant::WasmEndless => {
-            overwrite_arifs(&mut img, PART_ARI0, WASM_MODULE_FILE, ENDLESS_WASM)?
+            overwrite_arifs(&mut img, ari0, WASM_MODULE_FILE, ENDLESS_WASM)?
         }
         DiskVariant::WasmGrowLoop => {
-            overwrite_arifs(&mut img, PART_ARI0, WASM_MODULE_FILE, GROW_LOOP_WASM)?
+            overwrite_arifs(&mut img, ari0, WASM_MODULE_FILE, GROW_LOOP_WASM)?
         }
-        DiskVariant::FsNearlyFull => fill_arifs(&mut img, PART_ARI0, FS_FREE_ENTRIES)?,
-        DiskVariant::FsOneShort => fill_arifs(&mut img, PART_ARI0, FS_FREE_ENTRIES - 1)?,
+        DiskVariant::FsNearlyFull => fill_arifs(&mut img, ari0, FS_FREE_ENTRIES)?,
+        DiskVariant::FsOneShort => fill_arifs(&mut img, ari0, FS_FREE_ENTRIES - 1)?,
         DiskVariant::OversizedPackage => install_files(
             &mut img,
-            PART_ARI0,
+            ari0,
             &[(
                 String::from("apps/big.aripkg"),
                 vec![0xAB; aricode_pkg::PACKAGE_MAX + 1024],
             )],
         )?,
-        DiskVariant::FsCorrupt => {
-            // First byte of the name of the first entry in use.
-            img[(PART_ARI0.0 + aricode_arifs::TABLE_LBA) as usize * 512] ^= 0x20;
-        }
+        DiskVariant::FsCorrupt => corrupt_arifs(&mut img, ari0)?,
         _ => {}
     }
-    let (_, last) = PART_ARI0;
-    for lba in RAW_PATTERN_LBA..=last {
+    for lba in RAW_PATTERN_LBA..=RAW_PATTERN_LAST {
         let o = lba as usize * 512;
         img[o..o + 8].copy_from_slice(b"ARIDISK\0");
         img[o + 8..o + 16].copy_from_slice(&lba.to_le_bytes());
@@ -975,6 +990,7 @@ pub fn write_test_disk(
             | DiskVariant::EspOnly
             | DiskVariant::UsbImage
             | DiskVariant::FsPendingReplace
+            | DiskVariant::ArifsV1
             | DiskVariant::FsCorrupt
             | DiskVariant::WasmRestricted
             | DiskVariant::WasmInvalid
@@ -1053,25 +1069,25 @@ pub fn seed_record(img: &[u8]) -> Option<aricode_ab::seed::Record> {
     }
 }
 
-/// Adds files of any size to AriFS (installed packages, ADR 0017):
-/// capacity in multiples of 64 sectors.
+/// The AriFS volume of `part`, in whichever version it is.
+fn volume(img: &mut [u8], part: (u64, u64)) -> Result<aricode_arifs::Volume<VecDisk<'_>>> {
+    aricode_arifs::Volume::open(VecDisk {
+        data: img,
+        base: part.0,
+    })
+    .map_err(|e| format!("arifs: {e:?}"))
+}
+
+/// Adds files to AriFS (installed packages, ADR 0017); on v2 they take
+/// the space they need (ADR 0072).
 fn install_files(img: &mut [u8], part: (u64, u64), files: &[(String, Vec<u8>)]) -> Result {
     if files.is_empty() {
         return Ok(());
     }
-    let mut fs = aricode_arifs::AriFs::open(VecDisk {
-        data: img,
-        base: part.0,
-    })
-    .map_err(|e| format!("arifs: {e:?}"))?;
-    let unit = aricode_arifs::FILE_CAPACITY_SECTORS as usize * 512;
+    let mut fs = volume(img, part)?;
     for (name, bytes) in files {
-        let units = bytes.len().div_ceil(unit).max(1);
         let i = fs
-            .create_sized(
-                name,
-                (units * aricode_arifs::FILE_CAPACITY_SECTORS as usize) as u32,
-            )
+            .create(name)
             .map_err(|e| format!("arifs {name}: {e:?}"))?;
         fs.write(i, 0, bytes)
             .map_err(|e| format!("arifs {name} ({} bytes): {e:?}", bytes.len()))?;
@@ -1092,14 +1108,10 @@ pub const FS_FREE_ENTRIES: usize = 5;
 /// 0005), which is what made the first QEMU run of `update.fs_nearly_full`
 /// fail.
 fn fill_arifs(img: &mut [u8], part: (u64, u64), free: usize) -> Result {
-    let mut fs = aricode_arifs::AriFs::open(VecDisk {
-        data: img,
-        base: part.0,
-    })
-    .map_err(|e| format!("arifs: {e:?}"))?;
+    let mut fs = volume(img, part)?;
     let used = fs.entries().count();
-    for i in 0..aricode_arifs::MAX_FILES.saturating_sub(used + free) {
-        let name = format!("fill-{i:02}");
+    for i in 0..fs.slots().saturating_sub(used + free) {
+        let name = format!("fill-{i:03}");
         fs.create(&name)
             .map_err(|e| format!("arifs {name}: {e:?}"))?;
     }
@@ -1109,15 +1121,13 @@ fn fill_arifs(img: &mut [u8], part: (u64, u64), free: usize) -> Result {
 /// Contents `filesystem.replace_recovery` expects to read in `README`.
 pub const RECOVERED_README: &[u8] = b"AriCodeOS: recuperado tras un corte\n";
 
-/// Leaves a committed but unapplied `README` replacement in the AriFS
+/// Leaves a committed but unapplied `README` replacement in the AriFS v1
 /// journal: the exact state left by a power cut right after the commit
 /// (ADR 0014). The next mount must replay it.
 fn stage_arifs_replace(img: &mut [u8], part: (u64, u64)) -> Result {
-    let mut fs = aricode_arifs::AriFs::open(VecDisk {
-        data: img,
-        base: part.0,
-    })
-    .map_err(|e| format!("arifs: {e:?}"))?;
+    let aricode_arifs::Volume::V1(mut fs) = volume(img, part)? else {
+        return Err(String::from("arifs: a staged replace needs a v1 volume"));
+    };
     let i = fs
         .find("README")
         .ok_or_else(|| String::from("arifs: README missing"))?;
@@ -1126,17 +1136,31 @@ fn stage_arifs_replace(img: &mut [u8], part: (u64, u64)) -> Result {
         .map_err(|e| format!("arifs README: {e:?}"))
 }
 
-/// Formats AriFS in `part` with `files`.
+/// Formats AriFS v2 in `part` with `files`.
 fn format_arifs(img: &mut [u8], part: (u64, u64), files: &[(&str, &[u8])]) -> Result {
+    format_arifs_version(img, part, files, false)
+}
+
+/// Formats AriFS in `part` with `files`: v1, as disks made before ADR
+/// 0072 are, or v2.
+fn format_arifs_version(
+    img: &mut [u8],
+    part: (u64, u64),
+    files: &[(&str, &[u8])],
+    v1: bool,
+) -> Result {
     let (first, last) = part;
     let sectors = last - first + 1;
-    let mut fs = aricode_arifs::AriFs::format(
-        VecDisk {
-            data: img,
-            base: first,
-        },
-        sectors,
-    )
+    let dev = VecDisk {
+        data: img,
+        base: first,
+    };
+    let mut fs = if v1 {
+        aricode_arifs::v1::AriFs::format(dev, sectors)
+            .map(|fs| aricode_arifs::Volume::V1(Box::new(fs)))
+    } else {
+        aricode_arifs::v2::AriFs::format(dev, sectors).map(aricode_arifs::Volume::V2)
+    }
     .map_err(|e| format!("arifs: {e:?}"))?;
     for (name, content) in files {
         let i = fs
@@ -1152,14 +1176,30 @@ fn format_arifs(img: &mut [u8], part: (u64, u64), files: &[(&str, &[u8])]) -> Re
 /// and its manifest in `wasm_runner`'s private directory
 /// (`build_wasm_programs` produces it; without it, the runner reports and
 /// exits).
-fn populate_test_arifs(img: &mut [u8], part: (u64, u64)) -> Result {
+fn populate_test_arifs(img: &mut [u8], part: (u64, u64), v1: bool) -> Result {
     let demo = fs::read(crate::build_dir().join("demo.wasm")).ok();
     let mut files = DISK_FILES.to_vec();
     if let Some(bytes) = &demo {
         files.push((WASM_MODULE_FILE, bytes));
         files.push((WASM_MANIFEST_FILE, WASM_MANIFEST));
     }
-    format_arifs(img, part, &files)
+    format_arifs_version(img, part, &files, v1)
+}
+
+/// Breaks the table of the volume in `part` so that it does not mount:
+/// v1's first entry, or both of v2's copies (one broken copy is a torn
+/// commit, which mounts the other).
+fn corrupt_arifs(img: &mut [u8], part: (u64, u64)) -> Result {
+    let tables = match volume(img, part)? {
+        aricode_arifs::Volume::V1(_) => vec![aricode_arifs::v1::TABLE_LBA],
+        aricode_arifs::Volume::V2(fs) => fs.geometry().tables.to_vec(),
+    };
+    for table in tables {
+        // A byte of the first entry's name (in v2 the first slot is the
+        // copy's header; the CRC breaks either way).
+        img[(part.0 + table) as usize * 512 + 64] ^= 0x20;
+    }
+    Ok(())
 }
 
 const WASM_MODULE_FILE: &str = "wasm_runner/demo.wasm";
@@ -1230,7 +1270,8 @@ fn many_blocks_wasm() -> Vec<u8> {
             out.push(b | 0x80);
         }
     }
-    let capacity = aricode_arifs::FILE_CAPACITY_SECTORS as usize * aricode_arifs::SECTOR;
+    // AriFS v1's file capacity, the size incident 0042 measured.
+    let capacity = aricode_arifs::v1::FILE_CAPACITY_SECTORS as usize * aricode_arifs::SECTOR;
     let mut body = vec![0x00]; // no locals
     for _ in 0..(capacity - 80) / 3 {
         body.extend_from_slice(&[0x02, 0x40, 0x0B]); // block end
@@ -1254,11 +1295,7 @@ fn many_blocks_wasm() -> Vec<u8> {
 
 /// Replaces an AriFS file entirely (the library's atomic replace).
 fn overwrite_arifs(img: &mut [u8], part: (u64, u64), name: &str, bytes: &[u8]) -> Result {
-    let mut fs = aricode_arifs::AriFs::open(VecDisk {
-        data: img,
-        base: part.0,
-    })
-    .map_err(|e| format!("arifs: {e:?}"))?;
+    let mut fs = volume(img, part)?;
     let i = fs
         .find(name)
         .ok_or_else(|| format!("arifs: {name} missing"))?;
@@ -1459,12 +1496,12 @@ mod tests {
         let sectors = USB_PART_ARI0.1 - USB_PART_ARI0.0 + 1;
         let mut img = vec![0u8; sectors as usize * 512];
         format_arifs(&mut img, (0, sectors - 1), USB_FILES).unwrap();
-        let fs = aricode_arifs::AriFs::open(VecDisk {
-            data: &mut img,
-            base: 0,
-        })
-        .unwrap();
-        let names: Vec<&str> = fs.entries().map(|(_, e)| e.name_str()).collect();
+        let fs = volume(&mut img, (0, sectors - 1)).unwrap();
+        assert_eq!(fs.version(), 2);
+        let names: Vec<String> = fs
+            .entries()
+            .map(|(_, e)| e.name_str().to_string())
+            .collect();
         assert_eq!(names, ["README"]);
         let readme = USB_FILES[0].1;
         assert!(

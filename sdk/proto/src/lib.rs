@@ -129,8 +129,14 @@ pub mod fs {
     pub const MAX_NAME: usize = 32;
     /// Maximum per read/write request (client buffer).
     pub const MAX_IO: u32 = 4096;
-    /// Maximum size of an atomic replace (the AriFS journal, ADR 0018).
-    pub const MAX_REPLACE: u32 = 32 * 1024;
+    /// Maximum size of an atomic replace: AriFS v2's largest file (ADR
+    /// 0072). A volume still in v1 refuses more than its 32 KiB journal
+    /// with `OutOfRange`.
+    pub const MAX_REPLACE: u32 = 16 * 1024 * 1024;
+    /// Set in fsd's launch argument, beside the partition's LBA: migrate a
+    /// v1 volume to v2 at mount (ADR 0072). init sets it only when both
+    /// slots hold a system that reads v2.
+    pub const ARG_MIGRATE: u64 = 1 << 63;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Op {
@@ -184,6 +190,15 @@ pub mod fs {
         /// `NotFound` past the last slot; `Denied` from a private
         /// directory or a shared file (ADR 0036).
         Descriptors = 14,
+        /// Name in the request: deletes the file (ADR 0072). Descriptors
+        /// open on it stop working (`BadFd`). `Unsupported` on a volume
+        /// still in v1.
+        Delete = 15,
+        /// `fd`, name in the request: renames the file; a file already
+        /// called so is deleted in the same commit, so an installer can
+        /// write `x.new` and rename it over `x` atomically (ADR 0072).
+        /// `Unsupported` on a volume still in v1.
+        Rename = 16,
     }
 
     /// Descriptor table usage as `Op::Descriptors` reports it for one
@@ -291,6 +306,8 @@ pub mod fs {
                 12 => Op::ReplaceCommit,
                 13 => Op::Attach,
                 14 => Op::Descriptors,
+                15 => Op::Delete,
+                16 => Op::Rename,
                 _ => return None,
             };
             let mut name = [0u8; MAX_NAME];
@@ -323,6 +340,9 @@ pub mod fs {
         Denied = 9,
         /// Another chunked replace is in progress (ADR 0018).
         Busy = 10,
+        /// The volume's format does not have the operation (v1 has no
+        /// delete or rename, ADR 0072).
+        Unsupported = 11,
     }
 
     /// Reply (64 bytes): status, value and name (for `List`).
@@ -393,6 +413,7 @@ pub mod fs {
                 8 => Status::OutOfRange,
                 9 => Status::Denied,
                 10 => Status::Busy,
+                11 => Status::Unsupported,
                 _ => return None,
             };
             let mut name = [0u8; MAX_NAME];
@@ -1685,7 +1706,7 @@ mod tests {
     #[test]
     fn fs_session_operations_and_descriptor_usage() {
         use super::fs::*;
-        for op in [Op::Attach, Op::Descriptors] {
+        for op in [Op::Attach, Op::Descriptors, Op::Delete, Op::Rename] {
             let mut r = Request::new(op);
             r.fd = 7;
             assert_eq!(Request::decode(&r.encode()), Some(r));

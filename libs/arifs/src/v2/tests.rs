@@ -678,7 +678,48 @@ fn a_file_cannot_forge_the_migration() {
 }
 
 #[test]
-fn the_table_stays_small_in_memory() {
-    // fsd keeps the table; it must not grow its stack or heap much.
-    assert!(core::mem::size_of::<[Option<Entry>; MAX_FILES]>() <= 20 * 1024);
+fn the_volume_is_small_on_the_stack() {
+    // The table is on the heap (fsd's frames have a 16 KiB budget) and
+    // small there too.
+    assert!(core::mem::size_of::<AriFs<MemDisk>>() <= 256);
+    assert!(MAX_FILES * core::mem::size_of::<Option<Entry>>() <= 20 * 1024);
+}
+
+#[test]
+fn a_volume_opens_either_version_and_migrates() {
+    use crate::{Mounted, Volume};
+    let (img, files) = v1_volume();
+    let mut vol = Volume::open(MemDisk(img)).unwrap();
+    assert_eq!(vol.version(), 1);
+    assert_eq!(vol.max_replace(), v1::JOURNAL_CAPACITY_BYTES as u32);
+    let keys = vol.find("authorized_keys").unwrap();
+    assert_eq!(vol.delete(keys), Err(FsError::Unsupported));
+    assert_eq!(vol.rename(keys, "x"), Err(FsError::Unsupported));
+    let vol = vol.migrate().unwrap();
+    assert_eq!(vol.version(), 2);
+    let mut vol = Volume::open(vol.into_device()).unwrap();
+    assert_eq!(vol.version(), 2);
+    assert_eq!(vol.mounted(), Mounted::V2(Recovery::Clean));
+    assert_eq!(vol.max_replace(), MAX_FILE_BYTES);
+    assert_eq!(vol.entries().count(), files.len());
+    for (name, data) in &files {
+        let i = vol.find(name).unwrap();
+        assert_eq!(vol.info(i).unwrap().size as usize, data.len());
+        let mut buf = std::vec![0u8; data.len()];
+        assert_eq!(vol.read(i, 0, &mut buf).unwrap(), data.len());
+        assert_eq!(&buf, data);
+    }
+    // Migrating again changes nothing.
+    let vol = vol.migrate().unwrap();
+    assert_eq!(vol.version(), 2);
+    // A migration whose superblock write was cut opens as v2.
+    let (img, _) = v1_volume();
+    let mut done = AriFs::migrate(MemDisk(img.clone()))
+        .unwrap()
+        .into_device()
+        .0;
+    done[..SECTOR].copy_from_slice(&img[..SECTOR]);
+    done[0] ^= 0xFF;
+    let vol = Volume::open(MemDisk(done)).unwrap();
+    assert_eq!(vol.mounted(), Mounted::V2(Recovery::MigrationCompleted));
 }
