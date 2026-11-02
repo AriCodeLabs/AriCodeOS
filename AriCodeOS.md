@@ -4065,7 +4065,7 @@ two steps:
 
 ## 94.17 AriCodeOS 0.17
 
-**Status: completed (2026-11-01), tag `v0.17.0`.** The version of "compare,
+**Status: completed (2026-11-02), tag `v0.17.0`.** The version of "compare,
 then reuse or improve" (ADR 0063).
 
 The owner gave "from scratch" its meaning: study the established
