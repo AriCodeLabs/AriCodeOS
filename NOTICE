@@ -36,9 +36,35 @@ v. 2.0 (https://mozilla.org/MPL/2.0/), as its header states. It is
 compiled into the programs that verify certificates (the shell and the
 updater); its source form is libs/x509/psl/ in the repository above.
 
+libs/x509/roots/mozilla.der and mozilla.txt hold the TLS server roots of
+Mozilla's certificate store (NSS certdata.txt, by the Mozilla Foundation
+and its contributors), extracted by tools/mozilla-roots.py and
+distributed under the Mozilla Public License, v. 2.0
+(https://mozilla.org/MPL/2.0/). They are compiled into the programs that
+verify certificates.
+
+libs/crypto/tests/wycheproof/ holds test vectors from Wycheproof
+(https://github.com/C2SP/wycheproof), under the Apache License, Version
+2.0; they are used by host tests only.
+
 The console font glyphs (libs/fb-console/src/font.rs) are derived from
 Terminus Font, Copyright (c) 2010 Dimitar Toshkov Zhekov, and stay under
 the SIL Open Font License, Version 1.1
 (libs/fb-console/FONT-LICENSE-OFL.txt).
+
+sdk/runtime/src/mem.rs (memcpy, memmove, memset, memcmp, bcmp of user
+programs) is adapted from compiler-builtins
+(https://github.com/rust-lang/compiler-builtins, src/mem), by the
+compiler-builtins contributors, available under the MIT or the Apache
+License, Version 2.0; AriCodeOS uses it under the latter.
+
+Third-party crates
+------------------
+The images (AriBoot, the kernel and the programs of the initrd) include
+crates from crates.io under the MIT, BSD, Apache-2.0 and other licences
+accepted by ADR 0063. Their names, versions, licences, authors and licence
+texts are in THIRD-PARTY-NOTICES.txt, which `cargo xtask notices` generates
+from Cargo.lock: it is on the EFI partition of every USB image and attached
+to every release.
 
 The rest of AriCodeOS is under the Apache License, Version 2.0.

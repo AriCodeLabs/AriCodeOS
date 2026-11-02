@@ -392,8 +392,19 @@ fn switch_with(decide: impl FnOnce(&mut RoundRobin, usize) -> Option<Tid>) {
         let s = guard.as_mut().expect("scheduler not initialized");
         let prev = s.policy.current(c.index());
         decide(&mut s.policy, c.index()).map(|next| {
-            let old = &mut s.threads.get_mut(&prev).expect("current thread").saved_rsp as *mut u64;
-            let nt = s.threads.get(&next).expect("next thread");
+            let pt = s.threads.get_mut(&prev).expect("current thread");
+            // The user thread leaving keeps its registers (ADR 0065).
+            if let Some(area) = pt.fpu.as_mut() {
+                // SAFETY: `prev` is the thread running on this CPU.
+                unsafe { crate::arch::x86_64::fpu::save(area) };
+            }
+            let old = &mut pt.saved_rsp as *mut u64;
+            let nt = s.threads.get_mut(&next).expect("next thread");
+            if let Some(area) = nt.fpu.as_mut() {
+                // SAFETY: `area` is `next`'s; interrupts are off and the
+                // scheduler lock is held.
+                unsafe { crate::arch::x86_64::fpu::restore(area, next.0, c.index()) };
+            }
             (next, old, nt.saved_rsp, nt.kernel_stack_top(), nt.cr3)
         })
     };

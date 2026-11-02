@@ -1,13 +1,13 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 // SPDX-License-Identifier: Apache-2.0
-//! The state machine against the real OpenSSL server (`openssl s_server
-//! -tls1_3 -rev`, which echoes each line reversed): every cipher suite,
-//! ECDSA P-256/P-384, RSA-PSS and Ed25519 server certificates issued by a
-//! test CA, a CertificateRequest, and rejection of a wrong host name and
-//! of an untrusted CA. `openssl` is required, as for the QEMU HTTPS
-//! scenarios: the TLS unit tests replay a fixed trace whose certificate is
-//! accepted only through a test switch (ADR 0058), so these are the host
-//! tests that reach a successful `verify_chain`.
+//! The client against the real OpenSSL server (`openssl s_server -rev`,
+//! which echoes each line reversed), so it interoperates with an
+//! implementation other than rustls: every TLS 1.3 suite and TLS 1.2 with
+//! RSA and ECDSA, ECDSA P-256/P-384, RSA and Ed25519 server certificates
+//! issued by a test CA, a HelloRetryRequest, a CertificateRequest, and
+//! rejection of a wrong host name and of an untrusted CA (ADR 0067). The
+//! certificates are made at run time. `openssl` is required, as for the
+//! QEMU HTTPS scenarios.
 
 use aricode_tls::{Client, Error, Event};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -132,15 +132,14 @@ fn make_leaf(dir: &Path, ca: &str, kind: &str) {
 fn server(dir: &Path, leaf: &str, extra: &[&str]) -> (Child, u16) {
     let mut child = Command::new("openssl")
         .current_dir(dir)
-        .args([
-            "s_server",
-            "-tls1_3",
-            "-accept",
-            "127.0.0.1:0",
-            "-naccept",
-            "1",
-            "-rev",
-        ])
+        .args(["s_server"])
+        // TLS 1.3 unless the test asks for TLS 1.2.
+        .args(if extra.contains(&"-tls1_2") {
+            &[][..]
+        } else {
+            &["-tls1_3"][..]
+        })
+        .args(["-accept", "127.0.0.1:0", "-naccept", "1", "-rev"])
         .args([
             "-cert",
             &format!("{leaf}.pem"),
@@ -181,10 +180,15 @@ fn exchange(port: u16, host: &str, root: Vec<u8>, line: &[u8]) -> Result<Vec<u8>
     let mut seed = [0u8; 32];
     seed[..8].copy_from_slice(&now().to_le_bytes());
     seed[8..12].copy_from_slice(&port.to_le_bytes().repeat(2));
-    let mut client = Client::new(host, seed, Vec::new(), Some(now()));
-    client.add_root(root);
+    let mut client = Client::new(
+        host,
+        seed,
+        &[],
+        &[root],
+        aricode_x509::ValidityTime::Clock(now()),
+    );
     let mut out = Vec::new();
-    client.start(&mut out);
+    client.start(&mut out)?;
     sock.write_all(&out).unwrap();
     let mut expected: Vec<u8> = line.strip_suffix(b"\n").unwrap().to_vec();
     expected.reverse();
@@ -271,6 +275,35 @@ fn ecdsa_p384_certificate() {
 #[test]
 fn ed25519_certificate() {
     round_trip("ed25519_certificate", "ed25519", &[]);
+}
+
+#[test]
+fn tls12_with_rsa() {
+    round_trip(
+        "tls12_with_rsa",
+        "rsa",
+        &["-tls1_2", "-cipher", "ECDHE-RSA-AES128-GCM-SHA256"],
+    );
+}
+
+#[test]
+fn tls12_with_ecdsa_and_chacha20() {
+    round_trip(
+        "tls12_with_ecdsa_and_chacha20",
+        "p256",
+        &["-tls1_2", "-cipher", "ECDHE-ECDSA-CHACHA20-POLY1305"],
+    );
+}
+
+/// The client's key share is X25519; a server that only takes P-256 asks
+/// for another with a HelloRetryRequest.
+#[test]
+fn hello_retry_request_for_p256() {
+    round_trip(
+        "hello_retry_request_for_p256",
+        "p256",
+        &["-groups", "P-256"],
+    );
 }
 
 #[test]

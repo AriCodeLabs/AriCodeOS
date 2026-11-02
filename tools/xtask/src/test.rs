@@ -28,15 +28,7 @@ pub fn run(cli: &Cli, release: bool) -> Result {
         })
         .unwrap_or_default();
 
-    let cpus_override = match cli.value("--cpus") {
-        Some(v) => Some(
-            v.parse::<u32>()
-                .ok()
-                .filter(|n| (1..=64).contains(n))
-                .ok_or_else(|| format!("--cpus {v}: expected a number from 1 to 64"))?,
-        ),
-        None => None,
-    };
+    let cpus_override = cli.cpus()?;
     let jobs_requested = match cli.value("--jobs") {
         Some(v) => Some(
             v.parse::<usize>()
@@ -263,7 +255,7 @@ pub fn run_scenario(
     let workdir = image::scenario_dir(&root, &s.name)?;
     // This run's host ports (ADR 0040): the two `hostfwd` ports and, with
     // `host_https`, the two HTTPS servers'.
-    let lease = ports::PortLease::take(if s.host_https { 4 } else { 2 })?;
+    let lease = ports::PortLease::take(if s.host_https { 5 } else { 2 })?;
     let forwards = qemu::Forwards {
         tcp: lease.ports()[0],
         ssh: lease.ports()[1],
@@ -497,11 +489,12 @@ pub fn run_scenario(
         None => None,
     };
     let _https = if s.host_https {
-        let ports = (lease.ports()[2], lease.ports()[3]);
+        let ports = (lease.ports()[2], lease.ports()[3], lease.ports()[4]);
         let (servers, ca) = https_servers(&workdir.join("tls"), ports)?;
         installed.push((String::from("trusted_ca.der"), ca));
         values.push((scenario::HTTPS_PORT, ports.0));
         values.push((scenario::HTTPS_UNTRUSTED_PORT, ports.1));
+        values.push((scenario::HTTPS_TLS12_PORT, ports.2));
         Some(servers)
     } else {
         None
@@ -593,6 +586,7 @@ pub fn run_scenario(
             installed: &installed,
             cpus: s.cpus(cpus_override),
             cpu_rdrand: s.cpu_rdrand,
+            cpu_simd: s.cpu_simd,
             usb: qemu::UsbOptions {
                 hid: s.usb_hid,
                 hid_msi: s.usb_hid_msi,
@@ -745,10 +739,10 @@ impl Drop for HttpsServers {
 }
 
 /// Generates a test CA, a leaf for `10.0.2.2` signed by it and a
-/// self-signed leaf, and starts one `openssl s_server -www` for each leaf,
-/// on `ports` (trusted, untrusted). Returns the servers and the CA
-/// certificate (DER).
-fn https_servers(dir: &std::path::Path, ports: (u16, u16)) -> Result<(HttpsServers, Vec<u8>)> {
+/// self-signed leaf, and starts `openssl s_server -www` on `ports`: the
+/// leaf with TLS 1.3, the self-signed one, and the leaf with TLS 1.2 only
+/// (ADR 0067). Returns the servers and the CA certificate (DER).
+fn https_servers(dir: &std::path::Path, ports: (u16, u16, u16)) -> Result<(HttpsServers, Vec<u8>)> {
     use std::process::{Command, Stdio};
     let _ = std::fs::remove_dir_all(dir);
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
@@ -807,7 +801,9 @@ fn https_servers(dir: &std::path::Path, ports: (u16, u16)) -> Result<(HttpsServe
     .concat())?;
     std::fs::write(
         dir.join("leaf.ext"),
-        "subjectAltName=DNS:10.0.2.2\nbasicConstraints=CA:FALSE\n",
+        // An IP host is matched against iPAddress names only (RFC 6125
+        // section 6.2.1; rustls-webpki, ADR 0067).
+        "subjectAltName=IP:10.0.2.2\nbasicConstraints=CA:FALSE\n",
     )
     .map_err(|e| e.to_string())?;
     run(&[
@@ -840,20 +836,25 @@ fn https_servers(dir: &std::path::Path, ports: (u16, u16)) -> Result<(HttpsServe
             "-subj",
             "/CN=10.0.2.2",
             "-addext",
-            "subjectAltName=DNS:10.0.2.2",
+            "subjectAltName=IP:10.0.2.2",
+            // A server's self-signed certificate, not a CA's: the refusal is
+            // then for its unknown issuer.
+            "-addext",
+            "basicConstraints=critical,CA:FALSE",
         ],
     ]
     .concat())?;
     run(&["x509", "-in", "ca.pem", "-outform", "der", "-out", "ca.der"])?;
     let ca = std::fs::read(dir.join("ca.der")).map_err(|e| e.to_string())?;
     let mut servers = HttpsServers(Vec::new());
-    for (port, cert, key) in [
-        (ports.0, "leaf.pem", "leaf.key"),
-        (ports.1, "self.pem", "self.key"),
+    for (port, cert, key, version) in [
+        (ports.0, "leaf.pem", "leaf.key", "-tls1_3"),
+        (ports.1, "self.pem", "self.key", "-tls1_3"),
+        (ports.2, "leaf.pem", "leaf.key", "-tls1_2"),
     ] {
         let child = Command::new("openssl")
             .args([
-                "s_server", "-www", "-tls1_3", "-quiet", "-cert", cert, "-key", key, "-accept",
+                "s_server", "-www", version, "-quiet", "-cert", cert, "-key", key, "-accept",
             ])
             .arg(format!("127.0.0.1:{port}"))
             .current_dir(dir)
@@ -868,7 +869,7 @@ fn https_servers(dir: &std::path::Path, ports: (u16, u16)) -> Result<(HttpsServe
     // Fail loudly if a server died (its port was taken by another process
     // between the lease and its bind): the scenario would otherwise talk
     // to whatever holds the port and report a certificate error.
-    for (child, port) in servers.0.iter_mut().zip([ports.0, ports.1]) {
+    for (child, port) in servers.0.iter_mut().zip([ports.0, ports.1, ports.2]) {
         if let Ok(Some(status)) = child.try_wait() {
             return Err(format!(
                 "HTTPS test server on port {port} exited at start ({status}); is the port in use?"

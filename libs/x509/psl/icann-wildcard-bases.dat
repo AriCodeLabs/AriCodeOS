@@ -7,8 +7,8 @@
 // Extract of the Public Suffix List (https://publicsuffix.org/), ICANN
 // section: rules of two labels or more, wildcard and exception rules,
 // labels in punycode. Made by update.sh; do not edit by hand.
-// Source version: 2026-10-22_08-36-41_UTC
-// Source SHA-256: 0232f4df0831911356e8ee1f4d5c3b6b12c0ed3f6bd66b0f81c8ab5d3d49e9ca
+// Source version: 2026-10-31_14-17-28_UTC
+// Source SHA-256: 617d1b276660e5a01209d7b58159450e400cf636634a7a9c2cfd50a1c6675d01
 // Rules: 5509
 com.ac
 edu.ac

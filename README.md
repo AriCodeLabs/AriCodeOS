@@ -16,7 +16,7 @@ Design decisions are recorded as ADRs in
 [docs/decisions/](docs/decisions/) and the branch flow (git flow) in
 [docs/WORKFLOW.md](docs/WORKFLOW.md).
 
-**Status:** 0.16.1 (2026-11-02). All 35 roadmap phases (0 to 34) are
+**Status:** 0.17.0 (2026-11-02). All 35 roadmap phases (0 to 34) are
 implemented and tested in QEMU, as are stages 1 to 4 of the post-roadmap
 sequence (observable recovery, a useful session, limits and updates,
 external applications) and the part of stage 5 that needs no hardware
@@ -43,7 +43,7 @@ the evidence is recorded in `docs/hardware.md`.
 | IPv4 networking: DHCP, ARP, ICMP, UDP, TCP, DNS, HTTP client | prototype, validated in QEMU | `network.*`; no TLS, no DHCP renewal |
 | `arish` shell over the serial console, a PS/2 keyboard or USB/virtio keyboards (console bridge) | validated in QEMU | `shell.*`, `console.*` |
 | GUI: compositor, windows, input | prototype, validated in QEMU | `gui.*` |
-| WASM: MVP interpreter with an up-front validator, the `aricode-wasm` v1 profile and a per-module manifest | validated in QEMU | `wasm.*`, `docs/wasm-profile.md`; not WASI |
+| WASM: wasmi with fuel, profile v2 (stable features but SIMD, see the profile) and a per-module manifest | validated in QEMU | `wasm.*`, `docs/wasm-profile.md`, ADR 0071; not WASI |
 | In-house cryptography, RNG, signed images, A/B with rollback | validated in QEMU | `crypto.*`, `update.*`; not Secure Boot |
 | VT-d IOMMU with one domain per driver | validated in QEMU | `iommu.*` |
 | USB stick image | validated in QEMU (`usb.image_boot`) | pending on hardware |
@@ -60,8 +60,10 @@ rustup target add wasm32-unknown-unknown   # example WebAssembly modules (apps/w
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-`rust-toolchain.toml` pins the Rust version and adds the
-`x86_64-unknown-none` and `x86_64-unknown-uefi` targets automatically.
+`rust-toolchain.toml` pins the Rust version and adds its targets
+automatically: `x86_64-unknown-none` (the kernel), `x86_64-unknown-uefi`
+(AriBoot) and `x86_64-unknown-linux-gnu` (user programs, built
+freestanding, without Linux or its C library: ADR 0065).
 
 ### Docker
 
@@ -147,7 +149,7 @@ shell on your terminal (quit with Ctrl-A X):
 
 ```bash
 cargo xtask usb-image
-docker build -t aricodeos -f tools/docker/try/Dockerfile --build-arg VERSION=0.16.1 .
+docker build -t aricodeos -f tools/docker/try/Dockerfile --build-arg VERSION=0.17.0 .
 docker run --rm -it aricodeos
 ```
 
@@ -224,7 +226,6 @@ libs/manifest/   application manifests: requested capabilities, memory quota, re
 libs/pkg/        signed application packages (manifest with hashes, Ed25519 signature, ELF, app manifest)
 libs/crypto/     SHA-256, SHA-512, Ed25519 and ChaCha20 from scratch, checked against the official vectors
 keys/dev/        development Ed25519 key pair (tests only; see its README)
-libs/wasm/       WebAssembly MVP interpreter (integers, bounded memory, imports) with validator and host tests
 apps/wasm-demo/  portable WebAssembly example module; apps/wasm-runner runs it with the Capability API
 apps/updater/    update client: signed indexes from the owner's sources, system image into the inactive slot, app packages for the installer (ADR 0029)
 libs/update-index/ update sources, signed index, version and downgrade rules (ADR 0029)

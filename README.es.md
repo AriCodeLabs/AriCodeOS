@@ -16,7 +16,7 @@ El documento maestro de arquitectura y roadmap es [AriCodeOS.md](AriCodeOS.md).
 Las decisiones de diseño se registran en [docs/decisions/](docs/decisions/) y el
 flujo de ramas (git flow) en [docs/WORKFLOW.md](docs/WORKFLOW.md).
 
-**Estado:** 0.16.1 (2026-11-02). Las 35 fases del roadmap (0 a 34) están
+**Estado:** 0.17.0 (2026-11-02). Las 35 fases del roadmap (0 a 34) están
 implementadas y probadas en QEMU, y las etapas 1 a 4 de la secuencia
 posterior al roadmap (recuperación observable, sesión útil, límites y
 actualización, aplicaciones externas) también, más la parte de la etapa 5
@@ -43,7 +43,7 @@ hardware`, que se ha ejercitado en el portátil y la evidencia está en
 | Red IPv4: DHCP, ARP, ICMP, UDP, TCP, DNS, cliente HTTP | prototipo, validado en QEMU | `network.*`; sin TLS ni renovación DHCP |
 | Shell `arish` por consola serie, teclado PS/2 o teclados USB/virtio (puente de consola) | validado en QEMU | `shell.*`, `console.*` |
 | GUI: compositor, ventanas, entrada | prototipo, validado en QEMU | `gui.*` |
-| WASM: intérprete MVP con validador previo, perfil `aricode-wasm` v1 y manifiesto por módulo | validado en QEMU | `wasm.*`, `docs/wasm-profile.md`; no es WASI |
+| WASM: wasmi con combustible, perfil v2 (lo estable salvo SIMD, ver el perfil) y manifiesto por módulo | validado en QEMU | `wasm.*`, `docs/wasm-profile.md`, ADR 0071; no es WASI |
 | Criptografía propia, RNG, imágenes firmadas, A/B con rollback | validado en QEMU | `crypto.*`, `update.*`; no es Secure Boot |
 | IOMMU VT-d con dominio por driver | validado en QEMU | `iommu.*` |
 | Imagen USB para pendrive | validado en QEMU (`usb.image_boot`) | pendiente en hardware |
@@ -60,8 +60,10 @@ rustup target add wasm32-unknown-unknown   # modulos WebAssembly de ejemplo (app
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-`rust-toolchain.toml` fija la versión de Rust y añade automáticamente los
-targets `x86_64-unknown-none` y `x86_64-unknown-uefi`.
+`rust-toolchain.toml` fija la versión de Rust y añade automáticamente sus
+targets: `x86_64-unknown-none` (el kernel), `x86_64-unknown-uefi` (AriBoot)
+y `x86_64-unknown-linux-gnu` (los programas de usuario, compilados sin
+Linux ni su biblioteca de C: ADR 0065).
 
 ### Docker
 
@@ -152,7 +154,7 @@ en tu terminal (se sale con Ctrl-A X):
 
 ```bash
 cargo xtask usb-image
-docker build -t aricodeos -f tools/docker/try/Dockerfile --build-arg VERSION=0.16.1 .
+docker build -t aricodeos -f tools/docker/try/Dockerfile --build-arg VERSION=0.17.0 .
 docker run --rm -it aricodeos
 ```
 
@@ -221,7 +223,6 @@ apps/hello/      aplicacion de ejemplo del SDK con su manifiesto (ver docs/sdk.m
 libs/manifest/   manifiestos de aplicacion: capacidades pedidas y cuota de memoria
 libs/crypto/     SHA-256, SHA-512, Ed25519 y ChaCha20 desde cero con vectores oficiales
 keys/dev/        par Ed25519 de desarrollo (solo pruebas; ver su README)
-libs/wasm/       interprete WebAssembly MVP (enteros, memoria acotada, importaciones) con tests de host
 apps/wasm-demo/  modulo WebAssembly portable de ejemplo; apps/wasm-runner lo ejecuta con la Capability API
 apps/updater/    cliente de actualizacion: indices firmados de las fuentes del dueño, imagen del sistema al slot inactivo, paquetes de apps para el instalador (ADR 0029)
 libs/update-index/ fuentes de actualizacion, indice firmado, reglas de version y de downgrade (ADR 0029)

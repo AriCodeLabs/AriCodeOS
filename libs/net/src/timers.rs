@@ -27,11 +27,11 @@ pub fn dhcp_due(state: dhcp::State, probe_deadline: u64, retry_at: u64) -> Optio
 /// own timer (retransmission or the end of TIME-WAIT,
 /// `Connection::next_timer`) and the end of the window holding faults back
 /// (`faults_due`).
-pub fn next_deadline<'a>(
+pub fn next_deadline<'a, B: AsRef<[u8]> + AsMut<[u8]> + 'a>(
     sweep_due: u64,
     dhcp: Option<u64>,
     waits: impl IntoIterator<Item = u64>,
-    connections: impl IntoIterator<Item = &'a Connection>,
+    connections: impl IntoIterator<Item = &'a Connection<B>>,
     faults_due: Option<u64>,
 ) -> u64 {
     dhcp.into_iter()
@@ -50,7 +50,13 @@ mod tests {
     const A: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 15);
     const B: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 2);
 
-    fn none() -> core::iter::Empty<&'static Connection> {
+    type Conn = Connection<[u8; 16]>;
+
+    fn conn(local_port: u16) -> Conn {
+        Connection::new(A, local_port, B, 80, [0; 16], [0; 16])
+    }
+
+    fn none() -> core::iter::Empty<&'static Conn> {
         core::iter::empty()
     }
 
@@ -82,13 +88,13 @@ mod tests {
     /// segment would wait for the sweep instead of its RTO.
     #[test]
     fn a_tcp_timer_decides_when_it_is_earliest() {
-        let mut c = Connection::new(A, 40_000, B, 80);
+        let mut c = conn(40_000);
         c.connect(1, 100);
         let rto = c.next_timer().expect("a SYN in flight has a timer");
         assert!(rto > 100 && rto < SWEEP);
         assert_eq!(next_deadline(SWEEP, None, [], [&c], None), rto);
         // A connection without a timer adds nothing.
-        let idle = Connection::new(A, 40_001, B, 80);
+        let idle = conn(40_001);
         assert_eq!(idle.next_timer(), None);
         assert_eq!(next_deadline(SWEEP, None, [], [&idle], None), SWEEP);
     }

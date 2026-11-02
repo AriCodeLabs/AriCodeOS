@@ -67,7 +67,13 @@ cargo xtask publish-update --version N --no-legacy-manifest \
     --signing-key ~/.config/aricodeos/signing-key
 gh release upload vX.Y.Z build/update/index build/update/index.sig build/update/aricodeos-N.img
 cargo xtask usb-image --public-source --signing-key ~/.config/aricodeos/signing-key
+cargo xtask notices
+gh release upload vX.Y.Z build/THIRD-PARTY-NOTICES.txt
 ```
+
+The USB image carries `THIRD-PARTY-NOTICES.txt` on its EFI partition, and
+the release attaches it too: the licences of the crates the images
+include ask for their notices with binary distributions (NOTICE).
 
 Before uploading, the same files can be tried locally through the mirror
 of the public path (`serve-update`, docs/hardware.md, "The public source

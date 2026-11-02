@@ -2,7 +2,10 @@
 
 - **Date:** 2026-10-23
 - **Status:** Proposed (draft, recorded so the question is not lost). The
-  licence choice belongs to the owner; nothing changes until he decides.
+  licence choice belongs to the owner; nothing changes until they decide.
+  On 2026-10-29 the owner set the licence question aside (ADR 0063): our
+  own new drivers carry the project's licence and no GPL driver code is
+  adopted.
   On 2026-10-23 the owner approved the direction of the "Trusted vendors"
   section: three levels (official, trusted vendor, unofficial) and
   delegated public-key signing with vendor certificates and revocation,

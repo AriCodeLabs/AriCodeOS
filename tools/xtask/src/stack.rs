@@ -21,7 +21,10 @@
 //!   the chain is cut (direct recursion is reported);
 //! - `rsp` adjustments after a function's first call (dynamic `alloca`,
 //!   stack arguments pushed later) and stack realignment (`and $-N,%rsp`),
-//!   which add up to `N - 8` bytes.
+//!   which add up to `N - 8` bytes;
+//! - the red zone: since ADR 0065 user programs are built for a target
+//!   that has one, so a leaf function may use 128 bytes below `rsp`
+//!   without adjusting it.
 //!
 //! That is why the path budget is half the stack and not all of it. Direct
 //! calls, unconditional tail calls (`jmp`) and conditional ones (`jcc` to
@@ -59,9 +62,20 @@ pub const DEFAULT_BUDGET: Budget = Budget {
 };
 
 /// Programs allowed more than [`DEFAULT_BUDGET`]: (binary, budget, reason
-/// and tracking incident). Empty: every offender found when the check was
-/// extended was fixed instead (incident 0018).
-pub const EXCEPTIONS: &[(&str, Budget, &str)] = &[];
+/// and tracking incident). Every offender found when the check was
+/// extended was fixed instead (incident 0018); what is left is code of
+/// another project that keeps its working data on the stack.
+pub const EXCEPTIONS: &[(&str, Budget, &str)] = &[(
+    "sshd",
+    Budget {
+        path: 38 * 1024,
+        frame: 23 * 1024,
+    },
+    "ML-KEM-768 encryption in ml-kem 0.3.3 keeps its matrix on the stack \
+     (23.5 KB frame in release, 37.1 KB path in dev with the frame that \
+     isolates it for the scrub; libcrux-ml-kem uses as much); only during a \
+     key exchange (ADR 0068, incident 0055)",
+)];
 
 /// Budget of the initrd program `bin`.
 pub fn budget(bin: &str) -> Budget {
@@ -393,6 +407,43 @@ pub fn disassemble(elf: &Path) -> Result<String> {
     String::from_utf8(out.stdout).map_err(|e| format!("objdump output: {e}"))
 }
 
+/// wasmi's instruction handlers that dispatch the next one with a `call`
+/// instead of a tail `jmp` in the release runner (audit of ADR 0071, H1):
+/// each run of one keeps a frame until the WebAssembly call ends, so a
+/// loop of them exhausts the runner's stack (it is killed by its guard
+/// page; `wasm.grow_loop`). Any other handler doing so fails the check: a
+/// wasmi or compiler upgrade must not add more unnoticed.
+const NON_TAIL_HANDLERS: [&str; 2] = ["exec::memory_grow", "exec::table_grow"];
+
+/// Handlers of wasmi's executor (`handler::exec::`) whose disassembly
+/// ends an indirect call with nothing but an epilogue before `ret`: the
+/// next handler called, not jumped to.
+pub fn non_tail_handlers(disasm: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut name: Option<&str> = None;
+    let mut after_indirect_call = false;
+    for line in disasm.lines() {
+        if let Some((_, n)) = header(line) {
+            name = n.contains("handler::exec::").then_some(n);
+            after_indirect_call = false;
+            continue;
+        }
+        let (Some(n), Some((_, mnemonic, operands))) = (name, instruction(line)) else {
+            continue;
+        };
+        match mnemonic {
+            "call" if operands.starts_with('*') => after_indirect_call = true,
+            "ret" if after_indirect_call => {
+                found.push(n.to_string());
+                name = None;
+            }
+            "add" | "pop" | "mov" | "lea" => {}
+            _ => after_indirect_call = false,
+        }
+    }
+    found
+}
+
 /// Binaries always reported, in budget or not: the network drivers of the
 /// incident.
 const ALWAYS_REPORTED: [&str; 2] = ["virtio_net", "rtl_net"];
@@ -412,8 +463,8 @@ pub fn check() -> Result {
     let mut verdicts = Vec::new();
     for release in [true, false] {
         let profile = if release { "release" } else { "debug" };
-        let mut c = build::cargo();
-        c.args(["build", "--target", build::KERNEL_TARGET]);
+        let mut c = build::user_cargo();
+        c.args(["build", "--target", build::USER_TARGET]);
         for pkg in build::USER_PACKAGES {
             c.args(["-p", pkg]);
         }
@@ -424,10 +475,23 @@ pub fn check() -> Result {
         for bin in &programs {
             let elf = root()
                 .join("target")
-                .join(build::KERNEL_TARGET)
+                .join(build::USER_TARGET)
                 .join(profile)
                 .join(bin);
-            let funcs = parse(&disassemble(&elf)?);
+            let disasm = disassemble(&elf)?;
+            if release && bin == "wasm_runner" {
+                let unexpected: Vec<String> = non_tail_handlers(&disasm)
+                    .into_iter()
+                    .filter(|h| !NON_TAIL_HANDLERS.iter().any(|k| h.contains(k)))
+                    .collect();
+                if !unexpected.is_empty() {
+                    return Err(format!(
+                        "wasm_runner: wasmi handlers dispatching with a call, not a tail jump (ADR 0071): {}",
+                        unexpected.join(", ")
+                    ));
+                }
+            }
+            let funcs = parse(&disasm);
             let label = format!("{bin} ({})", if release { "release" } else { "dev" });
             verdicts.push((bin.clone(), judge(&label, &funcs, budget(bin))?));
         }
@@ -471,6 +535,34 @@ pub fn check() -> Result {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A handler that jumps to the next one passes; one that calls it and
+    /// returns is reported; calls to helpers followed by more work are not.
+    #[test]
+    fn handlers_that_call_the_next_one_are_found() {
+        let disasm = "\
+0000000000400000 <wasmi::engine::executor::handler::exec::i32_add>:
+  400000:\tadd    %esi,%edi
+  400002:\tjmp    *(%r14)
+
+0000000000400010 <wasmi::engine::executor::handler::exec::memory_grow>:
+  400010:\tpush   %rbx
+  400011:\tcall   *0x8(%rax)
+  400014:\ttest   %eax,%eax
+  400016:\tcall   *(%r14)
+  400019:\tadd    $0x88,%rsp
+  40001d:\tpop    %rbx
+  40001e:\tret
+
+0000000000400020 <other::function>:
+  400020:\tcall   *%rax
+  400022:\tret
+";
+        assert_eq!(
+            non_tail_handlers(disasm),
+            ["wasmi::engine::executor::handler::exec::memory_grow"]
+        );
+    }
 
     const SAMPLE: &str = "\
 target/x86_64-unknown-none/release/x:     file format elf64-x86-64
@@ -649,6 +741,7 @@ Disassembly of section .text:
             assert!(b.path < USER_STACK, "{bin}: budget over the stack");
         }
         assert_eq!(budget("virtio_net"), DEFAULT_BUDGET);
+        assert!(budget("sshd").frame > DEFAULT_BUDGET.frame);
     }
 
     #[test]

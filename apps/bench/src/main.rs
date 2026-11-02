@@ -4,8 +4,11 @@
 //! (`docs/performance.md`): latency of a syscall, of a full IPC call to fsd,
 //! of file operations and of a metadata call to the network service, with
 //! p50, p95 and p99 percentiles over the TSC calibrated against the system
-//! clock, and the idle time of every CPU over a quiet interval. Numbers are
-//! only comparable between runs with the same build and the same QEMU mode.
+//! clock, the time `aricode-crypto` and the memory routines take on
+//! fixed inputs (ADR 0063: what comparisons with other implementations
+//! are measured against), and the idle time of every CPU over a quiet
+//! interval. Numbers are only comparable between runs with the same build
+//! and the same QEMU mode.
 #![no_std]
 #![no_main]
 
@@ -21,7 +24,27 @@ const SYSCALLS: usize = 10_000;
 const IPC_CALLS: usize = 1_000;
 const FILE_OPS: usize = 100;
 const NET_CALLS: usize = 200;
+/// TCP transfers through the network service (ADR 0070), each timed.
+const TCP_RUNS: usize = 5;
+/// The host test servers at the virtual host's address (QEMU user
+/// networking): `/bulk` of the HTTP one sends `BULK_BYTES`, the echo one
+/// returns what it gets.
+const HOST: [u8; 4] = [10, 0, 2, 2];
+const BULK_BYTES: usize = 1 << 20;
+const ECHO_BYTES: usize = 256 * 1024;
+const ECHO_ROUND: usize = 16 * 1024;
+const TCP_TIMEOUT_MS: u32 = 10_000;
+/// How long the probe for the host test servers waits.
+const PROBE_TIMEOUT_MS: u32 = 2_000;
 const CHUNK: usize = 4096;
+/// Bytes hashed or encrypted per sample, and samples per algorithm.
+const CRYPTO_BYTES: usize = 16 * 1024;
+const CRYPTO_OPS: usize = 20;
+/// Signature verifications and key agreements per figure.
+const PUBLIC_KEY_OPS: usize = 10;
+/// Bytes copied per `memcpy` sample, and samples.
+const COPY_BYTES: usize = 64 * 1024;
+const COPY_OPS: usize = 100;
 /// Quiet interval over which the idle time of every CPU is measured: the
 /// system's own wakeups (timers, services waiting for deadlines) are what
 /// keeps it below 1000 permille.
@@ -63,6 +86,63 @@ fn report(name: &[u8], samples: &mut [u64], cycles_per_unit: u64, unit: &[u8]) {
         sys::print(unit);
     }
     sys::print(b"\n");
+}
+
+/// TSC cycles `f` takes, `n` times.
+fn timed(n: usize, mut f: impl FnMut()) -> Vec<u64> {
+    let mut samples = Vec::with_capacity(n);
+    for _ in 0..n {
+        let t0 = rdtsc();
+        f();
+        samples.push(rdtsc() - t0);
+    }
+    samples
+}
+
+/// Prints the computation figures, each in microseconds per operation:
+/// SHA-256, ChaCha20-Poly1305 and AES-128-GCM over `CRYPTO_BYTES`, an
+/// Ed25519 verification, an X25519 agreement and a `COPY_BYTES` copy.
+fn compute(per_us: u64) {
+    use aricode_crypto::{aead, ed25519, sha256, x25519};
+    use core::hint::black_box;
+    let mut data = alloc::vec![0u8; CRYPTO_BYTES];
+    for (i, b) in data.iter_mut().enumerate() {
+        *b = i as u8;
+    }
+    let key = [7u8; 32];
+    let nonce = [9u8; 12];
+    let mut s = timed(CRYPTO_OPS, || {
+        black_box(sha256::sha256(black_box(&data)));
+    });
+    report(b"sha256 16 KiB", &mut s, per_us, b"us");
+    let mut s = timed(CRYPTO_OPS, || {
+        black_box(aead::chacha20poly1305_seal(&key, &nonce, &[], &mut data));
+    });
+    report(b"chacha20poly1305 16 KiB", &mut s, per_us, b"us");
+    let gcm = aead::AesGcm::new(&key[..16]).expect("AES-128 key");
+    let mut s = timed(CRYPTO_OPS, || {
+        black_box(gcm.seal(&nonce, &[], &mut data));
+    });
+    report(b"aes128gcm 16 KiB", &mut s, per_us, b"us");
+    let seed = [3u8; 32];
+    let public = ed25519::public_key(&seed);
+    let signature = ed25519::sign(&seed, b"bench");
+    let mut s = timed(PUBLIC_KEY_OPS, || {
+        assert!(ed25519::verify(&public, black_box(b"bench"), &signature));
+    });
+    report(b"ed25519 verify", &mut s, per_us, b"us");
+    let peer = x25519::public_key(&[5u8; 32]);
+    let mut s = timed(PUBLIC_KEY_OPS, || {
+        black_box(x25519::scalar_mult(black_box(&key), &peer));
+    });
+    report(b"x25519", &mut s, per_us, b"us");
+    let src = alloc::vec![0x5Au8; COPY_BYTES];
+    let mut dst = alloc::vec![0u8; COPY_BYTES];
+    let mut s = timed(COPY_OPS, || {
+        dst.copy_from_slice(black_box(&src));
+        black_box(&mut dst);
+    });
+    report(b"memcpy 64 KiB", &mut s, per_us, b"us");
 }
 
 /// TSC cycles per millisecond, measured against the system clock.
@@ -214,12 +294,124 @@ fn main(_arg: u64) -> u64 {
         samples.push(rdtsc() - t0);
     }
     report(b"ipc net info", &mut samples, per_us, b"us");
-    // 5. Idle time over a quiet interval.
+    // 4b. TCP throughput: a download, and an exchange in both directions,
+    // when the host test servers are there (QEMU's user networking); on
+    // real hardware there are none, and the rest still runs.
+    let mut net = net;
+    if host_servers(&net) {
+        if let Err(code) = tcp(&mut net, per_us) {
+            return code;
+        }
+    } else {
+        sys::print(b"bench: tcp skipped (no test server at 10.0.2.2)\n");
+    }
+    // 5. Computation: hashing, encryption, signatures, key agreement and
+    // copies on fixed inputs.
+    compute(per_us);
+    // 6. Idle time over a quiet interval.
     if quiet_idle(system).is_none() {
         return 10;
     }
     sys::print(b"bench: done\n");
     0
+}
+
+/// Whether the host test HTTP server answers a connection.
+fn host_servers(net: &NetClient) -> bool {
+    match net.tcp_connect(HOST, aricode_proto::net::TEST_HTTP_PORT, PROBE_TIMEOUT_MS) {
+        Ok(sock) => {
+            let _ = net.tcp_close(sock);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// The TCP figures; the exit code when a transfer fails.
+fn tcp(net: &mut NetClient, per_us: u64) -> Result<(), u64> {
+    let mut buf = alloc::vec![0u8; ECHO_ROUND];
+    let mut samples = Vec::with_capacity(TCP_RUNS);
+    for _ in 0..TCP_RUNS {
+        let t0 = rdtsc();
+        if download(net, &mut buf) != Some(BULK_BYTES) {
+            sys::print(b"bench: tcp download failed\n");
+            return Err(11);
+        }
+        samples.push(rdtsc() - t0);
+    }
+    report(b"tcp download 1 MiB", &mut samples, per_us * 1000, b"ms");
+    let mut samples = Vec::with_capacity(TCP_RUNS);
+    for _ in 0..TCP_RUNS {
+        let t0 = rdtsc();
+        if echo(net, &mut buf).is_none() {
+            sys::print(b"bench: tcp echo failed\n");
+            return Err(12);
+        }
+        samples.push(rdtsc() - t0);
+    }
+    report(b"tcp echo 256 KiB", &mut samples, per_us * 1000, b"ms");
+    Ok(())
+}
+
+/// `BULK_BYTES` from the host's `/bulk`: the bytes after the headers.
+fn download(net: &mut NetClient, buf: &mut [u8]) -> Option<usize> {
+    let sock = net
+        .tcp_connect(HOST, aricode_proto::net::TEST_HTTP_PORT, TCP_TIMEOUT_MS)
+        .ok()?;
+    let sent = net.tcp_send_all(sock, b"GET /bulk HTTP/1.1\r\nHost: 10.0.2.2\r\n\r\n");
+    let mut total = 0;
+    let mut header = Some(0usize);
+    while sent.is_ok() {
+        let n = match net.tcp_recv(sock, TCP_TIMEOUT_MS, buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        total += n;
+        // The header ends at the first blank line; it fits a first read.
+        if let Some(0) = header {
+            header = buf[..n]
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+                .map(|i| i + 4);
+        }
+    }
+    let _ = net.tcp_close(sock);
+    total.checked_sub(header?)
+}
+
+/// `ECHO_BYTES` to the host's echo server and back, `ECHO_ROUND` at a time.
+fn echo(net: &mut NetClient, buf: &mut [u8]) -> Option<()> {
+    let sock = net
+        .tcp_connect(HOST, aricode_proto::net::TEST_TCP_ECHO_PORT, TCP_TIMEOUT_MS)
+        .ok()?;
+    let mut done = 0;
+    let ok = (|| {
+        while done < ECHO_BYTES {
+            for (i, b) in buf.iter_mut().enumerate() {
+                *b = ((done + i) % 251) as u8;
+            }
+            net.tcp_send_all(sock, buf).ok()?;
+            let mut back = 0;
+            while back < ECHO_ROUND {
+                let n = net.tcp_recv(sock, TCP_TIMEOUT_MS, &mut buf[back..]).ok()?;
+                if n == 0 {
+                    return None;
+                }
+                back += n;
+            }
+            if buf
+                .iter()
+                .enumerate()
+                .any(|(i, &b)| b != ((done + i) % 251) as u8)
+            {
+                return None;
+            }
+            done += ECHO_ROUND;
+        }
+        Some(())
+    })();
+    let _ = net.tcp_close(sock);
+    ok
 }
 
 aricode_rt::entry!(main);

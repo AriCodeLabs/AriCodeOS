@@ -130,7 +130,7 @@ fn with_handles<R>(
 }
 
 fn console_write(handle: Handle, ptr: u64, len: u64) -> Result<u64, Error> {
-    const MAX: u64 = 4096;
+    const MAX: u64 = aricode_abi::CONSOLE_WRITE_MAX as u64;
     let console = with_handles(|t| lookup(t, handle, Rights::WRITE).cloned())?;
     if !matches!(
         console.kind,

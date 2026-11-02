@@ -19,7 +19,8 @@ would open an unauthenticated shell on the user's network.
    an independent computation with the OpenSSL command line.
 2. **Protocol as a library** (`aricode-ssh`): an SSH-2 server state machine
    with no I/O (bytes and events in, bytes out). Exactly one algorithm per
-   slot: `curve25519-sha256` with strict KEX (Terrapin mitigation;
+   slot (since ADR 0068 the key exchange slot has two:
+   `mlkem768x25519-sha256` first): `curve25519-sha256` with strict KEX (Terrapin mitigation;
    required of the client since incident 0035: OpenSSH 9.6, PuTTY 0.80,
    WinSCP 6.2.2, FileZilla 3.66.4, Dropbear 2024.84, libssh 0.10.6,
    libssh2 1.11.1, Paramiko 3.4, Go x/crypto 0.17 or later, or a
@@ -132,7 +133,9 @@ would open an unauthenticated shell on the user's network.
   network, launching programs through the broker, power). Output of
   programs started with `run` still goes to the console, not to the session.
 - One SSH connection at a time; no port forwarding, agent forwarding, SFTP,
-  password authentication, re-keying or other algorithms.
+  password authentication or other algorithms. (Since ADR 0068 the key
+  exchange is `mlkem768x25519-sha256` or `curve25519-sha256`, and keys
+  are exchanged again.)
 - Ed25519 signing is not constant time; the signing key is the device's
   own host key, used once per connection.
 - HTTPS (TLS 1.3 client) can reuse X25519, ChaCha20-Poly1305 and SHA-256;
@@ -169,6 +172,8 @@ would open an unauthenticated shell on the user's network.
   2^31 packets, so the ChaCha20 nonce never repeats. OpenSSH clients ask
   for a re-exchange after about 1 GiB in either direction with this
   cipher, which the server refuses: sessions moving more than that end.
+  (Lifted by ADR 0068: keys are exchanged again, started by either side,
+  and the 2^31 bound applies under each set of keys.)
 
 ## Secrets and keys (2026-10-27, incident 0044)
 

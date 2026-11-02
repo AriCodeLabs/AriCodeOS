@@ -46,6 +46,29 @@ struct Cpu {
     /// `-cpu qemu64,+rdrand` instead of `qemu64` (TCG implements `rdrand`
     /// from the host's randomness; ADR 0039).
     rdrand: bool,
+    /// [`SIMD_FEATURES`] added to the model (ADR 0065).
+    simd: bool,
+}
+
+/// What `cpu_simd` adds to `qemu64`: XSAVE with AVX, so the kernel takes
+/// its `XSAVE` path, plus the extensions vector and AES code looks for.
+/// TCG implements all of them.
+pub const SIMD_FEATURES: &str =
+    "+xsave,+xsaveopt,+avx,+avx2,+aes,+pclmulqdq,+ssse3,+sse4.1,+sse4.2,+popcnt";
+
+impl Cpu {
+    /// The `-cpu` argument.
+    fn model(&self) -> String {
+        let mut model = String::from("qemu64");
+        if self.rdrand {
+            model.push_str(",+rdrand");
+        }
+        if self.simd {
+            model.push(',');
+            model.push_str(SIMD_FEATURES);
+        }
+        model
+    }
 }
 
 /// Network cards of the machine and the host ports forwarded into it.
@@ -102,11 +125,7 @@ fn base_command(
         "-machine",
         "q35",
         "-cpu",
-        if cpu.rdrand {
-            "qemu64,+rdrand"
-        } else {
-            "qemu64"
-        },
+        &cpu.model(),
         "-smp",
         &cpu.count.max(1).to_string(),
         "-m",
@@ -454,12 +473,16 @@ const EARLY_HINTS: &[u8] = b"HTTP/1.1 103 Early Hints\r\nLink: </style.css>; rel
 /// runs out before the interim-response limit (8) is reached.
 const EARLY_HINTS_PAUSE: Duration = Duration::from_secs(5);
 
+/// Body of `/bulk`: what `bench` downloads to measure TCP (ADR 0070).
+const BULK_BYTES: usize = 1 << 20;
+
 /// Test HTTP server: `/hola` (Content-Length), `/chunked`
 /// (Transfer-Encoding: chunked), `/big-headers` (5 KiB of headers, the
 /// size github.com sends), `/early-hints` (a `103` every five seconds and
 /// never a final response: the server of incident 0009, which the
 /// client's budget must cut), `/early-hints-flood` (twenty `103` at once,
-/// then a 200: the interim-response limit), `/update/NAME` from `update`
+/// then a 200: the interim-response limit), `/bulk` (1 MiB for `bench`),
+/// `/update/NAME` from `update`
 /// (a scenario's own update source; 404 without one), the same source
 /// under the public source's URL shape ([`mirror_route`], ADR 0048), the
 /// redirect limits (`/redirect-loop` redirects to itself and `/to-ftp` to
@@ -517,6 +540,15 @@ fn http_serve(mut stream: std::net::TcpStream, update: Option<&Path>) {
                 MirrorRoute::Redirect(r) => r,
                 MirrorRoute::Asset(name) => file_response(update.expect("checked"), name),
             }
+        }
+        // The TCP throughput figure of `bench` (ADR 0070).
+        "/bulk" => {
+            let mut r = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {BULK_BYTES}\r\nConnection: close\r\n\r\n"
+            )
+            .into_bytes();
+            r.extend((0..BULK_BYTES).map(|i| (i % 251) as u8));
+            r
         }
         "/redirect-loop" => redirect("302 Found", "/redirect-loop", 0),
         "/to-ftp" => redirect("301 Moved Permanently", "ftp://10.0.2.2/index", 0),
@@ -1175,6 +1207,7 @@ pub fn run_interactive(
         Cpu {
             count: cpus,
             rdrand: false,
+            simd: false,
         },
         usb,
         Nics {
@@ -1312,6 +1345,8 @@ pub struct Headless<'a> {
     pub cpus: u32,
     /// `-cpu qemu64,+rdrand` instead of `qemu64` (scenario `cpu_rdrand`).
     pub cpu_rdrand: bool,
+    /// [`SIMD_FEATURES`] added to the CPU model (scenario `cpu_simd`).
+    pub cpu_simd: bool,
     pub usb: UsbOptions,
     /// The virtio-net card is present (every scenario but `no_nic` ones).
     pub nic: bool,
@@ -1367,6 +1402,7 @@ pub fn run_headless(
         Cpu {
             count: options.cpus,
             rdrand: options.cpu_rdrand,
+            simd: options.cpu_simd,
         },
         options.usb,
         Nics {
@@ -1809,6 +1845,7 @@ mod tests {
             super::Cpu {
                 count: 1,
                 rdrand: false,
+                simd: false,
             },
             super::UsbOptions::default(),
             super::Nics {

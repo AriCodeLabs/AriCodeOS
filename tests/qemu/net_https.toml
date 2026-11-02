@@ -1,10 +1,12 @@
-# HTTPS (TLS 1.3 client, aricode-tls + aricode-x509): the runner starts two
-# `openssl s_server -www` on the host, one with a certificate for 10.0.2.2
-# from a test CA installed in AriFS as trusted_ca.der, one self-signed. The
-# shell's `http` fetches over TLS from the first and refuses the second. The
-# kernel's real-time clock provides the date for the validity check.
+# HTTPS (rustls client on aricode-crypto, ADR 0067): the runner starts
+# three `openssl s_server -www` on the host: one with a certificate for
+# 10.0.2.2 (an iPAddress name) from a test CA installed in AriFS as
+# trusted_ca.der, one self-signed, and the first again with TLS 1.2 only.
+# The shell's `http` fetches over TLS 1.3 from the first, refuses the
+# second, and fetches over TLS 1.2 from the third. The kernel's real-time
+# clock provides the date for the validity check.
 name = "net.https"
-description = "http https://...: TLS 1.3 handshake, certificate chain to a trusted root, refusal of an unknown issuer"
+description = "http https://...: TLS 1.3 and TLS 1.2 handshakes, certificate chain to a trusted root, refusal of an unknown issuer"
 level = "full"
 areas = ["network", "shell", "tls"]
 cmdline = "qemu_exit shell"
@@ -13,6 +15,7 @@ timeout_secs = 120
 stdin = [
     "http https://10.0.2.2:{https_port}/",
     "http https://10.0.2.2:{https_untrusted_port}/",
+    "http https://10.0.2.2:{https_tls12_port}/",
     "shutdown",
 ]
 
@@ -24,6 +27,7 @@ serial_contains = [
     "HTTP 200,",
     "s_server -www",
     "http: TLS: certificate signed by an unknown authority",
+    "Protocol  : TLSv1.2",
     "ARICODEOS_SHUTDOWN",
 ]
 serial_absent = ["KERNEL PANIC", "http: invalid response", "sshd: listening"]

@@ -988,6 +988,10 @@ pub mod pci_info {
 /// Maximum DMA buffer size per call (section 52).
 pub const DMA_MAX_LEN: u64 = 8 * 1024 * 1024;
 
+/// Most bytes one `console_write` takes; longer writes are refused
+/// (`Error::Invalid`), so writers split their text (incident 0054).
+pub const CONSOLE_WRITE_MAX: usize = 4096;
+
 /// IPC message limits (section 23: small, fast messages).
 pub const IPC_MAX_DATA: usize = 256;
 pub const IPC_MAX_HANDLES: usize = 4;

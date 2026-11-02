@@ -43,7 +43,9 @@ impl Digest<48> for Sha384 {
 }
 
 /// The padded key and the inner digest are wiped before returning; the
-/// hash states wipe themselves when dropped.
+/// hash states wipe themselves when dropped, and the public functions
+/// scrub the stack `sha2`'s compression left (its message schedule is
+/// derived from the key).
 fn hmac<H: Digest<N>, const N: usize>(key: &[u8], parts: &[&[u8]]) -> [u8; N] {
     // Keys longer than a block are hashed first; shorter ones are zero-padded.
     let mut padded = SecretBytes([0u8; 128]);
@@ -77,12 +79,12 @@ fn hmac<H: Digest<N>, const N: usize>(key: &[u8], parts: &[&[u8]]) -> [u8; N] {
 
 /// HMAC-SHA-256 of the concatenation of `parts`.
 pub fn hmac_sha256(key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
-    hmac::<Sha256, 32>(key, parts)
+    crate::scrubbed::<{ crate::SCRUB_HASH }, _>(|| hmac::<Sha256, 32>(key, parts))
 }
 
 /// HMAC-SHA-384 of the concatenation of `parts`.
 pub fn hmac_sha384(key: &[u8], parts: &[&[u8]]) -> [u8; 48] {
-    hmac::<Sha384, 48>(key, parts)
+    crate::scrubbed::<{ crate::SCRUB_HASH }, _>(|| hmac::<Sha384, 48>(key, parts))
 }
 
 #[cfg(test)]

@@ -20,6 +20,7 @@ members = [
     "libs/gpt",
     "libs/arifs",
     "libs/net",
+    "libs/wasm-host",
     "libs/faults",
     "libs/http",
     "libs/input",
@@ -27,7 +28,6 @@ members = [
     "libs/manifest",
     "libs/pkg",
     "libs/update-index",
-    "libs/wasm",
     "libs/crypto",
     "libs/ab",
     "libs/iommu",
@@ -113,7 +113,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.16.1"
+version = "0.17.0"
 edition = "2021"
 license = "Apache-2.0"
 authors = ["Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors"]

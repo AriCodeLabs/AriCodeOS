@@ -493,9 +493,13 @@ extern "C" fn user_thread_entry(pid: usize) {
         let p = procs.get(&pid).expect("process");
         (p.entry, p.arg)
     };
+    // `_start` is entered as if called: the System V ABI wants
+    // `rsp + 8` aligned to 16 at a function's first instruction, and SSE
+    // code relies on it for aligned stack slots (ADR 0065). The word
+    // below the top stays zero, an end for stack walks.
     // SAFETY: code and stack mapped USER in `spawn`; the kernel stack was set
     // by the scheduler when switching to this thread.
-    unsafe { usermode::enter(entry, USER_STACK_TOP, arg) }
+    unsafe { usermode::enter(entry, USER_STACK_TOP - 8, arg) }
 }
 
 /// Process of the current thread, if it is a user thread.

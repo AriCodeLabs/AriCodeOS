@@ -3,7 +3,7 @@ name = "aricode-x509"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "X.509 certificates for TLS: DER parsing, signature verification, hostname matching, chain building and embedded root CAs (no_std + alloc)"
+description = "Certificate policy of the AriCodeOS TLS client: Mozilla trust anchors, distrusted keys, time without a trusted clock, no wildcard over a public suffix (no_std)"
 
 [lib]
 path = "src/lib.rs"

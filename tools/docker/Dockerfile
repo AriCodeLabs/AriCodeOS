@@ -44,12 +44,14 @@ RUN apt-get update \
 
 # The toolchain, components and targets from rust-toolchain.toml, plus the
 # WebAssembly target of the example modules, installed at build time so a
-# run needs no network for the compiler.
+# run needs no network for the compiler. x86_64-unknown-linux-gnu is the
+# user programs' target (ADR 0065); the image's host target, named so a
+# non-x86 host still gets it.
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         | sh -s -- -y --no-modify-path --profile minimal \
             --default-toolchain "$RUST_VERSION" \
             --component rust-src,llvm-tools,rustfmt,clippy \
-            --target x86_64-unknown-none,x86_64-unknown-uefi,wasm32-unknown-unknown \
+            --target x86_64-unknown-none,x86_64-unknown-uefi,x86_64-unknown-linux-gnu,wasm32-unknown-unknown \
     && mkdir -p "$CARGO_HOME/registry" \
     && chmod -R a+rwX "$RUSTUP_HOME" "$CARGO_HOME"
 

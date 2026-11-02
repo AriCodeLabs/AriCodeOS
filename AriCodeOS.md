@@ -18,6 +18,8 @@
 
 AriCodeOS was born with the intention of building a modern operating system from scratch, without using Linux, Windows, BSD or any other kernel as its execution base.
 
+"From scratch" does not mean writing every line ourselves (ADR 0063). It means looking at what exists, comparing it, learning from other systems' failures and improving on them: never copying something only because it was written years ago and works, and never keeping our own only because it is ours. Each subsystem is measured against the established implementations, for compatibility and for how fast the system runs. The better one is kept, adopted under a permissive licence when it is not ours.
+
 The project does not initially aim to be a general replacement for Windows or Linux. Its first goal is to build a modern, small, secure, verifiable kernel designed around current hardware.
 
 The fundamental principles will be:
@@ -416,6 +418,8 @@ rustup component add rust-src llvm-tools
 ```
 
 The exact target configuration may evolve towards custom JSON targets when we need precise control over the ABI, red zone, CPU features, code model and linker.
+
+Update (2026-10-30, ADR 0065): custom JSON targets need nightly, which ADR 0008 rules out. User programs are built for `x86_64-unknown-linux-gnu` instead, as freestanding static binaries with no Linux and no C library, so they can use SSE and AVX; the kernel stays on `x86_64-unknown-none`.
 
 ---
 
@@ -4058,6 +4062,67 @@ two steps:
 - system images download into UPDATE and are verified there (ADR 0064);
 - `upgrade` says why it fails after a new release replaced the source
   (incident 0052).
+
+## 94.17 AriCodeOS 0.17
+
+**Status: completed (2026-11-02), tag `v0.17.0`.** The version of "compare,
+then reuse or improve" (ADR 0063).
+
+The owner gave "from scratch" its meaning: study the established
+implementations and their failures, measure ours against them on
+compatibility and on how fast the system runs, and keep the winner. Each
+subsystem was compared on its own branch, with its measurements in an ADR
+and an independent audit.
+
+- **Downloads larger than the updater's memory** stream into UPDATE and are
+  verified there (ADR 0064). The 6 MiB limit is gone.
+- **The FPU and SSE state** is saved eagerly on every switch, so user
+  programs may use SIMD (ADR 0065).
+- **Cryptography:** RustCrypto and the dalek crates replace this system's
+  primitives everywhere, the kernel and AriBoot included: SHA-2,
+  AES-GCM, ChaCha20-Poly1305, Ed25519 and X25519 (ADR 0066).
+  - Ours stay where they measured faster or are protocols: ECDSA and RSA
+    verification, HMAC and HKDF, the kernel generator and the OpenSSH
+    cipher.
+  - Keys are wiped and stacks scrubbed around the adopted code as before.
+- **TLS and X.509:** rustls and rustls-webpki with this system's provider
+  and policy. TLS 1.2's safe subset is on, the trust anchors are Mozilla's
+  117 TLS roots, and extended master secret is required (ADR 0067).
+- **SSH:**
+  - The server stays this system's (sunset cannot end a command
+    properly). It gains `mlkem768x25519-sha256`, key re-exchange and a
+    send path 37 % cheaper per byte (ADR 0068).
+  - sshd waits once for the client and the shell: the echo of a key went
+    from 31 to 10 ms in QEMU (ADR 0069).
+- **TCP:**
+  - It stays this system's: smoltcp's initial sequence numbers proved
+    predictable from two observed ones.
+  - Its transmission was rebuilt: RFC 6298 timeouts, NewReno, SACK,
+    out-of-order data kept, window probes, delayed ACKs and RFC 5961's
+    checks (ADR 0070).
+  - It had stalled at about 3 KB/s on any loss and believed blind resets
+    (incident 0056).
+  - On the laptop, its bursts overflowed the NIC's 8-slot ring, now held
+    back by the driver's free slots (incident 0057).
+- **WebAssembly:** wasmi replaces this system's interpreter, 15 to 35 times
+  faster inside AriCodeOS. Profile v2 accepts the stable features except
+  SIMD, extended constants and multiple memories, within strict limits
+  (ADR 0071). The audit's stack finding was reported privately to wasmi.
+- **Other fixes:** xtask refuses unknown options (incident 0053), and
+  `upgrade` says why a replaced release fails (incident 0052).
+- **Third-party notices** of the 81 crates.io crates the images include
+  ship on the USB image and with the release (`cargo xtask notices`).
+- **Verified:**
+  - the full suite with 1 and with 4 CPUs;
+  - dev build 19 on the reference laptop: SSH output went from 0.12 to
+    1.15 MB/s against the old TCP on the same LAN, and HTTPS to GitHub,
+    Google and the website.
+
+A 0.16.0 machine updates through 0.16.1 (system 17) to 0.17.0 (system 18):
+0.16.0's updater cannot download an image over 6 MiB.
+
+Still the owner's: agents outside the trusted base (ADR 0041) and apps over
+32 KiB.
 
 ---
 

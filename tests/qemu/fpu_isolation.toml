@@ -1,0 +1,30 @@
+# ADR 0065: user threads keep their x87, SSE and AVX registers across
+# context switches, saved eagerly (never lazily: CVE-2018-3665), and a new
+# process starts with clean registers. `qemu64` has no XSAVE, so this is
+# the FXSAVE path; its vendor is AMD without XSAVEERPTR, so the x87 error
+# pointers are reset before each restore (CVE-2006-1056). Three
+# `fpu_probe` instances on one CPU alternate through `yield` and `sleep`,
+# each checking its own pattern 300 times; then an unmasked x87 division
+# by zero ends only its process (#MF). The unmasked SIMD division sets
+# MXCSR's flag without raising #XM: QEMU's TCG does not deliver SIMD
+# exceptions (checked 2026-10-30, QEMU 10.0); hardware raises it and the
+# kernel ends the process like any ring-3 exception.
+name = "fpu.isolation"
+description = "test=fpu on 1 CPU (fxsave): 3 processes keep their own x87/SSE state; #XM and #MF kill only the process"
+level = "full"
+areas = ["fpu", "user", "threads"]
+cmdline = "qemu_exit test=fpu"
+cpus = 1
+timeout_secs = 90
+
+[expect]
+exit = 33
+serial_contains = [
+    "cpu: user FPU state saved eagerly with fxsave (512 bytes per thread); x87 error pointers reset before each restore",
+    "fpu_probe 1: fxsave state kept over 300 switches",
+    "fpu_probe 3: fxsave state kept over 300 switches",
+    "USER FAULT #MF (16)",
+    "fpu selftest ok (3 processes kept their own registers on 1 CPU(s); #MF ended only its process; this CPU set the SIMD flag without raising #XM)",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC", "fpu_probe: round", "left by another process", "not aligned"]

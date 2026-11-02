@@ -106,6 +106,16 @@ pub struct Datagram {
     pub len: usize,
 }
 
+/// The buffer goes with the client: unmapped, and its handle closed. A
+/// receive still waiting in the network service keeps its own duplicate
+/// until it is answered (ADR 0069).
+impl Drop for NetClient {
+    fn drop(&mut self) {
+        let _ = sys::mmio_unmap(self.buf);
+        let _ = sys::handle_close(self.dma);
+    }
+}
+
 impl NetClient {
     pub fn new(service: Handle, hardware: Handle) -> Result<Self, Error> {
         let dma = sys::dma_alloc(hardware, MAX_DATAGRAM as u64)?;
@@ -313,11 +323,46 @@ impl NetClient {
         timeout_ms: u32,
         out: &mut [u8],
     ) -> Result<usize, NetError> {
+        let reply = self.tcp_recv_start(sock, timeout_ms, out.len())?;
+        let mut msg = [0u8; Reply::LEN];
+        let got = sys::ipc_receive(reply, &mut msg, &mut [], timeout_ms as u64 + rpc::GRACE_MS)
+            .map_err(|e| NetError::Ipc(rpc::reply_error(e)));
+        let _ = sys::handle_close(reply);
+        let (len, _) = got?;
+        self.tcp_recv_finish(&msg[..len], out)
+    }
+
+    /// The first half of `tcp_recv` (ADR 0069): asks for up to `max` bytes
+    /// and returns, without waiting, the endpoint the reply will come to, so
+    /// the caller can wait on it together with its other endpoints
+    /// (`ipc_receive_any`). The caller closes it once the reply is taken
+    /// (or given up). The data lands in this client's buffer: until
+    /// [`Self::tcp_recv_finish`], no other call of this client may carry it.
+    /// A receive given up still holds the buffer in the service until it is
+    /// answered: by its deadline, or by `tcp_close` of the socket.
+    pub fn tcp_recv_start(
+        &self,
+        sock: u16,
+        timeout_ms: u32,
+        max: usize,
+    ) -> Result<Handle, NetError> {
         let mut req = Request::new(Op::TcpRecv);
         req.sock = sock;
         req.timeout_ms = timeout_ms;
-        req.len = out.len().min(MAX_DATAGRAM as usize) as u16;
-        let r = self.call(req, true)?;
+        req.len = max.min(MAX_DATAGRAM as usize) as u16;
+        let buf = sys::handle_duplicate(self.dma, rights::READ | rights::WRITE | rights::TRANSFER)
+            .map_err(NetError::Ipc)?;
+        rpc::send(self.service, &req.encode(), &[buf], rpc::GRACE_MS).map_err(NetError::Ipc)
+    }
+
+    /// The second half of `tcp_recv`: `reply` is the message received on the
+    /// endpoint `tcp_recv_start` returned. Copies the data into `out`;
+    /// `Ok(0)` means the other end closed.
+    pub fn tcp_recv_finish(&mut self, reply: &[u8], out: &mut [u8]) -> Result<usize, NetError> {
+        let r = Reply::decode(reply).ok_or(NetError::Ipc(Error::Invalid))?;
+        if r.status != Status::Ok {
+            return Err(NetError::Status(r.status));
+        }
         let len = (r.value as usize).min(out.len());
         out[..len].copy_from_slice(&self.buffer()[..len]);
         Ok(len)

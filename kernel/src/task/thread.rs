@@ -4,6 +4,7 @@
 
 use super::context::{initial_stack_frame, ThreadEntry};
 use super::stack::KernelStack;
+use crate::arch::x86_64::fpu::FpuArea;
 use alloc::string::String;
 use aricode_sched::Tid;
 
@@ -18,6 +19,9 @@ pub struct Thread {
     pub process: Option<u32>,
     /// PML4 to load into CR3 when switching to this thread.
     pub cr3: u64,
+    /// x87/SSE/AVX registers of a user thread while it is not running
+    /// (ADR 0065); kernel threads never touch them.
+    pub fpu: Option<FpuArea>,
 }
 
 impl Thread {
@@ -30,6 +34,7 @@ impl Thread {
             saved_rsp: 0,
             process: None,
             cr3,
+            fpu: None,
         }
     }
 
@@ -43,6 +48,7 @@ impl Thread {
             saved_rsp: 0,
             process: None,
             cr3,
+            fpu: None,
         }
     }
 
@@ -55,6 +61,10 @@ impl Thread {
         process: Option<u32>,
         cr3: u64,
     ) -> Result<Self, &'static str> {
+        let fpu = match process {
+            Some(_) => Some(FpuArea::new()?),
+            None => None,
+        };
         let stack = KernelStack::allocate(tid.0)?;
         // SAFETY: `stack.top()` is the end of a freshly mapped RW stack.
         let saved_rsp = unsafe { initial_stack_frame(stack.top(), entry, arg) };
@@ -65,6 +75,7 @@ impl Thread {
             saved_rsp,
             process,
             cr3,
+            fpu,
         })
     }
 

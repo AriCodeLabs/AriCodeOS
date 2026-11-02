@@ -101,7 +101,8 @@ wrong with each:
   | `update.cut_during_install` | 26.0 | 26.0 |
 
   The 7 MiB image of `update.large_download` downloads, verifies,
-  installs and boots in 21 s.
+  installs and boots in 21 s. Its padding went down to 3 MiB in ADR 0066,
+  so the test keeps fitting a system that grew to 4.4 MiB.
 - New code: `UPDATE_IO` (16, `upd-update-io`) when `UPDATE` cannot be
   written or read back during a download. `NO_MEMORY` (11) is gone with
   the buffer.
@@ -149,7 +150,8 @@ was done:
 
 ## Tests
 
-- `update.large_download`: an image of 7 MiB of padding plus the system,
+- `update.large_download`: an image of 3 MiB of padding (7 MiB before ADR
+  0066) plus the system,
   larger than the updater's whole memory, is downloaded, verified,
   installed and booted from slot B.
 - `update.failed_download_keeps_rollback`:

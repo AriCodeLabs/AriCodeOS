@@ -64,3 +64,7 @@ support.
 
 Amended by ADR 0055 (2026-10-25): fuel counts work, imports pay fuel, and new
 limits on arity, locals, tables and memories.
+
+Superseded in part by ADR 0071 (2026-11-01): the interpreter is wasmi and the
+profile is v2 (every stable feature except SIMD). The manifest, the
+Capability API and the `aricode` import module stay.

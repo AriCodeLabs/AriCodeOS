@@ -409,7 +409,8 @@ pub struct Scenario {
     /// HTTPS servers on the host (`openssl s_server -www`): one with a
     /// certificate for `10.0.2.2` from a test CA installed in AriFS as
     /// `trusted_ca.der`, one self-signed and untrusted, on ports chosen per
-    /// run: [`HTTPS_PORT`] and [`HTTPS_UNTRUSTED_PORT`].
+    /// run: [`HTTPS_PORT`] and [`HTTPS_UNTRUSTED_PORT`], and the trusted one
+    /// again with TLS 1.2 only on [`HTTPS_TLS12_PORT`].
     #[serde(default)]
     pub host_https: bool,
     /// An update source (ADR 0029) published into the scenario's directory
@@ -419,7 +420,7 @@ pub struct Scenario {
     /// Initial state of the test disk (`image::DiskVariant`): `slots`
     /// (default), `update-empty`, `esp-only`, `pending-b`, `b-exhausted`, `b-corrupt`,
     /// `fs-pending-replace`, `fs-corrupt`, `wasm-restricted`, `wasm-invalid`,
-    /// `wasm-bad-import`, `wasm-many-blocks`.
+    /// `wasm-bad-import`, `wasm-many-blocks`, `wasm-endless`, `wasm-grow-loop`.
     #[serde(default = "default_disk")]
     pub disk: String,
     /// Presents the test disk as read-only (write failures).
@@ -434,6 +435,11 @@ pub struct Scenario {
     /// is seeded from a hardware source (ADR 0039). Off, `qemu64` has none.
     #[serde(default)]
     pub cpu_rdrand: bool,
+    /// The CPU model adds XSAVE, AVX and the AES and SSE4 extensions
+    /// ([`crate::qemu::SIMD_FEATURES`]), so the kernel saves user state with
+    /// `XSAVE` instead of `FXSAVE` (ADR 0065). Off, `qemu64` has none.
+    #[serde(default)]
+    pub cpu_simd: bool,
     /// Adds an xHCI controller with a USB HID keyboard and mouse. QMP events
     /// go to the most recently activated input handler: the USB keyboard
     /// only while no virtio-input driver has started (QEMU activates a
@@ -524,6 +530,7 @@ pub struct Scenario {
 pub const UPDATE_PORT: &str = "{update_port}";
 pub const HTTPS_PORT: &str = "{https_port}";
 pub const HTTPS_UNTRUSTED_PORT: &str = "{https_untrusted_port}";
+pub const HTTPS_TLS12_PORT: &str = "{https_tls12_port}";
 
 /// `text` with each placeholder of `values` replaced by its port.
 pub fn fill(text: &str, values: &[(&str, u16)]) -> String {
@@ -677,6 +684,7 @@ impl Scenario {
             (UPDATE_PORT, self.host_update.is_some(), "[host_update]"),
             (HTTPS_PORT, self.host_https, "host_https = true"),
             (HTTPS_UNTRUSTED_PORT, self.host_https, "host_https = true"),
+            (HTTPS_TLS12_PORT, self.host_https, "host_https = true"),
         ] {
             if !provided && self.texts().any(|t| t.contains(placeholder)) {
                 return Err(format!("{placeholder} needs {field}"));

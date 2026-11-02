@@ -61,7 +61,6 @@ libs/virtio/         aricode-virtio: split virtqueue over DMA, modern virtio-pci
 libs/gpt/            aricode-gpt: CRC32, GPT header and entries, writer for the test disk (no_std, host tests)
 libs/ab/             aricode-ab: A/B boot state, signed system images and slot policy (no_std, host tests)
 libs/crypto/         aricode-crypto: SHA-256, SHA-512, Ed25519 and ChaCha20 from scratch with official vectors (no_std, host tests)
-libs/wasm/           aricode-wasm: WebAssembly MVP interpreter with integers, bounded memory and imports (no_std + alloc, host tests)
 libs/manifest/       aricode-manifest: application manifests (name, capabilities, memory) (no_std, host tests)
 libs/gfx/            aricode-gfx: 0x00RRGGBB canvases, clipping, text, cursor and window desktop (no_std, host tests)
 libs/input/          aricode-input: evdev events and US keyboard (no_std, host tests)
@@ -338,6 +337,12 @@ latter briefly to add the region.
 - `switch_context` (System V) saves rbx, rbp, r12..r15 and rsp; a new thread
   starts through `thread_start` with r12 = entry and r13 = argument, enables
   interrupts and on return enters `exit`.
+- User threads also own an x87/SSE/AVX area (`arch::x86_64::fpu`, ADR
+  0065). The scheduler saves the leaving user thread's registers into it
+  on every switch (`FXSAVE`, or `XSAVEOPT` with x87, SSE and AVX in
+  `XCR0`) and loads the next one's, never lazily (CVE-2018-3665). A CPU
+  that still holds the next thread's registers skips the load. The kernel
+  is soft-float and never touches them, so kernel threads have no area.
 - The scheduler lock is held across the context switch, with interrupts
   disabled, and released by the thread that resumes (`force_unlock` after
   `switch_context`, or in `thread_first_run` for a new thread): no other
@@ -442,8 +447,9 @@ latter briefly to add the region.
   assembly (`hello`, `kernel_read`, `kernel_write`, `privileged`,
   `bad_syscall`, `bad_pointer`) and in Rust on top of `aricode-sys`
   (`sleep_yield`, `handles`, `caps`, `ipc_server`, `ipc_client`). `cargo
-  xtask` builds them as static ELFs for `x86_64-unknown-none` with
-  `sdk/rust/user.ld` (0x400000, R-X, R--, RW- segments) and packs them with
+  xtask` builds them as static ELFs for `x86_64-unknown-linux-gnu`, without
+  its C library or anything of Linux, so they may use SSE and AVX (ADR
+  0065), with `sdk/rust/user.ld` (0x400000, R-X, R--, RW- segments) and packs them with
   `init` into `aricodeos/initrd.img`. `process::spawn` loads them with
   `aricode-elf` and maps each segment with its permissions (the whole
   zero-fill pages of a writable segment, `.bss` and the runtime's heap
@@ -902,17 +908,31 @@ latter briefly to add the region.
 ## TCP (Phase 23)
 
 - `aricode-net::tcp::Connection` is a pure state machine: `poll`
-  produces at most one segment per call (expired retransmission, SYN,
-  new data within the peer's window, FIN, pure ACK) and
-  `on_segment` consumes one; the caller transmits and keeps time. Fixed
-  4 KiB buffers per direction, retransmission from `snd_una` with exponential
-  RTO (500 ms to 8 s, `MAX_RETRIES = 6` → `CloseReason::Timeout`, about
-  31 s; a passive connection's SYN|ACK has the short budget
-  `SYN_ACK_MAX_RETRIES = 3`, about 7.5 s, so a SYN nobody completes frees
-  its slot soon: ADR 0035), 2 s TIME-WAIT, received RST or `abort` →
-  `CloseReason::Reset`. The host tests connect two `Connection`s through a
-  wire that drops chosen or random segments and pin both schedules.
-- In `netd` each TCP socket (`Box`, 8 KiB of buffers) lives in a slot of
+  produces at most one segment per call (expired retransmission, window
+  probe, SYN, a hole to resend, new data within the peer's window and the
+  congestion window, FIN, ACK) and `on_segment` consumes one; the caller
+  transmits and keeps time.
+  - Buffers come from the caller: in netd 32 KiB to send and 64 KiB to
+    receive (ADR 0070).
+  - Since ADR 0070 (incident 0056) it runs:
+    - the RTO of RFC 6298, 200 ms to 8 s, with go-back-N after a timeout;
+    - NewReno fast retransmit and recovery;
+    - SACK both ways, with out-of-order data kept;
+    - the peer's MSS honoured;
+    - window probes;
+    - ACKs delayed to every second segment or 20 ms;
+    - RFC 5961's checks against blind resets and injection.
+  - Unanswered data, a SYN or a probe gives up after `GIVE_UP_MS` (about
+    31 s) → `CloseReason::Timeout`. A passive connection's SYN|ACK has
+    the short budget `SYN_ACK_MAX_RETRIES = 3`, about 7.5 s, so a SYN
+    nobody completes frees its slot soon (ADR 0035).
+  - TIME-WAIT lasts 2 s. A received RST at the exact next sequence number,
+    or `abort`, gives `CloseReason::Reset`.
+  - The host tests connect two `Connection`s through a wire that drops
+    chosen or random segments, pin the schedules, and script exact
+    segments for each rule.
+- In `netd` each TCP socket (`Box`, its buffers lent by a static pool in
+  zero-fill memory, none for a listener: ADR 0070) lives in a slot of
   the table; segments are demultiplexed by 4-tuple and a SYN to a
   listening port creates a passive connection that `TcpAccept` delivers once
   established. `TcpConnect`/`TcpAccept`/`TcpRecv` stay pending with a
@@ -1262,32 +1282,34 @@ latter briefly to add the region.
   character by character. With interrupts disabled the lock is only tried,
   so that a handler never waits for a thread that cannot run.
 
-## WebAssembly runtime (Phase 29)
+## WebAssembly runtime (Phase 29, ADR 0071)
 
-- `aricode-wasm` parses the binary once (`Module::parse`: types,
-  imports, functions, table, memory, globals, exports,
-  elements and data) and executes byte by byte with a `u64` value stack and
-  a label stack. Block ends are located by skipping immediates on
-  entering each block; `br` trims the stack to the label's height and
-  keeps the arity; the function's implicit label acts as `return`.
-  Limits: 64 nested calls, 16 K values, 50 M steps (`Fuel`). Every
-  load, store, `memory.copy` and `memory.fill` is checked against
-  the `&mut [u8]` supplied by the host; floating point returns
-  `Unsupported`. The host tests use a minimal module assembler
-  to cover arithmetic, loops, `if/else` with a result, recursion,
-  `br_table`, globals, `call_indirect`, traps and limits.
-- `Module::parse` validates the whole module before returning it (ADR 0019:
-  typing of each function with an operand stack and control frames, indices
-  of types, functions, table, globals, exports and `start`); whatever the
-  interpreter does not execute is rejected there. The accepted profile is in
-  `docs/wasm-profile.md`.
+- Since ADR 0071 the interpreter is wasmi 2.0 (crates.io, MIT or
+  Apache-2.0), with wasmparser validating the whole module before it is
+  instantiated. It replaced `aricode-wasm`, which ADR 0063's comparison
+  found 13 to 38 times slower and accepting 315 invalid or malformed
+  modules of the spec testsuite.
+- The profile (`docs/wasm-profile.md`, v2) is the stable WebAssembly
+  features except SIMD, extended constants and multiple memories. Every call runs on fuel: 50 M units for `start`
+  and 50 M for `main`, one per 64 bytes that bulk operations move, and
+  imports priced by the runner before they run (ADR 0055).
 - `wasm_runner` is a normal broker application: it receives `SYSTEM`, its
-  private directory and `HARDWARE`; it reads `demo.wasm` (xtask compiles it with
-  `-C target-cpu=mvp -C target-feature=+sign-ext,+bulk-memory` and leaves it in
-  `build/`, and `write_test_disk` copies it to `wasm_runner/demo.wasm`), resolves
-  imports by name (`aricode.print`, `aricode.uptime_ms`) and
-  reserves the linear memory as a DMA buffer within its quota. The module has
-  no way to name anything the runner has not imported for it.
+  private directory and `HARDWARE`.
+  - It reads `demo.wasm`. xtask compiles the sample with `-C target-cpu=mvp
+    -C target-feature=+sign-ext,+bulk-memory` and leaves it in `build/`,
+    and `write_test_disk` copies it to `wasm_runner/demo.wasm`.
+  - It resolves imports by name and by the module manifest's
+    capabilities: `aricode.print`, `uptime_ms`, `file_read` and
+    `file_write`, each with an exact signature.
+  - It extends its heap with three 2 MiB DMA buffers from its quota. There
+    wasmi keeps its state and the module's memory.
+  - What a module holds is bounded in three places:
+    - `StoreLimits`: one memory of 1 MiB, four tables of 16 Ki elements,
+      a 512 KiB value stack and 1024 nested calls;
+    - wasmi's strict limits on functions, globals and segments;
+    - nesting of at most 1024 blocks.
+  - The module has no way to name anything the runner has not imported
+    for it.
 - AriFS files grow to 32 KiB capacity to hold modules.
 
 ## Cryptography (Phase 31)
@@ -1729,8 +1751,9 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
 
 - `aricode-crypto`: shared GF(2^255-19) field, X25519 (constant-time
   ladder), Poly1305 and `chacha20-poly1305@openssh.com`.
-- `aricode-ssh`: SSH-2 server state machine (curve25519-sha256 with strict
-  KEX, ssh-ed25519, chacha20-poly1305, publickey auth, one session channel),
+- `aricode-ssh`: SSH-2 server state machine (mlkem768x25519-sha256 or
+  curve25519-sha256 with strict KEX and key re-exchange (ADR 0068),
+  ssh-ed25519, chacha20-poly1305, publickey auth, one session channel),
   tested on the host against the OpenSSH client.
 - `services/sshd`: port 22 over the network service; host key and
   `authorized_keys` in AriFS. For `shell`/`exec` it asks init (session
@@ -1757,12 +1780,17 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
   `ssh.key_options_refused`). Ten authentication requests per connection,
   key queries and repeated `none` included (incident 0046).
 
-## HTTPS (ADR 0026)
+## HTTPS (ADR 0026, ADR 0067)
 
 - `aricode-crypto`: SHA-384, HMAC, HKDF, ChaCha20-Poly1305 and AES-GCM,
   big integers with RSA PKCS#1 v1.5/PSS verification, ECDSA P-256/P-384.
-- `aricode-x509`: DER, certificates, chain verification, host names, 17
-  embedded roots. `aricode-tls`: TLS 1.3 client state machine.
+- `aricode-tls`: rustls through its unbuffered API, on a provider built
+  from `aricode-crypto` (plus RustCrypto's `p256`/`p384` for the NIST key
+  exchanges), TLS 1.3 and TLS 1.2; chains verified by `rustls-webpki`.
+- `aricode-x509`: this system's certificate policy on top: Mozilla's TLS
+  server roots (`tools/mozilla-roots.py`), distrusted keys (ADR 0054), the
+  time without a trusted clock, no wildcard over a public suffix (ADR
+  0062).
 - Kernel: CMOS real-time clock read at boot (`rtc.rs`, `sysinfo::WALLCLOCK`).
 - `sdk/https` (`aricode-https`): HTTP/HTTPS GET over the TCP service; the
   shell's `http` uses it, with `trusted_ca.der` from AriFS as an optional

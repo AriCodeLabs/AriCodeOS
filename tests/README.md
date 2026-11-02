@@ -19,6 +19,11 @@ cargo xtask test --area boot        # QEMU scenarios of one area (with --all to 
 cargo xtask test --list             # list scenarios and which ones the filter selects
 ```
 
+Every `cargo xtask` command refuses an option it does not take, a missing
+value, an option given twice and a number that does not parse, before it
+runs anything (incident 0053): there is no per-scenario filter, and a
+mistyped one is an error, not a full run.
+
 ## Where things are
 
 ```text
@@ -105,6 +110,8 @@ serial = true                   # runs with no other scenario at once (--jobs); 
 cpus = 4                        # processors (-smp N); undeclared: 1, or whatever `--cpus N` forces
 cpu_rdrand = true               # -cpu qemu64,+rdrand (TCG implements it): the kernel generator is seeded from rdrand (ADR 0039);
                                 # default qemu64 has none, so every other scenario runs the weak TSC + interrupts path
+cpu_simd = true                 # adds XSAVE, AVX, AES and SSE4 to qemu64 (qemu::SIMD_FEATURES): the kernel saves user
+                                # registers with XSAVE, not FXSAVE (ADR 0065); default qemu64 has none
 usb_hid = true                  # adds qemu-xhci with a USB keyboard and mouse (QMP events go to the USB devices)
 usb_hid_only_input = true       # no virtio keyboard/mouse, so QMP input reaches the USB HID devices (xHCI or EHCI)
 usb_hid_msi = true              # that xHCI offers MSI only, no MSI-X (like 2012 Intel controllers)

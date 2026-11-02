@@ -85,6 +85,10 @@ const DHCP_PROBE_MS: u64 = 600;
 /// Pause before asking again after declining an address in use.
 const DHCP_DECLINE_PAUSE_MS: u64 = 10_000;
 const ARP_WAIT_MS: u64 = 1000;
+/// How soon a connection held back by a full transmit ring is tried again
+/// (incident 0057): the ring empties in microseconds, and an ACK from the
+/// peer usually wakes the service first.
+const TX_RETRY_MS: u64 = 1;
 
 /// What the service records in the kernel event ring (ADR 0028): why it
 /// refused a request or lost a frame (incident 0012), and what it cleaned
@@ -235,6 +239,10 @@ pub trait Link {
     fn mac(&self) -> MacAddr;
     /// Transmits a frame; `false` if there is no free slot (the caller loses it).
     fn send_frame(&mut self, frame: &[u8]) -> bool;
+    /// Whether `send_frame` has a free slot now (incident 0057): TCP is
+    /// asked for a segment only then, so a full ring holds segments back
+    /// instead of losing segments TCP counted as sent.
+    fn tx_room(&mut self) -> bool;
     /// Next received frame copied into `out`, or `None` if there is none.
     /// `Some(0)` is a receive slot consumed without a usable frame (an
     /// errored one): it counts toward the round's budget and is ignored.
@@ -315,9 +323,72 @@ struct Socket {
     data: Box<[u8]>,
 }
 
+/// A connection over buffers lent by the pool for as long as it lives.
+type Conn = Connection<&'static mut [u8]>;
+
+/// TCP buffers (ADR 0070): a send and a receive buffer for each of the
+/// `MAX_TCP` slots, in zero-fill memory that is backed only when a
+/// connection first writes to it (audit of 731c398, finding D). The
+/// runtime's 256 KiB heap could not hold them. Each pair is lent to one
+/// socket and comes back when the socket is dropped, however it goes
+/// (`Drop for TcpSock`); a listener borrows none.
+mod pool {
+    use super::MAX_TCP;
+    use aricode_net::tcp::{RECV_BUF, SEND_BUF};
+    use aricode_sync::SpinLock;
+    use core::cell::UnsafeCell;
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    pub type Buffers = (&'static mut [u8], &'static mut [u8]);
+
+    struct Memory {
+        send: UnsafeCell<[[u8; SEND_BUF]; MAX_TCP]>,
+        recv: UnsafeCell<[[u8; RECV_BUF]; MAX_TCP]>,
+    }
+    // SAFETY: the memory is only reached through the `&'static mut`
+    // slices `init` hands out once; nothing else touches it.
+    unsafe impl Sync for Memory {}
+
+    static MEMORY: Memory = Memory {
+        send: UnsafeCell::new([[0; SEND_BUF]; MAX_TCP]),
+        recv: UnsafeCell::new([[0; RECV_BUF]; MAX_TCP]),
+    };
+    static SPLIT: AtomicBool = AtomicBool::new(false);
+    static FREE: SpinLock<[Option<Buffers>; MAX_TCP]> = SpinLock::new([const { None }; MAX_TCP]);
+
+    /// Splits the memory into its pairs, the first time only.
+    pub fn init() {
+        if SPLIT.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        // SAFETY: `SPLIT` lets this run once, so these are the only
+        // references to the memory there will ever be.
+        let (send, recv) = unsafe { (&mut *MEMORY.send.get(), &mut *MEMORY.recv.get()) };
+        let mut free = FREE.lock();
+        for ((slot, s), r) in free.iter_mut().zip(send.iter_mut()).zip(recv.iter_mut()) {
+            *slot = Some((s.as_mut_slice(), r.as_mut_slice()));
+        }
+    }
+
+    /// A free pair, if any.
+    pub fn take() -> Option<Buffers> {
+        FREE.lock().iter_mut().find_map(Option::take)
+    }
+
+    /// Returns a pair; the empty ones of a listener are not kept.
+    pub fn give_back(b: Buffers) {
+        if b.0.is_empty() {
+            return;
+        }
+        if let Some(slot) = FREE.lock().iter_mut().find(|s| s.is_none()) {
+            *slot = Some(b);
+        }
+    }
+}
+
 /// TCP socket: one connection (or a listening port) and its waits.
 struct TcpSock {
-    conn: Connection,
+    conn: Conn,
     listening: bool,
     /// Incoming connection not yet handed out by `TcpAccept` (socket index).
     accepted_from: Option<u16>,
@@ -329,17 +400,22 @@ struct TcpSock {
 }
 
 impl TcpSock {
-    /// A socket for a connection between these endpoints, on the heap.
-    /// Out of line (incident 0018): a `Connection` carries 8 KiB of
-    /// buffers, and the copies of it an unoptimized build makes on the way
-    /// into the `Box` stay in this frame instead of in the frame of every
-    /// request or frame handler that opens a connection.
+    /// A socket for a connection between these endpoints, on the heap,
+    /// over `buffers` from the pool (none for a listener). Out of line
+    /// (incident 0018): the copies an unoptimized build makes on the way
+    /// into the `Box` stay in this frame.
     #[inline(never)]
-    fn boxed(local: Ipv4Addr, local_port: u16, remote: Ipv4Addr, remote_port: u16) -> Box<Self> {
+    fn boxed(
+        local: Ipv4Addr,
+        local_port: u16,
+        remote: Ipv4Addr,
+        remote_port: u16,
+        (send, recv): pool::Buffers,
+    ) -> Box<Self> {
         // One expression: the `Box` is allocated first and the socket
         // written into it.
         Box::new(Self {
-            conn: Connection::new(local, local_port, remote, remote_port),
+            conn: Connection::new(local, local_port, remote, remote_port, send, recv),
             listening: false,
             accepted_from: None,
             connect: None,
@@ -347,6 +423,12 @@ impl TcpSock {
             recv: None,
             user_closed: false,
         })
+    }
+}
+
+impl Drop for TcpSock {
+    fn drop(&mut self) {
+        pool::give_back(self.conn.take_buffers());
     }
 }
 
@@ -465,8 +547,11 @@ pub struct Stack<L: Link> {
     pings: Owned<PendingPing, MAX_PINGS>,
     sockets: Owned<Socket, MAX_SOCKETS>,
     dns: Owned<PendingDns, MAX_DNS>,
-    /// On the heap: each socket carries 8 KiB of buffers and the stack is 64 KiB.
+    /// On the heap, with their buffers in `pool` (ADR 0070).
     tcp: Owned<Box<TcpSock>, MAX_TCP>,
+    /// When to emit again what a full transmit ring held back (incident
+    /// 0057); cleared at every round of `tcp_poll`.
+    tx_retry_at: Option<u64>,
     /// Per-boot key of the initial sequence numbers and the ephemeral
     /// ports (`aricode_net::isn`, ADR 0034), from the kernel's entropy.
     tcp_secret: isn::Secret,
@@ -616,6 +701,7 @@ impl<L: Link> Stack<L> {
     /// this frame, popped before the service loop starts.
     #[inline(never)]
     pub fn new(link: L, clock: Clock, name: &'static str) -> Box<Self> {
+        pool::init();
         let () = Self::SIZE_OK;
         let (secret, whole) = tcp_secret(&clock, name);
         // DHCP transaction id, first DNS id and DNS source port drawn at
@@ -654,6 +740,7 @@ impl<L: Link> Stack<L> {
             sockets: Owned::new(),
             dns: Owned::new(),
             tcp: Owned::new(),
+            tx_retry_at: None,
             tcp_port_count: 0,
             tcp_syn_dropped: 0,
             deferred: core::array::from_fn(|_| Parking {
@@ -816,7 +903,8 @@ impl<L: Link> Stack<L> {
                 self.deferred
                     .iter()
                     .filter_map(|slot| slot.waiting.map(|p| p.deadline)),
-            );
+            )
+            .chain(self.tx_retry_at);
         Deadline::at(timers::next_deadline(
             self.last_sweep + SWEEP_MS,
             timers::dhcp_due(self.dhcp.state(), self.probe_deadline, self.dhcp_next),
@@ -1479,13 +1567,19 @@ impl<L: Link> Stack<L> {
             .iter()
             .filter(|(_, _, s)| s.accepted_from == Some(listener as u16))
             .count();
-        if backlog >= TCP_BACKLOG || (self.tcp.is_full() && !self.recycle_time_wait(now)) {
+        let buffers =
+            if backlog >= TCP_BACKLOG || (self.tcp.is_full() && !self.recycle_time_wait(now)) {
+                None
+            } else {
+                pool::take()
+            };
+        let Some(buffers) = buffers else {
             self.tcp_syn_dropped = self.tcp_syn_dropped.saturating_add(1);
             self.note(Fault::SynDropped, now);
             self.send_tcp_reset(ih, &h, payload.len(), now);
             return;
-        }
-        let mut sock = TcpSock::boxed(ih.dst, h.dst_port, ih.src, h.src_port);
+        };
+        let mut sock = TcpSock::boxed(ih.dst, h.dst_port, ih.src, h.src_port, buffers);
         sock.conn
             .listen(self.initial_seq(ih.dst, h.dst_port, ih.src, h.src_port, now));
         sock.conn.on_segment(&h, payload, now);
@@ -1505,8 +1599,7 @@ impl<L: Link> Stack<L> {
     /// not; a full transmit ring is recorded by `transmit`.
     fn send_tcp_reset(&mut self, ih: ipv4::Header, h: &tcp::Header, payload_len: usize, now: u64) {
         let mut seg = [0u8; tcp::HEADER_LEN];
-        let Some(len) = tcp::reset_for(h, payload_len).write(ih.dst, ih.src, None, &[], &mut seg)
-        else {
+        let Some(len) = tcp::reset_for(h, payload_len).write(ih.dst, ih.src, &[], &mut seg) else {
             return;
         };
         let mut frame = [0u8; MAX_FRAME];
@@ -1563,25 +1656,41 @@ impl<L: Link> Stack<L> {
     }
 
     /// Emits pending segments and resolves waits on every connection.
-    fn tcp_poll(&mut self, now: u64) {
+    /// Sends what connection `i` has to send now, while the NIC has room
+    /// (incident 0057): what does not fit stays in the connection, unsent,
+    /// and goes in a later round (`tx_retry_at`).
+    fn tcp_emit(&mut self, i: usize, now: u64) {
         let mut seg = [0u8; tcp::MAX_SEGMENT];
+        // Take the socket out of its slot while emitting: `send_ipv4` needs
+        // the rest of the stack.
+        let Some((owner, mut sock)) = self.tcp.take(i) else {
+            return;
+        };
+        let (remote, _) = sock.conn.remote();
+        loop {
+            if !self.link.tx_room() {
+                self.tx_retry_at = Some(now + TX_RETRY_MS);
+                break;
+            }
+            let Some(n) = sock.conn.poll(now, &mut seg) else {
+                break;
+            };
+            let _ = self.send_ipv4(remote, ipv4::PROTO_TCP, &seg[..n], now);
+            if sock.conn.is_closed() {
+                break;
+            }
+        }
+        self.tcp.set(i, owner, sock);
+    }
+
+    fn tcp_poll(&mut self, now: u64) {
+        self.tx_retry_at = None;
         for i in 0..MAX_TCP {
             if self.tcp.at(i).is_none_or(|s| s.listening) {
                 continue;
             }
-            // Take the socket out of its slot while emitting: `send_ipv4` needs
-            // the rest of the stack.
-            let Some((owner, mut sock)) = self.tcp.take(i) else {
-                continue;
-            };
-            let (remote, _) = sock.conn.remote();
-            while let Some(n) = sock.conn.poll(now, &mut seg) {
-                let _ = self.send_ipv4(remote, ipv4::PROTO_TCP, &seg[..n], now);
-                if sock.conn.is_closed() {
-                    break;
-                }
-            }
-            self.tcp.set(i, owner, sock);
+            self.tcp_emit(i, now);
+            let mut delivered = false;
             let Some(sock) = self.tcp.at_mut(i) else {
                 continue;
             };
@@ -1619,11 +1728,17 @@ impl<L: Link> Stack<L> {
                 } else {
                     let (from, port) = sock.conn.remote();
                     deliver_recv(&mut self.buffers, pending, from, port, &data[..n]);
+                    delivered = true;
                 }
             }
             // Free finished connections the user already closed.
             if sock.user_closed && sock.conn.is_closed() {
                 self.tcp.take(i);
+            } else if delivered {
+                // What reading freed: a window update or a delayed ACK owed
+                // goes now, not at the next unrelated wakeup (audit of
+                // ADR 0070, L4).
+                self.tcp_emit(i, now);
             }
         }
         // Hand accepted connections to pending `TcpAccept` calls.
@@ -1755,7 +1870,10 @@ impl<L: Link> Stack<L> {
                 ) else {
                     return self.refuse(reply_to, Fault::TcpTableFull, now);
                 };
-                let mut sock = TcpSock::boxed(local, port, addr, req.port);
+                let Some(buffers) = pool::take() else {
+                    return self.refuse(reply_to, Fault::TcpTableFull, now);
+                };
+                let mut sock = TcpSock::boxed(local, port, addr, req.port, buffers);
                 sock.conn
                     .connect(self.initial_seq(local, port, addr, req.port, now), now);
                 sock.connect = Some((reply_to, now + req.timeout_ms.max(1) as u64));
@@ -1788,7 +1906,13 @@ impl<L: Link> Stack<L> {
                 if !self.tcp_room(owner, reply_to, now) {
                     return;
                 }
-                let mut sock = TcpSock::boxed(self.my_ip(), req.port, Ipv4Addr::UNSPECIFIED, 0);
+                let mut sock = TcpSock::boxed(
+                    self.my_ip(),
+                    req.port,
+                    Ipv4Addr::UNSPECIFIED,
+                    0,
+                    (&mut [], &mut []),
+                );
                 // A listener sends nothing itself: every SYN to it gets a
                 // connection of its own in `on_tcp`, with its own ISN.
                 sock.conn.listen(0);

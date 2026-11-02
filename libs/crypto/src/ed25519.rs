@@ -1,417 +1,74 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 // SPDX-License-Identifier: Apache-2.0
-//! Ed25519 (RFC 8032) from scratch: GF(2^255-19) arithmetic with five 51-bit
-//! limbs, points in extended coordinates, scalars modulo L by long
-//! division. Verification works on public values only and is not
-//! constant time; what handles the secret seed (the public key from it and
-//! signing, which sshd does with its host key) runs in constant time
-//! (audit 2026-10-25 D, M2): the point ladder selects instead of
-//! branching, and reduction modulo L subtracts without branching. Signing
-//! wipes the expanded key, the scalar and the nonce before returning.
+//! Ed25519 (RFC 8032) over `ed25519-dalek` (ADR 0066), with precomputed
+//! tables; signing and the public key from a seed run in constant time.
+//! The signing key wipes itself when dropped, and the stack those leave
+//! behind (the expanded key, the nonce, SHA-512 states) is scrubbed
+//! before returning ([`crate::scrub_stack`]).
 //!
-//! Verification refuses (incident 0044) a point encoding whose y is not
-//! below p (RFC 8032 section 5.1.3), and a public key A or a commitment R
-//! of small order (\[8\]P is the identity): with such an A, the equation
-//! \[S\]B = R + \[k\]A holds for R = identity and S = 0 whenever the
-//! order of A divides k, for one message in eight or better, without any
-//! private key. No seed gives such a key (\[a\]B has order L). The equation
-//! is the cofactorless one; a key with a small-order component added to a
-//! point of order L is not refused (it only verifies what its holder
-//! signs).
+//! Verification is `verify_strict` plus one check of ours, so it refuses
+//! (incident 0044):
+//! - a point encoding whose y is not below p (RFC 8032 section 5.1.3), for
+//!   the public key A as well: `ed25519-dalek` accepts such an A when the
+//!   point has large order;
+//! - a public key A or a commitment R of small order (\[8\]P is the
+//!   identity): with such an A, \[S\]B = R + \[k\]A holds for R =
+//!   identity and S = 0 whenever the order of A divides k, for one message
+//!   in eight or better, without any private key;
+//! - S not below the group order L (a malleable signature).
+//!
+//! The equation is the cofactorless one; a key with a small-order component
+//! added to a point of order L is not refused (it only verifies what its
+//! holder signs).
 
-use crate::sha512::Sha512;
-use crate::{wipe, SecretBytes};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 
 pub const PUBLIC_KEY_LEN: usize = 32;
 pub const SEED_LEN: usize = 32;
 pub const SIGNATURE_LEN: usize = 64;
 
-use crate::field25519::Fe;
-
-/// sqrt(-1) = 2^((p-1)/4).
-fn sqrt_m1() -> Fe {
-    let mut e = [0xFFu8; 32];
-    e[0] = 0xFB;
-    e[31] = 0x1F;
-    Fe::from_u64(2).pow(&e)
-}
-
-/// d = -121665 / 121666.
-fn curve_d() -> Fe {
-    Fe::from_u64(121665)
-        .neg()
-        .mul(Fe::from_u64(121666).invert())
-}
-
-// ---------------------------------------------------------------- points
-
-/// Point in extended coordinates (X, Y, Z, T), x = X/Z, y = Y/Z, T = XY/Z.
-#[derive(Clone, Copy, Debug)]
-struct Point {
-    x: Fe,
-    y: Fe,
-    z: Fe,
-    t: Fe,
-}
-
-struct Curve {
-    d: Fe,
-    d2: Fe,
-    sqrt_m1: Fe,
-}
-
-impl Curve {
-    fn new() -> Self {
-        let d = curve_d();
-        Self {
-            d,
-            d2: d.add(d),
-            sqrt_m1: sqrt_m1(),
-        }
-    }
-
-    fn identity(&self) -> Point {
-        Point {
-            x: Fe::ZERO,
-            y: Fe::ONE,
-            z: Fe::ONE,
-            t: Fe::ZERO,
-        }
-    }
-
-    fn add(&self, p: &Point, q: &Point) -> Point {
-        let a = p.y.sub(p.x).mul(q.y.sub(q.x));
-        let b = p.y.add(p.x).mul(q.y.add(q.x));
-        let c = p.t.mul(self.d2).mul(q.t);
-        let d = p.z.mul(q.z);
-        let d = d.add(d);
-        let e = b.sub(a);
-        let f = d.sub(c);
-        let g = d.add(c);
-        let h = b.add(a);
-        Point {
-            x: e.mul(f),
-            y: g.mul(h),
-            z: f.mul(g),
-            t: e.mul(h),
-        }
-    }
-
-    fn double(&self, p: &Point) -> Point {
-        let a = p.x.square();
-        let b = p.y.square();
-        let c = p.z.square();
-        let c = c.add(c);
-        let h = a.add(b);
-        let e = h.sub(p.x.add(p.y).square());
-        let g = a.sub(b);
-        let f = c.add(g);
-        Point {
-            x: e.mul(f),
-            y: g.mul(h),
-            z: f.mul(g),
-            t: e.mul(h),
-        }
-    }
-
-    /// Scalar multiplication by a secret scalar: the same operations for
-    /// every scalar, the result of each addition taken or not by a mask
-    /// (a timing or cache observer learns nothing of the scalar's bits).
-    fn mul_secret(&self, scalar: &[u8; 32], p: &Point) -> Point {
-        let mut r = self.identity();
-        for i in (0..256).rev() {
-            r = self.double(&r);
-            let mut sum = self.add(&r, p);
-            let bit = ((scalar[i / 8] >> (i % 8)) & 1) as u64;
-            Fe::cswap(&mut r.x, &mut sum.x, bit);
-            Fe::cswap(&mut r.y, &mut sum.y, bit);
-            Fe::cswap(&mut r.z, &mut sum.z, bit);
-            Fe::cswap(&mut r.t, &mut sum.t, bit);
-        }
-        r
-    }
-
-    /// Scalar multiplication by a public scalar (double and add, variable
-    /// time): verification only.
-    fn mul(&self, scalar: &[u8; 32], p: &Point) -> Point {
-        let mut r = self.identity();
-        for i in (0..256).rev() {
-            r = self.double(&r);
-            if (scalar[i / 8] >> (i % 8)) & 1 == 1 {
-                r = self.add(&r, p);
-            }
-        }
-        r
-    }
-
-    fn compress(&self, p: &Point) -> [u8; 32] {
-        let zi = p.z.invert();
-        let x = p.x.mul(zi);
-        let y = p.y.mul(zi);
-        let mut out = y.to_bytes();
-        out[31] |= (x.is_negative() as u8) << 7;
-        out
-    }
-
-    /// Decodes a point (RFC 8032 section 5.1.3), refusing y >= p.
-    fn decompress(&self, b: &[u8; 32]) -> Option<Point> {
-        let sign = b[31] >> 7;
-        let mut yb = *b;
-        yb[31] &= 0x7F;
-        let y = Fe::from_bytes(&yb);
-        if y.to_bytes() != yb {
-            return None;
-        }
-        // x^2 = (y^2 - 1) / (d y^2 + 1)
-        let y2 = y.square();
-        let u = y2.sub(Fe::ONE);
-        let v = self.d.mul(y2).add(Fe::ONE);
-        // x = u v^3 (u v^7)^((p-5)/8)
-        let v3 = v.square().mul(v);
-        let v7 = v3.square().mul(v);
-        let mut x = u.mul(v3).mul(u.mul(v7).pow22523());
-        let vx2 = v.mul(x.square());
-        if !vx2.eq(u) {
-            if vx2.eq(u.neg()) {
-                x = x.mul(self.sqrt_m1);
-            } else {
-                return None;
-            }
-        }
-        if x.is_zero() && sign == 1 {
-            return None;
-        }
-        if x.is_negative() as u8 != sign {
-            x = x.neg();
-        }
-        Some(Point {
-            x,
-            y,
-            z: Fe::ONE,
-            t: x.mul(y),
-        })
-    }
-
-    /// \[8\]P is the identity. \[8\]P has order 1 or L (the group is
-    /// Z/8 x Z/L), and x = 0 only at the identity (0, 1) and at (0, -1),
-    /// of order 2: so x = 0 and y = z decide it.
-    fn is_small_order(&self, p: &Point) -> bool {
-        let q = self.double(&self.double(&self.double(p)));
-        q.x.is_zero() && q.y.eq(q.z)
-    }
-
-    fn base(&self) -> Point {
-        let mut b = [0x66u8; 32];
-        b[0] = 0x58;
-        self.decompress(&b).expect("base point")
-    }
-}
-
-// ---------------------------------------------------------------- scalars mod L
-
-/// L = 2^252 + 27742317777372353535851937790883648493, in LE u64 limbs.
-const L: [u64; 4] = [
-    0x5812631a5cf5d3ed,
-    0x14def9dea2f79cd6,
-    0,
-    0x1000000000000000,
-];
-
-fn ge(a: &[u64; 4], b: &[u64; 4]) -> bool {
-    for i in (0..4).rev() {
-        if a[i] != b[i] {
-            return a[i] > b[i];
-        }
-    }
-    true
-}
-
-/// a -= b; returns the final borrow (1 if b > a).
-fn sub_in_place(a: &mut [u64; 4], b: &[u64; 4]) -> u64 {
-    let mut borrow = 0u64;
-    for i in 0..4 {
-        let (d, b1) = a[i].overflowing_sub(b[i]);
-        let (d, b2) = d.overflowing_sub(borrow);
-        a[i] = d;
-        borrow = (b1 | b2) as u64;
-    }
-    borrow
-}
-
-/// x mod L for x of up to 512 bits (LE limbs), by binary long division.
-fn reduce_limbs(x: &[u64; 8]) -> [u64; 4] {
-    let mut rem = [0u64; 4];
-    for i in (0..512).rev() {
-        let bit = (x[i / 64] >> (i % 64)) & 1;
-        // rem = rem * 2 + bit (fits: rem < L < 2^253)
-        let mut carry = bit;
-        for limb in rem.iter_mut() {
-            let top = *limb >> 63;
-            *limb = (*limb << 1) | carry;
-            carry = top;
-        }
-        // rem - L kept when it did not borrow, without a branch: the
-        // scalar may be secret (the signing nonce, the key).
-        let mut less = rem;
-        let borrow = sub_in_place(&mut less, &L);
-        let keep = borrow.wrapping_sub(1); // all ones when rem >= L
-        for (r, l) in rem.iter_mut().zip(less) {
-            *r = (l & keep) | (*r & !keep);
-        }
-    }
-    rem
-}
-
-fn limbs_from_bytes(b: &[u8]) -> [u64; 8] {
-    let mut out = [0u64; 8];
-    for (i, chunk) in b.chunks(8).enumerate().take(8) {
-        let mut v = [0u8; 8];
-        v[..chunk.len()].copy_from_slice(chunk);
-        out[i] = u64::from_le_bytes(v);
-    }
-    out
-}
-
-fn bytes_from_limbs(l: &[u64; 4]) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    for (i, limb) in l.iter().enumerate() {
-        out[8 * i..8 * i + 8].copy_from_slice(&limb.to_le_bytes());
-    }
-    out
-}
-
-/// Reduces a 64-byte hash modulo L. The limb copies are wiped: the hash
-/// may be the signing nonce's.
-fn reduce(h: &[u8; 64]) -> [u8; 32] {
-    let mut x = limbs_from_bytes(h);
-    let mut r = reduce_limbs(&x);
-    let out = bytes_from_limbs(&r);
-    wipe(&mut x);
-    wipe(&mut r);
-    out
-}
-
-/// (a * b + c) mod L. The limbs are wiped: `b` is the secret scalar and
-/// `c` the nonce.
-fn mul_add(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> [u8; 32] {
-    let (mut a, mut b, mut c) = (
-        limbs_from_bytes(a),
-        limbs_from_bytes(b),
-        limbs_from_bytes(c),
-    );
-    // Schoolbook product with a carry per row: each partial sum fits in u128
-    // (limb*limb + limb + carry < 2^128), unlike accumulating columns.
-    let mut limbs = [0u64; 8];
-    for i in 0..4 {
-        let mut carry = 0u128;
-        for j in 0..4 {
-            let t = limbs[i + j] as u128 + a[i] as u128 * b[j] as u128 + carry;
-            limbs[i + j] = t as u64;
-            carry = t >> 64;
-        }
-        limbs[i + 4] = carry as u64;
-    }
-    let mut carry = 0u128;
-    for i in 0..8 {
-        let t = limbs[i] as u128 + if i < 4 { c[i] as u128 } else { 0 } + carry;
-        limbs[i] = t as u64;
-        carry = t >> 64;
-    }
-    let mut r = reduce_limbs(&limbs);
-    let out = bytes_from_limbs(&r);
-    for l in [
-        &mut a[..],
-        &mut b[..],
-        &mut c[..],
-        &mut limbs[..],
-        &mut r[..],
-    ] {
-        wipe(l);
-    }
-    out
-}
-
-/// `s` is a canonical scalar (< L).
-fn is_canonical(s: &[u8; 32]) -> bool {
-    let l = limbs_from_bytes(s);
-    !ge(&[l[0], l[1], l[2], l[3]], &L)
-}
-
-fn clamp(a: &mut [u8; 32]) {
-    a[0] &= 248;
-    a[31] &= 127;
-    a[31] |= 64;
-}
-
-// ---------------------------------------------------------------- API
-
-/// Public key derived from the 32-byte seed.
+/// Public key of `seed`.
 pub fn public_key(seed: &[u8; SEED_LEN]) -> [u8; PUBLIC_KEY_LEN] {
-    let h = SecretBytes(crate::sha512::sha512(seed));
-    let mut a = SecretBytes([0u8; 32]);
-    a.0.copy_from_slice(&h.0[..32]);
-    clamp(&mut a.0);
-    let c = Curve::new();
-    c.compress(&c.mul_secret(&a.0, &c.base()))
+    crate::scrubbed::<{ crate::SCRUB_CURVE }, _>(|| {
+        SigningKey::from_bytes(seed).verifying_key().to_bytes()
+    })
 }
 
-/// Signs `msg` with the seed (RFC 8032 §5.1.6).
+/// Signature of `msg` with `seed` (deterministic, RFC 8032 section 5.1.6).
 pub fn sign(seed: &[u8; SEED_LEN], msg: &[u8]) -> [u8; SIGNATURE_LEN] {
-    let h = SecretBytes(crate::sha512::sha512(seed));
-    let mut a = SecretBytes([0u8; 32]);
-    a.0.copy_from_slice(&h.0[..32]);
-    clamp(&mut a.0);
-    let prefix = &h.0[32..];
-    let c = Curve::new();
-    let base = c.base();
-    let pk = c.compress(&c.mul_secret(&a.0, &base));
-
-    let mut hasher = Sha512::new();
-    hasher.update(prefix);
-    hasher.update(msg);
-    let nonce_hash = SecretBytes(hasher.finish());
-    let r = SecretBytes(reduce(&nonce_hash.0));
-    let rb = c.compress(&c.mul_secret(&r.0, &base));
-
-    let mut hasher = Sha512::new();
-    hasher.update(&rb);
-    hasher.update(&pk);
-    hasher.update(msg);
-    let k = reduce(&hasher.finish());
-    let s = mul_add(&k, &a.0, &r.0);
-
-    let mut sig = [0u8; SIGNATURE_LEN];
-    sig[..32].copy_from_slice(&rb);
-    sig[32..].copy_from_slice(&s);
-    sig
+    // `ed25519-dalek` leaves the nonce r and the secret scalar on the
+    // stack; with r and the signature, anyone gets the private scalar.
+    crate::scrubbed::<{ crate::SCRUB_CURVE }, _>(|| {
+        SigningKey::from_bytes(seed).sign(msg).to_bytes()
+    })
 }
 
 /// Verifies `sig` over `msg` with the public key `pk` (RFC 8032 §5.1.7).
-/// Non-canonical encodings and a small-order A or R are refused (see the
-/// module documentation).
+/// Non-canonical encodings, a small-order A or R and a non-canonical S are
+/// refused (see the module documentation).
 pub fn verify(pk: &[u8; PUBLIC_KEY_LEN], msg: &[u8], sig: &[u8; SIGNATURE_LEN]) -> bool {
-    let mut rb = [0u8; 32];
-    let mut s = [0u8; 32];
-    rb.copy_from_slice(&sig[..32]);
-    s.copy_from_slice(&sig[32..]);
-    if !is_canonical(&s) {
+    if !canonical_y(pk) {
         return false;
     }
-    let c = Curve::new();
-    let (Some(a), Some(r)) = (c.decompress(pk), c.decompress(&rb)) else {
+    let Ok(key) = VerifyingKey::from_bytes(pk) else {
         return false;
     };
-    if c.is_small_order(&a) || c.is_small_order(&r) {
-        return false;
+    key.verify_strict(msg, &Signature::from_bytes(sig)).is_ok()
+}
+
+/// Whether the y coordinate of a point encoding (its low 255 bits, little
+/// endian) is below p = 2^255 - 19. R needs no such check: `verify_strict`
+/// compares the canonical encoding it computes with R's bytes.
+fn canonical_y(enc: &[u8; 32]) -> bool {
+    // p in little endian: ed ff .. ff 7f.
+    let top = enc[31] & 0x7F;
+    if top != 0x7F {
+        return true;
     }
-    let mut hasher = Sha512::new();
-    hasher.update(&rb);
-    hasher.update(pk);
-    hasher.update(msg);
-    let k = reduce(&hasher.finish());
-    let sb = c.mul(&s, &c.base());
-    let rka = c.add(&r, &c.mul(&k, &a));
-    crate::ct_eq(&c.compress(&sb), &c.compress(&rka))
+    if enc[1..31].iter().any(|&b| b != 0xFF) {
+        return true;
+    }
+    enc[0] < 0xED
 }
 
 #[cfg(test)]
@@ -425,47 +82,8 @@ mod tests {
         out
     }
 
-    #[test]
-    fn field_round_trip_and_inverse() {
-        let one = Fe::ONE;
-        assert_eq!(one.to_bytes()[0], 1);
-        let v = Fe::from_bytes(&bytes::<32>(
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd0f",
-        ));
-        assert!(v.mul(v.invert()).eq(one));
-        assert!(v.sub(v).is_zero());
-        assert!(v.add(v.neg()).is_zero());
-        let bytes_back = Fe::from_bytes(&v.to_bytes());
-        assert!(bytes_back.eq(v));
-        // p itself must reduce to 0.
-        let mut p = [0xFFu8; 32];
-        p[0] = 0xED;
-        p[31] = 0x7F;
-        assert!(Fe::from_bytes(&p).is_zero());
-        let i = sqrt_m1();
-        assert!(i.square().eq(Fe::ONE.neg()));
-    }
-
-    #[test]
-    fn scalar_reduction() {
-        // L mod L = 0 ; (L + 5) mod L = 5
-        let mut l = [0u8; 64];
-        l[..32].copy_from_slice(&bytes_from_limbs(&L));
-        assert_eq!(reduce(&l), [0u8; 32]);
-        l[0] = l[0].wrapping_add(5);
-        let mut five = [0u8; 32];
-        five[0] = 5;
-        assert_eq!(reduce(&l), five);
-        // 2 * 3 + 4 = 10
-        let (mut two, mut three, mut four, mut ten) = ([0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32]);
-        two[0] = 2;
-        three[0] = 3;
-        four[0] = 4;
-        ten[0] = 10;
-        assert_eq!(mul_add(&two, &three, &four), ten);
-        assert!(is_canonical(&ten));
-        assert!(!is_canonical(&bytes_from_limbs(&L)));
-    }
+    /// The group order L, little endian.
+    const L: &str = "edd3f55c1a631258d69cf7a2def9de1400000000000000000000000000000010";
 
     #[test]
     fn rfc8032_test_vectors() {
@@ -520,12 +138,7 @@ mod tests {
     }
 
     #[test]
-    fn scalar_products_with_large_limbs_do_not_overflow() {
-        // Regression: accumulating columns of four u64*u64 products in a u128
-        // overflowed with seeds such as [9; 32]; now the carry goes per row.
-        let all = [0xFFu8; 32];
-        let p = mul_add(&all, &all, &all);
-        assert!(is_canonical(&p));
+    fn varied_seeds_round_trip() {
         for seed in [[9u8; 32], [0xFFu8; 32], [0x80u8; 32], [0x5Au8; 32]] {
             let pk = public_key(&seed);
             let sig = sign(&seed, b"limbs grandes");
@@ -542,39 +155,12 @@ mod tests {
         assert!(verify(&pk, &msg, &sig));
         // Non-canonical signature (S >= L) is rejected.
         let mut noncanon = sig;
-        noncanon[32..].copy_from_slice(&bytes_from_limbs(&L));
+        noncanon[32..].copy_from_slice(&bytes::<32>(L));
         assert!(!verify(&pk, &msg, &noncanon));
         // Undecodable public key.
         let mut bad_pk = pk;
         bad_pk[31] = 0xFF;
         let _ = verify(&bad_pk, &msg, &sig); // must not panic
-    }
-
-    /// The constant-time ladder computes what double-and-add computes, and
-    /// the branchless reduction what long division with a branch did.
-    #[test]
-    fn constant_time_paths_agree() {
-        let c = Curve::new();
-        let b = c.base();
-        let mut x = 0x9E37_79B9_7F4A_7C15u64;
-        for _ in 0..16 {
-            let mut k = [0u8; 32];
-            for byte in k.iter_mut() {
-                x ^= x << 13;
-                x ^= x >> 7;
-                x ^= x << 17;
-                *byte = x as u8;
-            }
-            assert_eq!(
-                c.compress(&c.mul_secret(&k, &b)),
-                c.compress(&c.mul(&k, &b))
-            );
-        }
-        let mut all = [0xFFu8; 64];
-        let r = reduce(&all);
-        assert!(!ge(&limbs_from_bytes(&r)[..4].try_into().unwrap(), &L));
-        all = [0; 64];
-        assert_eq!(reduce(&all), [0; 32]);
     }
 
     /// The eight points of order dividing 8, canonically encoded, in the
@@ -601,15 +187,13 @@ mod tests {
     ];
 
     #[test]
-    fn small_order_points_are_found() {
-        let c = Curve::new();
+    fn small_order_points_are_weak_keys() {
         for enc in SMALL_ORDER {
-            let p = c.decompress(&bytes::<32>(enc)).expect("on the curve");
-            assert!(c.is_small_order(&p), "{enc}");
+            let key = VerifyingKey::from_bytes(&bytes::<32>(enc)).expect("on the curve");
+            assert!(key.is_weak(), "{enc}");
         }
-        assert!(!c.is_small_order(&c.base()));
-        let pk = c.decompress(&public_key(&[42; 32])).unwrap();
-        assert!(!c.is_small_order(&pk));
+        let key = VerifyingKey::from_bytes(&public_key(&[42; 32])).unwrap();
+        assert!(!key.is_weak());
     }
 
     /// Before incident 0044 a small-order A with R = identity (or another
@@ -627,9 +211,8 @@ mod tests {
                 }
             }
         }
-        let c = Curve::new();
         for enc in NON_CANONICAL {
-            assert!(c.decompress(&bytes::<32>(enc)).is_none(), "{enc}");
+            assert!(!canonical_y(&bytes::<32>(enc)), "{enc}");
         }
         // An honest key with a small-order R in place of its own.
         let seed = [42u8; 32];
@@ -641,5 +224,35 @@ mod tests {
             bad[..32].copy_from_slice(&bytes::<32>(r));
             assert!(!verify(&pk, b"m", &bad));
         }
+    }
+
+    /// A non-canonical encoding (y + p) of a point of large order:
+    /// `ed25519-dalek` decodes it as a key, the check of ours refuses it.
+    #[test]
+    fn non_canonical_large_order_keys_are_refused() {
+        let mut found = 0;
+        for y in 2u8..19 {
+            let mut canonical = [0u8; 32];
+            canonical[0] = y;
+            let Ok(key) = VerifyingKey::from_bytes(&canonical) else {
+                continue;
+            };
+            if key.is_weak() {
+                continue;
+            }
+            // y + p: low byte y + 0xed (no carry for y < 19), then all ones.
+            let mut alias = [0xFFu8; 32];
+            alias[0] = y + 0xED;
+            alias[31] = 0x7F;
+            assert!(
+                VerifyingKey::from_bytes(&alias).is_ok(),
+                "dalek decodes y = {y} + p"
+            );
+            assert!(!canonical_y(&alias));
+            assert!(!verify(&alias, b"m", &[0u8; 64]));
+            found += 1;
+        }
+        assert!(found > 0, "no large-order point with y < 19");
+        assert!(canonical_y(&public_key(&[42; 32])));
     }
 }
