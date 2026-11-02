@@ -1,9 +1,12 @@
 # ADR 0072: AriFS v2, copy-on-write replace and a larger partition
 
 - **Date:** 2026-11-03
-- **Status:** Proposed. The decision is the owner's: it changes the
-  on-disk format, the disk layout and what an older system can read
-  (incident 0026, "Open"; owner decisions pending, item 2).
+- **Status:** Accepted (B + P2). The owner, 2026-11-03: "AriFS es nuestro
+  y se puede mejorar, pues mejorémoslo con todo lo mejor que veas". It
+  changes the on-disk format, the disk layout and what an older system
+  can read (incident 0026, "Open"). P1, growing `ARI0` on first boot, is
+  left for a later change: rewriting the GPT on a running machine is a
+  separate risk with its own tests.
 
 ## Context
 
@@ -115,20 +118,26 @@ measured on the branch, see Tests):
 1. **AriFS v2 format.**
    - Superblock (LBA 0): magic `ARIFS\0\0\3`, version, sectors, where
      the two table copies are, CRC.
-   - Two copies of the table (32 sectors each), each with a
-     generation number and a CRC over the whole copy. A commit writes the
-     whole new table to the copy not holding the newest generation, then
-     flushes. `open` takes the valid copy with the higher generation. A
-     torn commit leaves the older copy valid, which is the state before
-     the replace.
-   - 256 entries of 64 bytes (16 KiB per copy): name (32 bytes, as v1),
-     size, and up to 4 extents (start, length).
+   - Two copies of the table, 32 sectors (16 KiB) each: a header
+     (generation number, CRC over the whole copy) and 255 entries of 64
+     bytes.
+   - A commit writes the whole new table to the copy not holding the
+     current generation, then flushes. `open` takes the valid copy with
+     the higher generation. A torn commit leaves the older copy valid,
+     which is the state before the operation.
+   - Every commit flushes, so the copy a commit overwrites is never the
+     only durable one, and sectors an operation frees are never the old
+     generation's while it may still be the one `open` finds.
+   - An entry: name (32 bytes, as v1), size, and up to 4 extents (start,
+     length in sectors).
    - No free-space map: free space is what no entry of the committed table
      covers, computed at `open`. A crash before a commit leaves the new
      sectors unreferenced, which is free.
    - Largest file 16 MiB (`MAX_REPLACE`, `PACKAGE_MAX`); the IPC protocol
      of ADR 0018 is unchanged (chunks, commit, one replace at a time, the
-     2-second abandonment).
+     2-second abandonment). Chunks arrive without the total length, so a
+     replace starts in the largest free run and grows there, taking
+     another run only when it is full.
    - `write` keeps v1's contract (in place, inside the file's extents, the
      size grows only after the data, by a commit).
    - New: `delete`, and `rename` (both one commit), so the installer can
@@ -146,10 +155,11 @@ measured on the branch, see Tests):
 3. **Rollback stays safe.** An older system must never meet a v2 disk:
    it would not mount `ARI0`, and would lose its keys and its updater
    state.
-   - fsd migrates only when both slots hold a system that reads v2 (or
-     the other slot is empty). After the first update to a v2 system the
-     other slot still holds the old one, so the disk stays v1; it migrates
-     after the next update.
+   - The updater, which knows the slots, asks fsd to migrate only when
+     both slots hold a system that reads v2 (or the other slot is empty).
+     After the first update to a v2 system the other slot still holds the
+     old one, so the disk stays v1, and fsd keeps operating it with v1's
+     code; it migrates after the next update.
    - Once the disk is v2, the updater refuses to install, even with
      `--allow-downgrade`, a system older than the first one that reads v2,
      and says why (ext4's incompatible feature flags, without leaving an
