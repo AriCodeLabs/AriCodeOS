@@ -1970,10 +1970,14 @@ fn execute(
                 }
             }
         }
+        // Writes not yet durable (growth on AriFS v2, in-place writes) are
+        // flushed before the power goes (audit of the deferred growth, M2).
         b"reboot" => {
+            let _ = fs.flush();
             aricode_rt::print_error(b"reboot", sys::system_power(SYSTEM, abi::power::REBOOT));
         }
         b"shutdown" => {
+            let _ = fs.flush();
             aricode_rt::print_error(b"shutdown", sys::system_power(SYSTEM, abi::power::SHUTDOWN));
         }
         b"exit" => return true,

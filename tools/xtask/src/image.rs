@@ -397,6 +397,7 @@ pub fn write_usb_image_as(
             fs.write(i, 0, content)
                 .map_err(|e| format!("arifs {name}: {e:?}"))?;
         }
+        fs.flush().map_err(|e| format!("arifs: {e:?}"))?;
     }
     // No test data (incident 0005): neither the `ARIDISK` raw-area pattern
     // nor the test disk's sample files. A `selftest` boot from the stick
@@ -1231,7 +1232,8 @@ fn format_arifs_version(
         fs.write(i, 0, content)
             .map_err(|e| format!("arifs {name} ({} bytes): {e:?}", content.len()))?;
     }
-    Ok(())
+    // Writes that grow a file are committed by the flush (ADR 0072).
+    fs.flush().map_err(|e| format!("arifs: {e:?}"))
 }
 
 /// Test disk: AriFS with the sample files and the sample WebAssembly module
@@ -1919,6 +1921,9 @@ pub struct Publication {
     /// Tests: publish the apps as `large` packages (`LARGE_PADDING` more
     /// after the ELF), which the updater stages piece by piece (ADR 0072).
     pub large_apps: bool,
+    /// Tests: publish the apps as `huge` packages (`HUGE_PADDING` more,
+    /// within 32 KiB of `PACKAGE_MAX`).
+    pub huge_apps: bool,
     /// Tests: the apps' `requires` (ADR 0074), 0 for none.
     pub apps_require: u32,
 }
@@ -2270,10 +2275,10 @@ pub fn publish_channel(dir: &Path, channel: &Publication) -> Result<String> {
             crate::build::PACKAGES_RELEASE,
             false,
         )?;
-        let extra = if channel.large_apps {
-            crate::build::LARGE_PADDING
-        } else {
-            0
+        let extra = match (channel.huge_apps, channel.large_apps) {
+            (true, _) => crate::build::HUGE_PADDING,
+            (false, true) => crate::build::LARGE_PADDING,
+            (false, false) => 0,
         };
         if extra > 0 || channel.apps_require > 0 {
             app = app.resigned(extra, channel.apps_require)?;

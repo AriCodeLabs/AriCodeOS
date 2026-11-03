@@ -1,0 +1,30 @@
+# A package larger than AriFS v1's 32 KiB files on a disk still in v1
+# (kept so by a slot whose system reads only v1, ADR 0072): the updater
+# stops the download into its stage file when v1 refuses to grow it, says
+# why and how to get v2, and stages nothing; the installed version stays.
+name = "apps.upgrade_v1_limit"
+description = "upgrade on AriFS v1: a package over 32 KiB is refused at download, said, nothing staged"
+level = "full"
+areas = ["apps", "update", "filesystem"]
+disk = "arifs-v1-old-slot"
+install = ["examples/hello_ext"]
+timeout_secs = 150
+
+[host_update]
+apps = ["examples/hello_ext:2"]
+large_apps = true
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["update", "upgrade", "run hello_ext 1", "shutdown"]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "fsd: AriFS v1 mounted",
+    "updater: app hello_ext: installed 1, source 1 offers 2: upgrade available",
+    "updater: downloading hello_ext-2.aripkg (10",
+    "do not fit updater/pkg-1.aripkg: ARI0 is still AriFS v1, whose files hold 32768 (a stick written from 0.18 on is v2); skipped",
+    "hello_ext v1: hello from outside the tree (arg 1)",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "installed (apps/", "staged for the installer"]

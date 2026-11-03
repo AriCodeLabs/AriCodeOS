@@ -292,19 +292,20 @@ pub fn run_scenario(
         let mut parts = spec.split(':');
         let (Some(dir), Some(version)) = (parts.next(), parts.next()) else {
             return Err(format!(
-                "{}: package '{spec}': DIR:VERSION[:corrupt|:large|:requires=N]",
+                "{}: package '{spec}': DIR:VERSION[:corrupt|:large|:huge|:requires=N]",
                 s.name
             ));
         };
         let version: u32 = version
             .parse()
             .map_err(|_| format!("{}: package '{spec}': invalid version", s.name))?;
-        let (corrupt, large, requires) = match parts.next() {
-            None => (false, false, 0),
-            Some("corrupt") => (true, false, 0),
-            Some("large") => (false, true, 0),
+        let (corrupt, extra, requires) = match parts.next() {
+            None => (false, 0, 0),
+            Some("corrupt") => (true, 0, 0),
+            Some("large") => (false, build::LARGE_PADDING, 0),
+            Some("huge") => (false, build::HUGE_PADDING, 0),
             Some(other) => match other.strip_prefix("requires=").map(str::parse::<u32>) {
-                Some(Ok(level)) if level > 0 => (false, false, level),
+                Some(Ok(level)) if level > 0 => (false, 0, level),
                 _ => return Err(format!("{}: package '{spec}': unknown '{other}'", s.name)),
             },
         };
@@ -314,8 +315,7 @@ pub fn run_scenario(
             build::PACKAGES_RELEASE,
             corrupt,
         )?;
-        if large || requires > 0 {
-            let extra = if large { build::LARGE_PADDING } else { 0 };
+        if extra > 0 || requires > 0 {
             app = app.resigned(extra, requires)?;
         }
         installed.push((
@@ -423,6 +423,7 @@ pub fn run_scenario(
                 tamper_image: u.tamper_image,
                 large_image: u.large_image,
                 large_apps: u.large_apps,
+                huge_apps: u.huge_apps,
                 apps_require: u.apps_require,
                 ..image::Publication::default()
             };

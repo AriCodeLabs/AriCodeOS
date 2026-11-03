@@ -430,6 +430,13 @@ impl Service {
         if n == 0 {
             return;
         }
+        // Each reclaimed descriptor is a close: what the client's writes
+        // grew is committed now, not whenever someone else commits (audit
+        // of the deferred growth, M2). A failure is said; the next commit
+        // writes it.
+        if self.fs.any_growth() && self.fs.flush().is_err() {
+            say(b"growth left by a client gone not committed yet (the next commit writes it)");
+        }
         self.reclaimed += n as u64;
         let mut buf = [0u8; 20];
         sys::print(b"fsd: client gone (");
@@ -602,7 +609,15 @@ impl Service {
                         self.staging = None;
                         self.fs.abandon_replace();
                     }
-                    Reply::ok(0)
+                    // A file written and closed is whole on disk (ADR
+                    // 0072): its growth is committed here at the latest,
+                    // and only its own, so the close of one file never
+                    // fails on another's. The descriptor is closed either
+                    // way; an error says the growth is not durable yet.
+                    match index.map_or(Ok(()), |i| self.fs.commit_growth(i)) {
+                        Ok(()) => Reply::ok(0),
+                        Err(e) => Reply::status(status_of(e)),
+                    }
                 } else {
                     Reply::status(Status::BadFd)
                 }

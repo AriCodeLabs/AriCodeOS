@@ -1,9 +1,10 @@
 # ADR 0072, phase B: an app upgrade of an app's real size over the network.
 # The source offers hello_ext 2 as a 1 MiB package. The updater downloads
-# it straight into a chunked replace of its stage file, hashing it on the
-# way, commits it only with the size and SHA-256 of the signed index, and
-# verifies it piece by piece; the installer checks its SHA-256 against the
-# staged list, verifies it again and copies it into apps/hello_ext.aripkg.
+# it straight into its stage file with plain writes (one table commit, at
+# the flush), hashing it on the way, lists it only with the size and
+# SHA-256 of the signed index, and verifies it piece by piece; the
+# installer checks its SHA-256 against the staged list, verifies it again
+# and copies it into apps/hello_ext.aripkg.
 name = "apps.upgrade_network_large"
 description = "upgrade: a 1 MiB app package downloaded, staged and installed piece by piece"
 level = "full"
