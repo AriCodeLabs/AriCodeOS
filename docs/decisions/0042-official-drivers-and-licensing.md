@@ -9,8 +9,12 @@
   On 2026-10-23 the owner approved the direction of the "Trusted vendors"
   section: three levels (official, trusted vendor, unofficial) and
   delegated public-key signing with vendor certificates and revocation,
-  instead of a secret shared between AriCodeLabs and the vendor. The
-  details (open questions below) are still to be designed.
+  instead of a secret shared between AriCodeLabs and the vendor. On
+  2026-11-03 the owner answered the open questions below, and ADR 0073
+  holds the design: a separate offline vendor-root key, a minimal signed
+  certificate record, owner keys enrolled at the physical console for
+  unofficial drivers, and revocation that stops a driver at the next
+  boot.
 
 ## Context
 
@@ -98,7 +102,7 @@ responsibility but recognised by the system.
   0038); trust affects whether it is installed and how it is labelled, not
   what it may touch.
 
-Open questions: a separate vendor-root key or the release key; certificate
+Open questions (answered on 2026-11-03, ADR 0073): a separate vendor-root key or the release key; certificate
 format (reuse the x509 code or a minimal Ed25519 record); how vendors are
 audited; whether trusted-vendor drivers may be closed source under the
 chosen licence.
