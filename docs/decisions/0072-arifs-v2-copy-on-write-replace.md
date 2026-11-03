@@ -130,16 +130,22 @@ measured on the branch, see Tests):
      generation's while it may still be the one `open` finds.
    - An entry: name (32 bytes, as v1), size, and up to 4 extents (start,
      length in sectors).
-   - No free-space map: free space is what no entry of the committed table
-     covers, computed at `open`. A crash before a commit leaves the new
+   - No free-space map: free space is what no entry of the table in memory
+     covers. That table is the committed one at `open`, plus growth not
+     yet committed and a replace in progress, so a sector any copy on disk
+     may use is never handed out. A crash before a commit leaves the new
      sectors unreferenced, which is free.
    - Largest file 16 MiB (`MAX_REPLACE`, `PACKAGE_MAX`); the IPC protocol
      of ADR 0018 is unchanged (chunks, commit, one replace at a time, the
      2-second abandonment). Chunks arrive without the total length, so a
      replace starts in the largest free run and grows there, taking
      another run only when it is full.
-   - `write` keeps v1's contract (in place, inside the file's extents, the
-     size grows only after the data, by a commit).
+   - `write` writes in place inside the file's extents. Growth (the size
+     and the extents it takes) stays in the table in memory until the next
+     commit, a `flush`, or the close of a descriptor of that file; that
+     commit flushes the data before its commit point, so the size never
+     covers unwritten sectors. Until 2026-11-03 each growing write was a
+     commit of its own.
    - New: `delete`, and `rename` (both one commit), so the installer can
      remove an app.
 2. **Migration in place, without copying data.** v1 files are already
@@ -331,10 +337,36 @@ No high finding. What it found, and what was done:
   read failing inside the program and the package manifest's bound.
 - **I2.** Packages from `pkgs/` are hashed after their verification and
   the copy is committed only if it hashes the same.
-- Residuals: the scenarios use 1 MiB packages, not 8 MiB; a growing write
-  commits the table, so staging 1 MiB costs about 2 s in QEMU (deferring
-  size-only commits to `flush` and `close` is a later improvement); the v1
-  limit and a mismatch found during the copy have no scenario (a v1 disk
-  cannot hold the large source file).
+- Residuals, fixed on 2026-11-03 (the owner: no known defect is left when
+  the fix is in our hands):
+  - **Growing writes commit once.** A write that grows a file changes the
+    table in memory only (`pending`). The next commit, `flush`, or the
+    close of a descriptor (`commit_growth`, called by fsd) writes it,
+    after the data, because each commit flushes before its commit point.
+    A cut before that loses the growth only, like any unflushed write. A
+    download is one commit instead of one per piece, and host tests cut
+    every write of it.
+  - **The 8 MiB limit is tested end to end** by `apps.huge_package` and
+    `apps.upgrade_network_huge`, with packages within 32 KiB of
+    `PACKAGE_MAX`.
+  - **The v1 download limit** has `apps.upgrade_v1_limit`.
+  - **The close commit has a scenario:** `filesystem.close_commits_growth`
+    cuts the power right after a file is written and closed without a
+    flush, and the file is whole on the next boot.
+  - **Audit of the change (no high findings), fixed:**
+    - M1: growth is tracked per file, and a close commits only that file's
+      growth, so one file's close never fails on another's. An error on
+      close is documented: the descriptor is closed and the growth is not
+      durable yet.
+    - M2: fsd commits the growth of a client that dies, as a close, and
+      the shell flushes before `reboot` and `shutdown`.
+    - L1: module and ADR texts.
+    - L2: `flush` resyncs after a failed commit.
+    - L3: per-file tracking, as in M1.
+    - L4: tests for a failed growth commit, growth into just-freed
+      sectors beside other commits under cuts, and writes that do not
+      grow.
+  - **Still without a scenario:** a source changing during the
+    installer's copy (`Copied::Mismatch`) needs a concurrent writer.
 
 Incident 0026 is closed.

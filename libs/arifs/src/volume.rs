@@ -179,13 +179,22 @@ impl<D: BlockDevice> Volume<D> {
         }
     }
 
-    /// Commits what growing writes left in memory (AriFS v2; v1 commits
-    /// each one as it happens): when a descriptor closes, so a file
-    /// written and closed is whole on disk without an explicit flush.
-    pub fn commit_pending(&mut self) -> Result<(), FsError> {
+    /// Commits the growth of file `index` left in memory by writes (AriFS
+    /// v2; v1 commits each write as it happens): when a descriptor of it
+    /// closes, so a file written and closed is whole on disk without an
+    /// explicit flush.
+    pub fn commit_growth(&mut self, index: usize) -> Result<(), FsError> {
         match self {
             Self::V1(_) => Ok(()),
-            Self::V2(fs) => fs.commit_pending(),
+            Self::V2(fs) => fs.commit_growth(index),
+        }
+    }
+
+    /// Whether any file grew and no commit has written it yet (AriFS v2).
+    pub fn any_growth(&self) -> bool {
+        match self {
+            Self::V1(_) => false,
+            Self::V2(fs) => fs.any_growth(),
         }
     }
 

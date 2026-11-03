@@ -417,8 +417,10 @@ fn growing_writes_commit_once_and_a_cut_before_loses_only_the_growth() {
     let dev = fs.into_device();
     let total = dev.writes;
     assert_eq!(dev.flushes, 2, "one commit: the table's body, its header");
-    // Without the flush (a cut, or a client that died): the file is as it
-    // was, the sectors the growth took are free, nothing else changed.
+    // A cut before the flush: the file is as it was, the sectors the
+    // growth took are free, nothing else changed. (fsd commits the growth
+    // of a client that dies, as a close; only a cut or its own crash
+    // drops it.)
     let mut fs = AriFs::open(CuttingDisk::new(&base, usize::MAX)).unwrap();
     fs.write(a, 5, &pattern(90_000, 9)).unwrap();
     let mut fs = AriFs::open(fs.into_device().power_off(KEPT[0])).unwrap();
@@ -454,6 +456,169 @@ fn growing_writes_commit_once_and_a_cut_before_loses_only_the_growth() {
     fs.create("third").unwrap();
     let mut fs = AriFs::open(fs.into_device()).unwrap();
     assert_eq!(content(&mut fs, a), b"first and more");
+}
+
+#[test]
+fn growth_is_tracked_per_file_and_writes_inside_commit_nothing() {
+    let mut fs = AriFs::format(disk(800), 800).unwrap();
+    let a = fs.create("a").unwrap();
+    let b = fs.create("b").unwrap();
+    fs.write(a, 0, &pattern(3000, 1)).unwrap();
+    assert!(fs.has_growth(a) && !fs.has_growth(b) && fs.any_growth());
+    // b's close commits nothing (b did not grow), a's does.
+    let base = fs.into_device().0;
+    let mut fs = AriFs::open(CuttingDisk::new(&base, usize::MAX)).unwrap();
+    fs.write(a, 0, &pattern(3000, 1)).unwrap();
+    let generation = fs.generation();
+    fs.commit_growth(b).unwrap();
+    assert_eq!(
+        fs.generation(),
+        generation,
+        "no commit for a file that did not grow"
+    );
+    fs.commit_growth(a).unwrap();
+    assert_eq!(fs.generation(), generation + 1);
+    assert!(!fs.any_growth());
+    // A write inside the size changes no entry: a flush is one device
+    // flush, no commit.
+    fs.write(a, 10, b"inside").unwrap();
+    assert!(!fs.any_growth());
+    let generation = fs.generation();
+    let before = fs.into_device();
+    let flushes = before.flushes;
+    let mut fs = AriFs::open(before).unwrap();
+    fs.flush().unwrap();
+    assert_eq!(fs.generation(), generation);
+    assert_eq!(fs.into_device().flushes, flushes + 1);
+}
+
+#[test]
+fn a_failed_growth_commit_keeps_serving_and_resyncs() {
+    let mut fs = AriFs::format(disk(1000), 1000).unwrap();
+    let a = fs.create("a").unwrap();
+    let b = fs.create("b").unwrap();
+    fs.write(a, 0, b"first").unwrap();
+    fs.write(b, 0, b"b").unwrap();
+    fs.flush().unwrap();
+    let base = fs.into_device().0;
+    let grown = {
+        let mut v = b"first".to_vec();
+        v.extend(pattern(40_000, 5));
+        v
+    };
+    let (writes, flushes) = {
+        let mut fs = AriFs::open(CuttingDisk::new(&base, usize::MAX)).unwrap();
+        fs.write(a, 5, &pattern(40_000, 5)).unwrap();
+        let w0 = fs.into_device();
+        let mut fs = AriFs::open(CuttingDisk::new(&base, usize::MAX)).unwrap();
+        fs.write(a, 5, &pattern(40_000, 5)).unwrap();
+        fs.flush().unwrap();
+        let d = fs.into_device();
+        // Only the commit's writes and flushes may fail here.
+        ((w0.writes..d.writes).collect::<Vec<_>>(), d.flushes)
+    };
+    let mut failures: Vec<(Option<(usize, bool)>, Option<usize>)> = Vec::new();
+    for &w in &writes {
+        failures.push((Some((w, true)), None));
+        failures.push((Some((w, false)), None));
+    }
+    for f in 0..flushes {
+        failures.push((None, Some(f)));
+    }
+    for (bad_write, bad_flush) in failures {
+        let flaky = FlakyDisk {
+            disk: CuttingDisk::new(&base, usize::MAX),
+            bad_write,
+            bad_flush,
+        };
+        let mut fs = AriFs::open(flaky).unwrap();
+        fs.write(a, 5, &pattern(40_000, 5)).unwrap();
+        assert!(fs.flush().is_err(), "{bad_write:?} {bad_flush:?}");
+        // Memory keeps serving the growth, and the next flush (a resync)
+        // writes it.
+        assert_eq!(content(&mut fs, a), grown);
+        fs.flush().unwrap();
+        assert!(!fs.any_growth());
+        let mut fs = AriFs::open(MemDisk(fs.into_device().disk.power_off(Kept::None).0)).unwrap();
+        assert_eq!(content(&mut fs, a), grown);
+        assert_eq!(content(&mut fs, b), b"b");
+        assert_disjoint(&fs);
+        // A cut right after the failure: the old file or the whole new one.
+        for kept in KEPT {
+            let flaky = FlakyDisk {
+                disk: CuttingDisk::new(&base, usize::MAX),
+                bad_write,
+                bad_flush,
+            };
+            let mut fs = AriFs::open(flaky).unwrap();
+            fs.write(a, 5, &pattern(40_000, 5)).unwrap();
+            let _ = fs.flush();
+            let mut fs = AriFs::open(fs.into_device().disk.power_off(kept)).unwrap();
+            let got = content(&mut fs, a);
+            assert!(
+                got == b"first" || got == grown,
+                "{bad_write:?} {bad_flush:?} {kept:?}"
+            );
+            assert_disjoint(&fs);
+        }
+    }
+}
+
+#[test]
+fn growth_into_sectors_just_freed_and_beside_other_commits_survives_cuts() {
+    // The updater's pattern: empty the stage file (a commit frees its
+    // sectors), then append; and another file's delete or replace commits
+    // in the middle of the appends.
+    let mut fs = AriFs::format(disk(600), 600).unwrap();
+    let stage = fs.create("updater/pkg-1.aripkg").unwrap();
+    let other = fs.create("other").unwrap();
+    let gone = fs.create("gone").unwrap();
+    fs.replace(stage, &pattern(60_000, 1)).unwrap();
+    fs.replace(other, &pattern(20_000, 2)).unwrap();
+    fs.replace(gone, &pattern(30_000, 3)).unwrap();
+    let base = fs.into_device().0;
+    let run = |fs: &mut AriFs<CuttingDisk>| -> Result<(), FsError> {
+        fs.replace(stage, &[])?;
+        let mut len = 0u32;
+        for k in 0..12u32 {
+            fs.write(stage, len, &pattern(5000, 10 + k))?;
+            len += 5000;
+            match k {
+                3 => fs.delete(gone)?,
+                7 => fs.replace(other, &pattern(25_000, 4))?,
+                _ => {}
+            }
+        }
+        fs.flush()
+    };
+    let mut want = Vec::new();
+    for k in 0..12u32 {
+        want.extend(pattern(5000, 10 + k));
+    }
+    let total = {
+        let mut fs = AriFs::open(CuttingDisk::new(&base, usize::MAX)).unwrap();
+        run(&mut fs).unwrap();
+        fs.into_device().writes
+    };
+    for cut_at in 0..=total {
+        for kept in KEPT {
+            let mut fs = AriFs::open(CuttingDisk::new(&base, cut_at)).unwrap();
+            let _ = run(&mut fs);
+            let mut fs = AriFs::open(fs.into_device().power_off(kept)).unwrap();
+            let got = content(&mut fs, stage);
+            // The old contents, empty, a whole prefix of pieces written
+            // before a commit, or everything: never bytes not written.
+            let ok = got == pattern(60_000, 1)
+                || (got.len() % 5000 == 0 && got[..] == want[..got.len()]);
+            assert!(ok, "cut at {cut_at}, {kept:?}: {} bytes", got.len());
+            let o = content(&mut fs, other);
+            assert!(o == pattern(20_000, 2) || o == pattern(25_000, 4));
+            if let Some(g) = fs.find("gone") {
+                assert_eq!(content(&mut fs, g), pattern(30_000, 3));
+            }
+            assert_disjoint(&fs);
+        }
+    }
 }
 
 #[test]

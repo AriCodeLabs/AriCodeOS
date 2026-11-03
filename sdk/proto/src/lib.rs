@@ -150,7 +150,9 @@ pub mod fs {
         Read = 4,
         /// `fd`, `offset`, `len`; handles `[reply, buffer]`; `value` = bytes written.
         Write = 5,
-        /// `fd`.
+        /// `fd`. On AriFS v2 it also commits what writes grew that file
+        /// by (ADR 0072); the descriptor is closed even when the reply is
+        /// an error, which says that growth is not durable yet.
         Close = 6,
         /// Main endpoint only (the broker): creates an endpoint bound
         /// to the prefix `name/`; the reply transfers that endpoint (`WRITE`).

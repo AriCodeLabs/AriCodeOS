@@ -20,10 +20,11 @@
 //!
 //! - a 512-byte sector is written whole or not at all, and nothing is
 //!   assumed about ordering between sectors except after `flush`;
-//! - every change of metadata is a commit: the whole table, one
-//!   generation newer, goes to the copy not holding the current one, then
-//!   `flush`. `open` takes the valid copy with the higher generation, so a
-//!   torn commit leaves the state before it;
+//! - every change of metadata is a commit (except the growth of a file by
+//!   `write`, below): the whole table in memory, one generation newer, goes
+//!   to the copy not holding the current one, then `flush`. `open` takes
+//!   the valid copy with the higher generation, so a torn commit leaves
+//!   the state before it;
 //! - since every commit is flushed, the copy a commit overwrites is never
 //!   the only durable one, and sectors freed by a commit are no longer
 //!   referenced by any copy `open` could pick;
@@ -31,10 +32,15 @@
 //!   flushed before the commit: after a cut the file holds the whole
 //!   previous contents or the whole new ones;
 //! - `write` writes in place inside the file's extents; a write that grows
-//!   the file puts the data in new free sectors and commits the size after
-//!   a flush;
-//! - free space is never stored: it is what the committed table does not
-//!   cover, so there is no map to disagree with the table;
+//!   the file puts the data in new free sectors and changes the table in
+//!   memory only. The next commit writes it (each commit flushes the data
+//!   before its commit point), or `flush`, or `commit_growth` when a
+//!   descriptor of that file closes. A cut before loses the growth only,
+//!   as any unflushed write;
+//! - free space is never stored: it is what the table in memory does not
+//!   cover (the committed table, growth not yet committed and a replace in
+//!   progress), so there is no map to disagree with the table, and a
+//!   sector one copy on disk may still use is never handed out;
 //! - `open` rejects (`Corrupt`) metadata that does not hold together
 //!   (overlapping extents, extents outside the data area, duplicate names)
 //!   even under a valid CRC: a volume that cannot be trusted is not
@@ -342,13 +348,13 @@ pub struct AriFs<D: BlockDevice> {
     /// first writes the table in memory over it and flushes, so no sector is
     /// written, and none reused, while a copy on disk may say otherwise.
     resync: bool,
-    /// The table in memory holds what growing writes added (sizes, and the
-    /// extents they took) and no commit has written yet: the next commit,
-    /// `flush` or `commit_pending` does. Until then a cut loses that
-    /// growth, as it loses any write not flushed, and nothing else: the
-    /// sectors it took are free on disk and used in memory, so no other
-    /// file is given them meanwhile.
-    pending: bool,
+    /// The files whose growth by `write` (sizes, and the extents it took)
+    /// is in the table in memory and no commit has written yet, one bit per
+    /// index: the next commit, `flush`, or `commit_growth` of that file
+    /// writes it. Until then a cut loses that growth, as it loses any write
+    /// not flushed, and nothing else: the sectors it took are free on disk
+    /// and used in memory, so no other file is given them meanwhile.
+    grown: [u64; 4],
 }
 
 /// The entries, `MAX_FILES` long.
@@ -389,7 +395,7 @@ impl<D: BlockDevice> AriFs<D> {
             recovery: Recovery::Clean,
             staged: None,
             resync: false,
-            pending: false,
+            grown: [0; 4],
         }
     }
 
@@ -632,7 +638,7 @@ impl<D: BlockDevice> AriFs<D> {
         self.generation = generation;
         self.resync = false;
         // The whole table in memory went to disk, growth included.
-        self.pending = false;
+        self.grown = [0; 4];
         Ok(())
     }
 
@@ -766,7 +772,7 @@ impl<D: BlockDevice> AriFs<D> {
     /// Writes `data` at `offset` (no gaps: `offset <= size`), durable at
     /// `flush`: in place inside the file's extents, and past them into free
     /// sectors the file takes. A write that grows the file changes the
-    /// table in memory only; the next commit, `flush` or `commit_pending`
+    /// table in memory only; the next commit, `flush` or `commit_growth`
     /// writes it, after the data (each commit flushes before its commit
     /// point). One commit for a whole download instead of one per write.
     pub fn write(&mut self, index: usize, offset: u32, data: &[u8]) -> Result<usize, FsError> {
@@ -790,16 +796,27 @@ impl<D: BlockDevice> AriFs<D> {
         e.size = e.size.max(end as u32);
         if self.table[index] != Some(e) {
             self.table[index] = Some(e);
-            self.pending = true;
+            self.grown[index / 64] |= 1 << (index % 64);
         }
         Ok(data.len())
     }
 
-    /// Writes what growing writes left in memory (see `pending`), if
-    /// anything: a commit, whose flush before its commit point makes the
-    /// data durable first. Nothing to do otherwise.
-    pub fn commit_pending(&mut self) -> Result<(), FsError> {
-        if self.pending {
+    /// Whether file `index` grew and no commit has written it yet.
+    pub fn has_growth(&self, index: usize) -> bool {
+        index < MAX_FILES && self.grown[index / 64] & 1 << (index % 64) != 0
+    }
+
+    /// Whether any file grew and no commit has written it yet.
+    pub fn any_growth(&self) -> bool {
+        self.grown.iter().any(|&w| w != 0)
+    }
+
+    /// Commits the growth of file `index`, if it has any (a commit, whose
+    /// flush before its commit point makes the data durable first; it
+    /// writes every other growth too). Nothing to do otherwise, so the
+    /// close of one file never fails on another's.
+    pub fn commit_growth(&mut self, index: usize) -> Result<(), FsError> {
+        if self.has_growth(index) {
             self.commit(&[])?;
         }
         Ok(())
@@ -931,10 +948,12 @@ impl<D: BlockDevice> AriFs<D> {
         Ok(())
     }
 
-    /// Makes previous writes durable, growth included.
+    /// Makes previous writes durable, growth included; after a failed
+    /// commit, it first writes the table in memory over the copy that
+    /// commit may have left, as the next change would.
     pub fn flush(&mut self) -> Result<(), FsError> {
-        match self.pending {
-            true => self.commit_pending(),
+        match self.resync || self.any_growth() {
+            true => self.commit(&[]),
             false => self.dev.flush(),
         }
     }

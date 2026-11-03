@@ -2416,7 +2416,7 @@ fn stage_app<'e>(
         fault(
             code::FILE_WRITE,
             "upd-pkg-stage",
-            &format!("cannot write {file}"),
+            &format!("cannot write {}/{file}", upd::UPDATER_DIR),
         )
     };
     let Ok(fd) = fs.open(file).or_else(|_| fs.create(file)) else {
@@ -2438,8 +2438,9 @@ fn stage_app<'e>(
             code::FILE_WRITE,
             "upd-pkg-v1-limit",
             &format!(
-                "app {}: {size} bytes do not fit {file}: ARI0 is still AriFS v1, whose files hold 32768 (a stick written from 0.18 on is v2); skipped",
-                entry.name
+                "app {}: {size} bytes do not fit {}/{file}: ARI0 is still AriFS v1, whose files hold 32768 (a stick written from 0.18 on is v2); skipped",
+                entry.name,
+                upd::UPDATER_DIR
             ),
         )),
         Ok(hash) if hash != entry.sha256 => Err(fault(

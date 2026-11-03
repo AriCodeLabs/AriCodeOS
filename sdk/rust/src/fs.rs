@@ -133,6 +133,10 @@ impl FsClient {
         self.call(req, false).map(|_| ())
     }
 
+    /// Closes `fd`; on AriFS v2 it also commits what the client's writes
+    /// grew the file by (ADR 0072). The descriptor is closed even when this
+    /// returns an error: the error says that growth is not durable yet
+    /// (`flush` makes it so, or the service's next commit).
     pub fn close(&self, fd: u32) -> Result<(), FsError> {
         let mut req = Request::new(Op::Close);
         req.fd = fd;

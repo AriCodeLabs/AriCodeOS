@@ -757,7 +757,9 @@ latter briefly to add the region.
   copy not holding the current generation and flushes, and `open` takes the
   valid copy with the higher generation. `replace` writes the new contents
   to free sectors, flushes, and commits (data written once, two flushes);
-  `write` writes in place and grows files into free sectors; `delete` and
+  `write` writes in place and grows files into free sectors, the growth
+  committed with the next commit, `flush` or descriptor close (one commit
+  per download, not per write); `delete` and
   `rename` (over an existing name, in one commit) are commits too. Free
   space is never stored: it is what the table does not cover. `open`
   rejects a table that does not hold together (overlapping extents,
