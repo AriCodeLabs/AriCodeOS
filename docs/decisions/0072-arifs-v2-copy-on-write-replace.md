@@ -273,12 +273,34 @@ what was done:
   raw pattern lies in what becomes free space after a migration (tests
   only).
 
-### Phase B (to do)
+## Implementation, phase B (2026-11-03)
 
-`PACKAGE_MAX` stays 32 KiB: the broker verifies a package in a DMA buffer
-of that size, the installer holds the new package and reads the installed
-one, and the updater stages app packages in memory. Raising it means
-handling packages in pieces: the broker hashing while it loads, the
-installer copying with `ReplaceChunk` while it verifies and committing
-only a package that verified, the updater staging downloads into a file.
-Incident 0026 closes with phase B.
+Packages are handled in pieces, so `PACKAGE_MAX` is 8 MiB, eight times the
+largest program of 0.17:
+
+- `aricode_pkg::verify_streaming`: the checks of `verify`, reading
+  through a callback (headers, the two small manifests, and the program
+  hashed 4 KiB at a time); the same packages accepted and refused.
+- Installer: a package is verified piece by piece and copied 4 KiB at a
+  time into a chunked replace of `apps/NAME.aripkg`, committed at the end;
+  a staged package's whole SHA-256 is checked first, as before, and again
+  over the bytes copied, so what is committed is what the updater listed.
+  Its version check verifies the installed package the same way. Its heap
+  holds a 4 KiB buffer, not two packages.
+- Updater: an app package downloads straight into a chunked replace of
+  its stage file, hashed on the way, committed only with the size and
+  SHA-256 of the signed index, then verified piece by piece.
+- Broker: the package it launches is loaded into a DMA buffer of its own
+  size, freed when the launch ends (the kernel copies the program when it
+  creates the process), instead of one buffer of `PACKAGE_MAX` kept for
+  ever.
+- Between verifying a source and copying it, the file could change: whoever
+  can write `pkgs/` or the updater's directory can write `apps/` directly,
+  and the broker verifies every package in full at each launch, so the gap
+  opens nothing.
+- Test disk: 72 MiB, `ARI0` 32 MiB (a package of `PACKAGE_MAX` and its
+  replace fit). `large` packages (1 MiB after the ELF, which the loader
+  ignores) in `apps.large_package` (installed, replaced, launched: 1,062,888
+  bytes) and `apps.upgrade_network_large`.
+
+Incident 0026 is closed.

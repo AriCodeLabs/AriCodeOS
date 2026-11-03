@@ -275,24 +275,28 @@ pub fn run_scenario(
         let mut parts = spec.split(':');
         let (Some(dir), Some(version)) = (parts.next(), parts.next()) else {
             return Err(format!(
-                "{}: package '{spec}': DIR:VERSION[:corrupt]",
+                "{}: package '{spec}': DIR:VERSION[:corrupt|:large]",
                 s.name
             ));
         };
         let version: u32 = version
             .parse()
             .map_err(|_| format!("{}: package '{spec}': invalid version", s.name))?;
-        let corrupt = match parts.next() {
-            None => false,
-            Some("corrupt") => true,
+        let (corrupt, large) = match parts.next() {
+            None => (false, false),
+            Some("corrupt") => (true, false),
+            Some("large") => (false, true),
             Some(other) => return Err(format!("{}: package '{spec}': unknown '{other}'", s.name)),
         };
-        let app = build::build_external(
+        let mut app = build::build_external(
             std::path::Path::new(dir),
             version,
             build::PACKAGES_RELEASE,
             corrupt,
         )?;
+        if large {
+            app = app.padded(build::LARGE_PADDING)?;
+        }
         installed.push((
             format!(
                 "pkgs/{}-{}{}",
@@ -392,6 +396,7 @@ pub fn run_scenario(
                 tamper_index: u.tamper_index,
                 tamper_image: u.tamper_image,
                 large_image: u.large_image,
+                large_apps: u.large_apps,
                 ..image::Publication::default()
             };
             let dir = workdir.join("update");

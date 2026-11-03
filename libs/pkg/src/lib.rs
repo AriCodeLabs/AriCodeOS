@@ -23,12 +23,13 @@ extern crate std;
 use aricode_crypto::{ed25519, sha256, unhex};
 use aricode_initrd::Initrd;
 
-/// Largest package the system handles (incident 0026). AriFS v2 replaces
-/// up to `MAX_REPLACE` (16 MiB, ADR 0072), but the broker, the installer
-/// and the updater still hold a whole package in memory, so the limit
-/// stays at AriFS v1's journal until they handle packages in pieces. The
-/// broker launches, and the updater downloads and stages, nothing larger.
-pub const PACKAGE_MAX: usize = 32 * 1024;
+/// Largest package the system handles (incident 0026, ADR 0072 phase B):
+/// eight times the largest program of 0.17 (the updater, 1 MiB). The
+/// installer and the updater handle packages in pieces; the broker holds
+/// the one it launches in a DMA buffer of its size, freed once the program
+/// starts. AriFS v2 replaces up to `MAX_REPLACE` (16 MiB); a volume still
+/// in v1 holds 32 KiB, and the installer says so.
+pub const PACKAGE_MAX: usize = 8 * 1024 * 1024;
 const _: () = assert!(PACKAGE_MAX <= aricode_proto::fs::MAX_REPLACE as usize);
 
 pub const MAX_NAME: usize = 32;
@@ -42,6 +43,8 @@ pub enum PkgError {
     BadManifest,
     BadSignature,
     HashMismatch(&'static str),
+    /// The reader of a streaming verification failed.
+    Unreadable,
 }
 
 /// Package manifest (what gets signed).
@@ -216,6 +219,93 @@ pub fn verify<'a>(container: &'a [u8], pubkey: &[u8; 32]) -> Result<Verified<'a>
     })
 }
 
+/// Largest package manifest or application manifest a streaming
+/// verification reads whole (both are a few hundred bytes).
+pub const SMALL_FILE_MAX: usize = 4096;
+
+/// A package verified piece by piece: its manifest, and where the program
+/// and its application manifest lie in it.
+#[derive(Debug, Clone, Copy)]
+pub struct StreamVerified {
+    pub manifest: PkgManifest,
+    pub program: aricode_initrd::Span,
+    pub app_manifest: aricode_initrd::Span,
+}
+
+/// Bytes hashed per read of a streaming verification.
+const HASH_PIECE: usize = 4096;
+
+/// [`verify`] of a package of `len` bytes read piece by piece through
+/// `read(offset, buf)`, for packages too large to hold (ADR 0072, phase
+/// B): the same checks in the same order, and the same accepted packages,
+/// with the manifests over [`SMALL_FILE_MAX`] refused. A failed read is
+/// `Unreadable`.
+pub fn verify_streaming(
+    len: usize,
+    mut read: impl FnMut(usize, &mut [u8]) -> Result<(), ()>,
+    pubkey: &[u8; 32],
+) -> Result<StreamVerified, PkgError> {
+    let unreadable = core::cell::Cell::new(false);
+    let mut fetch = |offset: usize, buf: &mut [u8]| {
+        read(offset, buf).map_err(|()| {
+            unreadable.set(true);
+            aricode_initrd::InitrdError::Truncated
+        })
+    };
+    let names = ["manifest", "manifest.sig", "program", "program.manifest"];
+    let [manifest, sig, program, app_manifest] = aricode_initrd::locate(len, &mut fetch, names)
+        .map_err(|_| {
+            if unreadable.get() {
+                PkgError::Unreadable
+            } else {
+                PkgError::BadContainer
+            }
+        })?;
+    let manifest = manifest.ok_or(PkgError::MissingFile("manifest"))?;
+    let sig = sig.ok_or(PkgError::MissingFile("manifest.sig"))?;
+    let program = program.ok_or(PkgError::MissingFile("program"))?;
+    let app_manifest = app_manifest.ok_or(PkgError::MissingFile("program.manifest"))?;
+    if sig.1 != ed25519::SIGNATURE_LEN {
+        return Err(PkgError::BadSignature);
+    }
+    if manifest.1 > SMALL_FILE_MAX {
+        return Err(PkgError::BadManifest);
+    }
+    let mut signature = [0u8; 64];
+    fetch(sig.0, &mut signature).map_err(|_| PkgError::Unreadable)?;
+    let mut manifest_buf = [0u8; SMALL_FILE_MAX];
+    let manifest_bytes = &mut manifest_buf[..manifest.1];
+    fetch(manifest.0, manifest_bytes).map_err(|_| PkgError::Unreadable)?;
+    if !ed25519::verify(pubkey, manifest_bytes, &signature) {
+        return Err(PkgError::BadSignature);
+    }
+    let text = core::str::from_utf8(manifest_bytes).map_err(|_| PkgError::BadManifest)?;
+    let parsed = PkgManifest::parse(text).ok_or(PkgError::BadManifest)?;
+    let mut digest = |(offset, len): aricode_initrd::Span| {
+        let mut h = sha256::Sha256::new();
+        let mut piece = [0u8; HASH_PIECE];
+        let mut done = 0;
+        while done < len {
+            let n = (len - done).min(HASH_PIECE);
+            fetch(offset + done, &mut piece[..n]).map_err(|_| PkgError::Unreadable)?;
+            h.update(&piece[..n]);
+            done += n;
+        }
+        Ok(h.finish())
+    };
+    if digest(program)? != parsed.program_sha256 {
+        return Err(PkgError::HashMismatch("program"));
+    }
+    if digest(app_manifest)? != parsed.manifest_sha256 {
+        return Err(PkgError::HashMismatch("program.manifest"));
+    }
+    Ok(StreamVerified {
+        manifest: parsed,
+        program,
+        app_manifest,
+    })
+}
+
 /// Builds and signs a package (host tools). With `corrupt` the
 /// signature is altered so that it does not verify.
 #[cfg(feature = "write")]
@@ -289,5 +379,46 @@ mod tests {
         );
         assert_eq!(verify(b"garbage", &pk).err(), Some(PkgError::BadContainer));
         assert!(build("with space", 1, elf, app, &SEED, false).is_none());
+    }
+
+    fn streaming(pkg: &[u8], pk: &[u8; 32]) -> Result<StreamVerified, PkgError> {
+        verify_streaming(
+            pkg.len(),
+            |o, b| {
+                b.copy_from_slice(pkg.get(o..o + b.len()).ok_or(())?);
+                Ok(())
+            },
+            pk,
+        )
+    }
+
+    #[test]
+    fn streaming_verification_agrees_with_verify() {
+        let pk = ed25519::public_key(&SEED);
+        let elf: std::vec::Vec<u8> = (0..300_000u32).map(|i| (i * 7) as u8).collect();
+        let app = b"name = demo\ncaps = system\n";
+        let pkg = build("demo", 4, &elf, app, &SEED, false).unwrap();
+        let v = streaming(&pkg, &pk).unwrap();
+        let whole = verify(&pkg, &pk).unwrap();
+        assert_eq!(v.manifest, whole.manifest);
+        assert_eq!(v.program, (whole.program_offset(&pkg), elf.len()));
+        assert_eq!(&pkg[v.app_manifest.0..][..v.app_manifest.1], app);
+        // The same refusals.
+        let mut tampered = pkg.clone();
+        tampered[v.program.0 + 1000] ^= 1;
+        assert_eq!(
+            streaming(&tampered, &pk).err(),
+            Some(PkgError::HashMismatch("program"))
+        );
+        let other = ed25519::public_key(&[9u8; 32]);
+        assert_eq!(streaming(&pkg, &other).err(), Some(PkgError::BadSignature));
+        let bad = build("demo", 4, &elf, app, &SEED, true).unwrap();
+        assert_eq!(streaming(&bad, &pk).err(), Some(PkgError::BadSignature));
+        assert_eq!(
+            streaming(b"garbage", &pk).err(),
+            Some(PkgError::BadContainer)
+        );
+        let failing = verify_streaming(pkg.len(), |_, _| Err(()), &pk);
+        assert_eq!(failing.err(), Some(PkgError::Unreadable));
     }
 }

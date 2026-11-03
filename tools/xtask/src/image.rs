@@ -247,7 +247,7 @@ fn write_esp(esp: &Path, a: &Artifacts, cmdline: Option<&str>) -> Result {
     Ok(())
 }
 
-/// virtio-blk test disk: 48 MiB with GPT and five partitions. It is
+/// virtio-blk test disk: 72 MiB with GPT and five partitions. It is
 /// regenerated on every boot (the tests write to it).
 ///
 /// ```text
@@ -256,7 +256,8 @@ fn write_esp(esp: &Path, a: &Artifacts, cmdline: Option<&str>) -> Result {
 /// SYSB     30720..55295  slot B (empty, or the variant the scenario asks for)
 /// UPDATE   55296..79871  update image (version 2) that `updater` installs
 /// ARIBOOT  79872..79935  A/B boot state (sector 0)
-/// ARI0     81920..98270  AriFS v2 with sample files, 8 MiB, last (ADR 0072)
+/// ARI0     81920..147422 AriFS v2 with sample files, 32 MiB, last (ADR 0072):
+///                        a package of `PACKAGE_MAX` (8 MiB) and its replace fit
 /// ```
 ///
 /// The v1 variants ([`DiskVariant::is_v1`]) keep `ARI0` where AriFS v1
@@ -264,8 +265,8 @@ fn write_esp(esp: &Path, a: &Artifacts, cmdline: Option<&str>) -> Result {
 ///
 /// The images' kernel carries no debug info (`strip`) if the tool exists;
 /// with it the ELF exceeds 8 MiB.
-pub const DISK_SECTORS: u64 = 98304;
-pub const PART_ARI0: (u64, u64) = (81_920, 98_270);
+pub const DISK_SECTORS: u64 = 147_456;
+pub const PART_ARI0: (u64, u64) = (81_920, 147_422);
 /// `ARI0` of the v1 variants: where AriFS v1 disks have it.
 pub const PART_ARI0_V1: (u64, u64) = (34, 6143);
 pub const PART_SYSA: (u64, u64) = (6144, 30719);
@@ -1913,6 +1914,9 @@ pub struct Publication {
     /// Tests: pad the system image past the updater's memory
     /// (`LARGE_IMAGE_PAD`), so only a download into `UPDATE` fits it.
     pub large_image: bool,
+    /// Tests: publish the apps as `large` packages (`LARGE_PADDING` more
+    /// after the ELF), which the updater stages piece by piece (ADR 0072).
+    pub large_apps: bool,
 }
 
 /// Index serial (audit 1, L3): the Unix time, but always above the serial
@@ -2256,12 +2260,15 @@ pub fn publish_channel(dir: &Path, channel: &Publication) -> Result<String> {
     }
     let mut apps = Vec::new();
     for (app_dir, version) in &channel.apps {
-        let app = crate::build::build_external(
+        let mut app = crate::build::build_external(
             Path::new(app_dir),
             *version,
             crate::build::PACKAGES_RELEASE,
             false,
         )?;
+        if channel.large_apps {
+            app = app.padded(crate::build::LARGE_PADDING)?;
+        }
         let file = format!("{}-{}{}", app.name, app.version, aricode_pkg::EXTENSION);
         apps.push((app.name, app.version, file.clone()));
         files.push((file, app.package));

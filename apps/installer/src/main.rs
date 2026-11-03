@@ -26,12 +26,16 @@
 //! have concluded from the missing answer (an empty state to rewrite, an
 //! app not installed, nothing pending) is refused instead, with a fault.
 //!
+//! Packages are never held whole (ADR 0072, phase B): each is verified
+//! piece by piece (`aricode_pkg::verify_streaming`), and installed by
+//! copying it 4 KiB at a time into a chunked replace of `apps/NAME.aripkg`
+//! that is committed only at the end, and only if a staged package's bytes
+//! hash to what the updater listed. A volume still in AriFS v1 replaces at
+//! most 32 KiB, and says so.
+//!
 //! Memory: the DMA quota (64 KiB, manifest) only holds the file client's
-//! 4 KiB buffer; packages live on the 256 KiB static heap of the runtime.
-//! The peak is one package (at most 32 KiB) plus the installed copy read to
-//! compare versions (at most 32 KiB, freed before the write) plus the
-//! history (up to 4 x 2 KiB while it is trimmed) and a list (under 16 KiB):
-//! under 80 KiB.
+//! 4 KiB buffer; the 256 KiB static heap holds a 4 KiB copy buffer, the
+//! history (up to 4 x 2 KiB while it is trimmed) and a list (under 16 KiB).
 #![no_std]
 #![no_main]
 
@@ -40,7 +44,7 @@ extern crate alloc;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use aricode_crypto::sha256::sha256;
+use aricode_crypto::sha256::Sha256;
 use aricode_proto::fs::Status;
 use aricode_rt::sys::fs::{FsClient, FsError};
 use aricode_rt::sys::{self, kind, permissions};
@@ -48,9 +52,10 @@ use aricode_update_index::files::{self, Files, ReadError};
 use aricode_update_index::run::{self, Outcome};
 use aricode_update_index::{self as upd, compare, installer_arg, lists, Change};
 
-/// An installed package is replaced in one go: the AriFS journal, the
-/// package limit the whole system shares (incident 0026).
+/// The package limit the whole system shares (incident 0026, ADR 0072).
 const MAX_PACKAGE: usize = aricode_pkg::PACKAGE_MAX;
+/// Bytes copied per chunk of an install: the file client's buffer.
+const PIECE: usize = 4096;
 const MAX_PENDING: usize = 8;
 /// Largest `updater/state` read (the three sections stay well under it).
 const MAX_STATE: usize = 16 * 1024;
@@ -127,14 +132,6 @@ impl Files for Main<'_> {
     }
 }
 
-type Read = Result<Option<Vec<u8>>, ReadError<FsError>>;
-
-/// Reads a whole file (up to `max` bytes) from the main space. `Ok(None)`
-/// only when it does not exist.
-fn read_all(fs: &mut FsClient, name: &str, max: usize) -> Read {
-    files::read_optional(&mut Main(fs), name, max)
-}
-
 /// The names in the main space for which `keep` holds; a failed listing is
 /// a fault, never a shorter list.
 fn list_names(fs: &mut FsClient, keep: impl FnMut(&str) -> bool) -> Result<Vec<String>, u64> {
@@ -184,10 +181,11 @@ fn history(fs: &mut FsClient, line: &str) {
     }
 }
 
-/// What is installed under a name.
+/// What a package file holds, checked piece by piece.
 enum Installed {
     Missing,
-    Valid(aricode_pkg::PkgManifest),
+    /// Verified; its size.
+    Valid(aricode_pkg::PkgManifest, u64),
     /// Present but fails verification: the broker refuses to launch it.
     Invalid,
     /// Present but larger than `MAX_PACKAGE`, so not a package this system
@@ -197,16 +195,135 @@ enum Installed {
     Unknown(FsError),
 }
 
+/// Verifies the package at `path` without holding it (ADR 0072, phase B).
 fn installed(fs: &mut FsClient, path: &str, pubkey: &[u8; 32]) -> Installed {
-    match read_all(fs, path, MAX_PACKAGE) {
-        Ok(None) => Installed::Missing,
-        Err(ReadError::Failed(e)) => Installed::Unknown(e),
-        Err(ReadError::TooLarge) => Installed::TooLarge,
-        Ok(Some(bytes)) => match aricode_pkg::verify(&bytes, pubkey) {
-            Ok(v) => Installed::Valid(v.manifest),
-            Err(_) => Installed::Invalid,
-        },
+    let mut main = Main(fs);
+    let size = match files::size_of(&mut main, path) {
+        Ok(None) => return Installed::Missing,
+        Ok(Some(size)) => size,
+        Err(e) => return Installed::Unknown(e),
+    };
+    if size > MAX_PACKAGE as u64 {
+        return Installed::TooLarge;
     }
+    let fd = match main.open(path) {
+        Ok(Some(fd)) => fd,
+        Ok(None) => return Installed::Missing,
+        Err(e) => return Installed::Unknown(e),
+    };
+    let mut failed = None;
+    let verified = aricode_pkg::verify_streaming(
+        size as usize,
+        |offset, buf| match files::read_exact(&mut main, &fd, offset as u32, buf) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(()),
+            Err(e) => {
+                failed = Some(e);
+                Err(())
+            }
+        },
+        pubkey,
+    );
+    main.close(fd);
+    match (verified, failed) {
+        (_, Some(e)) => Installed::Unknown(e),
+        (Ok(v), None) => Installed::Valid(v.manifest, size),
+        (Err(_), None) => Installed::Invalid,
+    }
+}
+
+/// SHA-256 of the first `size` bytes of `path`, read piece by piece;
+/// `Ok(None)` if it is missing or shorter.
+fn file_sha256(fs: &mut FsClient, path: &str, size: u64) -> Result<Option<[u8; 32]>, FsError> {
+    let mut main = Main(fs);
+    let Some(fd) = main.open(path)? else {
+        return Ok(None);
+    };
+    let mut h = Sha256::new();
+    let mut piece = alloc::vec![0u8; PIECE];
+    let mut done = 0u64;
+    let mut result = Ok(true);
+    while done < size {
+        let n = (size - done).min(PIECE as u64) as usize;
+        result = files::read_exact(&mut main, &fd, done as u32, &mut piece[..n]);
+        if result != Ok(true) {
+            break;
+        }
+        h.update(&piece[..n]);
+        done += n as u64;
+    }
+    main.close(fd);
+    match result {
+        Ok(true) => Ok(Some(h.finish())),
+        Ok(false) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// How a copy into an installed package ended.
+#[derive(PartialEq)]
+enum Copied {
+    Installed,
+    /// The bytes did not hash to what the updater staged: nothing changed.
+    Mismatch,
+    /// The volume is still AriFS v1, whose replace holds 32 KiB.
+    V1Limit,
+    /// `source` or `target` could not be opened (or created).
+    OpenFailed,
+    Failed,
+}
+
+/// Copies `size` bytes of `source` into `target` with one chunked replace,
+/// committed only once every byte is there and, with `expected`, hashes to
+/// it: after a power cut `target` holds the old package or the new one.
+fn copy_package(
+    fs: &mut FsClient,
+    source: &str,
+    target: &str,
+    size: u64,
+    expected: Option<[u8; 32]>,
+) -> Copied {
+    let Ok(src) = fs.open(source) else {
+        return Copied::OpenFailed;
+    };
+    let Ok(dst) = fs.open(target).or_else(|_| fs.create(target)) else {
+        let _ = fs.close(src);
+        return Copied::OpenFailed;
+    };
+    let mut h = Sha256::new();
+    let mut piece = alloc::vec![0u8; PIECE];
+    let mut done = 0u64;
+    let mut copied = Copied::Installed;
+    while done < size {
+        let n = (size - done).min(PIECE as u64) as usize;
+        if files::read_exact(&mut Main(fs), &src, done as u32, &mut piece[..n]) != Ok(true) {
+            copied = Copied::Failed;
+            break;
+        }
+        h.update(&piece[..n]);
+        match fs.replace_chunk(dst, done as u32, &piece[..n]) {
+            Ok(()) => {}
+            Err(FsError::Status(Status::OutOfRange)) => {
+                copied = Copied::V1Limit;
+                break;
+            }
+            Err(_) => {
+                copied = Copied::Failed;
+                break;
+            }
+        }
+        done += n as u64;
+    }
+    if copied == Copied::Installed && expected.is_some_and(|e| e != h.finish()) {
+        copied = Copied::Mismatch;
+    }
+    if copied == Copied::Installed && fs.replace_commit(dst, size as u32) != Ok(size as usize) {
+        copied = Copied::Failed;
+    }
+    // Closing a descriptor with an uncommitted replace abandons it.
+    let _ = fs.close(dst);
+    let _ = fs.close(src);
+    copied
 }
 
 /// Installed apps that verify; the others are reported, never listed. A
@@ -219,7 +336,7 @@ fn installed_apps(fs: &mut FsClient, pubkey: &[u8; 32]) -> Result<Vec<(String, u
     let mut apps = Vec::new();
     for path in paths {
         match installed(fs, &path, pubkey) {
-            Installed::Valid(m) => apps.push((String::from(m.name_str()), m.version)),
+            Installed::Valid(m, _) => apps.push((String::from(m.name_str()), m.version)),
             Installed::Unknown(e) => {
                 return Err(fault(
                     code::INSTALLED_UNKNOWN,
@@ -317,25 +434,20 @@ fn write_installed(fs: &mut FsClient, state: &mut String, pubkey: &[u8; 32]) -> 
     }
 }
 
-/// Installs one verified package (`bytes`, from `source`) unless the
-/// version rule refuses it. `Ok(true)` when installed.
+/// Installs the package at `source`, of `size` bytes and verified as
+/// `manifest`, unless the version rule refuses it; with `expected`, only if
+/// its bytes still hash to it. `Ok(true)` when installed.
 fn install_one(
     fs: &mut FsClient,
-    bytes: &[u8],
     source: &str,
+    manifest: &aricode_pkg::PkgManifest,
+    size: u64,
+    expected: Option<[u8; 32]>,
     allow_downgrade: bool,
     pubkey: &[u8; 32],
 ) -> Result<bool, u64> {
-    let Ok(verified) = aricode_pkg::verify(bytes, pubkey) else {
-        fault(
-            code::VERIFY,
-            "inst-pkg-verify",
-            &format!("{source} fails verification: skipped"),
-        );
-        return Ok(false);
-    };
-    let app = verified.manifest.name_str();
-    let version = verified.manifest.version;
+    let app = manifest.name_str();
+    let version = manifest.version;
     // ADR 0029, decision 2: a name over MAX_APP_NAME bytes makes a path the
     // file client refuses before asking the service, which could only be
     // reported as a failure of the service: refused here, as a package.
@@ -352,7 +464,7 @@ fn install_one(
     };
     let current = match installed(fs, &target, pubkey) {
         Installed::Missing => None,
-        Installed::Valid(m) => Some(m.version),
+        Installed::Valid(m, _) => Some(m.version),
         Installed::Invalid => {
             // Never replaced silently (audit 1, M1): it is recorded, and the
             // new, verified package takes its place.
@@ -407,23 +519,42 @@ fn install_one(
         return Ok(false);
     }
     say!("installing {app} version {version} (from {source})");
-    let Ok(fd) = fs.open(&target).or_else(|_| fs.create(&target)) else {
-        return Err(fault(
-            code::OPEN,
-            "inst-open",
-            "could not open or create the installed package",
-        ));
-    };
     // A single atomic replace: after a power cut there is either the old
     // version or the new one, never a mix.
-    let result = fs.replace(fd, bytes);
-    let _ = fs.close(fd);
-    if result != Ok(bytes.len()) {
-        return Err(fault(
-            code::WRITE,
-            "inst-write",
-            "error writing the installed package",
-        ));
+    match copy_package(fs, source, &target, size, expected) {
+        Copied::Installed => {}
+        Copied::Mismatch => {
+            fault(
+                code::STAGE,
+                "inst-stage-hash",
+                &format!("{source} changed while it was installed: refused"),
+            );
+            return Ok(false);
+        }
+        Copied::V1Limit => {
+            fault(
+                code::WRITE,
+                "inst-v1-limit",
+                &format!(
+                    "{source} is {size} bytes and ARI0 is still AriFS v1, which replaces at most 32768 (a stick written from 0.18 on is v2): refused"
+                ),
+            );
+            return Ok(false);
+        }
+        Copied::OpenFailed => {
+            return Err(fault(
+                code::OPEN,
+                "inst-open",
+                "could not open the package or open or create the installed one",
+            ));
+        }
+        Copied::Failed => {
+            return Err(fault(
+                code::WRITE,
+                "inst-write",
+                "error writing the installed package",
+            ));
+        }
     }
     let from = current.map_or(String::from("none"), |v| format!("{v}"));
     history(
@@ -452,14 +583,23 @@ fn install_pending(fs: &mut FsClient, pubkey: &[u8; 32]) -> u64 {
     }
     let (mut done, mut skipped) = (0u64, 0u64);
     for path in &pending {
-        let bytes = match read_all(fs, path, MAX_PACKAGE) {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => {
+        let (manifest, size) = match installed(fs, path, pubkey) {
+            Installed::Valid(manifest, size) => (manifest, size),
+            Installed::Missing => {
                 say!("{path} is gone: skipped");
                 skipped += 1;
                 continue;
             }
-            Err(ReadError::TooLarge) => {
+            Installed::Invalid => {
+                fault(
+                    code::VERIFY,
+                    "inst-pkg-verify",
+                    &format!("{path} fails verification: skipped"),
+                );
+                skipped += 1;
+                continue;
+            }
+            Installed::TooLarge => {
                 fault(
                     code::VERIFY,
                     "inst-pkg-size",
@@ -470,7 +610,7 @@ fn install_pending(fs: &mut FsClient, pubkey: &[u8; 32]) -> u64 {
                 skipped += 1;
                 continue;
             }
-            Err(ReadError::Failed(e)) => {
+            Installed::Unknown(e) => {
                 fault(
                     code::PKG_READ,
                     "inst-pkg-read",
@@ -480,7 +620,7 @@ fn install_pending(fs: &mut FsClient, pubkey: &[u8; 32]) -> u64 {
                 continue;
             }
         };
-        match install_one(fs, &bytes, path, false, pubkey) {
+        match install_one(fs, path, &manifest, size, None, false, pubkey) {
             Ok(true) => done += 1,
             Ok(false) => skipped += 1,
             Err(code) => return code,
@@ -515,8 +655,16 @@ fn install_staged(fs: &mut FsClient, allow_downgrade: bool, pubkey: &[u8; 32]) -
     let mut outcomes: Vec<Outcome> = Vec::new();
     for e in &entries {
         let path = upd::main_path(e.file);
-        let bytes = match read_all(fs, &path, MAX_PACKAGE) {
-            Ok(Some(bytes)) if sha256(&bytes) == e.sha256 => bytes,
+        let hashed = match files::size_of(&mut Main(fs), &path) {
+            Ok(Some(size)) if size > MAX_PACKAGE as u64 => Err(ReadError::TooLarge),
+            Ok(Some(size)) => file_sha256(fs, &path, size)
+                .map(|h| h.filter(|h| *h == e.sha256))
+                .map_err(ReadError::Failed),
+            Ok(None) => Ok(None),
+            Err(err) => Err(ReadError::Failed(err)),
+        };
+        match hashed {
+            Ok(Some(_)) => {}
             Err(ReadError::TooLarge) => {
                 outcomes.push(Outcome::Refused(fault(
                     code::STAGE,
@@ -544,8 +692,10 @@ fn install_staged(fs: &mut FsClient, allow_downgrade: bool, pubkey: &[u8; 32]) -
                 continue;
             }
         };
-        match aricode_pkg::verify(&bytes, pubkey) {
-            Ok(v) if v.manifest.name_str() == e.name && v.manifest.version == e.version => {}
+        let (manifest, size) = match installed(fs, &path, pubkey) {
+            Installed::Valid(m, size) if m.name_str() == e.name && m.version == e.version => {
+                (m, size)
+            }
             _ => {
                 outcomes.push(Outcome::Refused(fault(
                     code::VERIFY,
@@ -554,8 +704,16 @@ fn install_staged(fs: &mut FsClient, allow_downgrade: bool, pubkey: &[u8; 32]) -
                 )));
                 continue;
             }
-        }
-        match install_one(fs, &bytes, &path, allow_downgrade, pubkey) {
+        };
+        match install_one(
+            fs,
+            &path,
+            &manifest,
+            size,
+            Some(e.sha256),
+            allow_downgrade,
+            pubkey,
+        ) {
             Ok(true) => outcomes.push(Outcome::Installed),
             // Refused by `install_one` (its fault is recorded there; the
             // same version is no fault): no exit code of its own, as before.

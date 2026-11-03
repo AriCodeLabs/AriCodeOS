@@ -112,6 +112,40 @@ pub fn list_names<F: Files>(
     Ok(names)
 }
 
+/// The size of `name` as the directory lists it, without reading it (a
+/// package of several MiB is checked piece by piece, ADR 0072). `Ok(None)`
+/// only when the listing, read to its end, does not hold it.
+pub fn size_of<F: Files>(fs: &mut F, name: &str) -> Result<Option<u64>, F::Error> {
+    let mut entry = [0u8; NAME_LEN];
+    let mut i = 0;
+    while let Some((n, size)) = fs.list(i, &mut entry)? {
+        i += 1;
+        if &entry[..n] == name.as_bytes() {
+            return Ok(Some(size));
+        }
+    }
+    Ok(None)
+}
+
+/// Fills `out` from byte `offset` of the open file `fd`; `Ok(false)` when
+/// the file ends first.
+pub fn read_exact<F: Files>(
+    fs: &mut F,
+    fd: &F::Fd,
+    offset: u32,
+    out: &mut [u8],
+) -> Result<bool, F::Error> {
+    let mut done = 0;
+    while done < out.len() {
+        let n = fs.read(fd, offset + done as u32, &mut out[done..])?;
+        if n == 0 {
+            return Ok(false);
+        }
+        done += n;
+    }
+    Ok(true)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -285,6 +319,28 @@ pub(crate) mod tests {
             list_names(&mut Mock::default(), |_| true).expect("listed"),
             Vec::<String>::new()
         );
+    }
+
+    #[test]
+    fn size_from_the_listing_and_exact_reads() {
+        let mut fs = Mock {
+            files: vec![("a", vec![1, 2, 3]), ("b", (0..100).collect())],
+            ..Mock::default()
+        };
+        assert_eq!(size_of(&mut fs, "b"), Ok(Some(100)));
+        assert_eq!(size_of(&mut fs, "c"), Ok(None));
+        let fd = fs.open("b").unwrap().unwrap();
+        let mut out = [0u8; 10];
+        assert_eq!(read_exact(&mut fs, &fd, 90, &mut out), Ok(true));
+        assert_eq!(out[0], 90);
+        assert_eq!(read_exact(&mut fs, &fd, 95, &mut out), Ok(false));
+        fs.close(fd);
+        let mut failing = Mock {
+            files: vec![("b", vec![])],
+            fail_list: true,
+            ..Mock::default()
+        };
+        assert!(size_of(&mut failing, "a").is_err());
     }
 
     /// A listing that fails after the first entry is not a directory with

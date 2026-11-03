@@ -47,7 +47,7 @@ use alloc::vec::Vec;
 use aricode_ab::{
     schedule, BootState, Booted, Image, ImageError, Manifest, Slot, PART_STATE, PART_UPDATE,
 };
-use aricode_crypto::sha256::{sha256, Sha256};
+use aricode_crypto::sha256::Sha256;
 use aricode_rt::sys::block::{find_partition, BlockClient};
 use aricode_rt::sys::fs::{FsClient, FsError};
 use aricode_rt::sys::net::NetClient;
@@ -77,6 +77,8 @@ const RUN_DEADLINE_MS: u64 = 10 * 60 * 1000;
 /// Largest package: an installed package is replaced in one go (the AriFS
 /// journal, ADR 0018), the limit the whole system shares (incident 0026).
 const MAX_PACKAGE: usize = aricode_pkg::PACKAGE_MAX;
+/// Bytes per chunk of a staged download: the file client's buffer.
+const PIECE: usize = aricode_proto::fs::MAX_IO as usize;
 /// Largest exchange file with the installer (`state`).
 const MAX_STATE: usize = 16 * 1024;
 /// Largest `index.sig` (128 hex digits and a newline, with room).
@@ -1610,17 +1612,6 @@ fn fetch_into(
     }
 }
 
-/// `fetch` of exactly `out.len()` bytes (what the index announced).
-fn fetch_exact(net: &mut NetClient, url: &str, out: &mut [u8]) -> Result<(), FetchError> {
-    let want = out.len();
-    match fetch(net, url, out)? {
-        n if n == want => Ok(()),
-        n => Err(FetchError::Other(format!(
-            "{n} bytes received, the index announced {want}"
-        ))),
-    }
-}
-
 /// `fetch` of a small file of at most `max` bytes.
 fn fetch_small(net: &mut NetClient, url: &str, max: usize) -> Result<Vec<u8>, FetchError> {
     let mut buf = alloc::vec![0u8; max];
@@ -2244,9 +2235,22 @@ fn stage_app<'e>(
         ));
     }
     say!("downloading {} ({size} bytes)", entry.file);
-    let mut bytes = alloc::vec![0u8; size];
-    if let Err(e) = fetch_exact(net, &format!("{url}{}", entry.file), &mut bytes) {
-        return Err(download_fault(
+    // Straight into a chunked replace of the stage file, hashed on the
+    // way, never held whole (ADR 0072, phase B); committed only with the
+    // size and SHA-256 the signed index gives.
+    let stage_fault = || {
+        fault(
+            code::FILE_WRITE,
+            "upd-pkg-stage",
+            &format!("cannot write {file}"),
+        )
+    };
+    let Ok(fd) = fs.open(file).or_else(|_| fs.create(file)) else {
+        return Err(stage_fault());
+    };
+    let staged = download_to_stage(fs, fd, net, &format!("{url}{}", entry.file), size);
+    let committed = match staged {
+        Err(Staging::Download(e)) => Err(download_fault(
             code::DOWNLOAD,
             "upd-pkg-download",
             format!(
@@ -2254,19 +2258,23 @@ fn stage_app<'e>(
                 entry.name,
                 withdrawn(&e, entry.file, Channel::Stable)
             ),
-        ));
-    }
-    if sha256(&bytes) != entry.sha256 {
-        return Err(fault(
+        )),
+        Err(Staging::Write) => Err(stage_fault()),
+        Ok(hash) if hash != entry.sha256 => Err(fault(
             code::DOWNLOAD_MISMATCH,
             "upd-pkg-sha256",
             &format!(
                 "app {}: SHA-256 does not match the signed index; skipped",
                 entry.name
             ),
-        ));
-    }
-    match aricode_pkg::verify(&bytes, pk) {
+        )),
+        Ok(_) if fs.replace_commit(fd, size as u32) != Ok(size) => Err(stage_fault()),
+        Ok(_) => Ok(()),
+    };
+    // Closing abandons a replace that was not committed.
+    let _ = fs.close(fd);
+    committed?;
+    match verify_staged(fs, file, size, pk) {
         Ok(v) if v.manifest.name_str() == entry.name && v.manifest.version == entry.version => {}
         Ok(_) => {
             return Err(fault(
@@ -2289,13 +2297,6 @@ fn stage_app<'e>(
             ))
         }
     }
-    if !write_file(fs, file, &bytes) {
-        return Err(fault(
-            code::FILE_WRITE,
-            "upd-pkg-stage",
-            &format!("cannot write {file}"),
-        ));
-    }
     say!(
         "app {} version {} verified and staged as {}/{file}",
         entry.name,
@@ -2308,6 +2309,97 @@ fn stage_app<'e>(
         version: entry.version,
         sha256: entry.sha256,
     })
+}
+
+/// Why a download into the stage file stopped.
+enum Staging {
+    Download(FetchError),
+    Write,
+}
+
+/// Downloads `url`, exactly `size` bytes, into chunks of a replace of the
+/// open file `fd` (not committed); returns the bytes' SHA-256.
+fn download_to_stage(
+    fs: &mut FsClient,
+    fd: u32,
+    net: &mut NetClient,
+    url: &str,
+    size: usize,
+) -> Result<[u8; 32], Staging> {
+    let mut h = Sha256::new();
+    let mut piece: Vec<u8> = Vec::with_capacity(PIECE);
+    let (mut written, mut got) = (0usize, 0usize);
+    let (mut too_long, mut write_failed) = (false, false);
+    let mut sink = |chunk: &[u8]| {
+        if got + chunk.len() > size {
+            too_long = true;
+            return false;
+        }
+        got += chunk.len();
+        h.update(chunk);
+        let mut rest = chunk;
+        while !rest.is_empty() {
+            let n = (PIECE - piece.len()).min(rest.len());
+            piece.extend_from_slice(&rest[..n]);
+            rest = &rest[n..];
+            if piece.len() == PIECE {
+                if fs.replace_chunk(fd, written as u32, &piece).is_err() {
+                    write_failed = true;
+                    return false;
+                }
+                written += PIECE;
+                piece.clear();
+            }
+        }
+        true
+    };
+    let fetched = fetch_into(net, url, &mut sink);
+    if write_failed {
+        return Err(Staging::Write);
+    }
+    if too_long {
+        return Err(Staging::Download(FetchError::Other(format!(
+            "more than the {size} bytes the index announced"
+        ))));
+    }
+    fetched.map_err(Staging::Download)?;
+    if got != size {
+        return Err(Staging::Download(FetchError::Other(format!(
+            "{got} bytes received, the index announced {size}"
+        ))));
+    }
+    if !piece.is_empty() && fs.replace_chunk(fd, written as u32, &piece).is_err() {
+        return Err(Staging::Write);
+    }
+    Ok(h.finish())
+}
+
+/// Verifies the package staged in `file` (`size` bytes) piece by piece.
+fn verify_staged(
+    fs: &mut FsClient,
+    file: &str,
+    size: usize,
+    pk: &[u8; 32],
+) -> Result<aricode_pkg::StreamVerified, aricode_pkg::PkgError> {
+    let Ok(fd) = fs.open(file) else {
+        return Err(aricode_pkg::PkgError::Unreadable);
+    };
+    let verified = aricode_pkg::verify_streaming(
+        size,
+        |offset, buf| {
+            let mut done = 0;
+            while done < buf.len() {
+                match fs.read(fd, (offset + done) as u32, &mut buf[done..]) {
+                    Ok(n) if n > 0 => done += n,
+                    _ => return Err(()),
+                }
+            }
+            Ok(())
+        },
+        pk,
+    );
+    let _ = fs.close(fd);
+    verified
 }
 
 /// The command that refreshes `channel`'s sources.
