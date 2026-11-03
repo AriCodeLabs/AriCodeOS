@@ -201,7 +201,7 @@ fn installed(fs: &mut FsClient, path: &str, pubkey: &[u8; 32]) -> Installed {
     let size = match files::size_of(&mut main, path) {
         Ok(None) => return Installed::Missing,
         Ok(Some(size)) => size,
-        Err(e) => return Installed::Unknown(e),
+        Err(e) => return Installed::Unknown(size_error(e)),
     };
     if size > MAX_PACKAGE as u64 {
         return Installed::TooLarge;
@@ -229,6 +229,16 @@ fn installed(fs: &mut FsClient, path: &str, pubkey: &[u8; 32]) -> Installed {
         (_, Some(e)) => Installed::Unknown(e),
         (Ok(v), None) => Installed::Valid(v.manifest, size),
         (Err(_), None) => Installed::Invalid,
+    }
+}
+
+/// A size that could not be known, as the file client's error: a listing
+/// that kept missing a file that opens is a service too busy changing to
+/// answer (it never means "absent", audit of ADR 0072 phase B, M1).
+fn size_error(e: files::SizeError<FsError>) -> FsError {
+    match e {
+        files::SizeError::Failed(e) => e,
+        files::SizeError::Unlisted => FsError::Status(Status::Busy),
     }
 }
 
@@ -268,6 +278,8 @@ enum Copied {
     Mismatch,
     /// The volume is still AriFS v1, whose replace holds 32 KiB.
     V1Limit,
+    /// `source` is gone since it was verified.
+    Gone,
     /// `source` or `target` could not be opened (or created).
     OpenFailed,
     Failed,
@@ -283,8 +295,10 @@ fn copy_package(
     size: u64,
     expected: Option<[u8; 32]>,
 ) -> Copied {
-    let Ok(src) = fs.open(source) else {
-        return Copied::OpenFailed;
+    let src = match fs.open(source) {
+        Ok(fd) => fd,
+        Err(FsError::Status(Status::NotFound)) => return Copied::Gone,
+        Err(_) => return Copied::OpenFailed,
     };
     let Ok(dst) = fs.open(target).or_else(|_| fs.create(target)) else {
         let _ = fs.close(src);
@@ -436,7 +450,7 @@ fn write_installed(fs: &mut FsClient, state: &mut String, pubkey: &[u8; 32]) -> 
 
 /// Installs the package at `source`, of `size` bytes and verified as
 /// `manifest`, unless the version rule refuses it; with `expected`, only if
-/// its bytes still hash to it. `Ok(true)` when installed.
+/// its bytes still hash to it.
 fn install_one(
     fs: &mut FsClient,
     source: &str,
@@ -445,7 +459,7 @@ fn install_one(
     expected: Option<[u8; 32]>,
     allow_downgrade: bool,
     pubkey: &[u8; 32],
-) -> Result<bool, u64> {
+) -> Result<Done, u64> {
     let app = manifest.name_str();
     let version = manifest.version;
     // ADR 0029, decision 2: a name over MAX_APP_NAME bytes makes a path the
@@ -460,7 +474,7 @@ fn install_one(
                 upd::index::MAX_APP_NAME
             ),
         );
-        return Ok(false);
+        return Ok(Done::Refused(0));
     };
     let current = match installed(fs, &target, pubkey) {
         Installed::Missing => None,
@@ -516,30 +530,34 @@ fn install_one(
                 current.unwrap_or(0)
             );
         }
-        return Ok(false);
+        return Ok(Done::Refused(0));
     }
     say!("installing {app} version {version} (from {source})");
     // A single atomic replace: after a power cut there is either the old
     // version or the new one, never a mix.
     match copy_package(fs, source, &target, size, expected) {
         Copied::Installed => {}
+        // Refusals with their codes, as when found before the copy (audit
+        // of ADR 0072 phase B, L1).
         Copied::Mismatch => {
-            fault(
+            return Ok(Done::Refused(fault(
                 code::STAGE,
                 "inst-stage-hash",
                 &format!("{source} changed while it was installed: refused"),
-            );
-            return Ok(false);
+            )));
         }
         Copied::V1Limit => {
-            fault(
+            return Ok(Done::Refused(fault(
                 code::WRITE,
                 "inst-v1-limit",
                 &format!(
-                    "{source} is {size} bytes and ARI0 is still AriFS v1, which replaces at most 32768 (a stick written from 0.18 on is v2): refused"
+                    "{source} ({size} bytes) did not fit the replace of {target}: ARI0 is still AriFS v1, whose files hold 32768 (a stick written from 0.18 on is v2): refused"
                 ),
-            );
-            return Ok(false);
+            )));
+        }
+        Copied::Gone => {
+            say!("{source} is gone: skipped");
+            return Ok(Done::Refused(0));
         }
         Copied::OpenFailed => {
             return Err(fault(
@@ -562,7 +580,14 @@ fn install_one(
         &format!("app {app} {from} -> {version} installed ({target})"),
     );
     say!("{app} {from} -> {version} installed ({target})");
-    Ok(true)
+    Ok(Done::Installed)
+}
+
+/// What `install_one` did.
+enum Done {
+    Installed,
+    /// Refused, with the fault's code (0: not a fault, as the same version).
+    Refused(u64),
 }
 
 /// No flag: the packages in `pkgs/` (ADR 0018), in directory order.
@@ -620,9 +645,28 @@ fn install_pending(fs: &mut FsClient, pubkey: &[u8; 32]) -> u64 {
                 continue;
             }
         };
-        match install_one(fs, path, &manifest, size, None, false, pubkey) {
-            Ok(true) => done += 1,
-            Ok(false) => skipped += 1,
+        // The bytes committed are the bytes hashed here, right after the
+        // verification (audit of ADR 0072 phase B, I2).
+        let expected = match file_sha256(fs, path, size) {
+            Ok(Some(h)) => h,
+            Ok(None) => {
+                say!("{path} is gone: skipped");
+                skipped += 1;
+                continue;
+            }
+            Err(e) => {
+                fault(
+                    code::PKG_READ,
+                    "inst-pkg-read",
+                    &format!("{path} cannot be read ({e:?}): skipped"),
+                );
+                skipped += 1;
+                continue;
+            }
+        };
+        match install_one(fs, path, &manifest, size, Some(expected), false, pubkey) {
+            Ok(Done::Installed) => done += 1,
+            Ok(Done::Refused(_)) => skipped += 1,
             Err(code) => return code,
         }
     }
@@ -661,7 +705,7 @@ fn install_staged(fs: &mut FsClient, allow_downgrade: bool, pubkey: &[u8; 32]) -
                 .map(|h| h.filter(|h| *h == e.sha256))
                 .map_err(ReadError::Failed),
             Ok(None) => Ok(None),
-            Err(err) => Err(ReadError::Failed(err)),
+            Err(err) => Err(ReadError::Failed(size_error(err))),
         };
         match hashed {
             Ok(Some(_)) => {}
@@ -714,10 +758,10 @@ fn install_staged(fs: &mut FsClient, allow_downgrade: bool, pubkey: &[u8; 32]) -
             allow_downgrade,
             pubkey,
         ) {
-            Ok(true) => outcomes.push(Outcome::Installed),
-            // Refused by `install_one` (its fault is recorded there; the
-            // same version is no fault): no exit code of its own, as before.
-            Ok(false) => outcomes.push(Outcome::Refused(0)),
+            Ok(Done::Installed) => outcomes.push(Outcome::Installed),
+            // Refused by `install_one`, with its fault's code (the same
+            // version is no fault: 0).
+            Ok(Done::Refused(code)) => outcomes.push(Outcome::Refused(code)),
             Err(code) => {
                 outcomes.push(Outcome::Failed(code));
                 break;

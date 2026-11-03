@@ -219,8 +219,8 @@ pub fn verify<'a>(container: &'a [u8], pubkey: &[u8; 32]) -> Result<Verified<'a>
     })
 }
 
-/// Largest package manifest or application manifest a streaming
-/// verification reads whole (both are a few hundred bytes).
+/// Largest package manifest a streaming verification reads whole (a few
+/// hundred bytes; the application manifest is hashed in pieces).
 pub const SMALL_FILE_MAX: usize = 4096;
 
 /// A package verified piece by piece: its manifest, and where the program
@@ -238,8 +238,9 @@ const HASH_PIECE: usize = 4096;
 /// [`verify`] of a package of `len` bytes read piece by piece through
 /// `read(offset, buf)`, for packages too large to hold (ADR 0072, phase
 /// B): the same checks in the same order, and the same accepted packages,
-/// with the manifests over [`SMALL_FILE_MAX`] refused. A failed read is
-/// `Unreadable`.
+/// except a package manifest over [`SMALL_FILE_MAX`], refused before its
+/// signature is checked (project-signed manifests are a few hundred
+/// bytes). A failed read is `Unreadable`.
 pub fn verify_streaming(
     len: usize,
     mut read: impl FnMut(usize, &mut [u8]) -> Result<(), ()>,
@@ -420,5 +421,31 @@ mod tests {
         );
         let failing = verify_streaming(pkg.len(), |_, _| Err(()), &pk);
         assert_eq!(failing.err(), Some(PkgError::Unreadable));
+        // A read that fails after the headers (inside the program) too.
+        let late = verify_streaming(
+            pkg.len(),
+            |o, b| {
+                if o >= v.program.0 + 4096 {
+                    return Err(());
+                }
+                b.copy_from_slice(&pkg[o..o + b.len()]);
+                Ok(())
+            },
+            &pk,
+        );
+        assert_eq!(late.err(), Some(PkgError::Unreadable));
+        // The package manifest's bound: refused over it, before the signature.
+        let long = std::format!(
+            "name = demo\nversion = 4\n#{}\n",
+            "x".repeat(SMALL_FILE_MAX)
+        );
+        let c = aricode_initrd::build(&[
+            ("manifest", long.as_bytes()),
+            ("manifest.sig", &[0u8; 64][..]),
+            ("program", &elf[..]),
+            ("program.manifest", &app[..]),
+        ])
+        .unwrap();
+        assert_eq!(streaming(&c, &pk).err(), Some(PkgError::BadManifest));
     }
 }

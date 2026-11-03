@@ -112,19 +112,38 @@ pub fn list_names<F: Files>(
     Ok(names)
 }
 
-/// The size of `name` as the directory lists it, without reading it (a
-/// package of several MiB is checked piece by piece, ADR 0072). `Ok(None)`
-/// only when the listing, read to its end, does not hold it.
-pub fn size_of<F: Files>(fs: &mut F, name: &str) -> Result<Option<u64>, F::Error> {
-    let mut entry = [0u8; NAME_LEN];
-    let mut i = 0;
-    while let Some((n, size)) = fs.list(i, &mut entry)? {
-        i += 1;
-        if &entry[..n] == name.as_bytes() {
-            return Ok(Some(size));
+/// Why a file's size is not known.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SizeError<E> {
+    /// A request failed.
+    Failed(E),
+    /// The file opens, but the listing, read twice, did not show it: files
+    /// created or deleted meanwhile shift the listing's indices.
+    Unlisted,
+}
+
+/// The size of `name`, without reading it (a package of several MiB is
+/// checked piece by piece, ADR 0072). `Ok(None)` only when `open` says the
+/// file does not exist: a listing that misses an entry, because another
+/// client created or deleted a file between two of its requests, never
+/// makes a file "absent" (audit of ADR 0072 phase B, M1: an installed
+/// package taken for missing let an older one past the downgrade rule).
+pub fn size_of<F: Files>(fs: &mut F, name: &str) -> Result<Option<u64>, SizeError<F::Error>> {
+    let Some(fd) = fs.open(name).map_err(SizeError::Failed)? else {
+        return Ok(None);
+    };
+    fs.close(fd);
+    for _ in 0..2 {
+        let mut entry = [0u8; NAME_LEN];
+        let mut i = 0;
+        while let Some((n, size)) = fs.list(i, &mut entry).map_err(SizeError::Failed)? {
+            i += 1;
+            if &entry[..n] == name.as_bytes() {
+                return Ok(Some(size));
+            }
         }
     }
-    Ok(None)
+    Err(SizeError::Unlisted)
 }
 
 /// Fills `out` from byte `offset` of the open file `fd`; `Ok(false)` when
@@ -137,7 +156,10 @@ pub fn read_exact<F: Files>(
 ) -> Result<bool, F::Error> {
     let mut done = 0;
     while done < out.len() {
-        let n = fs.read(fd, offset + done as u32, &mut out[done..])?;
+        let Some(at) = u32::try_from(done).ok().and_then(|d| offset.checked_add(d)) else {
+            return Ok(false);
+        };
+        let n = fs.read(fd, at, &mut out[done..])?;
         if n == 0 {
             return Ok(false);
         }
@@ -162,6 +184,8 @@ pub(crate) mod tests {
         pub(crate) fail_open: bool,
         pub(crate) fail_read_at: Option<u32>,
         pub(crate) fail_list: bool,
+        /// A file that opens but the listing never shows.
+        pub(crate) unlisted: Option<&'static str>,
         pub(crate) open_fds: usize,
     }
 
@@ -211,7 +235,9 @@ pub(crate) mod tests {
             if self.fail_list && index == 1 {
                 return Err("ReplyLost");
             }
-            let Some((name, data)) = self.files.get(index as usize) else {
+            let unlisted = self.unlisted;
+            let mut listed = self.files.iter().filter(|(n, _)| Some(*n) != unlisted);
+            let Some((name, data)) = listed.nth(index as usize) else {
                 return Ok(None);
             };
             name_out[..name.len()].copy_from_slice(name.as_bytes());
@@ -329,6 +355,11 @@ pub(crate) mod tests {
         };
         assert_eq!(size_of(&mut fs, "b"), Ok(Some(100)));
         assert_eq!(size_of(&mut fs, "c"), Ok(None));
+        assert_eq!(fs.open_fds, 0);
+        // A file the listing misses is never absent.
+        fs.unlisted = Some("b");
+        assert_eq!(size_of(&mut fs, "b"), Err(SizeError::Unlisted));
+        fs.unlisted = None;
         let fd = fs.open("b").unwrap().unwrap();
         let mut out = [0u8; 10];
         assert_eq!(read_exact(&mut fs, &fd, 90, &mut out), Ok(true));
@@ -336,11 +367,14 @@ pub(crate) mod tests {
         assert_eq!(read_exact(&mut fs, &fd, 95, &mut out), Ok(false));
         fs.close(fd);
         let mut failing = Mock {
-            files: vec![("b", vec![])],
+            files: vec![("x", vec![]), ("b", vec![])],
             fail_list: true,
             ..Mock::default()
         };
-        assert!(size_of(&mut failing, "a").is_err());
+        assert_eq!(
+            size_of(&mut failing, "b"),
+            Err(SizeError::Failed("ReplyLost"))
+        );
     }
 
     /// A listing that fails after the first entry is not a directory with

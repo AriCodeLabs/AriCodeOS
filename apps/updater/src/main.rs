@@ -2235,9 +2235,12 @@ fn stage_app<'e>(
         ));
     }
     say!("downloading {} ({size} bytes)", entry.file);
-    // Straight into a chunked replace of the stage file, hashed on the
-    // way, never held whole (ADR 0072, phase B); committed only with the
-    // size and SHA-256 the signed index gives.
+    // Straight into the stage file, hashed on the way, never held whole
+    // (ADR 0072, phase B). Plain writes, not a chunked replace: fsd has one
+    // replace at a time, and a download waits on the network (audit of
+    // phase B, M2). The stage file is scratch: it is listed in `[staged]`
+    // only with the size and SHA-256 the signed index gives, and the
+    // installer hashes it again before its own atomic replace.
     let stage_fault = || {
         fault(
             code::FILE_WRITE,
@@ -2260,6 +2263,14 @@ fn stage_app<'e>(
             ),
         )),
         Err(Staging::Write) => Err(stage_fault()),
+        Err(Staging::V1Limit) => Err(fault(
+            code::FILE_WRITE,
+            "upd-pkg-v1-limit",
+            &format!(
+                "app {}: {size} bytes do not fit {file}: ARI0 is still AriFS v1, whose files hold 32768 (a stick written from 0.18 on is v2); skipped",
+                entry.name
+            ),
+        )),
         Ok(hash) if hash != entry.sha256 => Err(fault(
             code::DOWNLOAD_MISMATCH,
             "upd-pkg-sha256",
@@ -2268,10 +2279,8 @@ fn stage_app<'e>(
                 entry.name
             ),
         )),
-        Ok(_) if fs.replace_commit(fd, size as u32) != Ok(size) => Err(stage_fault()),
         Ok(_) => Ok(()),
     };
-    // Closing abandons a replace that was not committed.
     let _ = fs.close(fd);
     committed?;
     match verify_staged(fs, file, size, pk) {
@@ -2315,10 +2324,13 @@ fn stage_app<'e>(
 enum Staging {
     Download(FetchError),
     Write,
+    /// The volume is still AriFS v1, whose files hold 32 KiB.
+    V1Limit,
 }
 
-/// Downloads `url`, exactly `size` bytes, into chunks of a replace of the
-/// open file `fd` (not committed); returns the bytes' SHA-256.
+/// Empties the open file `fd` (a replace of nothing, at once) and downloads
+/// `url`, exactly `size` bytes, into it with plain writes, flushed; returns
+/// the bytes' SHA-256.
 fn download_to_stage(
     fs: &mut FsClient,
     fd: u32,
@@ -2326,10 +2338,13 @@ fn download_to_stage(
     url: &str,
     size: usize,
 ) -> Result<[u8; 32], Staging> {
+    if fs.replace(fd, &[]).is_err() {
+        return Err(Staging::Write);
+    }
     let mut h = Sha256::new();
     let mut piece: Vec<u8> = Vec::with_capacity(PIECE);
     let (mut written, mut got) = (0usize, 0usize);
-    let (mut too_long, mut write_failed) = (false, false);
+    let (mut too_long, mut write_failed) = (false, None);
     let mut sink = |chunk: &[u8]| {
         if got + chunk.len() > size {
             too_long = true;
@@ -2343,8 +2358,8 @@ fn download_to_stage(
             piece.extend_from_slice(&rest[..n]);
             rest = &rest[n..];
             if piece.len() == PIECE {
-                if fs.replace_chunk(fd, written as u32, &piece).is_err() {
-                    write_failed = true;
+                if let Err(e) = write_all(fs, fd, written, &piece) {
+                    write_failed = Some(e);
                     return false;
                 }
                 written += PIECE;
@@ -2354,8 +2369,8 @@ fn download_to_stage(
         true
     };
     let fetched = fetch_into(net, url, &mut sink);
-    if write_failed {
-        return Err(Staging::Write);
+    if let Some(e) = write_failed {
+        return Err(e);
     }
     if too_long {
         return Err(Staging::Download(FetchError::Other(format!(
@@ -2368,10 +2383,26 @@ fn download_to_stage(
             "{got} bytes received, the index announced {size}"
         ))));
     }
-    if !piece.is_empty() && fs.replace_chunk(fd, written as u32, &piece).is_err() {
-        return Err(Staging::Write);
+    if !piece.is_empty() {
+        write_all(fs, fd, written, &piece)?;
     }
+    fs.flush().map_err(|_| Staging::Write)?;
     Ok(h.finish())
+}
+
+/// Writes `data` at `offset` of `fd`, in requests of the client's buffer.
+fn write_all(fs: &mut FsClient, fd: u32, offset: usize, data: &[u8]) -> Result<(), Staging> {
+    let mut done = 0;
+    while done < data.len() {
+        match fs.write(fd, (offset + done) as u32, &data[done..]) {
+            Ok(n) if n > 0 => done += n,
+            Err(FsError::Status(aricode_proto::fs::Status::OutOfRange)) => {
+                return Err(Staging::V1Limit)
+            }
+            _ => return Err(Staging::Write),
+        }
+    }
+    Ok(())
 }
 
 /// Verifies the package staged in `file` (`size` bytes) piece by piece.

@@ -303,4 +303,38 @@ largest program of 0.17:
   ignores) in `apps.large_package` (installed, replaced, launched: 1,062,888
   bytes) and `apps.upgrade_network_large`.
 
+### Audit of phase B (2026-11-03)
+
+No high finding. What it found, and what was done:
+
+- **M1. A file taken for absent.** The installer learned a package's size
+  from the listing, and fsd lists by index: a client creating or deleting
+  files between two requests shifts the indices, so an installed package
+  could be missed, taken for "not installed", and an older signed package
+  in `pkgs/` installed over it. `files::size_of` now asks `open` whether
+  the file exists; a file that opens but the listing misses twice is an
+  error (`Busy`), never absent.
+- **M2. The replace slot held across the network.** The updater streamed
+  downloads into fsd's one chunked replace, so a slow server kept every
+  other replace on the system `Busy` for up to two minutes. It now empties
+  the stage file and downloads into it with plain writes; the file is
+  scratch, listed only with the index's size and SHA-256, and the
+  installer hashes it again before its own atomic replace. A v1 volume's
+  limit has its own message (`upd-pkg-v1-limit`).
+- **L1.** A mismatch found while copying, and the v1 limit, are refusals
+  with their codes (as when found before the copy); a source gone since its
+  verification is skipped.
+- **L2.** `PACKAGE_MAX` is asserted within the kernel's `DMA_MAX_LEN`, and
+  a failed allocation is said.
+- **L4.** `read_exact`'s offsets are checked.
+- **I1.** `verify_streaming`'s comment says what it bounds; tests cover a
+  read failing inside the program and the package manifest's bound.
+- **I2.** Packages from `pkgs/` are hashed after their verification and
+  the copy is committed only if it hashes the same.
+- Residuals: the scenarios use 1 MiB packages, not 8 MiB; a growing write
+  commits the table, so staging 1 MiB costs about 2 s in QEMU (deferring
+  size-only commits to `flush` and `close` is a later improvement); the v1
+  limit and a mismatch found during the copy have no scenario (a v1 disk
+  cannot hold the large source file).
+
 Incident 0026 is closed.

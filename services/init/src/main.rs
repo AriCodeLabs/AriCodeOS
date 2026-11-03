@@ -1992,6 +1992,9 @@ struct Broker {
 /// The largest package the broker loads: the limit every part of the
 /// system shares (incident 0026).
 const STAGE_LEN: u64 = aricode_pkg::PACKAGE_MAX as u64;
+// The broker's buffer is one DMA buffer: the package limit must stay within
+// what the kernel gives one (audit of ADR 0072 phase B, L2).
+const _: () = assert!(STAGE_LEN <= sys::abi::DMA_MAX_LEN);
 
 /// A DMA buffer mapped in init, unmapped and released on drop.
 struct Stage {
@@ -2121,7 +2124,15 @@ impl Broker {
             return Err(LaunchStatus::Failed);
         }
         let len = size.div_ceil(4096) * 4096;
-        let dma = sys::dma_alloc(HARDWARE, len).map_err(|_| LaunchStatus::Failed)?;
+        let Ok(dma) = sys::dma_alloc(HARDWARE, len) else {
+            let mut b = [0u8; 20];
+            sys::print(b"AriInit: no memory for package ");
+            sys::print(pkg_path.as_bytes());
+            sys::print(b" (");
+            sys::print(aricode_rt::fmt_u64(len, &mut b));
+            sys::print(b" bytes of contiguous DMA)\n");
+            return Err(LaunchStatus::Failed);
+        };
         let virt = match sys::mmio_map(dma) {
             Ok(virt) => virt,
             Err(_) => {
