@@ -695,6 +695,7 @@ mod tests {
                     sha256: [0; 32],
                 })
                 .collect(),
+            profiles: Vec::new(),
         }
     }
 

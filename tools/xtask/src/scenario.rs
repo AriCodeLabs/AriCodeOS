@@ -107,6 +107,9 @@ pub struct HostUpdate {
     /// App packages offered: `DIR:VERSION`.
     #[serde(default)]
     pub apps: Vec<String>,
+    /// Profiles offered (ADR 0074): `NAME:APP,APP...`, by package name.
+    #[serde(default)]
+    pub profiles: Vec<String>,
     /// The index is altered after signing (the updater must refuse it).
     #[serde(default)]
     pub tamper_index: bool,
@@ -127,6 +130,10 @@ pub struct HostUpdate {
     /// ELF): the updater stages them piece by piece (ADR 0072, phase B).
     #[serde(default)]
     pub large_apps: bool,
+    /// The apps' `requires` (ADR 0074): the application interface level
+    /// they need; 0 (the default) writes none.
+    #[serde(default)]
+    pub apps_require: u32,
     /// The machine already holds a verified copy of this source's index
     /// with a higher serial (the published one must be refused as stale).
     #[serde(default)]
@@ -507,12 +514,14 @@ pub struct Scenario {
     /// External applications (directories with `Cargo.toml` and
     /// `NAME.manifest`, relative to the root) that xtask builds, packs as
     /// version 1 and installs into the test disk's AriFS as
-    /// `apps/NAME.aripkg` (ADR 0017).
+    /// `apps/NAME.aripkg` (ADR 0017); `DIR:requires=N` packs it needing
+    /// application interface N (ADR 0074).
     #[serde(default)]
     pub install: Vec<String>,
     /// Pending packages in the test disk's `pkgs/`: `DIR:VERSION`,
     /// `DIR:VERSION:corrupt` (tampered signature), for the installer (ADR
-    /// 0018), or `DIR:VERSION:large` (1 MiB more after the ELF, ADR 0072).
+    /// 0018), `DIR:VERSION:large` (1 MiB more after the ELF, ADR 0072) or
+    /// `DIR:VERSION:requires=N` (needs application interface N, ADR 0074).
     #[serde(default)]
     pub packages: Vec<String>,
     /// Packages already staged by the updater: `DIR:VERSION`, or

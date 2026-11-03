@@ -1,0 +1,80 @@
+# Profiles (ADR 0074). The owner installed hello_ext on their own; the
+# source's signed index offers hello_ext and hello_more, profile `desktop`
+# names both and profile `robot` names hello_more. Following both, `update`
+# plans only hello_more (hello_ext is there) and `upgrade` installs it for
+# desktop. Leaving desktop deletes nothing: hello_ext was never desktop's,
+# and robot still names hello_more, which becomes robot's. Leaving robot
+# then deletes hello_more; the owner's hello_ext stays. The history keeps
+# every step.
+name = "apps.profile"
+description = "profiles: follow two, upgrade installs what is missing, leaving them deletes only what they installed and nobody needs"
+level = "full"
+areas = ["apps", "update", "network", "shell"]
+install = ["examples/hello_ext"]
+timeout_secs = 180
+
+[host_update]
+apps = ["examples/hello_ext:1", "examples/hello_more:1"]
+profiles = ["desktop:hello_ext,hello_more", "robot:hello_more"]
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = [
+    "update profile add desktop",
+    "update profile add desktop",
+    "update profile add robot",
+    "update profiles",
+    "update",
+    "upgrade",
+    "run hello_more 1",
+    "update profile remove desktop",
+    "run hello_more 2",
+    "update profile remove robot",
+    "run hello_more 3",
+    "run hello_ext 4",
+    "update profiles",
+    "cat updater/history.log",
+    "shutdown",
+]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "update: profile desktop followed (run update, then upgrade, to install it)",
+    "update: profile already followed",
+    "update: profile robot followed (run update, then upgrade, to install it)",
+    "update profiles:",
+    "  desktop",
+    "  robot",
+    "updater: app hello_ext: installed 1, source 1 offers 1: up to date",
+    "updater: app hello_more: not installed, source 1 offers 1 for profile desktop: upgrade installs it",
+    "updater: app hello_more: installing version 1 for profile desktop",
+    "updater: 1 package(s) staged for the installer",
+    "installer: hello_more none -> 1 installed (apps/hello_more.aripkg)",
+    "installer: 1 package(s) installed, 0 skipped",
+    "hello_more v1: the second app of the profile (arg 1)",
+    "update: profile desktop removed",
+    "hello_more v1: the second app of the profile (arg 2)",
+    "update: profile robot removed",
+    "update: deleted apps/hello_more.aripkg",
+    ": not found in the initrd or AriFS",
+    "hello_ext v1: hello from outside the tree (arg 4)",
+    "update: no profile followed (update profile add NAME)",
+    "profile followed: desktop (from the console)",
+    "profile followed: robot (from the console)",
+    "app hello_more none -> 1 installed (apps/hello_more.aripkg)",
+    "profile removed: desktop (from the console)",
+    "profile removed: robot (from the console)",
+    "app deleted with profile robot: hello_more (from the console)",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = [
+    "KERNEL PANIC",
+    "update: updater exited with",
+    "update: installer exited",
+    "index refused",
+    "available (not installed)",
+    "deleted apps/hello_ext",
+    "app deleted with profile desktop",
+    "hello_more v1: the second app of the profile (arg 3)",
+    "nothing changed",
+]

@@ -1902,6 +1902,8 @@ pub struct Publication {
     pub stable_image: bool,
     /// App packages: (directory of the external app, version).
     pub apps: Vec<(String, u32)>,
+    /// Profiles (ADR 0074): (name, package names), every one among `apps`.
+    pub profiles: Vec<(String, Vec<String>)>,
     /// Also write the ADR 0027 `manifest.txt` next to the image, so machines
     /// still running the single-channel updater can fetch this build (the
     /// transition release, ADR 0029 decision 9).
@@ -1917,6 +1919,8 @@ pub struct Publication {
     /// Tests: publish the apps as `large` packages (`LARGE_PADDING` more
     /// after the ELF), which the updater stages piece by piece (ADR 0072).
     pub large_apps: bool,
+    /// Tests: the apps' `requires` (ADR 0074), 0 for none.
+    pub apps_require: u32,
 }
 
 /// Index serial (audit 1, L3): the Unix time, but always above the serial
@@ -2183,7 +2187,7 @@ pub fn publish_update_to(dir: &Path, release: bool, channel: &Publication) -> Re
 /// Returns the one-line summary for the caller to print.
 pub fn publish_channel(dir: &Path, channel: &Publication) -> Result<String> {
     use aricode_ab::Channel;
-    use aricode_update_index::{AppEntry, Index, SystemEntry};
+    use aricode_update_index::{AppEntry, Index, ProfileEntry, SystemEntry};
     let dev = channel.channel == Channel::Dev;
     if dev
         && (!channel.apps.is_empty()
@@ -2266,8 +2270,13 @@ pub fn publish_channel(dir: &Path, channel: &Publication) -> Result<String> {
             crate::build::PACKAGES_RELEASE,
             false,
         )?;
-        if channel.large_apps {
-            app = app.padded(crate::build::LARGE_PADDING)?;
+        let extra = if channel.large_apps {
+            crate::build::LARGE_PADDING
+        } else {
+            0
+        };
+        if extra > 0 || channel.apps_require > 0 {
+            app = app.resigned(extra, channel.apps_require)?;
         }
         let file = format!("{}-{}{}", app.name, app.version, aricode_pkg::EXTENSION);
         apps.push((app.name, app.version, file.clone()));
@@ -2309,13 +2318,21 @@ pub fn publish_channel(dir: &Path, channel: &Publication) -> Result<String> {
                 })
             })
             .collect::<Result<_>>()?,
+        profiles: channel
+            .profiles
+            .iter()
+            .map(|(name, members)| ProfileEntry {
+                name,
+                apps: members.iter().map(String::as_str).collect(),
+            })
+            .collect(),
     };
     let mut text = index.write();
     // The index must parse back exactly as published (names, sizes, the
     // 20-byte app name limit).
     if Index::parse(&text).as_ref() != Ok(&index) {
         return Err(String::from(
-            "the index does not parse back (an app name over 20 bytes?)",
+            "the index does not parse back (an app name over 20 bytes, or a profile naming an app not published?)",
         ));
     }
     let signature = sign_index(&text, sign_as)?;

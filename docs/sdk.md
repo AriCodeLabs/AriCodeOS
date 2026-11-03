@@ -92,6 +92,22 @@ and the updater handle it in pieces, and the broker loads only the one it
 launches. On a disk still in AriFS v1 (a stick written before 0.18) a
 package holds 32 KiB.
 
+A package may declare the lowest application interface it runs on with a
+`requires = N` line in its signed manifest (ADR 0074; `cargo xtask
+app-pack DIR --requires N`). The system offers `aricode_ab::APPS_LEVEL`.
+The updater does not stage a package that needs more, the installer
+refuses it and the broker does not launch it, each saying which level it
+needs. A package without the line runs everywhere, and systems before
+0.18 refuse one that has it.
+
+Apps can also arrive as a profile (ADR 0074): a source's signed index may
+group apps under a name (`publish-update --profile desktop:a,b`). The owner
+follows a profile with `update profile add NAME`, after which `update` and
+`upgrade` install every app the profile names and keep them up to date with
+the system. `update profile remove NAME` deletes the apps that no other
+followed profile names and the profile installed itself; an app you
+installed by other means stays.
+
 ## What a program receives
 
 Fixed handles (`aricode_abi::handle`): `0x10001` its process, `0x10002` its

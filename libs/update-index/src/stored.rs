@@ -68,6 +68,56 @@ pub fn decode(bytes: &[u8]) -> Option<Stored<'_>> {
     })
 }
 
+/// Why a source's stored index cannot be used (ADR 0029, decision 4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotProblem {
+    /// Nothing verified stored for it yet: `update` has not reached it.
+    Missing,
+    /// The slot holds another URL's index: the source list changed since
+    /// the last `update`.
+    ListChanged,
+    /// The stored copy no longer verifies with the channel's key.
+    Refused,
+}
+
+/// The index stored in `slot` for `source`, verified again with the key of
+/// the source's channel: never another slot's copy, nor one a removed or
+/// moved source left behind.
+pub fn verified_slot<'a>(
+    slots: &'a [Vec<u8>],
+    slot: usize,
+    source: &crate::Source,
+    keys: &crate::Keys,
+) -> Result<crate::Index<'a>, SlotProblem> {
+    let s = slots
+        .get(slot)
+        .and_then(|b| decode(b))
+        .ok_or(SlotProblem::Missing)?;
+    if s.source != source.url {
+        return Err(SlotProblem::ListChanged);
+    }
+    crate::verify_channel(s.index, s.signature, keys, source.channel)
+        .map_err(|_| SlotProblem::Refused)
+}
+
+/// Every stored index of the `channel` sources in preference order, each
+/// from its own slot ([`verified_slot`]); the first source with a problem
+/// stops it (its list position, 1-based, and the problem), for callers
+/// that act on all of them or on none.
+pub fn verified_all<'a>(
+    slots: &'a [Vec<u8>],
+    sources: &crate::Sources,
+    keys: &crate::Keys,
+    channel: crate::Channel,
+) -> Result<Vec<crate::Index<'a>>, (usize, SlotProblem)> {
+    sources
+        .entries()
+        .enumerate()
+        .filter(|(_, s)| s.channel == channel)
+        .map(|(slot, source)| verified_slot(slots, slot, source, keys).map_err(|e| (slot + 1, e)))
+        .collect()
+}
+
 /// All slots in one file: per slot `entry LEN\n` and LEN bytes (0 for an
 /// empty slot), [`MAX_SOURCES`] entries in order.
 pub fn encode_all(slots: &[Vec<u8>]) -> Vec<u8> {
@@ -108,6 +158,47 @@ pub fn decode_all(mut bytes: &[u8]) -> Option<Vec<Vec<u8>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_source_only_reads_its_own_slot() {
+        extern crate std;
+        let seed = [5u8; 32];
+        let keys = crate::Keys::stable_only(aricode_crypto::ed25519::public_key(&seed));
+        let stored = |url: &str, serial: u32| {
+            let text = std::format!("format = 1\nserial = {serial}\n");
+            let sig = aricode_crypto::ed25519::sign(&seed, text.as_bytes());
+            let mut hex = [0u8; 128];
+            encode(
+                url,
+                aricode_crypto::hex(&sig, &mut hex).as_bytes(),
+                text.as_bytes(),
+            )
+        };
+        let (mut sources, _) = crate::Sources::parse("http://a/\nhttp://b/\n");
+        let slots = alloc::vec![stored("http://a/", 1), stored("http://b/", 2)];
+        let all = verified_all(&slots, &sources, &keys, crate::Channel::Stable).unwrap();
+        assert_eq!(all.iter().map(|i| i.serial).collect::<Vec<_>>(), [1, 2]);
+        // Source a removed: b moves to slot 0, which still holds a's copy.
+        sources.remove("http://a/").unwrap();
+        assert_eq!(
+            verified_all(&slots, &sources, &keys, crate::Channel::Stable).err(),
+            Some((1, SlotProblem::ListChanged))
+        );
+        // Nothing stored yet, and a copy that no longer verifies.
+        sources.add("http://c/").unwrap();
+        let only_b = alloc::vec![Vec::new(), Vec::new()];
+        assert_eq!(
+            verified_slot(&only_b, 1, sources.entries().nth(1).unwrap(), &keys).err(),
+            Some(SlotProblem::Missing)
+        );
+        let mut forged = stored("http://b/", 2);
+        let last = forged.len() - 2;
+        forged[last] ^= 1;
+        assert_eq!(
+            verified_slot(&[forged], 0, sources.entries().next().unwrap(), &keys).err(),
+            Some(SlotProblem::Refused)
+        );
+    }
 
     #[test]
     fn round_trip() {

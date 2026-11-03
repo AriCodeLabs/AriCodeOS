@@ -4,7 +4,8 @@
 //! `aricode-initrd` container with four files:
 //!
 //! ```text
-//! manifest          name, version and SHA-256 of program and program.manifest
+//! manifest          name, version, SHA-256 of program and program.manifest,
+//!                   and optionally `requires` (ADR 0074)
 //! manifest.sig      Ed25519 signature of the whole manifest
 //! program           static ring 3 ELF
 //! program.manifest  application manifest (`aricode-manifest`)
@@ -55,6 +56,11 @@ pub struct PkgManifest {
     pub version: u32,
     pub program_sha256: [u8; 32],
     pub manifest_sha256: [u8; 32],
+    /// The lowest application interface level it runs on
+    /// (`aricode_ab::APPS_LEVEL`, ADR 0074); 0 when the manifest has no
+    /// `requires` line. A system older than ADR 0074 refuses a manifest
+    /// that has one (its parser knows no such key), the safe failure.
+    pub requires: u32,
 }
 
 fn valid_name(name: &str) -> bool {
@@ -78,7 +84,13 @@ impl PkgManifest {
             version,
             program_sha256: sha256::sha256(program),
             manifest_sha256: sha256::sha256(manifest),
+            requires: 0,
         })
+    }
+
+    /// Whether a system offering application interface `level` runs it.
+    pub fn runs_on(&self, level: u32) -> bool {
+        self.requires <= level
     }
 
     pub fn name_str(&self) -> &str {
@@ -87,6 +99,7 @@ impl PkgManifest {
 
     pub fn parse(text: &str) -> Option<Self> {
         let (mut name, mut version, mut program, mut manifest) = (None, None, None, None);
+        let mut requires = None;
         for line in text.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -114,6 +127,14 @@ impl PkgManifest {
                     unhex(v, &mut h)?;
                     manifest = Some(h);
                 }
+                // One spelling: decimal digits without a sign or a leading
+                // zero (so never `requires = 0`), and one line.
+                "requires" if requires.is_none() => {
+                    if v.starts_with('0') || !v.bytes().all(|b| b.is_ascii_digit()) {
+                        return None;
+                    }
+                    requires = Some(v.parse::<u32>().ok()?);
+                }
                 _ => return None,
             }
         }
@@ -124,6 +145,7 @@ impl PkgManifest {
             version: version?,
             program_sha256: program?,
             manifest_sha256: manifest?,
+            requires: requires.unwrap_or(0),
         })
     }
 
@@ -138,17 +160,7 @@ impl PkgManifest {
         put(&self.name[..self.name_len as usize], &mut n);
         put(b"\nversion = ", &mut n);
         let mut num = [0u8; 10];
-        let mut v = self.version;
-        let mut i = num.len();
-        loop {
-            i -= 1;
-            num[i] = b'0' + (v % 10) as u8;
-            v /= 10;
-            if v == 0 {
-                break;
-            }
-        }
-        put(&num[i..], &mut n);
+        put(decimal(self.version, &mut num), &mut n);
         let mut hex = [0u8; 64];
         put(b"\nprogram = ", &mut n);
         put(
@@ -161,8 +173,29 @@ impl PkgManifest {
             &mut n,
         );
         put(b"\n", &mut n);
+        // Written only when set, so every package without it keeps the
+        // exact manifest (and signature) it always had.
+        if self.requires > 0 {
+            put(b"requires = ", &mut n);
+            put(decimal(self.requires, &mut num), &mut n);
+            put(b"\n", &mut n);
+        }
         core::str::from_utf8(&out[..n]).unwrap_or("")
     }
+}
+
+/// `v` in decimal, at the end of `num`.
+fn decimal(mut v: u32, num: &mut [u8; 10]) -> &[u8] {
+    let mut i = num.len();
+    loop {
+        i -= 1;
+        num[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    &num[i..]
 }
 
 /// Verified package: references to the bytes inside the container.
@@ -307,18 +340,23 @@ pub fn verify_streaming(
     })
 }
 
-/// Builds and signs a package (host tools). With `corrupt` the
-/// signature is altered so that it does not verify.
+/// Builds and signs a package (host tools); `requires` is its lowest
+/// application interface level, 0 for none. With `corrupt` the signature
+/// is altered so that it does not verify.
 #[cfg(feature = "write")]
 pub fn build(
     name: &str,
     version: u32,
+    requires: u32,
     program: &[u8],
     app_manifest: &[u8],
     seed: &[u8; 32],
     corrupt: bool,
 ) -> Option<std::vec::Vec<u8>> {
-    let manifest = PkgManifest::new(name, version, program, app_manifest)?;
+    let manifest = PkgManifest {
+        requires,
+        ..PkgManifest::new(name, version, program, app_manifest)?
+    };
     let mut buf = [0u8; 256];
     let text = manifest.write(&mut buf).as_bytes().to_vec();
     let mut sig = ed25519::sign(seed, &text);
@@ -346,7 +384,7 @@ mod tests {
         let pk = ed25519::public_key(&SEED);
         let elf = b"\x7fELF fake program";
         let app = b"name = demo\ncaps = system\n";
-        let pkg = build("demo", 3, elf, app, &SEED, false).unwrap();
+        let pkg = build("demo", 3, 0, elf, app, &SEED, false).unwrap();
         let v = verify(&pkg, &pk).unwrap();
         assert_eq!(v.manifest.name_str(), "demo");
         assert_eq!(v.manifest.version, 3);
@@ -359,16 +397,48 @@ mod tests {
     }
 
     #[test]
+    fn requires_is_signed_and_has_one_spelling() {
+        let pk = ed25519::public_key(&SEED);
+        let elf = b"\x7fELF";
+        let app = b"name = demo\n";
+        let pkg = build("demo", 2, 3, elf, app, &SEED, false).unwrap();
+        let v = verify(&pkg, &pk).unwrap();
+        assert_eq!(v.manifest.requires, 3);
+        assert!(v.manifest.runs_on(3) && v.manifest.runs_on(4) && !v.manifest.runs_on(2));
+        let mut text = [0u8; 256];
+        let canonical = v.manifest.write(&mut text);
+        assert!(canonical.ends_with("\nrequires = 3\n"), "{canonical}");
+        assert_eq!(PkgManifest::parse(canonical), Some(v.manifest));
+        // Without it, the manifest is the one packages always had.
+        let plain = build("demo", 2, 0, elf, app, &SEED, false).unwrap();
+        let old = verify(&plain, &pk).unwrap();
+        assert!(!old.manifest.write(&mut text).contains("requires"));
+        assert!(old.manifest.runs_on(0));
+        // `requires = 0`, a repeated or a malformed line are refused.
+        let base = std::string::String::from(old.manifest.write(&mut text));
+        for extra in [
+            "requires = 0\n",
+            "requires = 2\nrequires = 2\n",
+            "requires = x\n",
+            "requires = 02\n",
+            "requires = +2\n",
+            "requires = \n",
+        ] {
+            assert_eq!(PkgManifest::parse(&(base.clone() + extra)), None, "{extra}");
+        }
+    }
+
+    #[test]
     fn rejects_tampering() {
         let pk = ed25519::public_key(&SEED);
         let elf = b"\x7fELF";
         let app = b"name = demo\n";
         assert_eq!(
-            verify(&build("demo", 1, elf, app, &SEED, true).unwrap(), &pk).err(),
+            verify(&build("demo", 1, 0, elf, app, &SEED, true).unwrap(), &pk).err(),
             Some(PkgError::BadSignature)
         );
         let other = ed25519::public_key(&[9u8; 32]);
-        let pkg = build("demo", 1, elf, app, &SEED, false).unwrap();
+        let pkg = build("demo", 1, 0, elf, app, &SEED, false).unwrap();
         assert_eq!(verify(&pkg, &other).err(), Some(PkgError::BadSignature));
         // Program changed after signing: the hash does not match.
         let mut tampered = pkg.clone();
@@ -379,7 +449,7 @@ mod tests {
             Some(PkgError::HashMismatch("program"))
         );
         assert_eq!(verify(b"garbage", &pk).err(), Some(PkgError::BadContainer));
-        assert!(build("with space", 1, elf, app, &SEED, false).is_none());
+        assert!(build("with space", 1, 0, elf, app, &SEED, false).is_none());
     }
 
     fn streaming(pkg: &[u8], pk: &[u8; 32]) -> Result<StreamVerified, PkgError> {
@@ -398,7 +468,7 @@ mod tests {
         let pk = ed25519::public_key(&SEED);
         let elf: std::vec::Vec<u8> = (0..300_000u32).map(|i| (i * 7) as u8).collect();
         let app = b"name = demo\ncaps = system\n";
-        let pkg = build("demo", 4, &elf, app, &SEED, false).unwrap();
+        let pkg = build("demo", 4, 0, &elf, app, &SEED, false).unwrap();
         let v = streaming(&pkg, &pk).unwrap();
         let whole = verify(&pkg, &pk).unwrap();
         assert_eq!(v.manifest, whole.manifest);
@@ -413,7 +483,7 @@ mod tests {
         );
         let other = ed25519::public_key(&[9u8; 32]);
         assert_eq!(streaming(&pkg, &other).err(), Some(PkgError::BadSignature));
-        let bad = build("demo", 4, &elf, app, &SEED, true).unwrap();
+        let bad = build("demo", 4, 0, &elf, app, &SEED, true).unwrap();
         assert_eq!(streaming(&bad, &pk).err(), Some(PkgError::BadSignature));
         assert_eq!(
             streaming(b"garbage", &pk).err(),

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! The signed index: format, parser, canonical writer and verification.
 
-use crate::{FORMAT, MAX_APPS, MAX_INDEX};
+use crate::{FORMAT, MAX_APPS, MAX_INDEX, MAX_PROFILES, MAX_PROFILE_APPS};
 use alloc::string::String;
 use alloc::vec::Vec;
 use aricode_ab::{Channel, Commit, Keys};
@@ -34,6 +34,11 @@ pub enum IndexError {
     Duplicate(usize),
     /// More than `MAX_APPS` apps.
     TooManyApps,
+    /// More than `MAX_PROFILES` profiles.
+    TooManyProfiles,
+    /// A profile (line number) names an app the index does not list, or
+    /// none, or more than `MAX_PROFILE_APPS` (ADR 0074).
+    BadProfile(usize),
     /// Older than the index already stored for this source.
     Stale { stored: u64, offered: u64 },
     /// The channel rules of ADR 0045: a development index names its commit,
@@ -66,6 +71,18 @@ pub struct AppEntry<'a> {
     pub sha256: [u8; 32],
 }
 
+/// A profile a source offers (ADR 0074): a name and the apps it installs,
+/// every one of them listed in the same index.
+///
+/// ```text
+/// profile = desktop launcher terminal editor
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileEntry<'a> {
+    pub name: &'a str,
+    pub apps: Vec<&'a str>,
+}
+
 /// A parsed index. Only [`verify`] should produce one from downloaded bytes.
 ///
 /// A development index (ADR 0045) adds two lines after `serial` and offers
@@ -85,6 +102,7 @@ pub struct Index<'a> {
     pub commit: Option<&'a str>,
     pub system: Option<SystemEntry<'a>>,
     pub apps: Vec<AppEntry<'a>>,
+    pub profiles: Vec<ProfileEntry<'a>>,
 }
 
 /// A plain file name inside the source directory: no `/`, no leading `.`,
@@ -134,6 +152,7 @@ impl<'a> Index<'a> {
         let (mut format, mut serial, mut system) = (None, None, None);
         let (mut channel, mut commit) = (None, None);
         let mut apps: Vec<AppEntry<'a>> = Vec::new();
+        let mut profiles: Vec<(usize, ProfileEntry<'a>)> = Vec::new();
         for (i, raw) in text.lines().enumerate() {
             let n = i + 1;
             let line = raw.trim();
@@ -207,13 +226,51 @@ impl<'a> Index<'a> {
                         sha256,
                     });
                 }
+                "profile" => {
+                    let mut fields = value.split_whitespace();
+                    let name = fields
+                        .next()
+                        .filter(|f| valid_app_name(f))
+                        .ok_or(IndexError::Line(n))?;
+                    let mut members: Vec<&'a str> = Vec::new();
+                    for app in fields {
+                        if !valid_app_name(app) || members.contains(&app) {
+                            return Err(IndexError::BadProfile(n));
+                        }
+                        members.push(app);
+                    }
+                    if members.is_empty() || members.len() > MAX_PROFILE_APPS {
+                        return Err(IndexError::BadProfile(n));
+                    }
+                    if profiles.iter().any(|(_, p)| p.name == name) {
+                        return Err(IndexError::Duplicate(n));
+                    }
+                    if profiles.len() == MAX_PROFILES {
+                        return Err(IndexError::TooManyProfiles);
+                    }
+                    profiles.push((
+                        n,
+                        ProfileEntry {
+                            name,
+                            apps: members,
+                        },
+                    ));
+                }
                 _ => return Err(IndexError::Line(n)),
             }
         }
         if format != Some(FORMAT) {
             return Err(IndexError::UnsupportedFormat);
         }
+        // A profile only names apps this index signs, wherever their lines
+        // are.
+        for (n, p) in &profiles {
+            if p.apps.iter().any(|m| !apps.iter().any(|a| a.name == *m)) {
+                return Err(IndexError::BadProfile(*n));
+            }
+        }
         let channel = channel.unwrap_or(Channel::Stable);
+        // A profile names apps, so a development index (none) has none.
         let dev_ok = commit.is_some() && system.is_some() && apps.is_empty();
         match channel {
             Channel::Dev if !dev_ok => return Err(IndexError::ChannelRules),
@@ -226,6 +283,7 @@ impl<'a> Index<'a> {
             commit,
             system,
             apps,
+            profiles: profiles.into_iter().map(|(_, p)| p).collect(),
         })
     }
 
@@ -263,12 +321,24 @@ impl<'a> Index<'a> {
                 aricode_crypto::hex(&a.sha256, &mut hex)
             );
         }
+        for p in &self.profiles {
+            let _ = write!(out, "profile = {}", p.name);
+            for app in &p.apps {
+                let _ = write!(out, " {app}");
+            }
+            out.push('\n');
+        }
         out
     }
 
     /// The app entry with that name.
     pub fn app(&self, name: &str) -> Option<&AppEntry<'a>> {
         self.apps.iter().find(|a| a.name == name)
+    }
+
+    /// The profile with that name.
+    pub fn profile(&self, name: &str) -> Option<&ProfileEntry<'a>> {
+        self.profiles.iter().find(|p| p.name == name)
     }
 }
 
@@ -346,6 +416,10 @@ mod tests {
                 size: 10_240,
                 sha256: [0x11; 32],
             }],
+            profiles: vec![ProfileEntry {
+                name: "desktop",
+                apps: vec!["hello_ext"],
+            }],
         }
     }
 
@@ -367,8 +441,49 @@ mod tests {
             commit: None,
             system: None,
             apps: Vec::new(),
+            profiles: Vec::new(),
         };
         assert_eq!(Index::parse(&empty.write()), Ok(empty));
+    }
+
+    #[test]
+    fn profiles_name_only_apps_of_the_same_index() {
+        let sha = "00".repeat(32);
+        let head = "format = 1\nserial = 1\n";
+        let app = |name: &str| std::format!("app = {name} 1 {name}.aripkg 10 {sha}\n");
+        let text = std::format!("{head}profile = desktop a b\n{}{}", app("a"), app("b"));
+        let index = Index::parse(&text).unwrap();
+        assert_eq!(index.profile("desktop").unwrap().apps, vec!["a", "b"]);
+        assert_eq!(index.profile("robot"), None);
+        // An app the index does not list, none at all, one named twice, a
+        // bad name or too many.
+        let bad = [
+            std::format!("{head}{}profile = desktop a c\n", app("a")),
+            std::format!("{head}{}profile = desktop\n", app("a")),
+            std::format!("{head}{}profile = desktop a a\n", app("a")),
+            std::format!("{head}{}profile = desktop a b/c\n", app("a")),
+            std::format!(
+                "{head}{}profile = desktop a a1 a2 a3 a4 a5 a6 a7 a8\n",
+                app("a")
+            ),
+        ];
+        for text in &bad {
+            assert!(
+                matches!(Index::parse(text), Err(IndexError::BadProfile(_))),
+                "{text}"
+            );
+        }
+        // The same profile twice, and more than MAX_PROFILES.
+        let twice = std::format!("{head}{}profile = p a\nprofile = p a\n", app("a"));
+        assert_eq!(Index::parse(&twice), Err(IndexError::Duplicate(5)));
+        let mut many = std::format!("{head}{}", app("a"));
+        for i in 0..=MAX_PROFILES {
+            many.push_str(&std::format!("profile = p{i} a\n"));
+        }
+        assert_eq!(Index::parse(&many), Err(IndexError::TooManyProfiles));
+        // A bad profile name is a malformed line.
+        let name = std::format!("{head}{}profile = a/b a\n", app("a"));
+        assert_eq!(Index::parse(&name), Err(IndexError::Line(4)));
     }
 
     fn dev_sample() -> Index<'static> {
@@ -383,6 +498,7 @@ mod tests {
                 sha256: [0xCD; 32],
             }),
             apps: Vec::new(),
+            profiles: Vec::new(),
         }
     }
 

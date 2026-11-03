@@ -70,6 +70,7 @@ dependencies = [
 name = "ari-app-installer"
 version = "0.17.0"
 dependencies = [
+ "aricode-ab",
  "aricode-build",
  "aricode-crypto",
  "aricode-pkg",
@@ -197,6 +198,7 @@ version = "0.17.0"
 dependencies = [
  "aricode-build",
  "aricode-cmdline",
+ "aricode-crypto",
  "aricode-https",
  "aricode-lineedit",
  "aricode-net",

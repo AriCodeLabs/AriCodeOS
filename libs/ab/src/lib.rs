@@ -580,6 +580,14 @@ pub const FEATURES_FILE: &str = "features";
 /// What the systems built from this tree declare (xtask writes it).
 pub const FEATURES: &str = "arifs = 2\n";
 
+/// The application interface this tree's systems offer (ADR 0074), as
+/// Android's API level: a number that grows when what apps may rely on
+/// grows, apart from the release number (stable and development builds
+/// count releases differently). A package's `requires` names the lowest
+/// it runs on; the updater, the installer and the broker of the running
+/// system compare it with this one.
+pub const APPS_LEVEL: u32 = 1;
+
 /// Longest `features` file read.
 const FEATURES_MAX: usize = 256;
 

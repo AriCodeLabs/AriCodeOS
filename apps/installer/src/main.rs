@@ -83,6 +83,9 @@ mod code {
     /// A pending or staged package could not be read (as opposed to
     /// missing, oversized or tampered).
     pub const PKG_READ: u64 = 16;
+    /// The package needs a newer application interface than this system
+    /// offers (ADR 0074).
+    pub const REQUIRES: u64 = 17;
 }
 
 macro_rules! say {
@@ -476,6 +479,19 @@ fn install_one(
         );
         return Ok(Done::Refused(0));
     };
+    // ADR 0074: a package for a newer system never replaces one that runs
+    // here; the owner upgrades the system first.
+    if !manifest.runs_on(aricode_ab::APPS_LEVEL) {
+        return Ok(Done::Refused(fault(
+            code::REQUIRES,
+            "inst-requires-newer",
+            &format!(
+                "{app} version {version} needs application interface {} and this system offers {}: refused (upgrade the system first)",
+                manifest.requires,
+                aricode_ab::APPS_LEVEL
+            ),
+        )));
+    }
     let current = match installed(fs, &target, pubkey) {
         Installed::Missing => None,
         Installed::Valid(m, _) => Some(m.version),
@@ -772,9 +788,21 @@ fn install_staged(fs: &mut FsClient, allow_downgrade: bool, pubkey: &[u8; 32]) -
     let mut result = end.code;
     if !end.consume {
         say!("staged list kept for inspection in updater/state (a failure, not a refusal); upgrade stages again");
-    } else if !write_state_section(fs, &mut state, lists::STAGED, "") {
-        // Consumed: a later run (with or without --allow-downgrade) cannot
-        // install the same files again.
+    } else if write_state_section(fs, &mut state, lists::STAGED, "") {
+        // Consumed: the stage files are scratch now. Emptied so they do not
+        // keep up to MAX_STAGED packages of PACKAGE_MAX bytes on the
+        // volume (audit of ADR 0074 phase A, L3); a failure only leaves
+        // the bytes until the next upgrade overwrites them.
+        for e in &entries {
+            let path = upd::main_path(e.file);
+            if let Ok(fd) = fs.open(&path) {
+                let _ = fs.replace(fd, &[]);
+                let _ = fs.close(fd);
+            }
+        }
+    } else {
+        // The list stays: a later run (with or without --allow-downgrade)
+        // could install the same files again, so this is a failure.
         result = fault(
             code::WRITE,
             "inst-stage-clear",
