@@ -127,9 +127,13 @@ impl PkgManifest {
                     unhex(v, &mut h)?;
                     manifest = Some(h);
                 }
-                // One spelling: no `requires = 0`, no second line.
+                // One spelling: decimal digits without a sign or a leading
+                // zero (so never `requires = 0`), and one line.
                 "requires" if requires.is_none() => {
-                    requires = Some(v.parse::<u32>().ok().filter(|&r| r > 0)?);
+                    if v.starts_with('0') || !v.bytes().all(|b| b.is_ascii_digit()) {
+                        return None;
+                    }
+                    requires = Some(v.parse::<u32>().ok()?);
                 }
                 _ => return None,
             }
@@ -416,6 +420,9 @@ mod tests {
             "requires = 0\n",
             "requires = 2\nrequires = 2\n",
             "requires = x\n",
+            "requires = 02\n",
+            "requires = +2\n",
+            "requires = \n",
         ] {
             assert_eq!(PkgManifest::parse(&(base.clone() + extra)), None, "{extra}");
         }

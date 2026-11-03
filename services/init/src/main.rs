@@ -2171,6 +2171,23 @@ impl Broker {
                 return Err(LaunchStatus::Denied);
             }
         };
+        // ADR 0074: a package for a newer application interface never runs
+        // here, whatever brought it (a rollback to an older system, a copy
+        // made by hand).
+        if !verified.manifest.runs_on(aricode_ab::APPS_LEVEL) {
+            let mut b = [0u8; 20];
+            sys::print(b"AriInit: denied, package ");
+            sys::print(pkg_path.as_bytes());
+            sys::print(b" needs application interface ");
+            sys::print(aricode_rt::fmt_u64(
+                verified.manifest.requires as u64,
+                &mut b,
+            ));
+            sys::print(b" and this system offers ");
+            sys::print(aricode_rt::fmt_u64(aricode_ab::APPS_LEVEL as u64, &mut b));
+            sys::print(b"\n");
+            return Err(LaunchStatus::Denied);
+        }
         let manifest = core::str::from_utf8(verified.app_manifest)
             .ok()
             .and_then(|t| Manifest::parse(t).ok())

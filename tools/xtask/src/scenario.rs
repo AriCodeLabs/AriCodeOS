@@ -514,7 +514,8 @@ pub struct Scenario {
     /// External applications (directories with `Cargo.toml` and
     /// `NAME.manifest`, relative to the root) that xtask builds, packs as
     /// version 1 and installs into the test disk's AriFS as
-    /// `apps/NAME.aripkg` (ADR 0017).
+    /// `apps/NAME.aripkg` (ADR 0017); `DIR:requires=N` packs it needing
+    /// application interface N (ADR 0074).
     #[serde(default)]
     pub install: Vec<String>,
     /// Pending packages in the test disk's `pkgs/`: `DIR:VERSION`,

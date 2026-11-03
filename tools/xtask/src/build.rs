@@ -564,8 +564,13 @@ fn check_package_size(name: &str, len: usize, release: bool) -> Result {
 }
 
 /// `cargo xtask app-pack DIR [--version N]`: produces `build/pkgs/NAME-N.aripkg`.
-pub fn app_pack(dir: &Path, version: u32, release: bool) -> Result {
-    let app = build_external(dir, version, release, false)?;
+/// `requires`: the lowest application interface level the package runs on
+/// (ADR 0074), 0 for none.
+pub fn app_pack(dir: &Path, version: u32, requires: u32, release: bool) -> Result {
+    let mut app = build_external(dir, version, release, false)?;
+    if requires > 0 {
+        app = app.resigned(0, requires)?;
+    }
     let out = crate::build_dir().join("pkgs");
     std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
     let file = out.join(format!(

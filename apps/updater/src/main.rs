@@ -56,8 +56,9 @@ use aricode_update_index::files::{self, Files, ReadError};
 use aricode_update_index::lists::{self, PlanItem, StagedEntry};
 use aricode_update_index::{
     self as upd, best_app, best_system, check_fresh, compare, compare_system, decide_system,
-    profiles::profile_apps, stored, updater_arg, Change, Channel, Index, Keys, Migration, Profiles,
-    Refusal, Sources, StableFloor, SystemChange, SystemDecision, SystemId, SystemRules,
+    profiles::profile_apps, stored, stored::SlotProblem, updater_arg, Change, Channel, Index, Keys,
+    Migration, Profiles, Refusal, Sources, StableFloor, SystemChange, SystemDecision, SystemId,
+    SystemRules,
 };
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -396,12 +397,39 @@ fn missing_profile_apps<'a>(
     for profile in profiles.names() {
         for app in profile_apps(indexes, profile).unwrap_or_default() {
             if !installed.iter().any(|(n, _)| n == app) && !missing.iter().any(|(a, _)| *a == app) {
-                missing.push((app, profile.clone()));
+                missing.push((app, String::from(profile)));
             }
         }
     }
     missing
 }
+
+/// Whether profile apps may be planned or staged now (ADR 0074): only with
+/// an installed list that is present and undamaged, or a missing app could
+/// be one the list failed to name, and only on AriFS v2. A volume still in
+/// v1 cannot hold them (32 files, 32 KiB each); fsd answers `Delete` with
+/// `Unsupported` there before looking the name up (ADR 0072), which is
+/// how the volume's version is told from here. Says why not.
+fn profiles_possible(fs: &mut FsClient, state: &str) -> bool {
+    let exact = lists::section(state, lists::INSTALLED)
+        .is_some_and(|text| lists::parse_installed(&text).1 == 0);
+    if !exact {
+        say!("profiles not followed this run: the installed app list is missing or damaged");
+        return false;
+    }
+    if matches!(
+        fs.delete(PROBE_FILE),
+        Err(FsError::Status(aricode_proto::fs::Status::Unsupported))
+    ) {
+        say!("profiles not followed: ARI0 is still AriFS v1 (a stick written from 0.18 on is v2)");
+        return false;
+    }
+    true
+}
+
+/// A name never created in the updater's directory: deleting it only
+/// tells AriFS v1 (`Unsupported`) from v2 (`NotFound`).
+const PROBE_FILE: &str = "arifs-version-probe";
 
 /// The exchange file with the installer (`state`); empty when missing. A
 /// read error or an oversized file is a fault, and then the file is
@@ -1885,32 +1913,31 @@ fn verified_stored(
         if source.channel != channel {
             continue;
         }
-        let (n, url) = (slot + 1, source.url.as_str());
-        let Some(s) = files.get(slot).and_then(|b| stored::decode(b)) else {
-            fault(
-                code::INDEX_MISSING,
-                "upd-no-verified-index",
-                &format!("source {n}: no verified index yet; run update"),
-            );
-            continue;
-        };
-        if s.source != url {
-            fault(
-                code::INDEX_MISSING,
-                "upd-list-changed",
-                &format!("source {n}: the list changed since the last update; run update"),
-            );
-            continue;
+        let n = slot + 1;
+        match stored::verified_slot(&files, slot, source, keys) {
+            Ok(_) => list.push((slot, files[slot].clone())),
+            Err(SlotProblem::Missing) => {
+                fault(
+                    code::INDEX_MISSING,
+                    "upd-no-verified-index",
+                    &format!("source {n}: no verified index yet; run update"),
+                );
+            }
+            Err(SlotProblem::ListChanged) => {
+                fault(
+                    code::INDEX_MISSING,
+                    "upd-list-changed",
+                    &format!("source {n}: the list changed since the last update; run update"),
+                );
+            }
+            Err(SlotProblem::Refused) => {
+                fault(
+                    code::INDEX_REFUSED,
+                    "upd-stored-refused",
+                    &format!("source {n}: stored index fails verification; ignored"),
+                );
+            }
         }
-        if upd::verify_channel(s.index, s.signature, keys, channel).is_err() {
-            fault(
-                code::INDEX_REFUSED,
-                "upd-stored-refused",
-                &format!("source {n}: stored index fails verification; ignored"),
-            );
-            continue;
-        }
-        list.push((slot, files[slot].clone()));
     }
     list
 }
@@ -2075,8 +2102,15 @@ fn report(fs: &mut FsClient, sources: &Sources, keys: &Keys, channel: Channel) -
     }
     // Profiles (ADR 0074): what a followed profile installs and this
     // machine lacks is planned like an upgrade.
-    let profiles = match channel {
-        Channel::Stable if state.is_ok() => load_profiles(fs),
+    let profiles = match (&state, channel) {
+        (Ok(state), Channel::Stable) => {
+            let followed = load_profiles(fs);
+            if !followed.is_empty() && profiles_possible(fs, state) {
+                followed
+            } else {
+                Profiles::default()
+            }
+        }
         _ => Profiles::default(),
     };
     for name in profiles.names() {
@@ -2699,11 +2733,16 @@ fn upgrade(
     }
     // Apps of followed profiles not installed yet (ADR 0074), as `update`
     // planned them: only what the owner was shown.
-    let profiles = match channel {
+    let mut profiles = match channel {
         Channel::Stable => load_profiles(fs),
         Channel::Dev => Profiles::default(),
     };
-    for (app, profile) in missing_profile_apps(&indexes, &profiles, &installed_list) {
+    let mut for_profile: Vec<(&str, String)> = Vec::new();
+    let missing = match !profiles.is_empty() && profiles_possible(fs, &state) {
+        true => missing_profile_apps(&indexes, &profiles, &installed_list),
+        false => Vec::new(),
+    };
+    for (app, profile) in missing {
         let Some((i, entry)) = best_app(&indexes, app) else {
             continue;
         };
@@ -2726,6 +2765,7 @@ fn upgrade(
             entry.version
         );
         app_jobs.push((i, entry));
+        for_profile.push((app, profile));
     }
     // 2. Reserve every AriFS entry the installs will need (the history
     //    after a system install, one stage file per package) before the
@@ -2769,6 +2809,24 @@ fn upgrade(
             Ok(e) => staged.push(e),
             Err(code) => result = code,
         }
+    }
+    // What leaving a profile may delete (ADR 0074): the apps staged for
+    // it, recorded before the installer runs. A record without the app
+    // (its install failed) deletes nothing; an app without a record (the
+    // write failed) is never deleted with the profile, the safe side.
+    let mut recorded = false;
+    for (app, profile) in &for_profile {
+        if staged.iter().any(|e| e.name == *app) {
+            profiles.record(profile, app);
+            recorded = true;
+        }
+    }
+    if recorded && !write_file(fs, upd::PROFILES_FILE, profiles.to_text().as_bytes()) {
+        result = fault(
+            code::PROFILES_FILE,
+            "upd-profiles-write",
+            "cannot record the apps installed for profiles: leaving a profile will not delete them",
+        );
     }
     if !write_state_section(fs, &state, lists::STAGED, &lists::encode_staged(&staged)) {
         return fault(

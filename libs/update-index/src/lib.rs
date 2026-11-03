@@ -57,7 +57,7 @@ pub use policy::{
     floor_rewrite, raise_floor, Change, Refusal, StableFloor, SystemChange, SystemDecision,
     SystemId, SystemRules,
 };
-pub use profiles::{ProfileError, Profiles};
+pub use profiles::{Profile, ProfileError, Profiles};
 pub use sources::{normalize_source, Migration, Source, SourceError, Sources};
 pub use trust::{image_matches_offer, trusted_keys};
 

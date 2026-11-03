@@ -203,8 +203,16 @@ const ELAPSED_FILE: &str = "elapsed";
 /// no scenario starts cargo and the build output stays in one place.
 fn prebuild_packages(selected: &[&Scenario]) -> Result {
     for s in selected {
-        let mut wanted: Vec<(String, u32, bool)> =
-            s.install.iter().map(|d| (d.clone(), 1, false)).collect();
+        let mut wanted: Vec<(String, u32, bool)> = s
+            .install
+            .iter()
+            .map(|spec| {
+                let dir = spec
+                    .split_once(":requires=")
+                    .map_or(spec.as_str(), |(d, _)| d);
+                (dir.to_string(), 1, false)
+            })
+            .collect();
         for spec in &s.packages {
             let mut parts = spec.split(':');
             if let (Some(dir), Some(Ok(version))) = (parts.next(), parts.next().map(str::parse)) {
@@ -265,11 +273,20 @@ pub fn run_scenario(
     let disk_variant = image::DiskVariant::parse(&s.disk)
         .ok_or_else(|| format!("{}: unknown disk '{}'", s.name, s.disk))?;
     let mut installed: Vec<(String, Vec<u8>)> = Vec::new();
-    for dir in &s.install {
-        installed.push(
-            build::build_external(std::path::Path::new(dir), 1, build::PACKAGES_RELEASE, false)?
-                .installed(),
-        );
+    for spec in &s.install {
+        let (dir, requires) = match spec.split_once(":requires=") {
+            None => (spec.as_str(), 0),
+            Some((dir, level)) => match level.parse::<u32>() {
+                Ok(level) if level > 0 => (dir, level),
+                _ => return Err(format!("{}: install '{spec}': DIR[:requires=N]", s.name)),
+            },
+        };
+        let mut app =
+            build::build_external(std::path::Path::new(dir), 1, build::PACKAGES_RELEASE, false)?;
+        if requires > 0 {
+            app = app.resigned(0, requires)?;
+        }
+        installed.push(app.installed());
     }
     for spec in &s.packages {
         let mut parts = spec.split(':');

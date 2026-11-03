@@ -1871,17 +1871,23 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
   - The index may carry `profile = NAME APP...`, naming only apps of the
     same index (`MAX_PROFILES` 4, `MAX_PROFILE_APPS` 8).
   - The owner's list is `updater/profiles` (`aricode_update_index::
-    profiles`), edited by `update profile add|remove NAME` and listed by
-    `update profiles`.
+    profiles`): one line per profile, its name and the apps the updater
+    staged for it. It is edited by `update profile add|remove NAME` and
+    listed by `update profiles`.
   - `update` plans, and `upgrade` stages, the apps a followed profile names
-    and the machine lacks (`MAX_STAGED` 8).
-  - Removing a profile deletes the apps no other followed profile names,
-    as the stored stable indexes say once verified again.
+    and the machine lacks (`MAX_STAGED` 8). Neither does so on AriFS v1, or
+    without a sound `[installed]` list.
+  - Removing a profile deletes the apps recorded for it that no other
+    followed profile names. What the other profiles name comes from the
+    slot-bound, re-verified stored indexes (`stored::verified_all`).
   - A package's `requires = N` is checked against `aricode_ab::APPS_LEVEL`
-    by the updater before staging and by the installer before installing.
-  - Scenarios: `apps.profile`, `apps.requires_newer`.
+    by the updater before staging, by the installer before installing and
+    by the broker before launching.
+  - The installer empties the stage files it consumed.
+  - Scenarios: `apps.profile`, `apps.profile_v1`, `apps.requires_newer`.
 - xtask: `publish-update [--version N | --no-system] [--app DIR:VERSION]
-  [--profile NAME:APP,APP] [--no-legacy-manifest] [--signing-key DIR]` (atomic, legacy
+  [--profile NAME:APP,APP --all-machines-0.18] [--no-legacy-manifest]
+  [--signing-key DIR]` (atomic, legacy
   `manifest.txt` for the transition release), `usb-image --update-source
   URL --signing-key DIR`, scenario table `[host_update]`.
 - Scenarios: `update.sources`, `update.migrate_legacy_url`,

@@ -1408,8 +1408,12 @@ fn profile_add(fs: &mut FsClient, name: &[u8]) {
 }
 
 /// `update profile remove NAME` (ADR 0074): stops following it and deletes
-/// the apps it installed that no profile still followed installs, as the
-/// verified indexes of the stable sources name them.
+/// the apps `upgrade` installed for it that no profile still followed
+/// names; an app another followed profile names moves to that profile.
+/// What the other profiles name comes from the verified indexes of the
+/// current stable sources, each from its own slot; when one cannot be
+/// used, or a followed profile is offered by none, nothing changes. The
+/// decision is made before the list is saved, so a refusal can be retried.
 fn profile_remove(fs: &mut FsClient, name: &[u8]) {
     let Ok(name) = core::str::from_utf8(name) else {
         return profile_error(update_index::ProfileError::NotFound);
@@ -1417,42 +1421,70 @@ fn profile_remove(fs: &mut FsClient, name: &[u8]) {
     let Some(mut profiles) = load_profiles(fs) else {
         return;
     };
-    if let Err(e) = profiles.remove(name) {
-        return profile_error(e);
-    }
+    let removed = match profiles.remove(name) {
+        Ok(p) => p,
+        Err(e) => return profile_error(e),
+    };
+    let delete = if profiles.is_empty() {
+        removed.installed.clone()
+    } else {
+        let Some(sources) = load_sources(fs) else {
+            return;
+        };
+        let path = update_index::main_path(update_index::INDEXES_FILE);
+        let max = update_index::MAX_SOURCES * (update_index::MAX_INDEX + 1024);
+        let slots = match read_small(fs, &path, max) {
+            Ok(bytes) => update_index::stored::decode_all(&bytes.unwrap_or_default()),
+            Err(()) => None,
+        };
+        let Some(slots) = slots else {
+            print(b"update: the stored indexes cannot be read: nothing changed (run update)\n");
+            return;
+        };
+        let keys = update_index::Keys::stable_only(aricode_crypto::trust::public_key());
+        let indexes = match update_index::stored::verified_all(
+            &slots,
+            &sources,
+            &keys,
+            update_index::Channel::Stable,
+        ) {
+            Ok(indexes) => indexes,
+            Err((n, problem)) => {
+                print(b"update: source ");
+                num(n as u64);
+                print(match problem {
+                    update_index::stored::SlotProblem::Missing => {
+                        b": no verified index yet".as_slice()
+                    }
+                    update_index::stored::SlotProblem::ListChanged => {
+                        b": the list changed since the last update"
+                    }
+                    update_index::stored::SlotProblem::Refused => {
+                        b": its stored index fails verification"
+                    }
+                });
+                print(b": nothing changed (run update)\n");
+                return;
+            }
+        };
+        match update_index::profiles::plan_removal(&indexes, &removed, &mut profiles) {
+            Ok(delete) => delete,
+            Err(unknown) => {
+                print(b"update: no source offers profile ");
+                print(unknown.as_bytes());
+                print(b", so what it keeps is not known: nothing changed (run update)\n");
+                return;
+            }
+        }
+    };
     if !save_profiles(fs, &profiles, &alloc::format!("profile removed: {name}")) {
         return;
     }
     print(b"update: profile ");
     print(name.as_bytes());
     print(b" removed\n");
-    let path = update_index::main_path(update_index::INDEXES_FILE);
-    let stored = match read_small(
-        fs,
-        &path,
-        update_index::MAX_SOURCES * (update_index::MAX_INDEX + 1024),
-    ) {
-        Ok(Some(bytes)) => update_index::stored::decode_all(&bytes).unwrap_or_default(),
-        Ok(None) => alloc::vec::Vec::new(),
-        Err(()) => {
-            print(b"update: cannot read the stored indexes: its apps stay installed\n");
-            return;
-        }
-    };
-    // Only what the project key signed names apps to delete.
-    let key = aricode_crypto::trust::public_key();
-    let indexes: alloc::vec::Vec<_> = stored
-        .iter()
-        .filter_map(|b| update_index::stored::decode(b))
-        .filter_map(|s| update_index::verify(s.index, s.signature, &key).ok())
-        .filter(|i| i.channel == update_index::Channel::Stable)
-        .collect();
-    let Some(apps) = update_index::profiles::apps_to_remove(&indexes, name, &profiles) else {
-        print(b"update: no verified index names its apps: they stay installed\n");
-        return;
-    };
-    for app in apps {
-        let Some(target) = update_index::installed_path(app) else {
+    for app in delete {
+        let Some(target) = update_index::installed_path(&app) else {
             continue;
         };
         match fs.delete(&target) {
@@ -1466,15 +1498,11 @@ fn profile_remove(fs: &mut FsClient, name: &[u8]) {
                 );
             }
             Err(aricode_rt::sys::fs::FsError::Status(aricode_proto::fs::Status::NotFound)) => {}
-            Err(aricode_rt::sys::fs::FsError::Status(aricode_proto::fs::Status::Unsupported)) => {
-                print(b"update: AriFS v1 cannot delete files: ");
-                print(target.as_bytes());
-                print(b" stays\n");
-            }
             Err(_) => {
                 print(b"update: cannot delete ");
                 print(target.as_bytes());
-                print(b"\n");
+                print(b": it stays installed\n");
+                let _ = sys::event_record(3, "sh-profile-delete");
             }
         }
     }

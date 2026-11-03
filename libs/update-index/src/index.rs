@@ -270,7 +270,8 @@ impl<'a> Index<'a> {
             }
         }
         let channel = channel.unwrap_or(Channel::Stable);
-        let dev_ok = commit.is_some() && system.is_some() && apps.is_empty() && profiles.is_empty();
+        // A profile names apps, so a development index (none) has none.
+        let dev_ok = commit.is_some() && system.is_some() && apps.is_empty();
         match channel {
             Channel::Dev if !dev_ok => return Err(IndexError::ChannelRules),
             Channel::Stable if commit.is_some() => return Err(IndexError::ChannelRules),

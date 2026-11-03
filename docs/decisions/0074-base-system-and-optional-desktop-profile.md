@@ -68,10 +68,14 @@ package that the scenarios install, so `gui` keeps working in the tests.
     go only in indexes for the release that adds them. That is the same
     rule as every index change (ADR 0029).
 - **The owner follows a profile with `update profile add desktop`.**
-  - The shell records only the name, in `updater/profiles`, and logs it
-    in the install history.
-  - What the profile installs is never recorded. It is what the signed
-    indexes say, read again on every run.
+  - The shell adds the name to `updater/profiles` and logs it in the
+    install history.
+  - What the profile installs is never recorded there. It is what the
+    signed indexes say, read again on every run.
+  - What the profile *installed* is recorded: the updater appends each
+    app it stages for the profile to the profile's line
+    (`desktop editor terminal`). Only those apps are the profile's to
+    delete; an app the owner installed by other means never is.
 - **`update` plans, and `upgrade` installs.**
   1. `update` plans every app a followed profile names and the machine
      lacks, and shows each one with its profile.
@@ -88,13 +92,17 @@ package that the scenarios install, so `gui` keeps working in the tests.
   to a followed profile is planned and installed too, so the desktop
   never falls behind.
 - **`update profile remove desktop` stops following the profile.**
-  - It deletes the apps the profile installs that no other followed
-    profile installs (AriFS v2 `delete`, ADR 0072). The list comes from
-    the stored indexes of the stable sources, verified again with the
-    project key.
-  - Every deletion is logged.
-  - Without a verified index naming the profile, nothing is deleted, and
-    the shell says so.
+  - It deletes the apps recorded as installed for it (AriFS v2 `delete`,
+    ADR 0072), except those another followed profile names: these move to
+    that profile's record.
+  - What the other profiles name comes from the stored index of each
+    current stable source, read from that source's own slot and verified
+    again with the project key (`stored::verified_all`, the same check
+    `upgrade` makes). When a source has no verified index, the list
+    changed since the last `update`, or a followed profile is offered by
+    no source, nothing changes and the shell says to run `update`.
+  - The decision is made before the list is saved, so a refusal can be
+    retried. Every deletion is logged.
 - **`update profiles`** lists the profiles the machine follows.
 - **Offline machines (phase B).** `cargo xtask usb-image --profile
   desktop` will put the packages in the stick's `pkgs/` and follow the
@@ -102,15 +110,26 @@ package that the scenarios install, so `gui` keeps working in the tests.
   - This needs a stick with AriFS v2, so 0.18 or later.
   - An older stick is refused with a message to write a new one.
 - **Publishing.** `cargo xtask publish-update --profile NAME:APP,APP`
-  writes the line. Profiles only go in indexes for systems that read
-  them.
+  writes the line.
+  - An updater before 0.18 refuses an index with a line it does not
+    know, and with it the system image that would have updated it. So a
+    source may carry profiles only once every machine following it runs
+    0.18 or later.
+  - `publish-update` refuses `--profile` unless the publisher says so
+    with `--all-machines-0.18`.
+- **Only on AriFS v2.** On a volume still in v1, the updater neither
+  plans nor stages profile apps, and says why. It tells the version by
+  fsd answering `Delete` with `Unsupported` on v1 (ADR 0072).
+- **Only with a sound installed list.** When the `[installed]` list is
+  missing or damaged, profiles are not followed in that run, since a
+  "missing" app could be one the list failed to name.
 
 ### 3. Each package may declare the application interface it needs
 
 - **The level is a number of its own, not the release number.**
-  - The system declares `apps = N` in its initrd's `features` file
-    (`aricode_ab::APPS_LEVEL`, 1 in 0.18). The number grows when what
-    applications may rely on grows: a capability, a protocol, a syscall.
+  - Each system is built with it (`aricode_ab::APPS_LEVEL`, 1 in 0.18).
+    The number grows when what applications may rely on grows: a
+    capability, a protocol, a syscall.
   - Release numbers cannot play this part, because stable and development
     builds count differently. Android separates its API level from its
     release name for the same reason.
@@ -118,12 +137,20 @@ package that the scenarios install, so `gui` keeps working in the tests.
   runs on. It is signed with the rest of the manifest, and it is written
   only when set, so every existing package keeps its exact manifest and
   signature.
-- **Both programs refuse a package that needs more, and say which level
+- **Three programs refuse a package that needs more, and say which level
   it needs:**
   - the updater refuses it before staging (`upd-pkg-requires`);
-  - the installer refuses it before installing (`inst-requires-newer`).
+  - the installer refuses it before installing (`inst-requires-newer`,
+    exit code 17);
+  - the broker refuses to launch it. This covers a package installed
+    under a newer system and still there after a rollback.
   - A system installed by the same `upgrade` runs only after the reboot,
     so the app is installed by the next `upgrade`.
+- **Known cost.** The index does not carry `requires`, so `update` still
+  plans such an app, and each `upgrade` downloads it before refusing it.
+  An `app =` field for it belongs to a later index format.
+- **Developers** set the line with `cargo xtask app-pack DIR --requires
+  N`.
 - **Older systems never install such a package.** An older manifest
   parser refuses the unknown key, which is the safe failure.
 
@@ -169,9 +196,37 @@ declares.
 
 | Phase | Content |
 |---|---|
-| A (done) | The `profile` index line; `update profile add/remove` and `update profiles`; `update` and `upgrade` following profiles; `requires` with the `apps` level. Scenarios `apps.profile` and `apps.requires_newer`. |
+| A (done) | The `profile` index line; `update profile add/remove` and `update profiles`; `update` and `upgrade` following profiles, with the apps they install recorded; `requires` checked by the updater, the installer and the broker. Scenarios `apps.profile`, `apps.profile_v1` and `apps.requires_newer`. |
 | B | `session = desktop` in init; `launch` in the broker with its trust rule (audited: it touches the broker's grants); `gui_demo` as a test package; `usb-image --profile`. |
 | C | The desktop applications, one branch each: launcher, terminal, editor, files, settings. The widgets they share go into `libs/gfx`, with host tests. |
+
+## Audit of phase A (2026-11-03)
+
+An independent read-only audit found no high findings. These were fixed
+in the same branch:
+
+- **M1:** removal read stored indexes without binding each to its current
+  source. It now uses the same slot-bound check as `upgrade`, shared in
+  `stored::verified_all`.
+- **M2:** removal deleted apps the owner had installed by other means.
+  Each profile now records what it installed, and only that is deleted.
+- **M3:** the broker did not check `requires`, so a rollback could run a
+  package made for a newer interface. It now refuses to launch it.
+- **M4:** a `profile` line strands updaters before 0.18. `publish-update`
+  now needs `--all-machines-0.18`.
+- **Low findings:**
+  - L1: an unknown followed profile now stops a removal.
+  - L2: profiles are not followed on AriFS v1.
+  - L3: the installer empties consumed stage files.
+  - L5: the installer's exit code is 17 for a `requires` refusal.
+  - L6: `requires` has one spelling.
+  - L7: the deletion list is computed before saving, and failures are
+    said.
+  - L8: profiles are not followed without a sound installed list.
+  - L9: the docs were updated, the unused `apps` key in the features
+    file was dropped, and `app-pack --requires` was added.
+  - L10: new tests.
+- **Left as known:** L4, the repeated download of a refused package.
 
 ## Consequences
 
