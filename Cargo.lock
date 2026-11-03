@@ -578,6 +578,7 @@ dependencies = [
  "aricode-build",
  "aricode-cmdline",
  "aricode-crypto",
+ "aricode-fat",
  "aricode-gpt",
  "aricode-manifest",
  "aricode-pkg",

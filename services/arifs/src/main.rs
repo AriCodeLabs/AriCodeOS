@@ -45,6 +45,9 @@ const SYSTEM: Handle = Handle(0x0001_0007);
 /// owner died or went away): the next one supersedes it
 /// (audit 6ee19fb, finding 3).
 const STAGING_TIMEOUT_MS: u64 = 2_000;
+/// The longest a chunked replace may stay open, chunks or not: a 16 MiB
+/// replace of 4 KiB chunks takes seconds even over USB.
+const STAGING_MAX_MS: u64 = 120_000;
 /// Sessions served at once: every one of them and the main endpoint fit
 /// in a single `ipc_receive_any`.
 const MAX_SESSIONS: usize = sys::abi::IPC_MAX_ANY - 1;
@@ -66,6 +69,25 @@ fn say(msg: &[u8]) {
 struct PartitionDevice {
     blk: BlockClient,
     base_lba: u64,
+    /// Sectors from `base_lba` the device may reach: the disk less its
+    /// backup GPT. A volume whose geometry claims more is refused there
+    /// rather than written past (audit of ADR 0072, I1: `ARI0` is last).
+    limit: u64,
+}
+
+impl PartitionDevice {
+    /// The absolute LBA of `count` sectors from `lba`, inside `limit`.
+    /// Checked: a forged entry's start must not wrap onto another
+    /// partition (audit 2026-10-25 B, L1).
+    fn at(&self, lba: u64, count: u16) -> Result<u64, FsError> {
+        if lba
+            .checked_add(count as u64)
+            .is_none_or(|end| end > self.limit)
+        {
+            return Err(FsError::Io);
+        }
+        self.base_lba.checked_add(lba).ok_or(FsError::Io)
+    }
 }
 
 impl BlockDevice for PartitionDevice {
@@ -81,16 +103,14 @@ impl BlockDevice for PartitionDevice {
     /// A whole batch in one request to the block service (stage 5).
     fn read_sectors(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), FsError> {
         let count = (buf.len() / SECTOR) as u16;
-        // Checked: a forged entry's start must not wrap onto another
-        // partition (audit 2026-10-25 B, L1).
-        let at = self.base_lba.checked_add(lba).ok_or(FsError::Io)?;
+        let at = self.at(lba, count)?;
         self.blk.read(at, count).map_err(|_| FsError::Io)?;
         buf.copy_from_slice(&self.blk.buffer()[..buf.len()]);
         Ok(())
     }
     fn write_sectors(&mut self, lba: u64, buf: &[u8]) -> Result<(), FsError> {
         let count = (buf.len() / SECTOR) as u16;
-        let at = self.base_lba.checked_add(lba).ok_or(FsError::Io)?;
+        let at = self.at(lba, count)?;
         self.blk.buffer()[..buf.len()].copy_from_slice(buf);
         self.blk.write(at, count).map_err(|_| FsError::Io)
     }
@@ -199,6 +219,8 @@ fn qualified<'a>(prefix: &str, name: &str, buf: &'a mut [u8; 64]) -> Option<&'a 
 struct Staging {
     index: usize,
     owner: usize,
+    /// Its first chunk, for `STAGING_MAX_MS`.
+    started_ms: u64,
     last_ms: u64,
 }
 
@@ -206,8 +228,12 @@ impl Staging {
     fn same(&self, index: usize, owner: usize) -> bool {
         self.index == index && self.owner == owner
     }
+    /// Idle too long, or open too long in all: a client that trickles
+    /// chunks must not hold the one replace slot forever (audit of ADR
+    /// 0072, L5).
     fn abandoned(&self, now: u64) -> bool {
         now.saturating_sub(self.last_ms) >= STAGING_TIMEOUT_MS
+            || now.saturating_sub(self.started_ms) >= STAGING_MAX_MS
     }
 }
 
@@ -422,10 +448,10 @@ impl Service {
     /// Serves one request that arrived on `owner`'s endpoint (0 = main).
     fn serve(&mut self, owner: usize, msg: &[u8], handles: &[Handle]) {
         self.serve_one(owner, msg, handles);
-        // A commit could not be completed (v1: a committed replace not
-        // applied; v2: a table copy not written): only a fresh mount brings
-        // the volume back. Exiting lets the supervisor relaunch fsd; until
-        // then every request would fail (audit of incident 0032, M1).
+        // A v1 replace was committed but not applied: only a fresh mount
+        // redoes it. Exiting lets the supervisor relaunch fsd; until then
+        // every request would fail (audit of incident 0032, M1). v2 never
+        // asks: it resyncs its table before the next change.
         if self.fs.needs_reopen() {
             say(b"a commit could not be completed; exiting to mount again");
             sys::process_exit(EXIT_REMOUNT);
@@ -627,6 +653,10 @@ impl Service {
                         if let Some(j) = replaced {
                             self.forget(j);
                         }
+                        // Others' descriptors do not follow the file to a
+                        // name their prefix may not cover (audit of ADR
+                        // 0072, I3).
+                        self.fds.revoke_others(index, owner);
                         Reply::ok(0)
                     }
                     Err(e) => Reply::status(status_of(e)),
@@ -679,9 +709,22 @@ impl Service {
                     Op::Write => self.fs.write(index, req.offset, &buf[..len]),
                     Op::Replace => {
                         self.staging = None;
-                        self.fs.replace(index, &buf[..len]).map(|()| len)
+                        let r = self.fs.replace(index, &buf[..len]).map(|()| len);
+                        // A refused replace gives back what it took (audit
+                        // of ADR 0072, L2).
+                        if r.is_err() {
+                            self.fs.abandon_replace();
+                        }
+                        r
                     }
+                    // An empty chunk advances nothing; accepted, it kept a
+                    // transaction alive at no cost (audit of ADR 0072, L5).
+                    _ if len == 0 => Err(FsError::BadTransaction),
                     _ => {
+                        let started_ms = match self.staging {
+                            Some(s) if req.offset != 0 && s.same(index, owner) => s.started_ms,
+                            _ => now,
+                        };
                         let r = self.fs.replace_chunk(index, req.offset, &buf[..len]);
                         // Stamped once the chunk is written: its block
                         // requests may take seconds, which must not make a
@@ -690,6 +733,7 @@ impl Service {
                         self.staging = r.is_ok().then_some(Staging {
                             index,
                             owner,
+                            started_ms,
                             last_ms: now_ms(),
                         });
                         if r.is_err() {
@@ -824,9 +868,18 @@ fn main(arg: u64) -> u64 {
     let Ok(blk) = BlockClient::new(BLOCK, HW, aricode_arifs::MAX_BATCH_SECTORS as u16) else {
         return 1;
     };
+    // The backup GPT: its header and 32 sectors of entries end the disk.
+    const BACKUP_GPT: u64 = 33;
+    let Ok(capacity) = blk.capacity() else {
+        say(b"block service does not answer Info");
+        return 1;
+    };
     let dev = PartitionDevice {
         blk,
         base_lba: partition_lba,
+        limit: capacity
+            .saturating_sub(BACKUP_GPT)
+            .saturating_sub(partition_lba),
     };
     let mut fs = match Volume::open(dev) {
         Ok(fs) => fs,

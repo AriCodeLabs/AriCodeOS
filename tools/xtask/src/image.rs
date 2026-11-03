@@ -332,6 +332,19 @@ pub fn write_usb_image(
     extra: &[(String, Vec<u8>)],
     disk_guid: [u8; 16],
 ) -> Result<String> {
+    write_usb_image_as(path, esp_dir, extra, disk_guid, false)
+}
+
+/// [`write_usb_image`]; with `before_0072`, a stick as written before ADR
+/// 0072 left its mark on it: the ESP's initrd without `features` (the
+/// system AriBoot falls back to reads only AriFS v1) and `ARI0` in v1.
+pub fn write_usb_image_as(
+    path: &Path,
+    esp_dir: &Path,
+    extra: &[(String, Vec<u8>)],
+    disk_guid: [u8; 16],
+    before_0072: bool,
+) -> Result<String> {
     let esp_sectors = (USB_PART_ESP.1 - USB_PART_ESP.0 + 1) as u32;
     let mut fat =
         aricode_fat::Fat32Builder::new(esp_sectors, 1).map_err(|e| format!("fat: {e:?}"))?;
@@ -346,6 +359,10 @@ pub fn write_usb_image(
                 .into_iter()
                 .map(|(n, _)| n)
                 .collect();
+            let mut names = names;
+            if before_0072 {
+                names.push(aricode_ab::FEATURES_FILE.to_string());
+            }
             data = strip_initrd_files(&data, &names)?;
         }
         fat.add_file(rel, &data)
@@ -369,7 +386,7 @@ pub fn write_usb_image(
     let o = USB_PART_ESP.0 as usize * 512;
     let fat_img = fat.finish();
     img[o..o + fat_img.len()].copy_from_slice(&fat_img);
-    format_arifs(&mut img, USB_PART_ARI0, USB_FILES)?;
+    format_arifs_version(&mut img, USB_PART_ARI0, USB_FILES, before_0072)?;
     if !extra.is_empty() {
         let mut fs = volume(&mut img, USB_PART_ARI0)?;
         for (name, content) in extra {
@@ -613,6 +630,10 @@ pub enum DiskVariant {
     WasmGrowLoop,
     /// USB stick image: the ESP lives inside the disk (no `fat:` in QEMU).
     UsbImage,
+    /// [`Self::UsbImage`] as a stick written before ADR 0072 is after its
+    /// slots were updated: the ESP's system reads only AriFS v1, `ARI0` is
+    /// v1 and must stay so.
+    UsbImageBefore0072,
     /// Slot A and UPDATE hold images padded past the updater's memory
     /// (`LARGE_IMAGE_PAD`): they verify piece by piece, and `update apply`
     /// copies without loading them (incident 0021).
@@ -680,6 +701,7 @@ impl DiskVariant {
             "wasm-endless" => Self::WasmEndless,
             "wasm-grow-loop" => Self::WasmGrowLoop,
             "usb-image" => Self::UsbImage,
+            "usb-image-before-0072" => Self::UsbImageBefore0072,
             "large-a" => Self::LargeA,
             "oversized-package" => Self::OversizedPackage,
             _ => return None,
@@ -909,7 +931,10 @@ pub fn write_test_disk(
     variant: DiskVariant,
     installed: &[(String, Vec<u8>)],
 ) -> Result {
-    if variant == DiskVariant::UsbImage {
+    if matches!(
+        variant,
+        DiskVariant::UsbImage | DiskVariant::UsbImageBefore0072
+    ) {
         return Err(String::from(
             "the USB image needs the ESP: use write_usb_image",
         ));
@@ -1028,6 +1053,7 @@ pub fn write_test_disk(
             | DiskVariant::UpdateEmpty
             | DiskVariant::EspOnly
             | DiskVariant::UsbImage
+            | DiskVariant::UsbImageBefore0072
             | DiskVariant::FsPendingReplace
             | DiskVariant::ArifsV1
             | DiskVariant::UpdateBeforeFeatures
@@ -1174,11 +1200,6 @@ fn stage_arifs_replace(img: &mut [u8], part: (u64, u64)) -> Result {
     fs.stage_replace(i, RECOVERED_README)
         .map(|_| ())
         .map_err(|e| format!("arifs README: {e:?}"))
-}
-
-/// Formats AriFS v2 in `part` with `files`.
-fn format_arifs(img: &mut [u8], part: (u64, u64), files: &[(&str, &[u8])]) -> Result {
-    format_arifs_version(img, part, files, false)
 }
 
 /// Formats AriFS in `part` with `files`: v1, as disks made before ADR
@@ -1535,7 +1556,7 @@ mod tests {
     fn stick_arifs_holds_only_the_readme() {
         let sectors = USB_PART_ARI0.1 - USB_PART_ARI0.0 + 1;
         let mut img = vec![0u8; sectors as usize * 512];
-        format_arifs(&mut img, (0, sectors - 1), USB_FILES).unwrap();
+        format_arifs_version(&mut img, (0, sectors - 1), USB_FILES, false).unwrap();
         let fs = volume(&mut img, (0, sectors - 1)).unwrap();
         assert_eq!(fs.version(), 2);
         let names: Vec<String> = fs

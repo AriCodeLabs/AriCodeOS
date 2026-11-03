@@ -611,6 +611,40 @@ impl Features {
     }
 }
 
+/// What the system whose initrd is `len` bytes, read through `read`,
+/// declares in its `features` file ([`Image::features`] for a slot's
+/// container; init reads the ESP's initrd with it, which AriBoot boots
+/// when no slot verifies).
+pub fn initrd_features(
+    len: usize,
+    mut read: impl FnMut(usize, &mut [u8]) -> Result<(), ()>,
+) -> Result<Features, ImageError> {
+    let unreadable = core::cell::Cell::new(false);
+    let mut fetch = |offset: usize, buf: &mut [u8]| {
+        read(offset, buf).map_err(|()| {
+            unreadable.set(true);
+            aricode_initrd::InitrdError::Truncated
+        })
+    };
+    let [file] = aricode_initrd::locate(len, &mut fetch, [FEATURES_FILE]).map_err(|_| {
+        if unreadable.get() {
+            ImageError::Unreadable
+        } else {
+            ImageError::BadContainer
+        }
+    })?;
+    let Some((offset, len)) = file else {
+        return Ok(Features::BEFORE_FEATURES);
+    };
+    if len > FEATURES_MAX {
+        return Err(ImageError::BadContainer);
+    }
+    let mut buf = [0u8; FEATURES_MAX];
+    fetch(offset, &mut buf[..len]).map_err(|_| ImageError::Unreadable)?;
+    let text = core::str::from_utf8(&buf[..len]).map_err(|_| ImageError::BadContainer)?;
+    Ok(Features::parse(text))
+}
+
 /// Largest manifest a verification reads: four times the canonical
 /// [`MANIFEST_MAX`]; the signature covers the whole manifest, so it is
 /// read whole.
@@ -658,28 +692,16 @@ impl Image {
                 aricode_initrd::InitrdError::Truncated
             })
         };
-        let fail = || {
-            if unreadable.get() {
-                ImageError::Unreadable
-            } else {
-                ImageError::BadContainer
-            }
-        };
-        let [initrd] = aricode_initrd::locate(container_len, &mut fetch, ["initrd.img"])
-            .map_err(|_| fail())?;
+        let [initrd] =
+            aricode_initrd::locate(container_len, &mut fetch, ["initrd.img"]).map_err(|_| {
+                if unreadable.get() {
+                    ImageError::Unreadable
+                } else {
+                    ImageError::BadContainer
+                }
+            })?;
         let (base, len) = initrd.ok_or(ImageError::MissingFile("initrd.img"))?;
-        let [file] = aricode_initrd::locate(len, |o, b| fetch(base + o, b), [FEATURES_FILE])
-            .map_err(|_| fail())?;
-        let Some((offset, len)) = file else {
-            return Ok(Features::BEFORE_FEATURES);
-        };
-        if len > FEATURES_MAX {
-            return Err(ImageError::BadContainer);
-        }
-        let mut buf = [0u8; FEATURES_MAX];
-        fetch(base + offset, &mut buf[..len]).map_err(|_| ImageError::Unreadable)?;
-        let text = core::str::from_utf8(&buf[..len]).map_err(|_| ImageError::BadContainer)?;
-        Ok(Features::parse(text))
+        initrd_features(len, |o, b| read(base + o, b))
     }
 
     /// Verifies a container with the release key only (a stable image).

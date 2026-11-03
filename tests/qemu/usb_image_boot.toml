@@ -30,6 +30,7 @@ serial_contains = [
 ]
 serial_absent = [
     "KERNEL PANIC",
+    "is not migrated",
     "booting from the ESP",
     "AriInit: selftest",
     "fs_client",

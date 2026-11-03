@@ -106,9 +106,12 @@ impl Geometry {
     /// The copies lie in order between the superblock and the data, and
     /// every LBA fits an extent's 32-bit start.
     fn valid(&self) -> bool {
+        // Checked: under a valid CRC a forged geometry must not wrap
+        // (audit of ADR 0072, I2).
+        let end = |lba: u64| lba.checked_add(TABLE_SECTORS);
         self.tables[0] >= 1
-            && self.tables[0] + TABLE_SECTORS <= self.tables[1]
-            && self.tables[1] + TABLE_SECTORS <= self.data_lba
+            && end(self.tables[0]).is_some_and(|e| e <= self.tables[1])
+            && end(self.tables[1]).is_some_and(|e| e <= self.data_lba)
             && self.data_lba < self.total_sectors
             && self.total_sectors <= u32::MAX as u64
     }
@@ -562,8 +565,9 @@ impl<D: BlockDevice> AriFs<D> {
         s
     }
 
-    /// Writes the table with `changes` as `generation` into `copy`, without
-    /// flushing: the CRC first, from the same bytes, then the sectors.
+    /// Writes the table with `changes` as `generation` into `copy`: the CRC
+    /// first, from the same bytes, then the body, a flush, and the header
+    /// (not flushed: the caller does).
     fn write_copy(
         &mut self,
         copy: usize,
@@ -576,14 +580,28 @@ impl<D: BlockDevice> AriFs<D> {
         }
         let crc = !crc;
         let base = self.geo.tables[copy];
+        // The body first, flushed; then the header, one sector, is the
+        // commit point. Until it lands the copy keeps its older header,
+        // whose generation `open` does not prefer, so no mix of old and new
+        // body sectors can pass for a copy, whatever names an application
+        // chose to steer the CRC (audit of ADR 0072, L1).
         let mut batch = [0u8; BATCH_BYTES];
-        for first in (0..TABLE_SECTORS as usize).step_by(MAX_BATCH_SECTORS) {
-            for (j, s) in batch.as_chunks_mut::<SECTOR>().0.iter_mut().enumerate() {
+        let mut first = 1;
+        while first < TABLE_SECTORS as usize {
+            let n = (TABLE_SECTORS as usize - first).min(MAX_BATCH_SECTORS);
+            for (j, s) in batch.as_chunks_mut::<SECTOR>().0[..n]
+                .iter_mut()
+                .enumerate()
+            {
                 *s = self.copy_sector(first + j, generation, crc, changes);
             }
-            self.dev.write_sectors(base + first as u64, &batch)?;
+            self.dev
+                .write_sectors(base + first as u64, &batch[..n * SECTOR])?;
+            first += n;
         }
-        Ok(())
+        self.dev.flush()?;
+        self.dev
+            .write_sector(base, &self.copy_sector(0, generation, crc, changes))
     }
 
     /// A commit: the table with `changes`, one generation newer, into the
@@ -804,10 +822,11 @@ impl<D: BlockDevice> AriFs<D> {
                 .min(MAX_FILE_SECTORS as u64 - have);
             let mut space = staged.space;
             self.staged = None;
-            let grown = space.grow(self, more);
+            // Out of space: the replace is abandoned and what it took is
+            // free again (audit of ADR 0072, L2).
+            space.grow(self, more)?;
             staged.space = space;
             self.staged = Some(staged);
-            grown?;
         }
         if let Err(e) = write_extents(&mut self.dev, staged.space.extents(), offset as usize, data)
         {

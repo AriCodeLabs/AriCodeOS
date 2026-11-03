@@ -231,6 +231,48 @@ measured on the branch, see Tests):
   `filesystem.v1_old_slot`, `update.refuses_v1_only_system`, and
   `fs_client` renames over and deletes on every selftest boot.
 
+### Audit (2026-11-03)
+
+An independent audit found no high finding; the commit protocol, the
+allocator, the resync and the migration's order held. What it found, and
+what was done:
+
+- **M1. The ESP's system.** AriBoot boots the ESP's kernel and initrd
+  when the active slot does not verify, and nothing updates the ESP: every
+  stick written before this ADR keeps a v1-only system there. init now
+  reads the ESP's initrd too (`aricode_fat` reads FAT32 sector by sector)
+  and migrates only if it declares `arifs = 2`; an ESP without a system has
+  nothing to fall back to. So an existing stick stays v1 (its `ARI0` has
+  3 MiB anyway); a stick written from 0.18 on is v2 from the start.
+  `usb.image_before_0072`.
+- **L1. A crafted torn commit.** CRC32 is linear and applications choose
+  names, so a mix of new and stale body sectors under a new header could be
+  made to verify. The body is now flushed before the header, a single
+  sector, is written: until it lands the copy has its older generation,
+  which `open` does not prefer. A replace costs three flushes (v1: four).
+- **L2.** A replace refused for space gives back what it took.
+- **L3.** init counts any slot whose header is valid but whose features
+  cannot be read as v1, as the updater does.
+- **L4, L6.** `ARG_MIGRATE` goes with fsd's first launch only: a
+  relaunch, after a failed migration or any exit, serves what the disk
+  holds, and the disk never migrates later than the decision at boot.
+- **L5.** Empty `ReplaceChunk`s are refused and a chunked replace may stay
+  open two minutes in all.
+- **I1.** fsd refuses sectors past the disk less its backup GPT.
+- **I2.** Geometry sums are checked.
+- **I3.** A rename revokes the descriptors other owners hold on the file.
+- **I4.** fsd's remount comment says v2 never asks for one.
+- **I5.** Host tests keep eight subsets of the unflushed writes (with
+  only the first, only the last, all but the first, all but the last), and
+  a new one cuts every write of a replace that takes the sectors the
+  previous replace freed. Residuals: the updater's rollback refusal has no
+  scenario of its own (it shares `refuse_if_arifs_too_old` with the
+  install refusal, which has one); the pre-0072 systems of the tests are
+  the current build without `features`, not a real 0.17 container (the
+  test keys could not verify a release image); on the v1 test disks the
+  raw pattern lies in what becomes free space after a migration (tests
+  only).
+
 ### Phase B (to do)
 
 `PACKAGE_MAX` stays 32 KiB: the broker verifies a package in a DMA buffer

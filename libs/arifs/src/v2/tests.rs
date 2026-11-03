@@ -38,9 +38,24 @@ enum Kept {
     All,
     Even,
     Odd,
+    /// Only the first, or only the last, unflushed write.
+    First,
+    Last,
+    /// All but the first, or all but the last.
+    AllButFirst,
+    AllButLast,
 }
 
-const KEPT: [Kept; 4] = [Kept::None, Kept::All, Kept::Even, Kept::Odd];
+const KEPT: [Kept; 8] = [
+    Kept::None,
+    Kept::All,
+    Kept::Even,
+    Kept::Odd,
+    Kept::First,
+    Kept::Last,
+    Kept::AllButFirst,
+    Kept::AllButLast,
+];
 
 /// A disk whose writes fail from the `cut_at`-th on, as at a power cut,
 /// and whose unflushed writes are kept by `Kept` when it is powered off.
@@ -66,12 +81,17 @@ impl CuttingDisk {
     }
 
     fn power_off(mut self, kept: Kept) -> MemDisk {
+        let last = self.cache.len().saturating_sub(1);
         for (n, (lba, s)) in self.cache.iter().enumerate() {
             let keep = match kept {
                 Kept::None => false,
                 Kept::All => true,
                 Kept::Even => n % 2 == 0,
                 Kept::Odd => n % 2 == 1,
+                Kept::First => n == 0,
+                Kept::Last => n == last,
+                Kept::AllButFirst => n != 0,
+                Kept::AllButLast => n != last,
             };
             if keep {
                 let o = *lba as usize * SECTOR;
@@ -213,7 +233,7 @@ fn replace_survives_a_cut_at_every_write() {
     fs.replace(i, &new).unwrap();
     let dev = fs.into_device();
     let total = dev.writes;
-    assert_eq!(dev.flushes, 2, "the data, then the commit");
+    assert_eq!(dev.flushes, 3, "the data, the table's body, its header");
     let mut saw = [false; 2];
     for cut_at in 0..=total {
         for kept in KEPT {
@@ -245,6 +265,54 @@ fn replace_survives_a_cut_at_every_write() {
         [true, true],
         "some cuts keep the old contents, some the new"
     );
+}
+
+/// Copy on write's own property: sectors one commit frees are taken by the
+/// next operation, and a cut anywhere in that operation still leaves each
+/// file whole, never the first file pointing at the second one's data.
+#[test]
+fn freed_sectors_reused_by_the_next_operation_survive_a_cut() {
+    // Sized so that the run `a` frees (118 sectors) is the largest one
+    // left: the tail past `a`'s new copy holds 100.
+    let mut fs = AriFs::format(disk(382), 382).unwrap();
+    let a = fs.create("a").unwrap();
+    let b = fs.create("b").unwrap();
+    fs.replace(a, &pattern(60_000, 1)).unwrap();
+    fs.replace(b, b"b0").unwrap();
+    // `a` moves: its old sectors are free, and the largest free run now
+    // starts there, so `b`'s next replace takes them.
+    let freed = fs.entry(a).unwrap().extents()[0];
+    fs.replace(a, &pattern(50_000, 2)).unwrap();
+    let base = fs.into_device().0;
+    let mut fs = AriFs::open(CuttingDisk::new(&base, usize::MAX)).unwrap();
+    fs.replace(b, &pattern(55_000, 3)).unwrap();
+    let taken = fs.entry(b).unwrap().extents()[0];
+    assert!(
+        taken.overlaps(freed.start as u64, freed.len as u64),
+        "{taken:?} {freed:?}"
+    );
+    let total = fs.into_device().writes;
+    let mut saw = [false; 2];
+    for cut_at in 0..=total {
+        for kept in KEPT {
+            let mut fs = AriFs::open(CuttingDisk::new(&base, cut_at)).unwrap();
+            let _ = fs.replace(b, &pattern(55_000, 3));
+            let mut fs = AriFs::open(fs.into_device().power_off(kept)).unwrap();
+            assert_eq!(
+                content(&mut fs, a),
+                pattern(50_000, 2),
+                "cut at {cut_at}, {kept:?}"
+            );
+            let got = content(&mut fs, b);
+            assert!(
+                got == b"b0" || got == pattern(55_000, 3),
+                "cut at {cut_at}, {kept:?}"
+            );
+            saw[(got != b"b0") as usize] = true;
+            assert_disjoint(&fs);
+        }
+    }
+    assert_eq!(saw, [true, true]);
 }
 
 #[test]

@@ -11,7 +11,7 @@ disk = "arifs-v1-old-slot"
 [expect]
 exit = 33
 serial_contains = [
-    "AriInit: a slot holds a system that reads only AriFS v1: ARI0 is not migrated",
+    "AriInit: a slot or the ESP holds a system that reads only AriFS v1: ARI0 is not migrated",
     "fsd: AriFS v1 mounted, 4 files",
     "fs_client: atomic replace and flush ok",
     "fs_client: list, read, create and write over IPC ok",
