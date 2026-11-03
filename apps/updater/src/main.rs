@@ -56,8 +56,8 @@ use aricode_update_index::files::{self, Files, ReadError};
 use aricode_update_index::lists::{self, PlanItem, StagedEntry};
 use aricode_update_index::{
     self as upd, best_app, best_system, check_fresh, compare, compare_system, decide_system,
-    stored, updater_arg, Change, Channel, Index, Keys, Migration, Refusal, Sources, StableFloor,
-    SystemChange, SystemDecision, SystemId, SystemRules,
+    profiles::profile_apps, stored, updater_arg, Change, Channel, Index, Keys, Migration, Profiles,
+    Refusal, Sources, StableFloor, SystemChange, SystemDecision, SystemId, SystemRules,
 };
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -142,6 +142,9 @@ mod code {
     pub const BUILD_CONFLICT: u64 = 57;
     /// The stable floor in `state` is damaged (audit of ADR 0045, M1).
     pub const FLOOR: u64 = 58;
+    /// The followed profiles (`profiles`, ADR 0074) could not be read, or
+    /// held invalid lines.
+    pub const PROFILES_FILE: u64 = 59;
     /// The active slot's image could not be read or verified: said with
     /// the reason, so "installed version unknown" is never unexplained
     /// (incident 0021).
@@ -354,6 +357,50 @@ fn load_sources(fs: &mut FsClient) -> Result<Sources, u64> {
         );
     }
     Ok(sources)
+}
+
+/// The profiles the owner follows (ADR 0074); none when the file is
+/// missing. An unreadable file is a fault and follows none this run.
+fn load_profiles(fs: &mut FsClient) -> Profiles {
+    match read_text(fs, upd::PROFILES_FILE, 1024) {
+        Ok(text) => {
+            let (profiles, rejected) = Profiles::parse(text.as_deref().unwrap_or(""));
+            if rejected > 0 {
+                fault(
+                    code::PROFILES_FILE,
+                    "upd-profiles-damaged",
+                    &format!("{rejected} invalid line(s) in the profile list ignored"),
+                );
+            }
+            profiles
+        }
+        Err(_) => {
+            fault(
+                code::PROFILES_FILE,
+                "upd-profiles-read",
+                "cannot read the profile list: no profile followed this run",
+            );
+            Profiles::default()
+        }
+    }
+}
+
+/// The apps the followed profiles install and `installed` lacks, each
+/// once, with the profile that asks for it, in profile order (ADR 0074).
+fn missing_profile_apps<'a>(
+    indexes: &[Index<'a>],
+    profiles: &Profiles,
+    installed: &[(String, u32)],
+) -> Vec<(&'a str, String)> {
+    let mut missing: Vec<(&'a str, String)> = Vec::new();
+    for profile in profiles.names() {
+        for app in profile_apps(indexes, profile).unwrap_or_default() {
+            if !installed.iter().any(|(n, _)| n == app) && !missing.iter().any(|(a, _)| *a == app) {
+                missing.push((app, profile.clone()));
+            }
+        }
+    }
+    missing
 }
 
 /// The exchange file with the installer (`state`); empty when missing. A
@@ -2026,7 +2073,30 @@ fn report(fs: &mut FsClient, sources: &Sources, keys: &Keys, channel: Channel) -
             None => say!("app {name}: installed {version}, no source offers it"),
         }
     }
-    let mut listed: Vec<&str> = Vec::new();
+    // Profiles (ADR 0074): what a followed profile installs and this
+    // machine lacks is planned like an upgrade.
+    let profiles = match channel {
+        Channel::Stable if state.is_ok() => load_profiles(fs),
+        _ => Profiles::default(),
+    };
+    for name in profiles.names() {
+        if profile_apps(&indexes, name).is_none() {
+            say!("profile {name}: no source offers it");
+        }
+    }
+    let missing = missing_profile_apps(&indexes, &profiles, &apps);
+    for (app, profile) in &missing {
+        if let Some((i, a)) = best_app(&indexes, app) {
+            available += 1;
+            plan.push(PlanItem::App(a.name, a.version));
+            say!(
+                "app {app}: not installed, source {} offers {} for profile {profile}: upgrade installs it",
+                slots[i] + 1,
+                a.version
+            );
+        }
+    }
+    let mut listed: Vec<&str> = missing.iter().map(|(a, _)| *a).collect();
     for index in indexes.iter().filter(|_| state.is_ok()) {
         for a in &index.apps {
             if !apps.iter().any(|(n, _)| n == a.name) && !listed.contains(&a.name) {
@@ -2284,8 +2354,7 @@ fn stage_app<'e>(
     let _ = fs.close(fd);
     committed?;
     match verify_staged(fs, file, size, pk) {
-        Ok(v) if v.manifest.name_str() == entry.name && v.manifest.version == entry.version => {}
-        Ok(_) => {
+        Ok(v) if v.manifest.name_str() != entry.name || v.manifest.version != entry.version => {
             return Err(fault(
                 code::PACKAGE_REFUSED,
                 "upd-pkg-mismatch",
@@ -2295,6 +2364,21 @@ fn stage_app<'e>(
                 ),
             ))
         }
+        // ADR 0074: the system this run may have installed only runs after
+        // the reboot, so the app waits for the next `upgrade` on it.
+        Ok(v) if !v.manifest.runs_on(aricode_ab::APPS_LEVEL) => {
+            return Err(fault(
+                code::PACKAGE_REFUSED,
+                "upd-pkg-requires",
+                &format!(
+                    "app {}: needs application interface {} and this system offers {}: upgrade the system, reboot and run upgrade again; skipped",
+                    entry.name,
+                    v.manifest.requires,
+                    aricode_ab::APPS_LEVEL
+                ),
+            ))
+        }
+        Ok(_) => {}
         Err(_) => {
             return Err(fault(
                 code::PACKAGE_REFUSED,
@@ -2578,7 +2662,7 @@ fn upgrade(
         Channel::Dev => Vec::new(),
     };
     let mut app_jobs = Vec::new();
-    for (name, version) in installed_list {
+    for (name, version) in installed_list.clone() {
         let Some((i, entry)) = best_app(&indexes, &name) else {
             continue;
         };
@@ -2611,6 +2695,36 @@ fn upgrade(
             );
             break;
         }
+        app_jobs.push((i, entry));
+    }
+    // Apps of followed profiles not installed yet (ADR 0074), as `update`
+    // planned them: only what the owner was shown.
+    let profiles = match channel {
+        Channel::Stable => load_profiles(fs),
+        Channel::Dev => Profiles::default(),
+    };
+    for (app, profile) in missing_profile_apps(&indexes, &profiles, &installed_list) {
+        let Some((i, entry)) = best_app(&indexes, app) else {
+            continue;
+        };
+        if !plan
+            .items
+            .contains(&PlanItem::App(entry.name, entry.version))
+        {
+            result = not_reported(&format!("app {app} {}", entry.version));
+            continue;
+        }
+        if app_jobs.len() == upd::MAX_STAGED {
+            say!(
+                "app {app}: more installs than stage slots ({}): run upgrade again",
+                upd::MAX_STAGED
+            );
+            break;
+        }
+        say!(
+            "app {app}: installing version {} for profile {profile}",
+            entry.version
+        );
         app_jobs.push((i, entry));
     }
     // 2. Reserve every AriFS entry the installs will need (the history

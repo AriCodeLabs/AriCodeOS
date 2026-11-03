@@ -1,0 +1,67 @@
+# Profiles (ADR 0074): nothing is installed and the source's signed index
+# offers hello_ext and hello_more in profile `desktop`. The owner follows
+# it; `update` plans both apps, `upgrade` stages both and the installer
+# installs them. Leaving the profile deletes both (AriFS v2), and the
+# history keeps every step.
+name = "apps.profile"
+description = "profiles: follow one, upgrade installs its apps, leaving it deletes them"
+level = "full"
+areas = ["apps", "update", "network", "shell"]
+timeout_secs = 180
+
+[host_update]
+apps = ["examples/hello_ext:1", "examples/hello_more:1"]
+profiles = ["desktop:hello_ext,hello_more"]
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = [
+    "update profile add desktop",
+    "update profile add desktop",
+    "update profiles",
+    "update",
+    "upgrade",
+    "run hello_ext 1",
+    "run hello_more 1",
+    "update profile remove desktop",
+    "run hello_more 2",
+    "update profiles",
+    "cat updater/history.log",
+    "shutdown",
+]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "update: profile desktop followed (run update, then upgrade, to install it)",
+    "update: profile already followed",
+    "update profiles:",
+    "  desktop",
+    "updater: app hello_ext: not installed, source 1 offers 1 for profile desktop: upgrade installs it",
+    "updater: app hello_more: not installed, source 1 offers 1 for profile desktop: upgrade installs it",
+    "updater: app hello_ext: installing version 1 for profile desktop",
+    "updater: app hello_more: installing version 1 for profile desktop",
+    "updater: 2 package(s) staged for the installer",
+    "installer: hello_ext none -> 1 installed (apps/hello_ext.aripkg)",
+    "installer: hello_more none -> 1 installed (apps/hello_more.aripkg)",
+    "installer: 2 package(s) installed, 0 skipped",
+    "hello_ext v1: hello from outside the tree (arg 1)",
+    "hello_more v1: the second app of the profile (arg 1)",
+    "update: profile desktop removed",
+    "update: deleted apps/hello_ext.aripkg",
+    "update: deleted apps/hello_more.aripkg",
+    ": not found in the initrd or AriFS",
+    "update: no profile followed (update profile add NAME)",
+    "profile followed: desktop (from the console)",
+    "app hello_more none -> 1 installed (apps/hello_more.aripkg)",
+    "profile removed: desktop (from the console)",
+    "app deleted with profile desktop: hello_more (from the console)",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = [
+    "KERNEL PANIC",
+    "update: updater exited with",
+    "update: installer exited",
+    "index refused",
+    "available (not installed)",
+    "hello_more v1: the second app of the profile (arg 2)",
+]

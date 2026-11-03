@@ -394,9 +394,11 @@ pub const LARGE_PADDING: usize = 1024 * 1024;
 
 impl ExternalApp {
     /// The same package, signed again, with `extra` zero bytes after the
-    /// program's ELF, which the loader ignores: a package far over AriFS
-    /// v1's 32 KiB that still launches (ADR 0072, phase B).
-    pub fn padded(&self, extra: usize) -> Result<ExternalApp> {
+    /// program's ELF, which the loader ignores (a package far over AriFS
+    /// v1's 32 KiB that still launches, ADR 0072 phase B), and with
+    /// `requires` as its lowest application interface level (ADR 0074; 0
+    /// for none).
+    pub fn resigned(&self, extra: usize, requires: u32) -> Result<ExternalApp> {
         let key = crate::keys::expected_public_key()?;
         let v = aricode_pkg::verify(&self.package, &key)
             .map_err(|e| format!("{}: {e:?}", self.name))?;
@@ -406,6 +408,7 @@ impl ExternalApp {
         let package = aricode_pkg::build(
             &self.name,
             self.version,
+            requires,
             &program,
             v.app_manifest,
             &seed,
@@ -526,7 +529,7 @@ fn build_external_now(
     let manifest =
         std::fs::read(&manifest_path).map_err(|e| format!("{}: {e}", manifest_path.display()))?;
     let seed = crate::keys::signing_seed()?;
-    let package = aricode_pkg::build(&name, version, &elf, &manifest, &seed, corrupt)
+    let package = aricode_pkg::build(&name, version, 0, &elf, &manifest, &seed, corrupt)
         .ok_or_else(|| format!("{name}: invalid package name"))?;
     check_package_size(&name, package.len(), release)?;
     // Post-build check (re-audit, R1): a package meant to be valid must

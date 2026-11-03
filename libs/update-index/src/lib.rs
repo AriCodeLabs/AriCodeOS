@@ -44,18 +44,20 @@ pub mod history;
 pub mod index;
 pub mod lists;
 pub mod policy;
+pub mod profiles;
 pub mod run;
 pub mod sources;
 pub mod stored;
 pub mod trust;
 
 pub use aricode_ab::{Channel, Keys};
-pub use index::{verify, verify_channel, AppEntry, Index, IndexError, SystemEntry};
+pub use index::{verify, verify_channel, AppEntry, Index, IndexError, ProfileEntry, SystemEntry};
 pub use policy::{
     best_app, best_system, check_fresh, compare, compare_system, decide_system, floor_for_run,
     floor_rewrite, raise_floor, Change, Refusal, StableFloor, SystemChange, SystemDecision,
     SystemId, SystemRules,
 };
+pub use profiles::{ProfileError, Profiles};
 pub use sources::{normalize_source, Migration, Source, SourceError, Sources};
 pub use trust::{image_matches_offer, trusted_keys};
 
@@ -67,6 +69,12 @@ pub const SIGNATURE_FILE: &str = "index.sig";
 pub const MAX_INDEX: usize = 4096;
 /// Most app entries in one index.
 pub const MAX_APPS: usize = 16;
+/// Most profiles in one index, and most profiles a machine follows (ADR
+/// 0074).
+pub const MAX_PROFILES: usize = 4;
+/// Most apps in one profile: all of them fit one `upgrade`
+/// ([`MAX_STAGED`]).
+pub const MAX_PROFILE_APPS: usize = 8;
 /// Most registered sources (each one keeps a stored index in AriFS, whose
 /// table holds 32 files in all).
 pub const MAX_SOURCES: usize = 4;
@@ -81,6 +89,8 @@ pub const FORMAT: u32 = 1;
 pub const UPDATER_DIR: &str = "updater";
 /// The source list (the shell edits it with `update add/remove`).
 pub const SOURCES_FILE: &str = "sources";
+/// The profiles the owner follows (ADR 0074, [`profiles`]).
+pub const PROFILES_FILE: &str = "profiles";
 /// The single channel URL of ADR 0027; migrated into [`SOURCES_FILE`].
 pub const LEGACY_URL_FILE: &str = "update_url";
 /// Install history: system installs (updater), app installs (installer),
@@ -107,8 +117,10 @@ pub const STATE_FILE: &str = "state";
 /// The verified copies of every source's index, one file
 /// ([`stored::encode_all`]).
 pub const INDEXES_FILE: &str = "indexes";
-/// Most packages staged by one `upgrade` (each one is an AriFS file).
-pub const MAX_STAGED: usize = 4;
+/// Most packages staged by one `upgrade` (each one is an AriFS file): a
+/// whole profile (ADR 0074).
+pub const MAX_STAGED: usize = 8;
+const _: () = assert!(MAX_PROFILE_APPS <= MAX_STAGED);
 
 /// `name` inside the updater's directory, as the main file space sees it.
 pub fn main_path(name: &str) -> alloc::string::String {
@@ -138,6 +150,10 @@ pub fn staged_package_file(slot: usize) -> Option<&'static str> {
         "pkg-2.aripkg",
         "pkg-3.aripkg",
         "pkg-4.aripkg",
+        "pkg-5.aripkg",
+        "pkg-6.aripkg",
+        "pkg-7.aripkg",
+        "pkg-8.aripkg",
     ];
     FILES.get(slot).copied()
 }

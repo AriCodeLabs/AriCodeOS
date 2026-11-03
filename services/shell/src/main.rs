@@ -257,7 +257,7 @@ fn trim(s: &[u8]) -> &[u8] {
 fn help() {
     print(
         b"commands:\n  help      this help\n  ps        processes\n  mem       physical memory\n  ls        AriFS files\n  cat NAME  show a file\n  write NAME TEXT  save TEXT to the file (creates it or replaces it entirely)\n  devices   PCI functions\n  services  boot services (--detail: supervisor state)\n  uptime    time since boot\n  sleep MS  wait MS milliseconds (at most 60000)\n  cpus      online processors and idle time per CPU\n  diag [NAME]  full report (uptime, mem, cpus, entropy, ps, stacks, services, net, devices); with NAME saves it to AriFS\n  net       network configuration\n  ping IP   ICMP echo (4 attempts)\n  dns NAME  resolve a name\n  http URL  GET and show the body (http:// or https://)\n  run PROG  run an initrd program and wait\n\
-  update [--channel stable|dev]  fetch and verify the signed index of every source of the channel (stable by default) and show what is new (installs nothing; ADR 0029, ADR 0045)\n  update add [--channel dev] URL|IP[:PORT]  register an update source (stable unless --channel dev)\n  update remove N|URL  unregister a source\n  update sources  list the sources\n  update apply [--allow-downgrade]  install the image in the UPDATE partition\n  update rollback  boot the system in the other slot next (no network; then `reboot`)\n  upgrade [--channel stable|dev] [--allow-downgrade]  install what the last `update` found (system into the inactive slot, then `reboot`; apps through the installer); only --channel moves the system to another channel\n  spawn PROG  launch it in the background (cannot be stopped)\n  repeat N CMD  repeat a command N times\n  reboot    reboot\n  shutdown  power off\n  exit      exit the shell\n",
+  update [--channel stable|dev]  fetch and verify the signed index of every source of the channel (stable by default) and show what is new (installs nothing; ADR 0029, ADR 0045)\n  update add [--channel dev] URL|IP[:PORT]  register an update source (stable unless --channel dev)\n  update remove N|URL  unregister a source\n  update sources  list the sources\n  update profile add|remove NAME  follow a profile of the sources (upgrade installs its apps) or stop following it (its apps are deleted; ADR 0074)\n  update profiles  list the followed profiles\n  update apply [--allow-downgrade]  install the image in the UPDATE partition\n  update rollback  boot the system in the other slot next (no network; then `reboot`)\n  upgrade [--channel stable|dev] [--allow-downgrade]  install what the last `update` found (system into the inactive slot, then `reboot`; apps through the installer); only --channel moves the system to another channel\n  spawn PROG  launch it in the background (cannot be stopped)\n  repeat N CMD  repeat a command N times\n  reboot    reboot\n  shutdown  power off\n  exit      exit the shell\n",
     );
 }
 
@@ -1084,6 +1084,12 @@ fn update(fs: &mut FsClient, rest: &[u8]) {
             run_updater(updater_arg::ROLLBACK);
         }
         (b"sources", b"") => sources_list(fs),
+        (b"profiles", b"") => profiles_list(fs),
+        (b"profile", a) => match split(a) {
+            (b"add", name) if !name.is_empty() => profile_add(fs, name),
+            (b"remove", name) if !name.is_empty() => profile_remove(fs, name),
+            _ => update_usage(),
+        },
         (b"add", a) if !a.is_empty() => source_add(fs, a),
         (b"remove", a) if !a.is_empty() => source_remove(fs, a),
         _ => update_usage(),
@@ -1092,7 +1098,7 @@ fn update(fs: &mut FsClient, rest: &[u8]) {
 
 fn update_usage() {
     print(
-        b"usage: update [--channel stable|dev | add [--channel dev] URL|IP[:PORT] | remove N|URL | sources | apply [--allow-downgrade] | rollback]\n",
+        b"usage: update [--channel stable|dev | add [--channel dev] URL|IP[:PORT] | remove N|URL | sources | profile add|remove NAME | profiles | apply [--allow-downgrade] | rollback]\n",
     );
 }
 
@@ -1291,6 +1297,13 @@ fn save_sources(fs: &mut FsClient, sources: &update_index::Sources, event: &str)
         print(b"update: cannot save the source list\n");
         return false;
     }
+    log_history(fs, event);
+    true
+}
+
+/// Appends `event` to the install history, saying where the owner typed
+/// it.
+fn log_history(fs: &mut FsClient, event: &str) {
     let history_path = update_index::main_path(update_index::HISTORY_FILE);
     let line = alloc::format!(
         "{event} (from {})",
@@ -1313,13 +1326,158 @@ fn save_sources(fs: &mut FsClient, sources: &update_index::Sources, event: &str)
         Err(_) => {
             print(b"update: cannot read the install history: not rewritten\n");
             let _ = sys::event_record(2, "sh-history-read");
-            return true;
+            return;
         }
     };
     if save_file(fs, &history_path, &log).is_err() {
         print(b"update: cannot write the install history\n");
     }
+}
+
+/// The followed profiles (ADR 0074); `None` (after saying why) if the
+/// list cannot be read.
+fn load_profiles(fs: &mut FsClient) -> Option<update_index::Profiles> {
+    let path = update_index::main_path(update_index::PROFILES_FILE);
+    let Ok(text) = read_small(fs, &path, 1024) else {
+        print(b"update: cannot read the profile list\n");
+        return None;
+    };
+    let text = text.map(|t| alloc::string::String::from_utf8_lossy(&t).into_owned());
+    let (profiles, rejected) = update_index::Profiles::parse(text.as_deref().unwrap_or(""));
+    if rejected > 0 {
+        print(b"update: ");
+        num(rejected as u64);
+        print(b" invalid line(s) in the profile list ignored\n");
+    }
+    Some(profiles)
+}
+
+fn save_profiles(fs: &mut FsClient, profiles: &update_index::Profiles, event: &str) -> bool {
+    let path = update_index::main_path(update_index::PROFILES_FILE);
+    if save_file(fs, &path, profiles.to_text().as_bytes()).is_err() {
+        print(b"update: cannot save the profile list\n");
+        return false;
+    }
+    log_history(fs, event);
     true
+}
+
+fn profiles_list(fs: &mut FsClient) {
+    let Some(profiles) = load_profiles(fs) else {
+        return;
+    };
+    if profiles.is_empty() {
+        print(b"update: no profile followed (update profile add NAME)\n");
+        return;
+    }
+    print(b"update profiles:\n");
+    for name in profiles.names() {
+        print(b"  ");
+        print(name.as_bytes());
+        print(b"\n");
+    }
+}
+
+fn profile_error(e: update_index::ProfileError) {
+    use update_index::ProfileError as E;
+    print(match e {
+        E::Invalid => b"update: invalid profile name ([A-Za-z0-9_-], at most 20)\n".as_slice(),
+        E::Duplicate => b"update: profile already followed\n",
+        E::Full => b"update: profile list full (4 profiles); remove one first\n",
+        E::NotFound => b"update: no such profile (see update profiles)\n",
+    });
+}
+
+/// `update profile add NAME` (ADR 0074): follows it; `update` then plans
+/// what it installs and `upgrade` installs it.
+fn profile_add(fs: &mut FsClient, name: &[u8]) {
+    let Ok(name) = core::str::from_utf8(name) else {
+        return profile_error(update_index::ProfileError::Invalid);
+    };
+    let Some(mut profiles) = load_profiles(fs) else {
+        return;
+    };
+    if let Err(e) = profiles.add(name) {
+        return profile_error(e);
+    }
+    if save_profiles(fs, &profiles, &alloc::format!("profile followed: {name}")) {
+        print(b"update: profile ");
+        print(name.as_bytes());
+        print(b" followed (run update, then upgrade, to install it)\n");
+    }
+}
+
+/// `update profile remove NAME` (ADR 0074): stops following it and deletes
+/// the apps it installed that no profile still followed installs, as the
+/// verified indexes of the stable sources name them.
+fn profile_remove(fs: &mut FsClient, name: &[u8]) {
+    let Ok(name) = core::str::from_utf8(name) else {
+        return profile_error(update_index::ProfileError::NotFound);
+    };
+    let Some(mut profiles) = load_profiles(fs) else {
+        return;
+    };
+    if let Err(e) = profiles.remove(name) {
+        return profile_error(e);
+    }
+    if !save_profiles(fs, &profiles, &alloc::format!("profile removed: {name}")) {
+        return;
+    }
+    print(b"update: profile ");
+    print(name.as_bytes());
+    print(b" removed\n");
+    let path = update_index::main_path(update_index::INDEXES_FILE);
+    let stored = match read_small(
+        fs,
+        &path,
+        update_index::MAX_SOURCES * (update_index::MAX_INDEX + 1024),
+    ) {
+        Ok(Some(bytes)) => update_index::stored::decode_all(&bytes).unwrap_or_default(),
+        Ok(None) => alloc::vec::Vec::new(),
+        Err(()) => {
+            print(b"update: cannot read the stored indexes: its apps stay installed\n");
+            return;
+        }
+    };
+    // Only what the project key signed names apps to delete.
+    let key = aricode_crypto::trust::public_key();
+    let indexes: alloc::vec::Vec<_> = stored
+        .iter()
+        .filter_map(|b| update_index::stored::decode(b))
+        .filter_map(|s| update_index::verify(s.index, s.signature, &key).ok())
+        .filter(|i| i.channel == update_index::Channel::Stable)
+        .collect();
+    let Some(apps) = update_index::profiles::apps_to_remove(&indexes, name, &profiles) else {
+        print(b"update: no verified index names its apps: they stay installed\n");
+        return;
+    };
+    for app in apps {
+        let Some(target) = update_index::installed_path(app) else {
+            continue;
+        };
+        match fs.delete(&target) {
+            Ok(()) => {
+                print(b"update: deleted ");
+                print(target.as_bytes());
+                print(b"\n");
+                log_history(
+                    fs,
+                    &alloc::format!("app deleted with profile {name}: {app}"),
+                );
+            }
+            Err(aricode_rt::sys::fs::FsError::Status(aricode_proto::fs::Status::NotFound)) => {}
+            Err(aricode_rt::sys::fs::FsError::Status(aricode_proto::fs::Status::Unsupported)) => {
+                print(b"update: AriFS v1 cannot delete files: ");
+                print(target.as_bytes());
+                print(b" stays\n");
+            }
+            Err(_) => {
+                print(b"update: cannot delete ");
+                print(target.as_bytes());
+                print(b"\n");
+            }
+        }
+    }
 }
 
 fn sources_list(fs: &mut FsClient) {

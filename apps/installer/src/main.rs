@@ -83,6 +83,9 @@ mod code {
     /// A pending or staged package could not be read (as opposed to
     /// missing, oversized or tampered).
     pub const PKG_READ: u64 = 16;
+    /// The package needs a newer application interface than this system
+    /// offers (ADR 0074).
+    pub const REQUIRES: u64 = 17;
 }
 
 macro_rules! say {
@@ -476,6 +479,20 @@ fn install_one(
         );
         return Ok(Done::Refused(0));
     };
+    // ADR 0074: a package for a newer system never replaces one that runs
+    // here; the owner upgrades the system first.
+    if !manifest.runs_on(aricode_ab::APPS_LEVEL) {
+        fault(
+            code::REQUIRES,
+            "inst-requires-newer",
+            &format!(
+                "{app} version {version} needs application interface {} and this system offers {}: refused (upgrade the system first)",
+                manifest.requires,
+                aricode_ab::APPS_LEVEL
+            ),
+        );
+        return Ok(Done::Refused(0));
+    }
     let current = match installed(fs, &target, pubkey) {
         Installed::Missing => None,
         Installed::Valid(m, _) => Some(m.version),

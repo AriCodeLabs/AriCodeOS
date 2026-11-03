@@ -67,33 +67,63 @@ package that the scenarios install, so `gui` keeps working in the tests.
   - An older updater refuses an index line it does not know, so profiles
     go only in indexes for the release that adds them. That is the same
     rule as every index change (ADR 0029).
-- **`install --profile desktop` (in the installer) installs a profile:**
-  1. It downloads each package through the updater, as `upgrade` does for
-     applications (ADR 0064).
-  2. It installs each one with its own atomic `replace` (ADR 0018).
-  3. It records the profile in `profiles` only when every package is in.
-  4. After a cut, the next run finds the profile unrecorded and installs
-     the packages still missing. Each package is all-or-nothing, so a
-     half-installed profile only ever lacks whole packages.
-- **`upgrade` updates the packages of every recorded profile** together
-  with the system. A profile package the index adds later is installed
-  too, so the desktop never falls behind the system.
-- **`install --remove-profile desktop`** deletes the profile's packages
-  (AriFS v2 `delete`, ADR 0072) and its record.
-- **Offline machines.** `cargo xtask usb-image --profile desktop` puts the
-  packages in the stick's `pkgs/` and the profile in the installer's
-  queue.
+- **The owner follows a profile with `update profile add desktop`.**
+  - The shell records only the name, in `updater/profiles`, and logs it
+    in the install history.
+  - What the profile installs is never recorded. It is what the signed
+    indexes say, read again on every run.
+- **`update` plans, and `upgrade` installs.**
+  1. `update` plans every app a followed profile names and the machine
+     lacks, and shows each one with its profile.
+  2. `upgrade` downloads and stages those apps exactly as it does
+     application upgrades (ADR 0029, 0064). A whole profile fits one run
+     (`MAX_PROFILE_APPS` 8 ≤ `MAX_STAGED` 8).
+  3. The installer installs each app with its own atomic `replace` (ADR
+     0018).
+- **After a cut, nothing is lost.** Each package is all-or-nothing, so a
+  half-installed profile only ever lacks whole packages. The next
+  `update` plans them again.
+- **The profile follows the system.** `upgrade` updates the installed
+  apps together with the system, as before. An app a source later adds
+  to a followed profile is planned and installed too, so the desktop
+  never falls behind.
+- **`update profile remove desktop` stops following the profile.**
+  - It deletes the apps the profile installs that no other followed
+    profile installs (AriFS v2 `delete`, ADR 0072). The list comes from
+    the stored indexes of the stable sources, verified again with the
+    project key.
+  - Every deletion is logged.
+  - Without a verified index naming the profile, nothing is deleted, and
+    the shell says so.
+- **`update profiles`** lists the profiles the machine follows.
+- **Offline machines (phase B).** `cargo xtask usb-image --profile
+  desktop` will put the packages in the stick's `pkgs/` and follow the
+  profile.
   - This needs a stick with AriFS v2, so 0.18 or later.
   - An older stick is refused with a message to write a new one.
+- **Publishing.** `cargo xtask publish-update --profile NAME:APP,APP`
+  writes the line. Profiles only go in indexes for systems that read
+  them.
 
-### 3. Each profile package declares the system it needs
+### 3. Each package may declare the application interface it needs
 
-- **A package manifest may carry `requires = N`:** the oldest system
-  version it runs on.
-  - The installer refuses a package that needs a newer system, and says
-    which one.
-  - The updater installs the system first, then the packages, after the
-    reboot.
+- **The level is a number of its own, not the release number.**
+  - The system declares `apps = N` in its initrd's `features` file
+    (`aricode_ab::APPS_LEVEL`, 1 in 0.18). The number grows when what
+    applications may rely on grows: a capability, a protocol, a syscall.
+  - Release numbers cannot play this part, because stable and development
+    builds count differently. Android separates its API level from its
+    release name for the same reason.
+- **A package manifest may carry `requires = N`:** the lowest level it
+  runs on. It is signed with the rest of the manifest, and it is written
+  only when set, so every existing package keeps its exact manifest and
+  signature.
+- **Both programs refuse a package that needs more, and say which level
+  it needs:**
+  - the updater refuses it before staging (`upd-pkg-requires`);
+  - the installer refuses it before installing (`inst-requires-newer`).
+  - A system installed by the same `upgrade` runs only after the reboot,
+    so the app is installed by the next `upgrade`.
 - **Older systems never install such a package.** An older manifest
   parser refuses the unknown key, which is the safe failure.
 
@@ -139,8 +169,8 @@ declares.
 
 | Phase | Content |
 |---|---|
-| A | The profile mechanism: the `profile` index line; `install --profile` and `--remove-profile`; `profiles`; `upgrade` following profiles; `requires`; `usb-image --profile`; `gui_demo` as a test package. Scenarios with test packages. |
-| B | `session = desktop` in init, and `launch` in the broker with its trust rule (audited: it touches the broker's grants). |
+| A (done) | The `profile` index line; `update profile add/remove` and `update profiles`; `update` and `upgrade` following profiles; `requires` with the `apps` level. Scenarios `apps.profile` and `apps.requires_newer`. |
+| B | `session = desktop` in init; `launch` in the broker with its trust rule (audited: it touches the broker's grants); `gui_demo` as a test package; `usb-image --profile`. |
 | C | The desktop applications, one branch each: launcher, terminal, editor, files, settings. The widgets they share go into `libs/gfx`, with host tests. |
 
 ## Consequences

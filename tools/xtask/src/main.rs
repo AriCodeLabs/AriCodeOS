@@ -78,7 +78,7 @@ const DEBUG: (&str, Opt) = ("--debug", Opt::Flag);
 const CPUS: (&str, Opt) = ("--cpus", Opt::Value);
 const CMDLINE: (&str, Opt) = ("--cmdline", Opt::Value);
 const SIGNING_KEY: (&str, Opt) = ("--signing-key", Opt::Value);
-const PUBLISH: [(&str, Opt); 7] = [
+const PUBLISH: [(&str, Opt); 8] = [
     DEBUG,
     ("--channel", Opt::Value),
     SIGNING_KEY,
@@ -86,8 +86,9 @@ const PUBLISH: [(&str, Opt); 7] = [
     ("--no-system", Opt::Flag),
     ("--app", Opt::Repeated),
     ("--no-legacy-manifest", Opt::Flag),
+    ("--profile", Opt::Repeated),
 ];
-const SERVE: [(&str, Opt); 8] = [
+const SERVE: [(&str, Opt); 9] = [
     PUBLISH[0],
     PUBLISH[1],
     PUBLISH[2],
@@ -95,6 +96,7 @@ const SERVE: [(&str, Opt); 8] = [
     PUBLISH[4],
     PUBLISH[5],
     PUBLISH[6],
+    PUBLISH[7],
     ("--port", Opt::Value),
 ];
 
@@ -362,6 +364,19 @@ pub fn app_spec(spec: &str) -> Result<(String, u32)> {
     Ok((dir.to_string(), version))
 }
 
+/// `NAME:APP,APP...`: a profile of the index (ADR 0074) and the apps it
+/// installs, by package name.
+pub fn profile_spec(spec: &str) -> Result<(String, Vec<String>)> {
+    let (name, apps) = spec
+        .split_once(':')
+        .ok_or_else(|| format!("'{spec}': expected NAME:APP,APP..."))?;
+    let apps: Vec<String> = apps.split(',').map(String::from).collect();
+    if name.is_empty() || apps.iter().any(String::is_empty) {
+        return Err(format!("'{spec}': expected NAME:APP,APP..."));
+    }
+    Ok((name.to_string(), apps))
+}
+
 /// `--channel stable|dev` (default stable), the key that signs it, and
 /// what it publishes (ADR 0045).
 fn publication(cli: &Cli) -> Result<image::Publication> {
@@ -377,7 +392,13 @@ fn publication(cli: &Cli) -> Result<image::Publication> {
         aricode_ab::Channel::Dev => {
             // The build number is the source's own (one above the last
             // published), never typed: no hand-picked versions.
-            for flag in ["--version", "--no-system", "--app", "--no-legacy-manifest"] {
+            for flag in [
+                "--version",
+                "--no-system",
+                "--app",
+                "--no-legacy-manifest",
+                "--profile",
+            ] {
                 if cli.flag(flag) {
                     return Err(format!(
                         "--channel dev: {flag} does not apply (a development source offers one system image, numbered automatically)"
@@ -406,6 +427,11 @@ fn channel_flags(cli: &Cli) -> Result<image::Publication> {
             .values("--app")
             .into_iter()
             .map(app_spec)
+            .collect::<Result<_>>()?,
+        profiles: cli
+            .values("--profile")
+            .into_iter()
+            .map(profile_spec)
             .collect::<Result<_>>()?,
         legacy_manifest: !cli.flag("--no-legacy-manifest"),
         ..image::Publication::default()

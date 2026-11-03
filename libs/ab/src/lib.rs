@@ -578,7 +578,14 @@ pub struct StreamVerified {
 pub const FEATURES_FILE: &str = "features";
 
 /// What the systems built from this tree declare (xtask writes it).
-pub const FEATURES: &str = "arifs = 2\n";
+pub const FEATURES: &str = "arifs = 2\napps = 1\n";
+
+/// The application interface this tree's systems offer (ADR 0074), as
+/// Android's API level: a number that grows when what apps may rely on
+/// grows, apart from the release number (stable and development builds
+/// count releases differently). A package's `requires` names the lowest
+/// it runs on.
+pub const APPS_LEVEL: u32 = 1;
 
 /// Longest `features` file read.
 const FEATURES_MAX: usize = 256;
@@ -588,22 +595,26 @@ const FEATURES_MAX: usize = 256;
 pub struct Features {
     /// The newest AriFS version it mounts.
     pub arifs: u8,
+    /// Its application interface level ([`APPS_LEVEL`]); 0 before ADR 0074.
+    pub apps: u32,
 }
 
 impl Features {
     /// A system whose initrd has no `features` file: everything before
     /// ADR 0072, which reads AriFS v1 only.
-    pub const BEFORE_FEATURES: Features = Features { arifs: 1 };
+    pub const BEFORE_FEATURES: Features = Features { arifs: 1, apps: 0 };
 
     /// `key = value` lines; unknown keys are for later systems and are
     /// skipped; an `arifs` that is not a number counts as v1 (the safe
-    /// reading: it keeps the disk v1).
+    /// reading: it keeps the disk v1), an `apps` that is not one as 0.
     pub fn parse(text: &str) -> Self {
         let mut f = Self::BEFORE_FEATURES;
         for line in text.lines() {
             if let Some((k, v)) = line.split_once('=') {
-                if k.trim() == "arifs" {
-                    f.arifs = v.trim().parse().unwrap_or(1);
+                match k.trim() {
+                    "arifs" => f.arifs = v.trim().parse().unwrap_or(1),
+                    "apps" => f.apps = v.trim().parse().unwrap_or(0),
+                    _ => {}
                 }
             }
         }
@@ -988,7 +999,10 @@ mod tests {
         };
         assert_eq!(
             features(&with(FEATURES.as_bytes())),
-            Ok(Features { arifs: 2 })
+            Ok(Features {
+                arifs: 2,
+                apps: APPS_LEVEL
+            })
         );
         // Images before ADR 0072 have no such file: they read v1.
         let old = aricode_initrd::build(&[("init", &b"elf"[..])]).unwrap();
@@ -996,9 +1010,12 @@ mod tests {
         // Later keys are skipped; an unreadable number is the safe v1.
         assert_eq!(
             features(&with(b"later = 1\narifs = 3\n")),
-            Ok(Features { arifs: 3 })
+            Ok(Features { arifs: 3, apps: 0 })
         );
-        assert_eq!(features(&with(b"arifs = two\n")), Ok(Features { arifs: 1 }));
+        assert_eq!(
+            features(&with(b"arifs = two\napps = one\n")),
+            Ok(Features { arifs: 1, apps: 0 })
+        );
         assert_eq!(features(&with(&[b'a'; 300])), Err(ImageError::BadContainer));
         assert_eq!(features(b"not an archive"), Err(ImageError::BadContainer));
         // A read that fails is told apart.
