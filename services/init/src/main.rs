@@ -1779,6 +1779,7 @@ fn run_shell(
         }
         sup.poll();
         broker.serve_one(20, sup);
+        broker.serve_apps();
         broker.poll_launches();
         if let (Some(s), Some(fs)) = (sessions.as_deref_mut(), broker.fs.as_ref()) {
             s.serve(fs, net_service, services, broker.endpoint);
@@ -1970,11 +1971,16 @@ impl Sessions {
 /// manifest. An application receives, in this order, only what it asks for
 /// and is allowed: `SYSTEM` (read), a private directory in fsd, the network
 /// endpoint, a compositor session, the block endpoint (trusted
-/// applications only), and finally `HARDWARE` if it needs buffers, bounded
-/// by the manifest's memory. The input services are never granted (ADR
-/// 0053).
+/// applications only), the main file namespace (`installer`), the launch
+/// endpoint (`launcher`, ADR 0074), and finally `HARDWARE` if it needs
+/// buffers, bounded by the manifest's memory. The input services are never
+/// granted (ADR 0053).
 struct Broker {
     endpoint: Handle,
+    /// Where `launch` holders ask (ADR 0074): an endpoint of its own, so a
+    /// request that arrives here is known to come from the launcher, and
+    /// only its narrower rule applies ([`Self::serve_apps`]).
+    apps: Handle,
     fs: Option<FsClient>,
     block: Option<Handle>,
     /// The network service's main endpoint, when a driver serves it.
@@ -2076,6 +2082,7 @@ impl Broker {
     ) -> Result<Self, Error> {
         Ok(Self {
             endpoint: sys::endpoint_create()?,
+            apps: sys::endpoint_create()?,
             fs,
             block,
             net,
@@ -2302,6 +2309,70 @@ impl Broker {
         }
     }
 
+    /// Serves at most one request from a `launch` holder, without waiting
+    /// (ADR 0074). The launcher starts installed applications in the
+    /// background, each with its own manifest, and nothing more: no initrd
+    /// program (the installer, the updater, the shell), not itself, no
+    /// console and no wait for an exit; service status is not served here.
+    fn serve_apps(&mut self) {
+        let mut msg = [0u8; LaunchRequest::LEN];
+        let mut handles = [Handle(0); 2];
+        let Ok((n, nh)) = sys::ipc_receive(self.apps, &mut msg, &mut handles, 0) else {
+            return;
+        };
+        if nh == 0 {
+            return;
+        }
+        let reply_to = handles[0];
+        if nh == 2 {
+            let _ = sys::handle_close(handles[1]);
+        }
+        let refuse = |status| reply(reply_to, LaunchReply::status(status));
+        let Some(req) = LaunchRequest::decode(&msg[..n]) else {
+            sys::print(b"AriInit: refused, the launcher sent something other than a launch\n");
+            return refuse(LaunchStatus::Invalid);
+        };
+        let name = req.name_str();
+        if !req.is_detached() || req.has_console() || nh == 2 {
+            sys::print(b"AriInit: refused, the launcher asked to start ");
+            sys::print(name.as_bytes());
+            sys::print(b" other than in the background without a console\n");
+            return refuse(LaunchStatus::Invalid);
+        }
+        if Caps::TRUSTED_LAUNCH.contains(&name) {
+            sys::print(b"AriInit: refused, the launcher asked to start itself\n");
+            return refuse(LaunchStatus::Denied);
+        }
+        if in_initrd(name) {
+            sys::print(
+                b"AriInit: refused, the launcher may start installed applications only, and ",
+            );
+            sys::print(name.as_bytes());
+            sys::print(b" is a system program\n");
+            return refuse(LaunchStatus::Denied);
+        }
+        let Some(slot) = self.running.iter().position(Option::is_none) else {
+            sys::print(b"AriInit: ");
+            sys::print(name.as_bytes());
+            sys::print(b": running program limit reached\n");
+            return refuse(LaunchStatus::Limit);
+        };
+        sys::print(b"AriInit: the launcher asks to start ");
+        sys::print(name.as_bytes());
+        sys::print(b"\n");
+        match self.launch(name, req.arg, None) {
+            Launched::Reply(r) => reply(reply_to, r),
+            Launched::Process(process, window) => {
+                reply(reply_to, LaunchReply::status(LaunchStatus::Started));
+                self.running[slot] = Some(Running {
+                    process,
+                    reply_to: None,
+                    window,
+                });
+            }
+        }
+    }
+
     /// Reads the manifest (`NAME.manifest` in the initrd, or the one in the
     /// package `apps/NAME.aripkg` in AriFS if the program is installed,
     /// ADR 0017), applies the policy and launches the program; its exit is
@@ -2330,13 +2401,7 @@ impl Broker {
         let Some(path) = join(name, ".manifest", &mut path) else {
             return Launched::Reply(LaunchReply::status(LaunchStatus::Invalid));
         };
-        // One byte is enough to know whether the program is in the initrd:
-        // TooBig if it exists, NotFound otherwise.
-        let mut probe = [0u8; 1];
-        let in_initrd = !matches!(
-            sys::initrd_read(SPAWNER, name, &mut probe),
-            Err(Error::NotFound)
-        );
+        let in_initrd = in_initrd(name);
         let mut text = [0u8; 1024];
         let (manifest, source) = if in_initrd {
             let manifest = match sys::initrd_read(SPAWNER, path, &mut text) {
@@ -2419,6 +2484,15 @@ impl Broker {
                 sys::print(b" ");
                 sys::print(c.as_bytes());
             }
+            sys::print(b"\n");
+            return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
+        }
+        // `launch` goes only to an installed package, which verified against
+        // the release key: never to an initrd program of that name (ADR
+        // 0074).
+        if caps.contains(Caps::LAUNCH) && !matches!(source, Source::Installed { .. }) {
+            sys::print(b"AriInit: denied, launch is granted only to an installed, signed ");
+            sys::print(name.as_bytes());
             sys::print(b"\n");
             return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
         }
@@ -2515,6 +2589,13 @@ impl Broker {
                 Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
             }
             needs_hw = true;
+        }
+        // Send only: the launcher asks, the broker decides (`serve_apps`).
+        if caps.contains(Caps::LAUNCH) {
+            match sys::handle_duplicate(self.apps, rights::WRITE | rights::TRANSFER) {
+                Ok(h) => granted.push(h),
+                Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
+            }
         }
         if needs_hw {
             match sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER) {
@@ -2622,6 +2703,22 @@ impl Drop for Granted {
             }
         }
     }
+}
+
+/// Whether `name` is an initrd program. One byte is enough to know: TooBig
+/// if it exists, NotFound otherwise.
+fn in_initrd(name: &str) -> bool {
+    let mut probe = [0u8; 1];
+    !matches!(
+        sys::initrd_read(SPAWNER, name, &mut probe),
+        Err(Error::NotFound)
+    )
+}
+
+/// Sends a launch reply and gives up the reply endpoint.
+fn reply(reply_to: Handle, reply: LaunchReply) {
+    let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
+    let _ = sys::handle_close(reply_to);
 }
 
 /// `a` + `b` into `buf`.
