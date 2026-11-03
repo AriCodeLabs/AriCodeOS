@@ -1,0 +1,32 @@
+# The package limit over the network (ADR 0072): the source offers
+# hello_ext 2 padded to within 32 KiB of PACKAGE_MAX (8 MiB). The updater
+# downloads it into its stage file (one table commit, at the flush),
+# checks it against the signed index and verifies it piece by piece; the
+# installer installs it and empties the stage file; the broker launches
+# it.
+name = "apps.upgrade_network_huge"
+description = "upgrade: a package at the 8 MiB limit downloaded, staged, installed and launched"
+level = "full"
+areas = ["apps", "update", "network", "shell"]
+install = ["examples/hello_ext"]
+timeout_secs = 300
+
+[host_update]
+apps = ["examples/hello_ext:2"]
+huge_apps = true
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["update", "upgrade", "run hello_ext 2", "ls updater", "shutdown"]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "updater: app hello_ext: installed 1, source 1 offers 2: upgrade available",
+    "updater: downloading hello_ext-2.aripkg (83",
+    "updater: app hello_ext version 2 verified and staged as updater/pkg-1.aripkg",
+    "installer: hello_ext 1 -> 2 installed (apps/hello_ext.aripkg)",
+    "AriInit: launch hello_ext from AriFS (apps/hello_ext.aripkg version 2, 83",
+    "hello_ext v2: hello from outside the tree (arg 2)",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "update: updater exited with", "update: installer exited", "upd-pkg", "inst-", "no memory for package"]

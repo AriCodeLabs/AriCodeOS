@@ -130,6 +130,10 @@ pub struct HostUpdate {
     /// ELF): the updater stages them piece by piece (ADR 0072, phase B).
     #[serde(default)]
     pub large_apps: bool,
+    /// The apps are published as `huge` packages, within 32 KiB of
+    /// `PACKAGE_MAX` (8 MiB): the limit itself, downloaded and installed.
+    #[serde(default)]
+    pub huge_apps: bool,
     /// The apps' `requires` (ADR 0074): the application interface level
     /// they need; 0 (the default) writes none.
     #[serde(default)]
@@ -526,6 +530,7 @@ pub struct Scenario {
     /// Pending packages in the test disk's `pkgs/`: `DIR:VERSION`,
     /// `DIR:VERSION:corrupt` (tampered signature), for the installer (ADR
     /// 0018), `DIR:VERSION:large` (1 MiB more after the ELF, ADR 0072) or
+    /// `DIR:VERSION:huge` (within 32 KiB of `PACKAGE_MAX`) or
     /// `DIR:VERSION:requires=N` (needs application interface N, ADR 0074).
     #[serde(default)]
     pub packages: Vec<String>,

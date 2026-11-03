@@ -602,7 +602,13 @@ impl Service {
                         self.staging = None;
                         self.fs.abandon_replace();
                     }
-                    Reply::ok(0)
+                    // A file written and closed is whole on disk (ADR
+                    // 0072): growing writes are committed here at the
+                    // latest. The descriptor is closed either way.
+                    match self.fs.commit_pending() {
+                        Ok(()) => Reply::ok(0),
+                        Err(e) => Reply::status(status_of(e)),
+                    }
                 } else {
                     Reply::status(Status::BadFd)
                 }

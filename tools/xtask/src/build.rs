@@ -392,6 +392,11 @@ pub struct ExternalApp {
 /// example is the size of an app with TLS (ADR 0072, phase B).
 pub const LARGE_PADDING: usize = 1024 * 1024;
 
+/// Bytes `huge` packages carry after their program's ELF: the package
+/// ends within 32 KiB of `PACKAGE_MAX`, the largest the system handles,
+/// so the limit itself is exercised end to end.
+pub const HUGE_PADDING: usize = aricode_pkg::PACKAGE_MAX - 32 * 1024;
+
 impl ExternalApp {
     /// The same package, signed again, with `extra` zero bytes after the
     /// program's ELF, which the loader ignores (a package far over AriFS

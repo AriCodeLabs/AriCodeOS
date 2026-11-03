@@ -179,6 +179,16 @@ impl<D: BlockDevice> Volume<D> {
         }
     }
 
+    /// Commits what growing writes left in memory (AriFS v2; v1 commits
+    /// each one as it happens): when a descriptor closes, so a file
+    /// written and closed is whole on disk without an explicit flush.
+    pub fn commit_pending(&mut self) -> Result<(), FsError> {
+        match self {
+            Self::V1(_) => Ok(()),
+            Self::V2(fs) => fs.commit_pending(),
+        }
+    }
+
     pub fn needs_reopen(&self) -> bool {
         match self {
             Self::V1(fs) => fs.needs_reopen(),

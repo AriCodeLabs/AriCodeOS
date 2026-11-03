@@ -176,6 +176,7 @@ fn format_create_write_read_and_reopen() {
     fs.write(a, 0, b"hello").unwrap();
     fs.write(a, 5, b" world").unwrap();
     fs.write(b, 0, &pattern(70_000, 1)).unwrap();
+    fs.flush().unwrap();
     let mut fs = AriFs::open(fs.into_device()).unwrap();
     assert_eq!(fs.recovery(), Recovery::Clean);
     assert_eq!(content(&mut fs, a), b"hello world");
@@ -226,6 +227,7 @@ fn replace_survives_a_cut_at_every_write() {
     let other = fs.create("other").unwrap();
     fs.write(i, 0, &old).unwrap();
     fs.write(other, 0, b"untouched").unwrap();
+    fs.flush().unwrap();
     let old_sectors = fs.entry(i).unwrap().capacity_sectors();
     let base_free = fs.free_sectors();
     let base = fs.into_device().0;
@@ -352,6 +354,7 @@ fn delete_and_rename_over_are_atomic() {
     let cur = fs.create("apps/x.aripkg").unwrap();
     fs.write(tmp, 0, &pattern(20_000, 1)).unwrap();
     fs.write(cur, 0, &pattern(10_000, 2)).unwrap();
+    fs.flush().unwrap();
     let base = fs.into_device().0;
     let mut fs = AriFs::open(CuttingDisk::new(&base, usize::MAX)).unwrap();
     fs.rename(tmp, "apps/x.aripkg").unwrap();
@@ -384,6 +387,73 @@ fn delete_and_rename_over_are_atomic() {
     assert_eq!(fs.delete(cur), Err(FsError::NotFound));
     fs.rename(tmp, "apps/x.new").unwrap();
     assert_eq!(fs.find("apps/x.new"), Some(tmp), "renaming to its own name");
+}
+
+#[test]
+fn growing_writes_commit_once_and_a_cut_before_loses_only_the_growth() {
+    let mut fs = AriFs::format(disk(1000), 1000).unwrap();
+    let a = fs.create("download").unwrap();
+    let other = fs.create("other").unwrap();
+    fs.write(a, 0, b"first").unwrap();
+    fs.write(other, 0, b"untouched").unwrap();
+    fs.flush().unwrap();
+    let free = fs.free_sectors();
+    let base = fs.into_device().0;
+    // A download in 100 pieces: the table is written once, at the flush
+    // (its body and header: two flushes), not once per piece.
+    let mut fs = AriFs::open(CuttingDisk::new(&base, usize::MAX)).unwrap();
+    let mut want = b"first".to_vec();
+    for k in 0..100u32 {
+        let piece = pattern(1000, k);
+        fs.write(a, want.len() as u32, &piece).unwrap();
+        want.extend(&piece);
+    }
+    assert_eq!(
+        content(&mut fs, a),
+        want,
+        "memory serves the growth at once"
+    );
+    fs.flush().unwrap();
+    let dev = fs.into_device();
+    let total = dev.writes;
+    assert_eq!(dev.flushes, 2, "one commit: the table's body, its header");
+    // Without the flush (a cut, or a client that died): the file is as it
+    // was, the sectors the growth took are free, nothing else changed.
+    let mut fs = AriFs::open(CuttingDisk::new(&base, usize::MAX)).unwrap();
+    fs.write(a, 5, &pattern(90_000, 9)).unwrap();
+    let mut fs = AriFs::open(fs.into_device().power_off(KEPT[0])).unwrap();
+    assert_eq!(content(&mut fs, a), b"first");
+    assert_eq!(fs.free_sectors(), free);
+    // A cut at every write of the pieces and of the commit: the old file
+    // or the whole new one, never a size that covers unwritten data.
+    for cut_at in 0..=total {
+        for kept in KEPT {
+            let mut fs = AriFs::open(CuttingDisk::new(&base, cut_at)).unwrap();
+            let mut len = 5u32;
+            for k in 0..100u32 {
+                if fs.write(a, len, &pattern(1000, k)).is_err() {
+                    break;
+                }
+                len += 1000;
+            }
+            let _ = fs.flush();
+            let mut fs = AriFs::open(fs.into_device().power_off(kept)).unwrap();
+            let got = content(&mut fs, a);
+            assert!(
+                got == b"first" || got == want,
+                "cut at {cut_at}, {kept:?}: {} bytes",
+                got.len()
+            );
+            assert_eq!(content(&mut fs, other), b"untouched");
+            assert_disjoint(&fs);
+        }
+    }
+    // Another commit takes the growth with it, after the data.
+    let mut fs = AriFs::open(MemDisk(base.clone())).unwrap();
+    fs.write(a, 5, b" and more").unwrap();
+    fs.create("third").unwrap();
+    let mut fs = AriFs::open(fs.into_device()).unwrap();
+    assert_eq!(content(&mut fs, a), b"first and more");
 }
 
 #[test]
@@ -463,6 +533,7 @@ fn growth_prefers_contiguity_and_stops_at_four_extents() {
     assert!(refused, "space or extents run out");
     assert!(grown >= 1);
     assert!(fs.entry(c).unwrap().extents().len() <= MAX_EXTENTS);
+    fs.flush().unwrap();
     let mut fs = AriFs::open(fs.into_device()).unwrap();
     for k in 0..40 {
         let mut buf = [0u8; 1000];

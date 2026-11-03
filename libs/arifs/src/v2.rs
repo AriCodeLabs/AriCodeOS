@@ -342,6 +342,13 @@ pub struct AriFs<D: BlockDevice> {
     /// first writes the table in memory over it and flushes, so no sector is
     /// written, and none reused, while a copy on disk may say otherwise.
     resync: bool,
+    /// The table in memory holds what growing writes added (sizes, and the
+    /// extents they took) and no commit has written yet: the next commit,
+    /// `flush` or `commit_pending` does. Until then a cut loses that
+    /// growth, as it loses any write not flushed, and nothing else: the
+    /// sectors it took are free on disk and used in memory, so no other
+    /// file is given them meanwhile.
+    pending: bool,
 }
 
 /// The entries, `MAX_FILES` long.
@@ -382,6 +389,7 @@ impl<D: BlockDevice> AriFs<D> {
             recovery: Recovery::Clean,
             staged: None,
             resync: false,
+            pending: false,
         }
     }
 
@@ -623,6 +631,8 @@ impl<D: BlockDevice> AriFs<D> {
         self.current = target;
         self.generation = generation;
         self.resync = false;
+        // The whole table in memory went to disk, growth included.
+        self.pending = false;
         Ok(())
     }
 
@@ -753,10 +763,12 @@ impl<D: BlockDevice> AriFs<D> {
         Ok(len)
     }
 
-    /// Writes `data` at `offset` (no gaps: `offset <= size`). Inside the
-    /// file's extents it writes in place, durable at `flush`; past them
-    /// the file grows into free sectors, and the new size is committed
-    /// after the data is flushed.
+    /// Writes `data` at `offset` (no gaps: `offset <= size`), durable at
+    /// `flush`: in place inside the file's extents, and past them into free
+    /// sectors the file takes. A write that grows the file changes the
+    /// table in memory only; the next commit, `flush` or `commit_pending`
+    /// writes it, after the data (each commit flushes before its commit
+    /// point). One commit for a whole download instead of one per write.
     pub fn write(&mut self, index: usize, offset: u32, data: &[u8]) -> Result<usize, FsError> {
         self.ready()?;
         let mut e = *self.entry(index).ok_or(FsError::NotFound)?;
@@ -775,13 +787,22 @@ impl<D: BlockDevice> AriFs<D> {
             e.grow(self, more)?;
         }
         write_extents(&mut self.dev, e.extents(), offset as usize, data)?;
-        if end > e.size as u64 {
-            // The data must be durable before the size that covers it.
-            self.dev.flush()?;
-            e.size = end as u32;
-            self.commit(&[(index, Some(e))])?;
+        e.size = e.size.max(end as u32);
+        if self.table[index] != Some(e) {
+            self.table[index] = Some(e);
+            self.pending = true;
         }
         Ok(data.len())
+    }
+
+    /// Writes what growing writes left in memory (see `pending`), if
+    /// anything: a commit, whose flush before its commit point makes the
+    /// data durable first. Nothing to do otherwise.
+    pub fn commit_pending(&mut self) -> Result<(), FsError> {
+        if self.pending {
+            self.commit(&[])?;
+        }
+        Ok(())
     }
 
     /// Atomically replaces the whole contents with `data`. Durable on
@@ -910,11 +931,16 @@ impl<D: BlockDevice> AriFs<D> {
         Ok(())
     }
 
-    /// Makes previous in-place writes durable.
+    /// Makes previous writes durable, growth included.
     pub fn flush(&mut self) -> Result<(), FsError> {
-        self.dev.flush()
+        match self.pending {
+            true => self.commit_pending(),
+            false => self.dev.flush(),
+        }
     }
 
+    /// The device, as a cut would leave it: growth not yet committed
+    /// (`flush`) is not on it.
     pub fn into_device(self) -> D {
         self.dev
     }
