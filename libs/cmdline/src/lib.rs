@@ -137,6 +137,11 @@ pub mod keys {
     /// (a file service that dies while its clients hold sessions, ADR
     /// 0050).
     pub const FSD_FAULT: &str = "fsd_fault";
+    /// Tests only: `fsd_mutate=NAME@N`, on the N-th open of the file NAME
+    /// fsd flips its last byte in place, as a writer changing the file
+    /// between two reads of a client would (the installer's copy check,
+    /// ADR 0072).
+    pub const FSD_MUTATE: &str = "fsd_mutate";
     /// `smp=off`: do not start the application processors (real hardware).
     pub const SMP: &str = "smp";
     /// `iommu=off`: do not enable DMA translation (real hardware).
@@ -211,6 +216,7 @@ pub mod keys {
         INPUT_ORPHAN,
         SHELL_FAULT,
         FSD_FAULT,
+        FSD_MUTATE,
         SELFTEST,
         USB_FAULT,
         BLK_FAULT,

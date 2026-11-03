@@ -366,7 +366,9 @@ No high finding. What it found, and what was done:
     - L4: tests for a failed growth commit, growth into just-freed
       sectors beside other commits under cuts, and writes that do not
       grow.
-  - **Still without a scenario:** a source changing during the
-    installer's copy (`Copied::Mismatch`) needs a concurrent writer.
+  - **A package changing during the installer's copy** has
+    `apps.copy_mismatch`. The test-only key `fsd_mutate=NAME@N` makes fsd
+    flip the file's last byte on its N-th open, as a concurrent writer
+    would. The installer refuses the copy and commits nothing.
 
 Incident 0026 is closed.

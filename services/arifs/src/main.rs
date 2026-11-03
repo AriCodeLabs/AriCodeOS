@@ -309,7 +309,40 @@ struct Service {
     probe_error_said: bool,
     /// `fsd_fault` (tests only): opening `FAULT_FILE` crashes fsd.
     fault_on_open: bool,
+    /// `fsd_mutate` (tests only): the file changed on one of its opens.
+    mutate: Option<Mutate>,
 }
+
+/// `fsd_mutate=NAME@N` (tests only): on the `at`-th open of `name` fsd
+/// flips the file's last byte in place and flushes, so a client that read
+/// it before sees other bytes now (the installer's copy check, ADR 0072).
+struct Mutate {
+    name: [u8; MAX_NAME],
+    len: usize,
+    at: u32,
+    opens: u32,
+}
+
+impl Mutate {
+    fn parse(value: &str) -> Option<Self> {
+        let (name, at) = value.rsplit_once('@')?;
+        let at = at.parse().ok().filter(|&n| n > 0)?;
+        if name.is_empty() || name.len() > MAX_NAME {
+            return None;
+        }
+        let mut buf = [0u8; MAX_NAME];
+        buf[..name.len()].copy_from_slice(name.as_bytes());
+        Some(Self {
+            name: buf,
+            len: name.len(),
+            at,
+            opens: 0,
+        })
+    }
+}
+
+/// Longest name `fsd_mutate` takes (an AriFS name).
+const MAX_NAME: usize = aricode_arifs::NAME_LEN;
 
 /// The name whose `Open` crashes fsd under `fsd_fault` (tests only).
 const FAULT_FILE: &str = "fsd-fault";
@@ -411,6 +444,35 @@ impl Service {
                 true
             }
         }
+    }
+
+    /// `fsd_mutate` (tests only): on the chosen open of the chosen file,
+    /// its last byte is flipped in place and flushed, and said.
+    fn mutate_on_open(&mut self, index: usize) {
+        let Some(m) = self.mutate.as_mut() else {
+            return;
+        };
+        let Some(info) = self.fs.info(index) else {
+            return;
+        };
+        if info.name_str().as_bytes() != &m.name[..m.len] {
+            return;
+        }
+        m.opens += 1;
+        if m.opens != m.at || info.size == 0 {
+            return;
+        }
+        let last = info.size - 1;
+        let mut byte = [0u8; 1];
+        let changed = self.fs.read(index, last, &mut byte).is_ok_and(|n| n == 1) && {
+            byte[0] ^= 0x01;
+            self.fs.write(index, last, &byte).is_ok() && self.fs.flush().is_ok()
+        };
+        say(if changed {
+            b"test mutation: the file changed on this open (fsd_mutate)"
+        } else {
+            b"test mutation failed (fsd_mutate)"
+        });
     }
 
     /// The client of session `i` is gone: releases its descriptors, its
@@ -591,7 +653,10 @@ impl Service {
                     fault();
                 }
                 match qualified(prefix, req.name_str(), &mut qbuf).and_then(|q| self.fs.find(q)) {
-                    Some(i) => self.open(i, owner),
+                    Some(i) => {
+                        self.mutate_on_open(i);
+                        self.open(i, owner)
+                    }
                     None => Reply::status(Status::NotFound),
                 }
             }
@@ -962,6 +1027,14 @@ fn main(arg: u64) -> u64 {
             let mut buf = [0u8; sys::CMDLINE_MAX];
             sys::cmdline(SYSTEM, &mut buf).is_ok_and(|c| {
                 aricode_cmdline::CmdLine::new(c).has(aricode_cmdline::keys::FSD_FAULT)
+            })
+        },
+        mutate: {
+            let mut buf = [0u8; sys::CMDLINE_MAX];
+            sys::cmdline(SYSTEM, &mut buf).ok().and_then(|c| {
+                aricode_cmdline::CmdLine::new(c)
+                    .get(aricode_cmdline::keys::FSD_MUTATE)
+                    .and_then(Mutate::parse)
             })
         },
     };
