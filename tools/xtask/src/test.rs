@@ -687,6 +687,12 @@ pub fn run_scenario(
                 problems.push(format!("{prefix}unexpected '{needle}'"));
             }
         }
+        for needle in &expect.serial_once {
+            match cap.serial.matches(needle.as_str()).count() {
+                1 => {}
+                n => problems.push(format!("{prefix}'{needle}' seen {n} times, expected once")),
+            }
+        }
         if s.host_ssh.as_ref().is_some_and(|h| h.old_host_key) {
             let public = aricode_crypto::ed25519::public_key(&OLD_HOST_KEY_SEED);
             let needle = format!("host key {}", aricode_ssh::fingerprint(&public));

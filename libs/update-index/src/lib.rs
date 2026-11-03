@@ -45,6 +45,7 @@ pub mod index;
 pub mod lists;
 pub mod policy;
 pub mod profiles;
+pub mod refused;
 pub mod run;
 pub mod sources;
 pub mod stored;
@@ -91,6 +92,9 @@ pub const UPDATER_DIR: &str = "updater";
 pub const SOURCES_FILE: &str = "sources";
 /// The profiles the owner follows (ADR 0074, [`profiles`]).
 pub const PROFILES_FILE: &str = "profiles";
+/// Packages refused for needing a newer application interface (ADR 0074,
+/// [`refused`]).
+pub const REFUSED_FILE: &str = "refused";
 /// The single channel URL of ADR 0027; migrated into [`SOURCES_FILE`].
 pub const LEGACY_URL_FILE: &str = "update_url";
 /// Install history: system installs (updater), app installs (installer),

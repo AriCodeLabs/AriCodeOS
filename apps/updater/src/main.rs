@@ -45,7 +45,8 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use aricode_ab::{
-    schedule, BootState, Booted, Image, ImageError, Manifest, Slot, PART_STATE, PART_UPDATE,
+    schedule, BootState, Booted, Image, ImageError, Manifest, Slot, APPS_LEVEL, PART_STATE,
+    PART_UPDATE,
 };
 use aricode_crypto::sha256::Sha256;
 use aricode_rt::sys::block::{find_partition, BlockClient};
@@ -56,9 +57,12 @@ use aricode_update_index::files::{self, Files, ReadError};
 use aricode_update_index::lists::{self, PlanItem, StagedEntry};
 use aricode_update_index::{
     self as upd, best_app, best_system, check_fresh, compare, compare_system, decide_system,
-    profiles::profile_apps, stored, stored::SlotProblem, updater_arg, Change, Channel, Index, Keys,
-    Migration, Profiles, Refusal, Sources, StableFloor, SystemChange, SystemDecision, SystemId,
-    SystemRules,
+    profiles::profile_apps,
+    refused::{Refused, RefusedList},
+    stored,
+    stored::SlotProblem,
+    updater_arg, Change, Channel, Index, Keys, Migration, Profiles, Refusal, Sources, StableFloor,
+    SystemChange, SystemDecision, SystemId, SystemRules,
 };
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -146,6 +150,9 @@ mod code {
     /// The followed profiles (`profiles`, ADR 0074) could not be read, or
     /// held invalid lines.
     pub const PROFILES_FILE: u64 = 59;
+    /// The refused package list (`refused`, ADR 0074) could not be read or
+    /// written, or held invalid lines.
+    pub const REFUSED_FILE: u64 = 60;
     /// The active slot's image could not be read or verified: said with
     /// the reason, so "installed version unknown" is never unexplained
     /// (incident 0021).
@@ -402,6 +409,42 @@ fn missing_profile_apps<'a>(
         }
     }
     missing
+}
+
+/// Packages refused before for needing a newer application interface
+/// (ADR 0074); none when the file is missing or cannot be read (each such
+/// package is then downloaded and refused again, never installed).
+fn load_refused(fs: &mut FsClient) -> RefusedList {
+    match read_text(fs, upd::REFUSED_FILE, 8192) {
+        Ok(text) => {
+            let (list, rejected) = RefusedList::parse(text.as_deref().unwrap_or(""));
+            if rejected > 0 {
+                fault(
+                    code::REFUSED_FILE,
+                    "upd-refused-damaged",
+                    &format!("{rejected} invalid line(s) in the refused package list ignored"),
+                );
+            }
+            list
+        }
+        Err(_) => {
+            fault(
+                code::REFUSED_FILE,
+                "upd-refused-read",
+                "cannot read the refused package list",
+            );
+            RefusedList::default()
+        }
+    }
+}
+
+/// Why `a` is not planned: the level its package needs, known from an
+/// earlier download.
+fn held_back(a: &upd::AppEntry, refused: &RefusedList) -> String {
+    format!(
+        "it needs application interface {} and this system offers {APPS_LEVEL} (known from an earlier download): held back until it does",
+        refused.holds_back(a, APPS_LEVEL).unwrap_or(0)
+    )
 }
 
 /// Whether profile apps may be planned or staged now (ADR 0074): only with
@@ -2082,8 +2125,22 @@ fn report(fs: &mut FsClient, sources: &Sources, keys: &Keys, channel: Channel) -
             Vec::new()
         }
     };
+    let refused = match channel {
+        Channel::Stable => load_refused(fs),
+        Channel::Dev => RefusedList::default(),
+    };
     for (name, version) in &apps {
         match best_app(&indexes, name) {
+            Some((i, a))
+                if *version != a.version && refused.holds_back(a, APPS_LEVEL).is_some() =>
+            {
+                say!(
+                    "app {name}: installed {version}, source {} offers {}: {}",
+                    slots[i] + 1,
+                    a.version,
+                    held_back(a, &refused)
+                );
+            }
             Some((i, a)) => {
                 let change = compare(Some(*version), a.version);
                 available += usize::from(change == Change::Upgrade);
@@ -2121,6 +2178,15 @@ fn report(fs: &mut FsClient, sources: &Sources, keys: &Keys, channel: Channel) -
     let missing = missing_profile_apps(&indexes, &profiles, &apps);
     for (app, profile) in &missing {
         if let Some((i, a)) = best_app(&indexes, app) {
+            if refused.holds_back(a, APPS_LEVEL).is_some() {
+                say!(
+                    "app {app}: not installed, source {} offers {} for profile {profile}: {}",
+                    slots[i] + 1,
+                    a.version,
+                    held_back(a, &refused)
+                );
+                continue;
+            }
             available += 1;
             plan.push(PlanItem::App(a.name, a.version));
             say!(
@@ -2326,6 +2392,7 @@ fn stage_app<'e>(
     entry: &upd::AppEntry<'e>,
     file: &'static str,
     pk: &[u8; 32],
+    refused: &mut RefusedList,
 ) -> Result<StagedEntry<'e>, u64> {
     let size = entry.size as usize;
     if size > MAX_PACKAGE {
@@ -2400,7 +2467,15 @@ fn stage_app<'e>(
         }
         // ADR 0074: the system this run may have installed only runs after
         // the reboot, so the app waits for the next `upgrade` on it.
-        Ok(v) if !v.manifest.runs_on(aricode_ab::APPS_LEVEL) => {
+        Ok(v) if !v.manifest.runs_on(APPS_LEVEL) => {
+            // Remembered, so neither `update` nor `upgrade` fetches these
+            // bytes again while this system cannot run them.
+            refused.record(Refused {
+                name: String::from(entry.name),
+                version: entry.version,
+                sha256: entry.sha256,
+                requires: v.manifest.requires,
+            });
             return Err(fault(
                 code::PACKAGE_REFUSED,
                 "upd-pkg-requires",
@@ -2408,9 +2483,9 @@ fn stage_app<'e>(
                     "app {}: needs application interface {} and this system offers {}: upgrade the system, reboot and run upgrade again; skipped",
                     entry.name,
                     v.manifest.requires,
-                    aricode_ab::APPS_LEVEL
+                    APPS_LEVEL
                 ),
-            ))
+            ));
         }
         Ok(_) => {}
         Err(_) => {
@@ -2801,14 +2876,33 @@ fn upgrade(
         }
     }
     let mut staged: Vec<StagedEntry> = Vec::new();
+    let mut refused = load_refused(fs);
+    let refused_before = refused.clone();
+    refused.prune(APPS_LEVEL);
     for (k, (i, entry)) in app_jobs.into_iter().enumerate() {
         let Some(file) = upd::staged_package_file(k) else {
             break;
         };
-        match stage_app(fs, net, urls[slots[i]], entry, file, &keys.stable) {
+        match stage_app(
+            fs,
+            net,
+            urls[slots[i]],
+            entry,
+            file,
+            &keys.stable,
+            &mut refused,
+        ) {
             Ok(e) => staged.push(e),
             Err(code) => result = code,
         }
+    }
+    if refused != refused_before && !write_file(fs, upd::REFUSED_FILE, refused.to_text().as_bytes())
+    {
+        result = fault(
+            code::REFUSED_FILE,
+            "upd-refused-write",
+            "cannot record the refused packages: the next upgrade downloads them again",
+        );
     }
     // What leaving a profile may delete (ADR 0074): the apps staged for
     // it, recorded before the installer runs. A record without the app

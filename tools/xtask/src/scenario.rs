@@ -324,6 +324,10 @@ pub struct Expect {
     /// previous one's first match from there on).
     #[serde(default)]
     pub serial_order: Vec<String>,
+    /// Texts that must appear exactly once (something done once and not
+    /// repeated).
+    #[serde(default)]
+    pub serial_once: Vec<String>,
     /// The runner had to kill QEMU on seeing `kill_on` (power cut).
     #[serde(default)]
     pub killed: bool,
@@ -337,6 +341,7 @@ impl Expect {
             && self.serial_contains.is_empty()
             && self.serial_absent.is_empty()
             && self.serial_order.is_empty()
+            && self.serial_once.is_empty()
             && !self.killed
             && self.seed_store.is_none()
     }
@@ -562,6 +567,7 @@ impl Expect {
             serial_contains: all(&self.serial_contains),
             serial_absent: all(&self.serial_absent),
             serial_order: all(&self.serial_order),
+            serial_once: all(&self.serial_once),
             killed: self.killed,
             seed_store: self.seed_store,
         }
@@ -572,6 +578,7 @@ impl Expect {
             .iter()
             .chain(&self.serial_absent)
             .chain(&self.serial_order)
+            .chain(&self.serial_once)
     }
 }
 
