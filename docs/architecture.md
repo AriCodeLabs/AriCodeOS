@@ -1884,6 +1884,9 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
     by the updater before staging, by the installer before installing and
     by the broker before launching.
   - The installer empties the stage files it consumed.
+  - A package refused for its level is remembered in `updater/refused`,
+    keyed by its SHA-256, so it is not planned or downloaded again while
+    the system cannot run it.
   - Scenarios: `apps.profile`, `apps.profile_v1`, `apps.requires_newer`.
 - xtask: `publish-update [--version N | --no-system] [--app DIR:VERSION]
   [--profile NAME:APP,APP --all-machines-0.18] [--no-legacy-manifest]

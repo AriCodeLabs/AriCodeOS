@@ -20,3 +20,6 @@ aricode-initrd = { path = "../initrd" }
 
 [dev-dependencies]
 aricode-initrd = { path = "../initrd", features = ["write"] }
+# The tests build packages: plain `cargo test -p aricode-pkg` turns the
+# writer on, as `--features write` did (audit of ADR 0074 phase A).
+aricode-pkg = { path = ".", features = ["write"] }

@@ -2,7 +2,9 @@
 # `requires = 9`, above this system's application interface. The updater
 # downloads and verifies one but does not stage it; the installer refuses
 # one left in pkgs/; and the broker refuses to launch one already in
-# apps/ (as after a rollback to an older system).
+# apps/ (as after a rollback to an older system). The refusal is
+# remembered: the next `update` holds the package back and the next
+# `upgrade` does not download it again.
 name = "apps.requires_newer"
 description = "packages needing a newer application interface: not staged by upgrade, refused by the installer and at launch"
 level = "full"
@@ -22,6 +24,8 @@ stdin = [
     "update profile add desktop",
     "update",
     "upgrade",
+    "update",
+    "upgrade",
     "run installer",
     "run hello_ext 1",
     "run hello_more 1",
@@ -32,10 +36,15 @@ exit = 33
 serial_contains = [
     "updater: app hello_ext: not installed, source 1 offers 1 for profile desktop: upgrade installs it",
     "updater: app hello_ext: needs application interface 9 and this system offers 1: upgrade the system, reboot and run upgrade again; skipped",
+    "updater: app hello_ext: not installed, source 1 offers 1 for profile desktop: it needs application interface 9 and this system offers 1 (known from an earlier download): held back until it does",
     "installer: hello_more version 1 needs application interface 9 and this system offers 1: refused (upgrade the system first)",
     "installer: 0 package(s) installed, 1 skipped",
     "run: hello_ext: not found in the initrd or AriFS",
     "AriInit: denied, package apps/hello_more.aripkg needs application interface 9 and this system offers 1",
     "ARICODEOS_SHUTDOWN",
+]
+serial_once = [
+    "updater: downloading hello_ext-1.aripkg",
+    "updater: app hello_ext: not installed, source 1 offers 1 for profile desktop: upgrade installs it",
 ]
 serial_absent = ["KERNEL PANIC", "installed (apps/", "hello_more v1:"]

@@ -284,7 +284,7 @@ a machine installed with `usb-image --dev-source`.
   uses `sources`, `indexes` (every stored copy), `state` (installed, plan
   and staged sections), `last.log`, `history.log` and up to four stage
   files, plus `update_url` on migrated machines. Since ADR 0074 there are
-  up to eight stage files and `profiles`, on AriFS v2 only (255 entries):
+  up to eight stage files, `profiles` and `refused`, on AriFS v2 only (255 entries):
   profiles are not followed on a volume still in v1. A first `update` creates
   `state` (installer `LIST`), `indexes` and `last.log`; an `upgrade` adds
   `history.log` after a system install and one stage file per package:

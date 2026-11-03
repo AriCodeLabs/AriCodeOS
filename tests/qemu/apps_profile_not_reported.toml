@@ -1,0 +1,37 @@
+# `upgrade` installs only what the last `update` showed (ADR 0029, 0074):
+# a profile followed after `update` installs nothing until the owner runs
+# `update` again and sees what it brings.
+name = "apps.profile_not_reported"
+description = "profiles: an app the last update did not show is not installed by upgrade"
+level = "full"
+areas = ["apps", "update", "shell"]
+timeout_secs = 150
+
+[host_update]
+apps = ["examples/hello_more:1"]
+profiles = ["desktop:hello_more"]
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = [
+    "update",
+    "update profile add desktop",
+    "upgrade",
+    "run hello_more 1",
+    "update",
+    "upgrade",
+    "run hello_more 2",
+    "shutdown",
+]
+[boots.expect]
+exit = 33
+serial_order = [
+    "updater: app hello_more: version 1 available (not installed)",
+    "update: profile desktop followed",
+    "updater: app hello_more 1 was not reported by the last update: run update",
+    "run: hello_more: not found in the initrd or AriFS",
+    "updater: app hello_more: not installed, source 1 offers 1 for profile desktop: upgrade installs it",
+    "installer: hello_more none -> 1 installed (apps/hello_more.aripkg)",
+    "hello_more v1: the second app of the profile (arg 2)",
+]
+serial_absent = ["KERNEL PANIC", "hello_more v1: the second app of the profile (arg 1)"]

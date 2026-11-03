@@ -146,9 +146,15 @@ package that the scenarios install, so `gui` keeps working in the tests.
     under a newer system and still there after a rollback.
   - A system installed by the same `upgrade` runs only after the reboot,
     so the app is installed by the next `upgrade`.
-- **Known cost.** The index does not carry `requires`, so `update` still
-  plans such an app, and each `upgrade` downloads it before refusing it.
-  An `app =` field for it belongs to a later index format.
+- **Each refused package is downloaded only once.** The index does not
+  carry `requires`, so the updater remembers each package it refused, in
+  `updater/refused`: name, version, the SHA-256 the index gave, and the
+  level required.
+  - `update` holds back that exact package and says why, and `upgrade`
+    does not fetch it again.
+  - Other bytes or another version are fetched normally.
+  - A line stops holding anything back once the system offers the level,
+    and is pruned.
 - **Developers** set the line with `cargo xtask app-pack DIR --requires
   N`.
 - **Older systems never install such a package.** An older manifest
@@ -225,8 +231,11 @@ in the same branch:
   - L8: profiles are not followed without a sound installed list.
   - L9: the docs were updated, the unused `apps` key in the features
     file was dropped, and `app-pack --requires` was added.
-  - L10: new tests.
-- **Left as known:** L4, the repeated download of a refused package.
+  - L10: new tests, including `apps.profile_not_reported`.
+  - L4: a refused package is remembered and not downloaded again
+    (`updater/refused`). The scenarios check it with a new expectation,
+    `serial_once`.
+  - `cargo test -p aricode-pkg` builds without `--features write`.
 
 ## Consequences
 

@@ -449,6 +449,7 @@ version = "0.17.0"
 dependencies = [
  "aricode-crypto",
  "aricode-initrd",
+ "aricode-pkg",
  "aricode-proto",
 ]
 
