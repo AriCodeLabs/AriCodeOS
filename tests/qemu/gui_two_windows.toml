@@ -1,5 +1,6 @@
 # Phase 26: with `gui` the kernel hands over the framebuffer; init launches the compositor
-# with the virtio inputs and two applications that paint at the same time. The host
+# with the virtio inputs, and the shell starts the test package `gui_demo` twice
+# (ADR 0074) so two applications paint at the same time. The host
 # moves the mouse over window B, clicks (focus) and types 'h': only B
 # receives the key. `gui_trace` makes the compositor log every frame with
 # one pixel sample per window (without it frames print nothing,
@@ -11,7 +12,10 @@ name = "gui.two_windows"
 description = "ring 3 compositor: two isolated windows, click-to-focus and routed keyboard"
 level = "full"
 areas = ["gui", "input", "init"]
-cmdline = "qemu_exit gui gui_trace"
+cmdline = "qemu_exit gui gui_trace shell"
+install = ["examples/gui_demo"]
+# Demo A waits 3 s without events after B is gone, then closes its window.
+stdin = ["spawn gui_demo 0", "run gui_demo 1", "sleep 5000", "shutdown"]
 timeout_secs = 120
 
 [host_input]
@@ -43,9 +47,10 @@ serial_contains = [
     "compositor: client 2 gone: 1 window(s) closed",
     "gui_demo A: window closed",
     "compositor: client 1 gone: 0 window(s) closed",
-    "AriInit: gui ok (2 applications)",
+    "AriInit: gui ok (compositor started)",
+    "AriInit: launch gui_demo from AriFS (apps/gui_demo.aripkg version 1",
     "[host] QMP: 6 input events sent",
-    "ARICODEOS_KERNEL_READY",
+    "ARICODEOS_SHUTDOWN",
 ]
 serial_absent = [
     "KERNEL PANIC",
@@ -62,5 +67,4 @@ serial_order = [
     "compositor: client 2 gone: 1 window(s) closed",
     "gui_demo A: window closed",
     "compositor: client 1 gone: 0 window(s) closed",
-    "AriInit: gui ok (2 applications)",
 ]
