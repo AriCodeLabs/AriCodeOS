@@ -273,12 +273,68 @@ what was done:
   raw pattern lies in what becomes free space after a migration (tests
   only).
 
-### Phase B (to do)
+## Implementation, phase B (2026-11-03)
 
-`PACKAGE_MAX` stays 32 KiB: the broker verifies a package in a DMA buffer
-of that size, the installer holds the new package and reads the installed
-one, and the updater stages app packages in memory. Raising it means
-handling packages in pieces: the broker hashing while it loads, the
-installer copying with `ReplaceChunk` while it verifies and committing
-only a package that verified, the updater staging downloads into a file.
-Incident 0026 closes with phase B.
+Packages are handled in pieces, so `PACKAGE_MAX` is 8 MiB, eight times the
+largest program of 0.17:
+
+- `aricode_pkg::verify_streaming`: the checks of `verify`, reading
+  through a callback (headers, the two small manifests, and the program
+  hashed 4 KiB at a time); the same packages accepted and refused.
+- Installer: a package is verified piece by piece and copied 4 KiB at a
+  time into a chunked replace of `apps/NAME.aripkg`, committed at the end;
+  a staged package's whole SHA-256 is checked first, as before, and again
+  over the bytes copied, so what is committed is what the updater listed.
+  Its version check verifies the installed package the same way. Its heap
+  holds a 4 KiB buffer, not two packages.
+- Updater: an app package downloads straight into a chunked replace of
+  its stage file, hashed on the way, committed only with the size and
+  SHA-256 of the signed index, then verified piece by piece.
+- Broker: the package it launches is loaded into a DMA buffer of its own
+  size, freed when the launch ends (the kernel copies the program when it
+  creates the process), instead of one buffer of `PACKAGE_MAX` kept for
+  ever.
+- Between verifying a source and copying it, the file could change: whoever
+  can write `pkgs/` or the updater's directory can write `apps/` directly,
+  and the broker verifies every package in full at each launch, so the gap
+  opens nothing.
+- Test disk: 72 MiB, `ARI0` 32 MiB (a package of `PACKAGE_MAX` and its
+  replace fit). `large` packages (1 MiB after the ELF, which the loader
+  ignores) in `apps.large_package` (installed, replaced, launched: 1,062,888
+  bytes) and `apps.upgrade_network_large`.
+
+### Audit of phase B (2026-11-03)
+
+No high finding. What it found, and what was done:
+
+- **M1. A file taken for absent.** The installer learned a package's size
+  from the listing, and fsd lists by index: a client creating or deleting
+  files between two requests shifts the indices, so an installed package
+  could be missed, taken for "not installed", and an older signed package
+  in `pkgs/` installed over it. `files::size_of` now asks `open` whether
+  the file exists; a file that opens but the listing misses twice is an
+  error (`Busy`), never absent.
+- **M2. The replace slot held across the network.** The updater streamed
+  downloads into fsd's one chunked replace, so a slow server kept every
+  other replace on the system `Busy` for up to two minutes. It now empties
+  the stage file and downloads into it with plain writes; the file is
+  scratch, listed only with the index's size and SHA-256, and the
+  installer hashes it again before its own atomic replace. A v1 volume's
+  limit has its own message (`upd-pkg-v1-limit`).
+- **L1.** A mismatch found while copying, and the v1 limit, are refusals
+  with their codes (as when found before the copy); a source gone since its
+  verification is skipped.
+- **L2.** `PACKAGE_MAX` is asserted within the kernel's `DMA_MAX_LEN`, and
+  a failed allocation is said.
+- **L4.** `read_exact`'s offsets are checked.
+- **I1.** `verify_streaming`'s comment says what it bounds; tests cover a
+  read failing inside the program and the package manifest's bound.
+- **I2.** Packages from `pkgs/` are hashed after their verification and
+  the copy is committed only if it hashes the same.
+- Residuals: the scenarios use 1 MiB packages, not 8 MiB; a growing write
+  commits the table, so staging 1 MiB costs about 2 s in QEMU (deferring
+  size-only commits to `flush` and `close` is a later improvement); the v1
+  limit and a mismatch found during the copy have no scenario (a v1 disk
+  cannot hold the large source file).
+
+Incident 0026 is closed.

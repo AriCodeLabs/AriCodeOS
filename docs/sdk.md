@@ -87,8 +87,10 @@ same manifest, and a package that does not verify is not launched. From
 inside the system, `run installer` installs or updates the packages left in
 `pkgs/` (ADR 0018): it verifies each one, installs only versions newer than
 the installed one, and does so with a single atomic `replace`. A package
-cannot exceed 32 KiB yet: AriFS v2 stores up to 16 MiB (ADR 0072), but the
-broker, the installer and the updater still hold a whole package in memory.
+may be up to 8 MiB (`aricode_pkg::PACKAGE_MAX`, ADR 0072): the installer
+and the updater handle it in pieces, and the broker loads only the one it
+launches. On a disk still in AriFS v1 (a stick written before 0.18) a
+package holds 32 KiB.
 
 ## What a program receives
 

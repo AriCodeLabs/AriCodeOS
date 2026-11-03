@@ -1983,14 +1983,32 @@ struct Broker {
     /// Launched programs that have not exited yet (ADR 0015): process and,
     /// if someone waits for its exit, the endpoint to reply to.
     running: [Option<Running>; MAX_RUNNING],
-    /// DMA staging buffer for packages installed in AriFS (ADR 0017):
-    /// handle and address, allocated the first time it is needed.
-    stage: Option<(Handle, u64)>,
+    /// DMA buffer of the package being launched (ADR 0017), the package's
+    /// size: freed once the launch ends, since the kernel copies the
+    /// program when it creates the process (ADR 0072, phase B).
+    stage: Option<Stage>,
 }
 
-/// Size of the staging buffer: the package limit every part of the system
-/// shares (incident 0026).
+/// The largest package the broker loads: the limit every part of the
+/// system shares (incident 0026).
 const STAGE_LEN: u64 = aricode_pkg::PACKAGE_MAX as u64;
+// The broker's buffer is one DMA buffer: the package limit must stay within
+// what the kernel gives one (audit of ADR 0072 phase B, L2).
+const _: () = assert!(STAGE_LEN <= sys::abi::DMA_MAX_LEN);
+
+/// A DMA buffer mapped in init, unmapped and released on drop.
+struct Stage {
+    dma: Handle,
+    virt: u64,
+    len: u64,
+}
+
+impl Drop for Stage {
+    fn drop(&mut self) {
+        let _ = sys::mmio_unmap(self.virt);
+        let _ = sys::handle_close(self.dma);
+    }
+}
 
 /// Where the launched program comes from.
 #[derive(Clone, Copy)]
@@ -2102,20 +2120,32 @@ impl Broker {
             sys::print(aricode_rt::fmt_u64(size, &mut b));
             sys::print(b" bytes; packages hold 1 to ");
             sys::print(aricode_rt::fmt_u64(STAGE_LEN, &mut b));
-            sys::print(b" (what AriFS installs)\n");
+            sys::print(b" (the system's package limit)\n");
             return Err(LaunchStatus::Failed);
         }
-        let virt = match self.stage {
-            Some((_, virt)) => virt,
-            None => {
-                let dma = sys::dma_alloc(HARDWARE, STAGE_LEN).map_err(|_| LaunchStatus::Failed)?;
-                let virt = sys::mmio_map(dma).map_err(|_| LaunchStatus::Failed)?;
-                self.stage = Some((dma, virt));
-                virt
+        let len = size.div_ceil(4096) * 4096;
+        let Ok(dma) = sys::dma_alloc(HARDWARE, len) else {
+            let mut b = [0u8; 20];
+            sys::print(b"AriInit: no memory for package ");
+            sys::print(pkg_path.as_bytes());
+            sys::print(b" (");
+            sys::print(aricode_rt::fmt_u64(len, &mut b));
+            sys::print(b" bytes of contiguous DMA)\n");
+            return Err(LaunchStatus::Failed);
+        };
+        let virt = match sys::mmio_map(dma) {
+            Ok(virt) => virt,
+            Err(_) => {
+                let _ = sys::handle_close(dma);
+                return Err(LaunchStatus::Failed);
             }
         };
-        // SAFETY: our own DMA buffer of STAGE_LEN bytes, mapped RW in init.
-        let stage = unsafe { core::slice::from_raw_parts_mut(virt as *mut u8, STAGE_LEN as usize) };
+        let fresh = Stage { dma, virt, len };
+        // SAFETY: our own DMA buffer of `len` bytes, mapped RW in init,
+        // alive while `self.stage` holds it.
+        let stage =
+            unsafe { core::slice::from_raw_parts_mut(fresh.virt as *mut u8, fresh.len as usize) };
+        self.stage = Some(fresh);
         let fd = fs.open(pkg_path).map_err(|_| LaunchStatus::NotFound)?;
         let total = size as usize;
         let mut done = 0usize;
@@ -2260,7 +2290,15 @@ impl Broker {
     /// ADR 0017), applies the policy and launches the program; its exit is
     /// collected by `poll_launches`. `console`, if any, becomes the
     /// program's console (ADR 0047) and is closed if the launch fails.
+    /// [`Self::launch_staged`], then the package's buffer goes, whatever the
+    /// outcome.
     fn launch(&mut self, name: &str, arg: u64, console: Option<Handle>) -> Launched {
+        let launched = self.launch_staged(name, arg, console);
+        self.stage = None;
+        launched
+    }
+
+    fn launch_staged(&mut self, name: &str, arg: u64, console: Option<Handle>) -> Launched {
         // The prepared duplicates close themselves if any error path returns
         // before transferring them (`Granted::take` hands them to the
         // kernel). Previously, a denial after granting SYSTEM leaked one table
@@ -2490,10 +2528,12 @@ impl Broker {
                 elf_len,
                 ..
             } => {
-                let (dma, _) = self.stage.expect("staging buffer allocated");
+                let Some(stage) = self.stage.as_ref() else {
+                    return Launched::Reply(LaunchReply::status(LaunchStatus::Failed));
+                };
                 sys::process_spawn_from(
                     SPAWNER,
-                    dma,
+                    stage.dma,
                     elf_offset,
                     elf_len,
                     name,

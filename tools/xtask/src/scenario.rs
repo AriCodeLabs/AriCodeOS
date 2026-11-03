@@ -123,6 +123,10 @@ pub struct HostUpdate {
     /// only a download into `UPDATE` holds it.
     #[serde(default)]
     pub large_image: bool,
+    /// The apps are published as `large` packages (1 MiB more after the
+    /// ELF): the updater stages them piece by piece (ADR 0072, phase B).
+    #[serde(default)]
+    pub large_apps: bool,
     /// The machine already holds a verified copy of this source's index
     /// with a higher serial (the published one must be refused as stale).
     #[serde(default)]
@@ -506,8 +510,9 @@ pub struct Scenario {
     /// `apps/NAME.aripkg` (ADR 0017).
     #[serde(default)]
     pub install: Vec<String>,
-    /// Pending packages in the test disk's `pkgs/`: `DIR:VERSION` or
-    /// `DIR:VERSION:corrupt` (tampered signature), for the installer (ADR 0018).
+    /// Pending packages in the test disk's `pkgs/`: `DIR:VERSION`,
+    /// `DIR:VERSION:corrupt` (tampered signature), for the installer (ADR
+    /// 0018), or `DIR:VERSION:large` (1 MiB more after the ELF, ADR 0072).
     #[serde(default)]
     pub packages: Vec<String>,
     /// Packages already staged by the updater: `DIR:VERSION`, or

@@ -1,7 +1,7 @@
 # Incident 0026: the broker and the installer disagree on how large a package can be
 
 - Opened: 2026-10-24. Status: fixed on `fix/package-size-limit`
-  (2026-10-24); larger packages need larger AriFS files (see Open).
+  (2026-10-24); closed by ADR 0072 (2026-11-03): packages up to 8 MiB.
 - Found by: the debug-build reproduction of incident 0021 (`cargo xtask
   test --debug --all --area update` on `fix/update-image-size`), after the
   system image cases passed: the 7 scenarios still failing all involve an
@@ -80,10 +80,11 @@ odd one out: it launched packages the system could never manage.
   of an oversized pending package, the compile-time assertion, ADR 0017's
   text, the hint) are applied.
 
-## Open
+## Closed by ADR 0072
 
-- Apps larger than 32 KiB (any real one in a debug build; a release app
-  with TLS would pass it too) need AriFS files larger than one journal,
-  either a larger journal and file capacity or an install that is atomic
-  across several journal transactions (ADR 0018). That is AriFS design
-  work for the owner's roadmap, not part of this fix.
+- Apps larger than 32 KiB needed AriFS files larger than one journal.
+  AriFS v2 replaces up to 16 MiB atomically by copy on write (phase A),
+  and the broker, the installer and the updater handle packages in pieces
+  (phase B), so `PACKAGE_MAX` is 8 MiB. A volume still in AriFS v1 holds
+  32 KiB, and the installer says so. `apps.large_package` and
+  `apps.upgrade_network_large` install, upgrade and launch a 1 MiB package.

@@ -388,7 +388,38 @@ pub struct ExternalApp {
     pub package: Vec<u8>,
 }
 
+/// Bytes `large` packages carry after their program's ELF: with them the
+/// example is the size of an app with TLS (ADR 0072, phase B).
+pub const LARGE_PADDING: usize = 1024 * 1024;
+
 impl ExternalApp {
+    /// The same package, signed again, with `extra` zero bytes after the
+    /// program's ELF, which the loader ignores: a package far over AriFS
+    /// v1's 32 KiB that still launches (ADR 0072, phase B).
+    pub fn padded(&self, extra: usize) -> Result<ExternalApp> {
+        let key = crate::keys::expected_public_key()?;
+        let v = aricode_pkg::verify(&self.package, &key)
+            .map_err(|e| format!("{}: {e:?}", self.name))?;
+        let mut program = v.program.to_vec();
+        program.resize(program.len() + extra, 0);
+        let seed = crate::keys::signing_seed()?;
+        let package = aricode_pkg::build(
+            &self.name,
+            self.version,
+            &program,
+            v.app_manifest,
+            &seed,
+            false,
+        )
+        .ok_or_else(|| format!("{}: invalid package name", self.name))?;
+        check_package_size(&self.name, package.len(), true)?;
+        Ok(ExternalApp {
+            name: self.name.clone(),
+            version: self.version,
+            package,
+        })
+    }
+
     /// File that goes to AriFS as an installed program.
     pub fn installed(&self) -> (String, Vec<u8>) {
         (
