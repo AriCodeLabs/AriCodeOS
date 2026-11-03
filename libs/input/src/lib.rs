@@ -606,6 +606,46 @@ impl HidBootMouse {
     }
 }
 
+/// Ctrl+Alt+Backspace (ADR 0074 phase B): the owner's way back to the text
+/// console from a desktop, typed on any keyboard. The compositor leaves when
+/// it sees it on its keyboards; the kernel stops whoever holds the screen
+/// when it sees it on the PS/2 keyboard. Either Ctrl and either Alt count.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct EscapeChord {
+    /// Bits: left Ctrl, right Ctrl, left Alt, right Alt.
+    held: u8,
+}
+
+impl EscapeChord {
+    pub const fn new() -> Self {
+        Self { held: 0 }
+    }
+
+    /// Follows one event; `true` on the Backspace press made with a Ctrl
+    /// and an Alt held.
+    pub fn feed(&mut self, ev: Event) -> bool {
+        if ev.kind != EV_KEY {
+            return false;
+        }
+        let bit = match ev.code {
+            KEY_LEFTCTRL => 1,
+            KEY_RIGHTCTRL => 2,
+            KEY_LEFTALT => 4,
+            KEY_RIGHTALT => 8,
+            KEY_BACKSPACE => {
+                return ev.value == 1 && self.held & 3 != 0 && self.held & 12 != 0;
+            }
+            _ => return false,
+        };
+        if ev.value == 0 {
+            self.held &= !bit;
+        } else {
+            self.held |= bit;
+        }
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -959,5 +999,26 @@ mod tests {
         );
         assert_eq!(m.feed(&[0, 0, 0], &mut out), 0);
         assert_eq!(m.feed(&[0, 0], &mut out), 0);
+    }
+
+    #[test]
+    fn escape_chord_needs_a_ctrl_and_an_alt_held() {
+        let mut c = EscapeChord::new();
+        assert!(!c.feed(key(KEY_BACKSPACE, 1)));
+        assert!(!c.feed(key(KEY_LEFTCTRL, 1)));
+        assert!(!c.feed(key(KEY_BACKSPACE, 1)), "Ctrl alone");
+        assert!(!c.feed(key(KEY_RIGHTALT, 1)));
+        assert!(!c.feed(key(KEY_BACKSPACE, 0)), "a release");
+        assert!(!c.feed(key(KEY_BACKSPACE, 2)), "a repeat");
+        assert!(c.feed(key(KEY_BACKSPACE, 1)));
+        assert!(!c.feed(key(KEY_LEFTCTRL, 0)));
+        assert!(!c.feed(key(KEY_BACKSPACE, 1)), "Ctrl released");
+        assert!(!c.feed(key(KEY_RIGHTCTRL, 1)));
+        assert!(c.feed(key(KEY_BACKSPACE, 1)), "the other Ctrl");
+        assert!(!c.feed(Event {
+            kind: 2,
+            code: KEY_BACKSPACE,
+            value: 1
+        }));
     }
 }

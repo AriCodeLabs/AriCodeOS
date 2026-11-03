@@ -211,6 +211,39 @@ pub fn screen_returned_said(pid: u32, lent: bool) {
     }
 }
 
+/// Ctrl+Alt+Backspace was typed on the PS/2 keyboard while the screen was
+/// held: the cursor thread stops the holders ([`stop_holders`]). Set from
+/// the keyboard's interrupt handler, which kills nothing itself.
+static WANTED_BACK: AtomicBool = AtomicBool::new(false);
+
+/// The owner asked for the screen back on the PS/2 keyboard (ADR 0074
+/// phase B). Interrupt context: only flags it.
+pub fn screen_wanted_back() {
+    WANTED_BACK.store(true, Ordering::Release);
+}
+
+/// Stops every process holding the screen, once the owner asked for it on
+/// the PS/2 keyboard: on a laptop whose only other way out is the desktop
+/// itself, this is how the text console is always reachable (ADR 0074 §4).
+/// Its death returns the screen; init then ends the desktop. Thread code.
+fn stop_holders() {
+    if !WANTED_BACK.swap(false, Ordering::AcqRel) {
+        return;
+    }
+    let mut pids: Vec<u32> = LEASE.lock().holders.iter().map(|&(p, _)| p).collect();
+    pids.sort_unstable();
+    pids.dedup();
+    for pid in pids {
+        log::info!(
+            "console: Ctrl+Alt+Backspace on the PS/2 keyboard: process {pid}, which holds the screen, is stopped so the console gets it back"
+        );
+        crate::user::process::request_kill(
+            crate::user::process::Pid(pid),
+            "stopped by Ctrl+Alt+Backspace on the PS/2 keyboard",
+        );
+    }
+}
+
 /// A screen whose holders all went: reattached to the console, which then
 /// needs a full repaint. Thread code (the cursor thread).
 fn take_back_returned(guard: &mut FbGuard) {
@@ -316,6 +349,7 @@ pub fn start_cursor_thread() {
 extern "C" fn cursor_thread(_arg: usize) {
     loop {
         crate::task::scheduler::sleep_ms(500);
+        stop_holders();
         if let Some(mut guard) = FB.try_lock() {
             take_back_returned(&mut guard);
             if guard.needs_redraw() {

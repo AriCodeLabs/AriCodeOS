@@ -114,8 +114,8 @@ pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
     crate::ipc::settle_closed();
     // A termination requested by another process runs here, with the
     // syscall already complete and no locks held (audit 6ee19fb, finding 4).
-    if process::current_kill_requested() {
-        process::kill_current(process::KILLED_BY_SUPERVISOR);
+    if let Some(why) = process::current_kill_reason() {
+        process::kill_current(why);
     }
     match result {
         Ok(v) => v as i64,
@@ -745,7 +745,7 @@ fn spawn_from_bytes(
         // killed, and a supervisor would start another (audit 2026-10-25
         // C, L2): it does not run.
         warn!("process_spawn '{name}': no room for its handle; killing it");
-        process::request_kill(pid);
+        process::request_kill(pid, "stopped: its parent had no room for its handle");
     }
     handle
 }
@@ -812,7 +812,7 @@ fn process_kill(h: Handle) -> Result<u64, Error> {
         ObjectKind::Process(p) => Ok(p),
         _ => Err(Error::Invalid),
     })?;
-    if process::request_kill(pid) {
+    if process::request_kill(pid, process::KILLED_BY_REQUEST) {
         Ok(0)
     } else {
         Err(Error::BadHandle)
@@ -875,8 +875,11 @@ fn mmio_map(h: Handle) -> Result<u64, Error> {
     // The buffer stays referenced here until the IOMMU has it, whatever
     // happens to the handle meanwhile (ADR 0038).
     let held = dma.clone();
-    let screen = dma.is_none() && crate::framebuffer::overlaps(phys, len);
-    let (virt, created) = process::map_foreign(phys, len, cacheable, dma)?;
+    let process::Mapped {
+        virt,
+        created,
+        screen,
+    } = process::map_foreign(phys, len, cacheable, dma)?;
     // IOMMU (Phase 33): mapping a device assigns it to the process's
     // domain; mapping a foreign DMA buffer makes it visible to its devices.
     if let Some(pid) = process::current_pid() {
@@ -907,7 +910,7 @@ fn mmio_map(h: Handle) -> Result<u64, Error> {
     // The screen's mapper holds it (`map_foreign` recorded it): the kernel
     // console stops drawing until the last such mapping goes (ADR 0074
     // phase B).
-    if created && screen {
+    if screen {
         crate::console::screen_take();
     }
     Ok(virt)

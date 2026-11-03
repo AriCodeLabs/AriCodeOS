@@ -4280,7 +4280,8 @@ fn serve(ctl: &mut Controller, which: usize, msg: &[u8], handles: &[Handle], now
         Some(Request { op: Op::Info, .. }) => {
             let reply = Reply::status(Status::Ok)
                 .with_name(device_name(ctl))
-                .unwrap_or(Reply::status(Status::Ok));
+                .unwrap_or(Reply::status(Status::Ok))
+                .with_kinds(device_kinds(ctl));
             answer(reply_to, reply);
         }
         Some(Request {
@@ -4293,6 +4294,20 @@ fn serve(ctl: &mut Controller, which: usize, msg: &[u8], handles: &[Handle], now
         }
         None => answer(reply_to, Reply::status(Status::Invalid)),
     }
+}
+
+/// What the service's devices are (`Info`, ADR 0074 phase B): init starts
+/// the desktop only with a keyboard among them.
+fn device_kinds(ctl: &Controller) -> u8 {
+    use aricode_proto::input::{KIND_KEYBOARD, KIND_POINTER};
+    let mut kinds = 0;
+    if ctl.keyboards > 0 {
+        kinds |= KIND_KEYBOARD;
+    }
+    if ctl.mice > 0 {
+        kinds |= KIND_POINTER;
+    }
+    kinds
 }
 
 fn device_name(ctl: &Controller) -> &'static str {

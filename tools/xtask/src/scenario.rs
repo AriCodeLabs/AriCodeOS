@@ -474,6 +474,12 @@ pub struct Scenario {
     /// QMP input reaches them whatever the guest starts.
     #[serde(default)]
     pub usb_hid_only_input: bool,
+    /// No virtio keyboard and mouse, and no USB HID unless asked: QMP keys
+    /// reach the i8042, the PS/2 keyboard the kernel reads (ADR 0074 phase
+    /// B: a desktop needs another keyboard, the console's keys follow the
+    /// screen).
+    #[serde(default)]
+    pub no_virtio_input: bool,
     /// The `usb_hid` xHCI offers MSI only (no MSI-X), like 2012 Intel
     /// controllers: the kernel must program the MSI capability.
     #[serde(default)]

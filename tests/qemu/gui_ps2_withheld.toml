@@ -1,0 +1,31 @@
+# The console's keyboard follows its screen (ADR 0074 phase B). With the
+# compositor holding the screen, a key typed on the PS/2 keyboard never
+# reaches the shell; Ctrl+Alt+Backspace there makes the kernel stop the
+# process holding the screen, and the console gets its keys back, told how
+# many were withheld.
+name = "gui.ps2_withheld"
+description = "PS/2 keys are withheld from the console while the screen is held; Ctrl+Alt+Backspace takes it back"
+level = "full"
+areas = ["gui", "console", "input"]
+cmdline = "qemu_exit gui shell"
+no_virtio_input = true
+stdin = ["sleep 4000", "shutdown"]
+timeout_secs = 90
+
+[host_input]
+marker = "compositor: serving requests"
+keys = ["x", "ctrl+alt+backspace"]
+key_delay_ms = 50
+
+[expect]
+exit = 33
+serial_contains = [
+    "console: process",
+    "holds the screen; the console gets no PS/2 keys meanwhile",
+    "console: Ctrl+Alt+Backspace on the PS/2 keyboard: process",
+    "which holds the screen, is stopped so the console gets it back",
+    "'compositor' killed: stopped by Ctrl+Alt+Backspace on the PS/2 keyboard",
+    "no longer holds the screen; the console gets the PS/2 keys again (1 character(s) typed meanwhile were not given to it)",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "unknown command: x"]

@@ -112,8 +112,8 @@ The `desktop` profile also chooses what the machine boots into (`session`
 in the shell; following the profile writes `session = desktop`). At boot
 init starts the compositor and the profile's `launcher`, which starts the
 other apps through the broker with the capability `launch`. When the
-launcher exits, the desktop ends and the text console gets the screen and
-the keyboards back. A stick can come with a profile: `cargo xtask
+launcher exits, or on Ctrl+Alt+Backspace on any keyboard, the desktop ends
+and the text console gets the screen and the keyboards back. A stick can come with a profile: `cargo xtask
 usb-image --app DIR:VER... --profile desktop:launcher,...`.
 
 ## What a program receives

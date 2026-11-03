@@ -1138,16 +1138,22 @@ latter briefly to add the region.
   or with its process, `screen_release` queues the surface and the cursor
   thread reattaches and repaints it, since a release can run with
   interrupts off (a reap). The kernel says each change, with how many PS/2
-  characters were withheld.
+  characters were withheld. Ctrl+Alt+Backspace on the PS/2 keyboard while
+  the screen is held is the one key acted on: the interrupt handler flags
+  it and the cursor thread stops every holder (`request_kill` with that
+  reason), so a laptop always has a local way back to the console.
 - The desktop session (ADR 0074 phase B): `session = desktop` in AriFS,
   with the `desktop` profile followed (`updater/profiles`), its
-  `launcher` installed, a display and at least one USB or virtio input,
-  makes init start the compositor before the console bridge and launch
-  `launcher` through the broker; the shell still runs on COM1 (and over
-  SSH). When the launcher's process ends (`Running::ends_session`), init
-  kills the compositor, the kernel gives the console its screen and PS/2
-  keyboard back, and init starts the console bridge over the input
-  services. Without `gui` and without the session, the graphical demos
+  `launcher` installed, a display and a keyboard among the input services
+  (`input::KIND_KEYBOARD` in their `Info` replies), and no `gui` on the
+  command line, makes init start the compositor before the console bridge
+  and launch `launcher` through the broker; the shell still runs on COM1
+  (and over SSH). init keeps only the send side of the compositor's
+  endpoint. When the launcher's process ends (`Running::ends_session`) or
+  the compositor's does (Ctrl+Alt+Backspace, `aricode_input::EscapeChord`),
+  init stops the launcher and its apps (`Running::from_launcher`) and the
+  compositor, the kernel gives the console its screen and PS/2 keyboard
+  back, and init starts the console bridge over the input services. Without `gui` and without the session, the graphical demos
   are a test package (`examples/gui_demo`) the scenarios start from the
   shell.
 - `aricode-gfx` allocates no memory: `Canvas` wraps `&mut [u32]` with

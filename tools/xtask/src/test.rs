@@ -646,7 +646,7 @@ pub fn run_scenario(
                 hid: s.usb_hid,
                 hid_msi: s.usb_hid_msi,
                 hid_msi_and_msix: s.usb_hid_msi_and_msix,
-                hid_only_input: s.usb_hid_only_input,
+                hid_only_input: s.usb_hid_only_input || s.no_virtio_input,
                 legacy_controller: s.usb_legacy_controller,
                 storage: s.usb_storage,
                 ehci_hid: s.usb_ehci_hid,

@@ -1565,6 +1565,10 @@ fn desktop_missing(fs: &mut FsClient) {
         &update_index::main_path(update_index::PROFILES_FILE),
         1024,
     );
+    if profiles.is_err() {
+        print(b" (whether the desktop profile is followed cannot be read)\n");
+        return;
+    }
     let followed = matches!(&profiles, Ok(Some(text))
         if core::str::from_utf8(text).is_ok_and(session::follows_desktop));
     use update_index::files::Files;

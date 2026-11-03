@@ -120,8 +120,10 @@ pub fn on_tick(now: u64, bsp: bool, from_user: bool) {
     // A user thread that makes no syscalls (infinite loop) only passes
     // through here: if its process has a pending termination, it ends now,
     // just as on an exception (audit 6ee19fb, finding 4).
-    if from_user && crate::user::process::current_kill_requested() {
-        crate::user::process::kill_current(crate::user::process::KILLED_BY_SUPERVISOR);
+    if from_user {
+        if let Some(why) = crate::user::process::current_kill_reason() {
+            crate::user::process::kill_current(why);
+        }
     }
     let woke = if bsp {
         let mut guard = SCHED.lock();

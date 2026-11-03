@@ -246,19 +246,22 @@ in the same branch:
   every log line would scroll over the windows. So mapping the framebuffer
   now lends the screen to the mapper, and the console takes it back when
   the last mapping goes: unmapped, or with its process. The capability to
-  map it stays the right to hold it, and init hands it only to the
-  compositor.
+  map it stays the right to hold it. init hands it only to the
+  compositor; a display driver that keeps the display's BAR covering the
+  framebuffer (ADR 0051) holds the screen the same way when it maps it.
 - **The console's keyboard follows its screen.** On a laptop, the kernel
   reads the internal PS/2 keyboard for the console. With the desktop on the
   screen, those keys would have reached a hidden shell. While any process
   holds the screen, PS/2 characters are not given to the console, and the
   kernel says how many it withheld. This also closes the same leak under
   `gui`.
-- **The desktop needs a USB or virtio keyboard or mouse.** The compositor
-  reads the input services, and the PS/2 keyboard is not one of them yet.
-  Without such a device, init boots into the text console and says why.
-  Giving the compositor the PS/2 keyboard and touchpad, a ring-3 driver
-  for the i8042, is future work and needs the owner's go-ahead.
+- **The desktop needs a USB or virtio keyboard.** The compositor reads the
+  input services, and the PS/2 keyboard is not one of them yet. Each input
+  service now says in its `Info` reply whether it has a keyboard, a pointer
+  or both (`input::KIND_*`), and init starts the desktop only with a
+  keyboard among them. Without one, init boots into the text console and
+  says why. Giving the compositor the PS/2 keyboard and touchpad, a ring-3
+  driver for the i8042, is future work and needs the owner's go-ahead.
 - **`launch` is an endpoint of its own.** It is a send handle to a second
   broker endpoint, so every request there comes from a `launch` holder.
   - The broker grants it only to a `launcher` that is installed and
@@ -277,11 +280,23 @@ in the same branch:
     is a USB or virtio input. Otherwise it says which one is missing. A
     damaged file means the text console.
   - The shell keeps running on COM1 and over SSH.
-- **The way back to the text console.** When the launcher exits, init:
-  1. kills the compositor;
-  2. the kernel gives the console its screen and PS/2 keyboard back;
-  3. init starts the console bridge over the input services.
-  Phase C's launcher offers this as a menu entry.
+- **The way back to the text console** is always at hand, on any keyboard.
+  - **Ctrl+Alt+Backspace** on a keyboard the compositor reads makes it
+    leave.
+  - The same chord on the PS/2 keyboard, the only key the kernel acts on
+    while the screen is held, makes the kernel stop every process holding
+    the screen.
+  - The session also ends when its launcher exits; phase C's launcher
+    offers that as a menu entry.
+  - Whichever way it ends, init:
+    1. stops the launcher, the apps it started and the compositor;
+    2. the kernel gives the console its screen and PS/2 keyboard back;
+    3. init starts the console bridge over the input services, unless the
+       compositor did not end within 5 s, which init says.
+  - `session shell` then makes it last across boots.
+- **`gui` on the command line** keeps its compositor for the whole boot. No
+  desktop session is started on it, so a kiosk or test boot never loses
+  its screen to a launcher's exit.
 - **`usb-image --app DIR:VER --profile NAME:APP,APP`** (both repeatable)
   installs the apps in the stick's `apps/` directly, not in `pkgs/`, so
   the first boot already has them.
@@ -295,6 +310,37 @@ in the same branch:
   - Since the stick is always AriFS v2, there is no older stick to refuse.
 - **Remaining limit, to decide in phase C:** the launcher's apps share the
   broker's four running slots with the shell's `run` and `spawn`.
+
+## Audit of phase B (2026-11-04)
+
+An independent read-only audit found that `launch` gives nothing beyond
+the launched app's own manifest, and that the kernel lease is free of
+lock-order and interrupt problems. Everything it found was fixed in the
+same branch:
+
+- **H1:** with the desktop up there was no local way back: PS/2 keys were
+  withheld, the other keyboards belonged to the compositor, and
+  `session = desktop` survived a power cycle. Ctrl+Alt+Backspace now
+  works on every keyboard (`aricode_input::EscapeChord`, host tests;
+  `usb.image_desktop_escape`, `gui.ps2_withheld`).
+- **M1:** init did not notice the compositor dying. Its exit now ends the
+  session too. This also showed that init kept the receive side of the
+  compositor's endpoint, so every request to a dead compositor waited out
+  its timeout. init now keeps only the send side (ADR 0030).
+- **M2:** a mouse alone started the desktop. A keyboard is now required
+  (`usb.image_desktop_no_keyboard`).
+- **Low findings:**
+  - L1: the kernel decides "screen" once, in `map_foreign`, at page
+    granularity.
+  - L2: a profile list that cannot be read is said as such.
+  - L3: the inputs stay with a compositor that does not end.
+  - L4: the launcher's apps are stopped with the session.
+  - L5: `gui` keeps its compositor.
+  - L6: `run_gui` closes what it made on every failure.
+  - L7: the wording above.
+- **Also:** a stopped process's log line now says who stopped it (another
+  process's request, or Ctrl+Alt+Backspace) instead of always "the
+  supervisor".
 
 ## Consequences
 

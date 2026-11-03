@@ -1784,7 +1784,24 @@ fn run_shell(
         sup.poll();
         broker.serve_one(20, sup);
         broker.serve_apps();
-        if let Some(why) = broker.poll_launches() {
+        // The session ends with its launcher or with its compositor (audit
+        // of phase B, M1): with the compositor gone and nothing done, the
+        // input services would have no reader. The compositor is looked at
+        // first, so the launches collected after it no longer ask it to
+        // end their windows.
+        let compositor_end = desktop
+            .as_ref()
+            .is_some_and(|d| !matches!(sys::process_wait(d.gui.process, 0), Err(Error::Timeout)));
+        if compositor_end {
+            broker.compositor = None;
+        }
+        let launcher_end = broker.poll_launches();
+        let why = match (launcher_end, compositor_end) {
+            (Some(r), _) => Some(DesktopEnd::Launcher(r)),
+            (None, true) => Some(DesktopEnd::Compositor),
+            (None, false) => None,
+        };
+        if let Some(why) = why {
             if let Some(d) = desktop.take() {
                 end_desktop(d, why, broker, sup);
             }
@@ -2051,6 +2068,8 @@ struct Running {
     /// The desktop session's launcher: its exit ends the session (ADR
     /// 0074).
     ends_session: bool,
+    /// Started by the launcher: stopped when the session ends.
+    from_launcher: bool,
 }
 
 /// Immediate result of `launch`: an already decided reply, or a created
@@ -2253,6 +2272,17 @@ impl Broker {
         session_end
     }
 
+    /// Stops the desktop session's launcher and every app it started (ADR
+    /// 0074): their windows are gone with the compositor. Their exits are
+    /// collected by `poll_launches` as usual.
+    fn stop_desktop_apps(&mut self) {
+        for r in self.running.iter().flatten() {
+            if r.ends_session || r.from_launcher {
+                let _ = sys::process_kill(r.process);
+            }
+        }
+    }
+
     /// Starts the desktop session's launcher in the background with its
     /// own manifest (ADR 0074); its exit ends the session
     /// (`poll_launches`). `false`, said, when it does not start.
@@ -2275,6 +2305,7 @@ impl Broker {
                     reply_to: None,
                     window,
                     ends_session: true,
+                    from_launcher: false,
                 });
                 true
             }
@@ -2343,6 +2374,7 @@ impl Broker {
                     reply_to: None,
                     window,
                     ends_session: false,
+                    from_launcher: false,
                 });
             }
             Launched::Process(process, window) => {
@@ -2351,6 +2383,7 @@ impl Broker {
                     reply_to: Some(reply_to),
                     window,
                     ends_session: false,
+                    from_launcher: false,
                 });
             }
         }
@@ -2416,6 +2449,7 @@ impl Broker {
                     reply_to: None,
                     window,
                     ends_session: false,
+                    from_launcher: true,
                 });
             }
         }
@@ -2785,30 +2819,56 @@ fn join<'a>(a: &str, b: &str, buf: &'a mut [u8; 48]) -> Option<&'a str> {
 /// applications get their sessions from the broker (ADR 0052); the
 /// graphical demos are a test package since ADR 0074.
 fn run_gui(inputs: &[Handle]) -> Result<Gui, u64> {
-    let service = sys::endpoint_create().map_err(|_| 1u64)?;
+    // The compositor gets the receive side and init keeps only the send
+    // side (ADR 0030): once the compositor is gone, init's requests
+    // (`window::attach`/`detach`) answer `PeerClosed` at once instead of
+    // waiting on a queue nobody reads (found with the desktop session's
+    // Ctrl+Alt+Backspace, ADR 0074 phase B).
+    let (receive, service) = sys::endpoint_create_pair().map_err(|_| 1u64)?;
     let mut handles = [Handle(0); 8];
-    handles[0] = sys::handle_duplicate(service, rights::READ | rights::WRITE | rights::TRANSFER)
-        .map_err(|_| 2u64)?;
-    handles[1] =
-        sys::handle_duplicate(FRAMEBUFFER, rights::READ | rights::WRITE | rights::TRANSFER)
-            .map_err(|_| 3u64)?;
-    handles[2] =
-        sys::handle_duplicate(SYSTEM, rights::READ | rights::TRANSFER).map_err(|_| 4u64)?;
-    handles[3] =
-        sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER).map_err(|_| 5u64)?;
-    let mut n = 4;
-    for ep in inputs.iter().take(4) {
-        handles[n] =
-            sys::handle_duplicate(*ep, rights::WRITE | rights::TRANSFER).map_err(|_| 6u64)?;
-        n += 1;
+    handles[0] = receive;
+    let mut made = 1;
+    let spawned = (|| {
+        let mut grant = |h: Result<Handle, Error>, code: u64| -> Result<(), u64> {
+            handles[made] = h.map_err(|_| code)?;
+            made += 1;
+            Ok(())
+        };
+        grant(
+            sys::handle_duplicate(FRAMEBUFFER, rights::READ | rights::WRITE | rights::TRANSFER),
+            3,
+        )?;
+        grant(
+            sys::handle_duplicate(SYSTEM, rights::READ | rights::TRANSFER),
+            4,
+        )?;
+        grant(
+            sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER),
+            5,
+        )?;
+        for ep in inputs.iter().take(MAX_INPUTS) {
+            grant(
+                sys::handle_duplicate(*ep, rights::WRITE | rights::TRANSFER),
+                6,
+            )?;
+        }
+        sys::process_spawn_with(SPAWNER, "compositor", inputs.len() as u64, &handles[..made])
+            .map_err(|_| 7u64)
+    })();
+    match spawned {
+        Ok(process) => Ok(Gui {
+            endpoint: service,
+            process,
+        }),
+        // The kernel takes the handles only when it creates the process.
+        Err(code) => {
+            for h in &handles[..made] {
+                let _ = sys::handle_close(*h);
+            }
+            let _ = sys::handle_close(service);
+            Err(code)
+        }
     }
-    let process =
-        sys::process_spawn_with(SPAWNER, "compositor", inputs.len() as u64, &handles[..n])
-            .map_err(|_| 7u64)?;
-    Ok(Gui {
-        endpoint: service,
-        process,
-    })
 }
 
 /// The compositor init started: its service endpoint and its process.
@@ -2828,10 +2888,10 @@ struct Desktop {
 
 /// Whether to boot into the desktop session (ADR 0074): `session` asks for
 /// it, the machine follows the `desktop` profile, its launcher is
-/// installed, and there are a display and a keyboard or mouse the
-/// compositor can read. Says why when the file asks for the desktop and
+/// installed, and there are a display and a keyboard the compositor can
+/// read. Says why when the file asks for the desktop and
 /// it cannot start; never boots into a desktop that is not there.
-fn desktop_wanted(fs: &mut FsClient, inputs: usize) -> bool {
+fn desktop_wanted(fs: &mut FsClient, inputs: &[Handle]) -> bool {
     let mut text = [0u8; 256];
     let chosen = match read_small(fs, session::FILE, &mut text) {
         Ok(None) => return false,
@@ -2853,11 +2913,17 @@ fn desktop_wanted(fs: &mut FsClient, inputs: usize) -> bool {
     }
     let mut profiles = [0u8; 1024];
     let path = update_index::main_path(update_index::PROFILES_FILE);
-    let followed = matches!(read_small(fs, &path, &mut profiles), Ok(Some(n))
-        if core::str::from_utf8(&profiles[..n]).is_ok_and(session::follows_desktop));
-    if !followed {
-        say(b"session = desktop, but this machine does not follow the desktop profile: the text console");
-        return false;
+    match read_small(fs, &path, &mut profiles) {
+        Ok(Some(n)) if core::str::from_utf8(&profiles[..n]).is_ok_and(session::follows_desktop) => {
+        }
+        Ok(_) => {
+            say(b"session = desktop, but this machine does not follow the desktop profile: the text console");
+            return false;
+        }
+        Err(()) => {
+            say(b"session = desktop, but the profile list cannot be read: the text console");
+            return false;
+        }
     }
     let path = update_index::installed_path(session::LAUNCHER);
     match path.as_deref().map(|p| exists(fs, p)) {
@@ -2871,8 +2937,14 @@ fn desktop_wanted(fs: &mut FsClient, inputs: usize) -> bool {
             return false;
         }
     }
-    if inputs == 0 {
-        say(b"session = desktop, but there is no USB or virtio keyboard or mouse for it (the PS/2 keyboard stays the console's): the text console");
+    // The compositor reads the input services, never the PS/2 keyboard,
+    // which stays the console's: without a keyboard among the services
+    // the desktop could not be typed at (audit of phase B, M2).
+    if !inputs
+        .iter()
+        .any(|&ep| input_kinds(ep) & aricode_proto::input::KIND_KEYBOARD != 0)
+    {
+        say(b"session = desktop, but there is no USB or virtio keyboard for it (the PS/2 keyboard stays the console's): the text console");
         return false;
     }
     let mut fb = [0u8; sys::abi::sysinfo::Framebuffer::LEN];
@@ -2881,6 +2953,19 @@ fn desktop_wanted(fs: &mut FsClient, inputs: usize) -> bool {
         return false;
     }
     true
+}
+
+/// What an input service's devices are (`input::KIND_*`, from its `Info`
+/// reply); 0 when it does not answer.
+fn input_kinds(service: Handle) -> u8 {
+    use aricode_proto::input::{Op, Reply, Request};
+    let req = Request {
+        op: Op::Info,
+        timeout_ms: 0,
+    };
+    ask(service, &req.encode(), 500, &mut [0u8; Reply::LEN])
+        .and_then(Reply::decode)
+        .map_or(0, |r| r.kinds)
 }
 
 /// Whether `name` exists: `Err` when fsd's answer says neither.
@@ -2895,33 +2980,52 @@ fn exists(fs: &mut FsClient, name: &str) -> Result<bool, ()> {
     }
 }
 
-/// Ends the desktop session once its launcher is gone (ADR 0074): the
-/// compositor goes, so the kernel gives the console back its screen and
-/// its PS/2 keyboard, and the console bridge feeds the shell from the
-/// input services again. Windows still open close with the compositor.
-fn end_desktop(desktop: Desktop, why: LaunchReply, broker: &mut Broker, sup: &mut Supervisor) {
+/// Why the desktop session ends.
+enum DesktopEnd {
+    /// Its launcher's process ended, as `poll_launches` reported it.
+    Launcher(LaunchReply),
+    /// The compositor ended: the owner typed Ctrl+Alt+Backspace, the kernel
+    /// stopped it for the same chord on the PS/2 keyboard, or it failed.
+    Compositor,
+}
+
+/// Ends the desktop session (ADR 0074): the launcher and the apps it
+/// started are stopped, the compositor goes, so the kernel gives the
+/// console back its screen and its PS/2 keyboard, and the console bridge
+/// feeds the shell from the input services again.
+fn end_desktop(desktop: Desktop, why: DesktopEnd, broker: &mut Broker, sup: &mut Supervisor) {
     let mut b = [0u8; 20];
-    sys::print(b"AriInit: the desktop ended (its launcher ");
-    match why.status {
-        LaunchStatus::Ok => {
-            sys::print(b"exited with ");
-            sys::print(aricode_rt::fmt_u64(why.value, &mut b));
+    sys::print(b"AriInit: the desktop ended (");
+    match why {
+        DesktopEnd::Launcher(r) => {
+            sys::print(b"its launcher ");
+            match r.status {
+                LaunchStatus::Ok => {
+                    sys::print(b"exited with ");
+                    sys::print(aricode_rt::fmt_u64(r.value, &mut b));
+                }
+                LaunchStatus::Killed => sys::print(b"was killed"),
+                _ => sys::print(b"failed"),
+            }
         }
-        LaunchStatus::Killed => sys::print(b"was killed"),
-        _ => sys::print(b"failed"),
+        DesktopEnd::Compositor => sys::print(b"the compositor ended"),
     }
     sys::print(b"): back to the text console\n");
+    broker.stop_desktop_apps();
     broker.compositor = None;
     let Desktop { gui, inputs, count } = desktop;
     let _ = sys::process_kill(gui.process);
     // A killed process's wait answers `Killed`: only a timeout means it is
-    // still there.
-    if matches!(sys::process_wait(gui.process, 5000), Err(Error::Timeout)) {
-        say(b"the compositor did not end within 5 s");
-    }
+    // still there, and then it may still read the input services, which
+    // are not shared with a second reader (audit of phase B, L3).
+    let ended = !matches!(sys::process_wait(gui.process, 5000), Err(Error::Timeout));
     let _ = sys::handle_close(gui.process);
     let _ = sys::handle_close(gui.endpoint);
-    launch_console_bridge(sup, &inputs[..count]);
+    if ended {
+        launch_console_bridge(sup, &inputs[..count]);
+    } else {
+        say(b"the compositor did not end within 5 s: its input services are not handed to the console bridge");
+    }
 }
 
 /// Registers and launches the console bridge over `inputs` under the
@@ -3438,10 +3542,13 @@ fn main(arg: u64) -> u64 {
         };
         // The desktop session (ADR 0074), decided before the console
         // bridge: the compositor takes the input services.
-        let desktop_session = fs_client
-            .as_mut()
-            .is_some_and(|fs| desktop_wanted(fs, inputs));
-        if desktop_session && gui.is_none() {
+        // With `gui` on the command line the compositor is the command
+        // line's, and stays: no desktop session is started on it.
+        let desktop_session = gui.is_none()
+            && fs_client
+                .as_mut()
+                .is_some_and(|fs| desktop_wanted(fs, &input_eps[..inputs]));
+        if desktop_session {
             match run_gui(&input_eps[..inputs]) {
                 Ok(g) => {
                     services |= SERVICE_GUI;
@@ -3487,7 +3594,7 @@ fn main(arg: u64) -> u64 {
             } else {
                 end_desktop(
                     d,
-                    LaunchReply::status(LaunchStatus::Failed),
+                    DesktopEnd::Launcher(LaunchReply::status(LaunchStatus::Failed)),
                     &mut broker,
                     &mut sup,
                 );
