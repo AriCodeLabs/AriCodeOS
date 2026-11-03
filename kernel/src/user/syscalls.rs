@@ -875,6 +875,7 @@ fn mmio_map(h: Handle) -> Result<u64, Error> {
     // The buffer stays referenced here until the IOMMU has it, whatever
     // happens to the handle meanwhile (ADR 0038).
     let held = dma.clone();
+    let screen = dma.is_none() && crate::framebuffer::overlaps(phys, len);
     let (virt, created) = process::map_foreign(phys, len, cacheable, dma)?;
     // IOMMU (Phase 33): mapping a device assigns it to the process's
     // domain; mapping a foreign DMA buffer makes it visible to its devices.
@@ -903,6 +904,12 @@ fn mmio_map(h: Handle) -> Result<u64, Error> {
         }
     }
     drop(held);
+    // The screen's mapper holds it (`map_foreign` recorded it): the kernel
+    // console stops drawing until the last such mapping goes (ADR 0074
+    // phase B).
+    if created && screen {
+        crate::console::screen_take();
+    }
     Ok(virt)
 }
 

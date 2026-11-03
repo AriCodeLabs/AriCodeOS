@@ -638,6 +638,17 @@ pub fn release_address_space(pid: u32) {
         }
         let n = free_address_space(m);
         log::debug!("user: address space of process {pid} freed ({n} frames)");
+        // A screen it held goes back to the console once its pages are
+        // gone (ADR 0074 phase B).
+        let screen = foreign
+            .iter()
+            .any(|f| f.dma.is_none() && crate::framebuffer::overlaps(f.phys, f.span));
+        if let Some(lent) = screen
+            .then(|| crate::console::screen_release(pid, None))
+            .flatten()
+        {
+            crate::console::screen_returned_said(pid, lent);
+        }
         for f in foreign {
             report_last_reference(pid, &f);
         }
@@ -1303,6 +1314,11 @@ pub fn map_foreign(
     }
     // A lingering buffer mapped again: this mapping takes it over.
     let lingered = dma.is_some() && take_lingering(p, start);
+    // Recorded with the mapping, under this lock, so the console's holders
+    // always match the mappings (ADR 0074 phase B).
+    if dma.is_none() && crate::framebuffer::overlaps(start, span) {
+        crate::console::screen_hold(pid.0, virt);
+    }
     p.foreign.push(Foreign {
         virt,
         phys: start,
@@ -1423,7 +1439,7 @@ pub fn settle_lingering() {
 /// which may free it.
 pub fn unmap_foreign(virt: u64) -> Result<(), aricode_abi::Error> {
     let pid = current_pid().ok_or(aricode_abi::Error::Fault)?;
-    let (f, release) = {
+    let (f, release, screen_back) = {
         let mut procs = PROCESSES.lock();
         let p = procs.get_mut(&pid).ok_or(aricode_abi::Error::Fault)?;
         let start = virt & !(PAGE_SIZE - 1);
@@ -1437,6 +1453,11 @@ pub fn unmap_foreign(virt: u64) -> Result<(), aricode_abi::Error> {
         for page in (f.virt..f.virt + f.span).step_by(PAGE_SIZE as usize) {
             let _ = m.unmap_4k(page);
         }
+        let screen_back = if f.dma.is_none() && crate::framebuffer::overlaps(f.phys, f.span) {
+            crate::console::screen_release(pid.0, Some(f.virt))
+        } else {
+            None
+        };
         if f.dma.is_some() {
             p.dma_mapped -= f.span;
         }
@@ -1455,9 +1476,12 @@ pub fn unmap_foreign(virt: u64) -> Result<(), aricode_abi::Error> {
             }
             _ => false,
         };
-        (f, release)
+        (f, release, screen_back)
     };
     vmm::flush_own_user_range(f.virt, f.span);
+    if let Some(lent) = screen_back {
+        crate::console::screen_returned_said(pid.0, lent);
+    }
     if release {
         crate::iommu::unmap_region(pid.0, f.phys);
     }

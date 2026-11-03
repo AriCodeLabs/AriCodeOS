@@ -87,6 +87,9 @@ struct Ps2 {
     /// `bytes` when the last line ended (the byte that produced the newline
     /// included), for `ps2_selftest`.
     bytes_at_newline: u64,
+    /// Characters typed while a process held the screen, never given to
+    /// the console (ADR 0074 phase B).
+    withheld: u64,
 }
 
 static PS2: IrqLock<Ps2> = IrqLock::new(Ps2 {
@@ -94,7 +97,15 @@ static PS2: IrqLock<Ps2> = IrqLock::new(Ps2 {
     keyboard: Keyboard::new(),
     bytes: 0,
     bytes_at_newline: 0,
+    withheld: 0,
 });
+
+/// Characters the PS/2 keyboard produced while a process held the screen,
+/// since the last call: they were typed at that process's screen, never at
+/// the console, so the console never got them (ADR 0074 phase B).
+pub fn take_withheld() -> u64 {
+    core::mem::take(&mut PS2.lock().withheld)
+}
 
 /// Routes the COM1 IRQ to its dedicated vector and enables the UART receive
 /// interrupt. Requires the I/O APIC and interrupts enabled.
@@ -249,7 +260,18 @@ pub fn on_keyboard_irq() {
                 continue;
             }
             if let Some(ev) = ps2.decoder.feed(byte) {
-                for &c in ps2.keyboard.feed(ev).as_slice() {
+                // Decoded either way, so a modifier held across the change
+                // is not left stuck.
+                let typed = ps2.keyboard.feed(ev);
+                // The person typing looks at the screen, and while a process
+                // (the compositor) holds it the keys are not typed at the
+                // console: a shell must never read what was meant for a
+                // window (ADR 0074 phase B).
+                if crate::console::screen_held() {
+                    ps2.withheld += typed.as_slice().len() as u64;
+                    continue;
+                }
+                for &c in typed.as_slice() {
                     if c == b'\n' || c == b'\r' {
                         ps2.bytes_at_newline = ps2.bytes;
                     }
