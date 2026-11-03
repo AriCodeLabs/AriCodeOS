@@ -31,6 +31,8 @@ use aricode_rt::sys::block::{find_partition, BlockClient};
 use aricode_rt::sys::fs::{FsClient, FsError};
 use aricode_rt::sys::{self, rights, Error, Handle, TIMEOUT_INFINITE};
 use aricode_supervisor::{Action, Exit, Policy, Service, State};
+use aricode_update_index as update_index;
+use aricode_update_index::session::{self, Session};
 
 const SPAWNER: Handle = Handle(0x0001_0004);
 const PCI_ROOT: Handle = Handle(0x0001_0005);
@@ -1756,13 +1758,15 @@ fn run_block_client_supervised(
 /// Launches the shell with its own fsd session (WRITE), hardware for its
 /// buffer, the system object (READ|MANAGE), the console input, the PCI root
 /// read-only, the netd endpoint (WRITE) and the launch broker for `run`;
-/// `arg` = active services. Waits for it to exit.
+/// `arg` = active services. Waits for it to exit, ending the desktop
+/// session meanwhile if its launcher goes (ADR 0074).
 fn run_shell(
     net_service: Handle,
     services: u64,
     broker: &mut Broker,
     sup: &mut Supervisor,
     mut sessions: Option<&mut Sessions>,
+    desktop: &mut Option<Desktop>,
 ) -> Result<u64, Error> {
     let console_in = sys::handle_duplicate(CONSOLE_IN, rights::READ | rights::TRANSFER)?;
     let fs = broker.fs.as_ref().ok_or(Error::NotFound)?;
@@ -1780,7 +1784,11 @@ fn run_shell(
         sup.poll();
         broker.serve_one(20, sup);
         broker.serve_apps();
-        broker.poll_launches();
+        if let Some(why) = broker.poll_launches() {
+            if let Some(d) = desktop.take() {
+                end_desktop(d, why, broker, sup);
+            }
+        }
         if let (Some(s), Some(fs)) = (sessions.as_deref_mut(), broker.fs.as_ref()) {
             s.serve(fs, net_service, services, broker.endpoint);
         }
@@ -2040,6 +2048,9 @@ struct Running {
     reply_to: Option<Handle>,
     /// Its compositor session, ended when it exits (ADR 0052).
     window: Option<u32>,
+    /// The desktop session's launcher: its exit ends the session (ADR
+    /// 0074).
+    ends_session: bool,
 }
 
 /// Immediate result of `launch`: an already decided reply, or a created
@@ -2214,7 +2225,9 @@ impl Broker {
     }
 
     /// Replies for the programs that have exited and frees their slots.
-    fn poll_launches(&mut self) {
+    /// Returns how the desktop session's launcher ended, if it did.
+    fn poll_launches(&mut self) -> Option<LaunchReply> {
+        let mut session_end = None;
         for slot in self.running.iter_mut() {
             let Some(r) = *slot else { continue };
             let reply = match sys::process_wait(r.process, 0) {
@@ -2232,7 +2245,39 @@ impl Broker {
                 let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
                 let _ = sys::handle_close(reply_to);
             }
+            if r.ends_session {
+                session_end = Some(reply);
+            }
             *slot = None;
+        }
+        session_end
+    }
+
+    /// Starts the desktop session's launcher in the background with its
+    /// own manifest (ADR 0074); its exit ends the session
+    /// (`poll_launches`). `false`, said, when it does not start.
+    fn launch_session(&mut self) -> bool {
+        let Some(slot) = self.running.iter().position(Option::is_none) else {
+            say(b"the desktop's launcher did not start: running program limit reached");
+            return false;
+        };
+        match self.launch(session::LAUNCHER, 0, None) {
+            Launched::Reply(r) => {
+                let mut b = [0u8; 20];
+                sys::print(b"AriInit: the desktop's launcher did not start (launch status ");
+                sys::print(aricode_rt::fmt_u64(r.status as u64, &mut b));
+                sys::print(b")\n");
+                false
+            }
+            Launched::Process(process, window) => {
+                self.running[slot] = Some(Running {
+                    process,
+                    reply_to: None,
+                    window,
+                    ends_session: true,
+                });
+                true
+            }
         }
     }
 
@@ -2297,6 +2342,7 @@ impl Broker {
                     process,
                     reply_to: None,
                     window,
+                    ends_session: false,
                 });
             }
             Launched::Process(process, window) => {
@@ -2304,6 +2350,7 @@ impl Broker {
                     process,
                     reply_to: Some(reply_to),
                     window,
+                    ends_session: false,
                 });
             }
         }
@@ -2368,6 +2415,7 @@ impl Broker {
                     process,
                     reply_to: None,
                     window,
+                    ends_session: false,
                 });
             }
         }
@@ -2736,7 +2784,7 @@ fn join<'a>(a: &str, b: &str, buf: &'a mut [u8; 48]) -> Option<&'a str> {
 /// its back buffer and the input services) and returns its endpoint. The
 /// applications get their sessions from the broker (ADR 0052); the
 /// graphical demos are a test package since ADR 0074.
-fn run_gui(inputs: &[Handle]) -> Result<Handle, u64> {
+fn run_gui(inputs: &[Handle]) -> Result<Gui, u64> {
     let service = sys::endpoint_create().map_err(|_| 1u64)?;
     let mut handles = [Handle(0); 8];
     handles[0] = sys::handle_duplicate(service, rights::READ | rights::WRITE | rights::TRANSFER)
@@ -2754,10 +2802,157 @@ fn run_gui(inputs: &[Handle]) -> Result<Handle, u64> {
             sys::handle_duplicate(*ep, rights::WRITE | rights::TRANSFER).map_err(|_| 6u64)?;
         n += 1;
     }
-    let _compositor =
+    let process =
         sys::process_spawn_with(SPAWNER, "compositor", inputs.len() as u64, &handles[..n])
             .map_err(|_| 7u64)?;
-    Ok(service)
+    Ok(Gui {
+        endpoint: service,
+        process,
+    })
+}
+
+/// The compositor init started: its service endpoint and its process.
+struct Gui {
+    endpoint: Handle,
+    process: Handle,
+}
+
+/// The desktop session while it runs (ADR 0074): the compositor, and the
+/// input services it took, which go back to the console bridge when the
+/// session ends.
+struct Desktop {
+    gui: Gui,
+    inputs: [Handle; MAX_INPUTS],
+    count: usize,
+}
+
+/// Whether to boot into the desktop session (ADR 0074): `session` asks for
+/// it, the machine follows the `desktop` profile, its launcher is
+/// installed, and there are a display and a keyboard or mouse the
+/// compositor can read. Says why when the file asks for the desktop and
+/// it cannot start; never boots into a desktop that is not there.
+fn desktop_wanted(fs: &mut FsClient, inputs: usize) -> bool {
+    let mut text = [0u8; 256];
+    let chosen = match read_small(fs, session::FILE, &mut text) {
+        Ok(None) => return false,
+        Ok(Some(n)) => core::str::from_utf8(&text[..n])
+            .ok()
+            .and_then(Session::parse),
+        Err(()) => {
+            say(b"the session file cannot be read: the text console");
+            return false;
+        }
+    };
+    match chosen {
+        Some(Session::Shell) => return false,
+        Some(Session::Desktop) => {}
+        None => {
+            say(b"the session file is damaged: the text console (session shell|desktop writes it again)");
+            return false;
+        }
+    }
+    let mut profiles = [0u8; 1024];
+    let path = update_index::main_path(update_index::PROFILES_FILE);
+    let followed = matches!(read_small(fs, &path, &mut profiles), Ok(Some(n))
+        if core::str::from_utf8(&profiles[..n]).is_ok_and(session::follows_desktop));
+    if !followed {
+        say(b"session = desktop, but this machine does not follow the desktop profile: the text console");
+        return false;
+    }
+    let path = update_index::installed_path(session::LAUNCHER);
+    match path.as_deref().map(|p| exists(fs, p)) {
+        Some(Ok(true)) => {}
+        Some(Ok(false)) | None => {
+            say(b"session = desktop, but the desktop's launcher is not installed yet (update, then upgrade): the text console");
+            return false;
+        }
+        Some(Err(())) => {
+            say(b"session = desktop, but whether the launcher is installed cannot be read: the text console");
+            return false;
+        }
+    }
+    if inputs == 0 {
+        say(b"session = desktop, but there is no USB or virtio keyboard or mouse for it (the PS/2 keyboard stays the console's): the text console");
+        return false;
+    }
+    let mut fb = [0u8; sys::abi::sysinfo::Framebuffer::LEN];
+    if sys::system_info(SYSTEM, sys::abi::sysinfo::FRAMEBUFFER, &mut fb).is_err() {
+        say(b"session = desktop, but there is no display: the text console");
+        return false;
+    }
+    true
+}
+
+/// Whether `name` exists: `Err` when fsd's answer says neither.
+fn exists(fs: &mut FsClient, name: &str) -> Result<bool, ()> {
+    match fs.open(name) {
+        Ok(fd) => {
+            let _ = fs.close(fd);
+            Ok(true)
+        }
+        Err(FsError::Status(aricode_proto::fs::Status::NotFound)) => Ok(false),
+        Err(_) => Err(()),
+    }
+}
+
+/// Ends the desktop session once its launcher is gone (ADR 0074): the
+/// compositor goes, so the kernel gives the console back its screen and
+/// its PS/2 keyboard, and the console bridge feeds the shell from the
+/// input services again. Windows still open close with the compositor.
+fn end_desktop(desktop: Desktop, why: LaunchReply, broker: &mut Broker, sup: &mut Supervisor) {
+    let mut b = [0u8; 20];
+    sys::print(b"AriInit: the desktop ended (its launcher ");
+    match why.status {
+        LaunchStatus::Ok => {
+            sys::print(b"exited with ");
+            sys::print(aricode_rt::fmt_u64(why.value, &mut b));
+        }
+        LaunchStatus::Killed => sys::print(b"was killed"),
+        _ => sys::print(b"failed"),
+    }
+    sys::print(b"): back to the text console\n");
+    broker.compositor = None;
+    let Desktop { gui, inputs, count } = desktop;
+    let _ = sys::process_kill(gui.process);
+    // A killed process's wait answers `Killed`: only a timeout means it is
+    // still there.
+    if matches!(sys::process_wait(gui.process, 5000), Err(Error::Timeout)) {
+        say(b"the compositor did not end within 5 s");
+    }
+    let _ = sys::handle_close(gui.process);
+    let _ = sys::handle_close(gui.endpoint);
+    launch_console_bridge(sup, &inputs[..count]);
+}
+
+/// Registers and launches the console bridge over `inputs` under the
+/// supervisor (stage 2, ADR 0013): the user-space keyboards feed the shell
+/// console. Says what it did.
+fn launch_console_bridge(sup: &mut Supervisor, inputs: &[Handle]) {
+    let mut ins = [Handle(0); MAX_INPUTS];
+    let count = inputs.len().min(MAX_INPUTS);
+    ins[..count].copy_from_slice(&inputs[..count]);
+    let launched = sup
+        .register(
+            "console_bridge",
+            Kind::ConsoleBridge { inputs: ins, count },
+            Probe::None,
+            Handle(0),
+            true,
+            Policy::DRIVER,
+        )
+        .is_some_and(|i| sup.launch(i));
+    if launched {
+        // The announcement goes here and not in the bridge: init prints
+        // before the shell exists, so nothing interleaves with its first
+        // prompt. The input services buffer whatever is typed until the
+        // bridge reads it.
+        let mut b = [0u8; 20];
+        sys::print(b"AriInit: console bridge with ");
+        sys::print(aricode_rt::fmt_u64(count as u64, &mut b));
+        sys::print(b" input device(s)\nCONSOLE_BRIDGE_READY\n");
+    } else {
+        say(b"console bridge not started: the shell only reads COM1 and PS/2");
+    }
 }
 
 fn main(arg: u64) -> u64 {
@@ -3175,12 +3370,12 @@ fn main(arg: u64) -> u64 {
     }
     // 10. Graphical interface: the compositor with the framebuffer and the
     //     inputs; applications ask the broker for their windows.
-    let mut compositor = None;
+    let mut gui = None;
     if arg & sys::abi::init_arg::GUI != 0 {
         match run_gui(&input_eps[..inputs]) {
-            Ok(ep) => {
+            Ok(g) => {
                 services |= SERVICE_GUI;
-                compositor = Some(ep);
+                gui = Some(g);
                 say(b"gui ok (compositor started)");
             }
             Err(code) => {
@@ -3241,46 +3436,61 @@ fn main(arg: u64) -> u64 {
             say(b"no file service, not launching the shell");
             return 15;
         };
+        // The desktop session (ADR 0074), decided before the console
+        // bridge: the compositor takes the input services.
+        let desktop_session = fs_client
+            .as_mut()
+            .is_some_and(|fs| desktop_wanted(fs, inputs));
+        if desktop_session && gui.is_none() {
+            match run_gui(&input_eps[..inputs]) {
+                Ok(g) => {
+                    services |= SERVICE_GUI;
+                    gui = Some(g);
+                    say(b"desktop session: compositor started");
+                }
+                Err(code) => {
+                    sys::print(b"AriInit: the desktop's compositor did not start (code ");
+                    sys::print(aricode_rt::fmt_u64(code, &mut buf));
+                    sys::print(b"): the text console\n");
+                }
+            }
+        }
         let Ok(mut broker) = Broker::new(
             fs_client,
             block_service,
             (services & SERVICE_NET != 0).then_some(net_service),
-            compositor,
+            gui.as_ref().map(|g| g.endpoint),
         ) else {
             return 26;
         };
         // Stage 2 (ADR 0013): the user-space keyboards feed the shell console
         // as long as there is no compositor (with the GUI the events belong
         // to it, and each input service accepts a single reader).
-        if inputs > 0 && compositor.is_none() {
+        if inputs > 0 && gui.is_none() {
             if input_orphan_test {
                 orphan_reads(&input_eps[..inputs], &mut sup);
             }
+            launch_console_bridge(&mut sup, &input_eps[..inputs]);
+        }
+        let mut desktop = None;
+        if let Some(g) = gui.take().filter(|_| desktop_session) {
             let mut ins = [Handle(0); MAX_INPUTS];
             ins[..inputs].copy_from_slice(&input_eps[..inputs]);
-            let launched = sup
-                .register(
-                    "console_bridge",
-                    Kind::ConsoleBridge {
-                        inputs: ins,
-                        count: inputs,
-                    },
-                    Probe::None,
-                    Handle(0),
-                    true,
-                    Policy::DRIVER,
-                )
-                .is_some_and(|i| sup.launch(i));
-            if launched {
-                // The announcement goes here and not in the bridge: init
-                // prints before the shell exists, so nothing interleaves with
-                // its first prompt. The input services buffer whatever is
-                // typed until the bridge reads it.
-                sys::print(b"AriInit: console bridge with ");
-                sys::print(aricode_rt::fmt_u64(inputs as u64, &mut buf));
-                sys::print(b" input device(s)\nCONSOLE_BRIDGE_READY\n");
+            let d = Desktop {
+                gui: g,
+                inputs: ins,
+                count: inputs,
+            };
+            if broker.launch_session() {
+                say(b"desktop session: launcher started");
+                desktop = Some(d);
             } else {
-                say(b"console bridge not started: the shell only reads COM1 and PS/2");
+                end_desktop(
+                    d,
+                    LaunchReply::status(LaunchStatus::Failed),
+                    &mut broker,
+                    &mut sup,
+                );
             }
         }
         // SSH (ADR 0025): with a network service, sshd serves remote shells
@@ -3326,6 +3536,7 @@ fn main(arg: u64) -> u64 {
             &mut broker,
             &mut sup,
             sessions.as_mut(),
+            &mut desktop,
         ) {
             Ok(code) => {
                 sys::print(b"AriInit: shell exited with ");

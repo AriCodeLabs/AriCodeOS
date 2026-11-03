@@ -1127,7 +1127,29 @@ latter briefly to add the region.
   (serial only) and `run_init` hands init an `Mmio` object with the
   GOP framebuffer (`0x10009`, `READ|WRITE`); `system_info(FRAMEBUFFER)`
   returns width, height, stride, format, size and masks. Without `gui` the
-  capability exists but the kernel keeps using the screen.
+  capability exists and the kernel uses the screen until someone maps it
+  (ADR 0074 phase B): mapping any part of the framebuffer lends the screen
+  to the mapper (`console::screen_hold`, recorded under the process
+  table's lock with the mapping, then `screen_take` detaches the
+  console's surface). While any process maps it, the kernel console writes
+  to serial only and the PS/2 keyboard's characters are not given to the
+  console (decoded all the same, so no modifier sticks): a shell never
+  reads what was typed at a window. When the last mapping goes, unmapped
+  or with its process, `screen_release` queues the surface and the cursor
+  thread reattaches and repaints it, since a release can run with
+  interrupts off (a reap). The kernel says each change, with how many PS/2
+  characters were withheld.
+- The desktop session (ADR 0074 phase B): `session = desktop` in AriFS,
+  with the `desktop` profile followed (`updater/profiles`), its
+  `launcher` installed, a display and at least one USB or virtio input,
+  makes init start the compositor before the console bridge and launch
+  `launcher` through the broker; the shell still runs on COM1 (and over
+  SSH). When the launcher's process ends (`Running::ends_session`), init
+  kills the compositor, the kernel gives the console its screen and PS/2
+  keyboard back, and init starts the console bridge over the input
+  services. Without `gui` and without the session, the graphical demos
+  are a test package (`examples/gui_demo`) the scenarios start from the
+  shell.
 - `aricode-gfx` allocates no memory: `Canvas` wraps `&mut [u32]` with
   a stride and clips everything (`fill_rect`, `blit`, `text`, `cursor`) to
   the canvas and to a clip rectangle (`Canvas::clipped`); `Desktop`
@@ -1245,12 +1267,13 @@ latter briefly to add the region.
   `spawn` in the shell) the broker replies `Started` when it creates the process and
   nobody waits for its exit. If the program is not in the initrd, the broker
   looks for it installed in AriFS (`apps/NAME.aripkg`, ADR 0017): it copies the
-  package through fsd into a DMA staging buffer of `PACKAGE_MAX` (32 KiB,
-  what one AriFS replace writes, shared with the installer and the
-  updater since incident 0026; a larger file is refused naming both sizes)
-  reserved once, verifies it with `aricode-pkg` (Ed25519 signature of the package
-  manifest with the development key and SHA-256 of the ELF and of the
-  application manifest), applies the policy to the manifest and launches it with
+  package through fsd into a DMA staging buffer the size of the package,
+  freed once the launch ends (at most `PACKAGE_MAX`, 8 MiB since ADR 0072
+  phase B, the limit shared with the installer and the updater since
+  incident 0026; a larger file is refused naming both sizes), verifies it
+  with `aricode-pkg` (Ed25519 signature of the package manifest with the
+  key the build embeds, `aricode_crypto::trust`, and SHA-256 of the ELF and of the application manifest) and
+  its `requires` level (ADR 0074), applies the policy to the manifest and launches it with
   `process_spawn_from` (syscall 30: `MANAGE` on the `SPAWNER`, `READ`
   on the buffer, ELF offset and length; the kernel copies the
   segments through the physical map and the buffer is free for the next one).
@@ -1262,6 +1285,14 @@ latter briefly to add the region.
   creates the process): previously every nonexistent name consumed an entry in
   init's table. The shell receives the broker endpoint instead
   of the `SPAWNER`.
+- `launch` (ADR 0074) is a send handle to a second broker endpoint,
+  granted only to `launcher` (`Caps::TRUSTED_LAUNCH`) and only when it is
+  an installed package, verified against the release key. There
+  `Broker::serve_apps` serves only background launches of installed
+  applications, without a console, each with its own manifest: an initrd
+  program (installer, updater, shell), the launcher itself, a launch that
+  waits for the exit or carries a console, and service status requests are
+  refused and said. The launcher's apps share the `MAX_RUNNING` slots.
 - fsd serves up to 15 *sessions* besides its main endpoint (ADR 0036):
   each `Bind` (only through the main endpoint) creates an endpoint bound
   to a prefix, each `Share` (ADR 0016) one bound to a single file in read
@@ -1336,7 +1367,7 @@ latter briefly to add the region.
     - nesting of at most 1024 blocks.
   - The module has no way to name anything the runner has not imported
     for it.
-- AriFS files grow to 32 KiB capacity to hold modules.
+- AriFS files grow to hold modules: up to 32 KiB on a volume still in v1, and on v2 as far as one replace writes, 16 MiB (ADR 0072).
 
 ## Cryptography (Phase 31)
 

@@ -4,8 +4,9 @@
 //! it presents a window, starts `hello_ext` and `gui_demo` through the
 //! broker's launch endpoint, and checks that the broker refuses the rest
 //! (a system program, itself, a launch waited for, a console). Then it
-//! waits `arg` seconds and exits; in the desktop session that ends the
-//! desktop and gives the console back its screen and keyboard.
+//! waits 4 s, so the demo's window closes, and exits; in the desktop
+//! session that ends the desktop and gives the console back its screen and
+//! keyboard.
 //!
 //! Handles, in the broker's order: its compositor session, the launch
 //! endpoint (both endpoints, send only) and `HARDWARE`.
@@ -47,7 +48,7 @@ fn check(what: &[u8], got: Result<(), LaunchError>, want: &[u8]) -> bool {
     status_name(&got) == want
 }
 
-fn main(seconds: u64) -> u64 {
+fn main(_arg: u64) -> u64 {
     let mut endpoints = [None; 2];
     let mut found = 0;
     let mut hw = None;
@@ -116,7 +117,7 @@ fn main(seconds: u64) -> u64 {
     } else {
         b"the broker broke a rule"
     });
-    sys::thread_sleep(seconds.min(60) * 1000);
+    sys::thread_sleep(4000);
     let _ = win.close();
     say(b"leaving");
     if kept {

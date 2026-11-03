@@ -449,6 +449,11 @@ pub const PUBLIC_SOURCE: &str =
 /// the source as `dev URL`. Without it the stick has neither.
 /// `public_source`: the stick registers [`PUBLIC_SOURCE`] (release sticks),
 /// before `update_source` if both are given.
+/// `apps` (external app directory, version): installed on the stick,
+/// signed with the selected key; `profiles` (name, app names): followed,
+/// with those apps recorded as installed for them ([`stick_profile_files`],
+/// ADR 0074).
+#[allow(clippy::too_many_arguments)]
 pub fn build_usb_image(
     release: bool,
     cmdline: &str,
@@ -456,6 +461,8 @@ pub fn build_usb_image(
     public_source: bool,
     update_source: Option<&str>,
     dev_source: Option<&str>,
+    apps: &[(String, u32)],
+    profiles: &[(String, Vec<String>)],
 ) -> Result<PathBuf> {
     let line = aricode_cmdline::CmdLine::new(cmdline);
     if let Some(key) = line.first_of(aricode_cmdline::keys::TEST_ONLY) {
@@ -491,6 +498,29 @@ pub fn build_usb_image(
             crate::keys::DEV_CHANNEL_PUB
         );
         crate::keys::set_loader_dev_channel();
+    }
+    // The apps and profiles next, so a bad profile fails before the image
+    // is built.
+    let mut installed = Vec::new();
+    for (dir, version) in apps {
+        let app = crate::build::build_external(
+            Path::new(dir),
+            *version,
+            crate::build::PACKAGES_RELEASE,
+            false,
+        )?;
+        println!(
+            "[xtask] app {} {} installed on the stick ({} bytes)",
+            app.name,
+            app.version,
+            app.package.len()
+        );
+        installed.push(app);
+    }
+    let names: Vec<String> = installed.iter().map(|a| a.name.clone()).collect();
+    let profile_files = stick_profile_files(&names, profiles)?;
+    for (name, apps) in profiles {
+        println!("[xtask] profile {name} followed with {}", apps.join(", "));
     }
     let base = build_base_esp(release)?;
     let esp = build_scenario_esp(
@@ -538,6 +568,8 @@ pub fn build_usb_image(
             stick_state().into_bytes(),
         ));
     }
+    extra.extend(installed.iter().map(crate::build::ExternalApp::installed));
+    extra.extend(profile_files);
     // Every stick gets its own disk GUID from OS entropy: the storage
     // drivers use it to tell AriCodeOS sticks apart (ADR 0031).
     let disk_guid = random_disk_guid()?;
@@ -545,6 +577,61 @@ pub fn build_usb_image(
     let out = crate::build_dir().join("aricodeos-usb.img");
     println!("{}", write_usb_image(&out, &esp, &extra, disk_guid)?);
     Ok(out)
+}
+
+/// What `usb-image --profile` adds to a stick's ARI0 besides the apps
+/// themselves (ADR 0074): `updater/profiles`, each profile with its apps
+/// recorded as installed for it, so leaving the profile deletes them; and
+/// `session = desktop` when the desktop profile is among them, so the
+/// stick boots into its desktop. Every app a profile names must be on the
+/// stick (`apps`), and the desktop profile must name its launcher, or the
+/// stick would boot into a desktop that is not there.
+pub fn stick_profile_files(
+    apps: &[String],
+    profiles: &[(String, Vec<String>)],
+) -> Result<Vec<(String, Vec<u8>)>> {
+    use aricode_update_index::session::{self, Session};
+    if profiles.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut followed = aricode_update_index::Profiles::default();
+    for (name, names) in profiles {
+        followed
+            .add(name)
+            .map_err(|e| format!("--profile {name}: {e:?}"))?;
+        if names.len() > aricode_update_index::MAX_PROFILE_APPS {
+            return Err(format!(
+                "--profile {name}: {} apps, a profile holds at most {}",
+                names.len(),
+                aricode_update_index::MAX_PROFILE_APPS
+            ));
+        }
+        for app in names {
+            if !apps.contains(app) {
+                return Err(format!(
+                    "--profile {name}: {app} is not among the stick's apps (add it with --app DIR:VERSION)"
+                ));
+            }
+            followed.record(name, app);
+        }
+        if name == session::DESKTOP_PROFILE && !names.iter().any(|a| a == session::LAUNCHER) {
+            return Err(format!(
+                "--profile {name}: the desktop session starts `{}`, which the profile does not name",
+                session::LAUNCHER
+            ));
+        }
+    }
+    let mut files = vec![(
+        aricode_update_index::main_path(aricode_update_index::PROFILES_FILE),
+        followed.to_text().into_bytes(),
+    )];
+    if followed.contains(session::DESKTOP_PROFILE) {
+        files.push((
+            String::from(session::FILE),
+            Session::Desktop.to_text().into_bytes(),
+        ));
+    }
+    Ok(files)
 }
 
 /// A random GPT disk GUID (version 4 / RFC 4122 variant bits in GPT's
@@ -1511,7 +1598,8 @@ mod tests {
             "shell usb_fault=idle",
             "test=panic",
         ] {
-            let err = build_usb_image(false, cmdline, None, false, None, None).unwrap_err();
+            let err =
+                build_usb_image(false, cmdline, None, false, None, None, &[], &[]).unwrap_err();
             assert!(err.contains("test-only key"), "{cmdline}: {err}");
         }
         for cmdline in [
@@ -1519,8 +1607,64 @@ mod tests {
             "shell boot_pending",
             "shell boot_channel=dev",
         ] {
-            let err = build_usb_image(false, cmdline, None, false, None, None).unwrap_err();
+            let err =
+                build_usb_image(false, cmdline, None, false, None, None, &[], &[]).unwrap_err();
             assert!(err.contains("added by AriBoot"), "{cmdline}: {err}");
+        }
+    }
+
+    /// ADR 0074 phase B: a stick's profiles name only apps it carries, the
+    /// desktop names its launcher, and following the desktop boots into it.
+    #[test]
+    fn stick_profiles_record_their_apps_and_the_desktop_session() {
+        let apps: Vec<String> = ["launcher", "editor", "hello_ext"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let profile = |name: &str, apps: &[&str]| {
+            (
+                name.to_string(),
+                apps.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            )
+        };
+        assert!(stick_profile_files(&apps, &[]).unwrap().is_empty());
+        let files = stick_profile_files(
+            &apps,
+            &[
+                profile("desktop", &["launcher", "editor"]),
+                profile("robot", &["hello_ext"]),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            files,
+            [
+                (
+                    String::from("updater/profiles"),
+                    b"desktop launcher editor\nrobot hello_ext\n".to_vec()
+                ),
+                (String::from("session"), b"session = desktop\n".to_vec()),
+            ]
+        );
+        let robot = stick_profile_files(&apps, &[profile("robot", &["hello_ext"])]).unwrap();
+        assert_eq!(robot.len(), 1, "no session file without the desktop");
+        for (bad, why) in [
+            (
+                vec![profile("desktop", &["launcher", "files"])],
+                "not among",
+            ),
+            (vec![profile("desktop", &["editor"])], "does not name"),
+            (vec![profile("a/b", &["editor"])], "Invalid"),
+            (
+                vec![
+                    profile("robot", &["hello_ext"]),
+                    profile("robot", &["editor"]),
+                ],
+                "Duplicate",
+            ),
+        ] {
+            let err = stick_profile_files(&apps, &bad).unwrap_err();
+            assert!(err.contains(why), "{bad:?}: {err}");
         }
     }
 

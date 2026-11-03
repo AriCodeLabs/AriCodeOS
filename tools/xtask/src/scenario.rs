@@ -534,6 +534,11 @@ pub struct Scenario {
     /// `DIR:VERSION:requires=N` (needs application interface N, ADR 0074).
     #[serde(default)]
     pub packages: Vec<String>,
+    /// With `disk = "usb-image"`: profiles the stick follows, `NAME:APP,APP`
+    /// with apps among `install`, as `usb-image --profile` writes them (ADR
+    /// 0074).
+    #[serde(default)]
+    pub stick_profiles: Vec<String>,
     /// Packages already staged by the updater: `DIR:VERSION`, or
     /// `DIR:VERSION:wrong-hash` (the staged list's SHA-256 does not match
     /// the stage file), for `run installer 2` (ADR 0029).

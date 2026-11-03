@@ -104,11 +104,9 @@ package that the scenarios install, so `gui` keeps working in the tests.
   - The decision is made before the list is saved, so a refusal can be
     retried. Every deletion is logged.
 - **`update profiles`** lists the profiles the machine follows.
-- **Offline machines (phase B).** `cargo xtask usb-image --profile
-  desktop` will put the packages in the stick's `pkgs/` and follow the
-  profile.
-  - This needs a stick with AriFS v2, so 0.18 or later.
-  - An older stick is refused with a message to write a new one.
+- **Offline machines (phase B).** `cargo xtask usb-image --app DIR:VER
+  --profile desktop:APP,...` installs the profile's apps on the stick and
+  follows the profile (see "Phase B as built").
 - **Publishing.** `cargo xtask publish-update --profile NAME:APP,APP`
   writes the line.
   - An updater before 0.18 refuses an index with a line it does not
@@ -203,7 +201,7 @@ declares.
 | Phase | Content |
 |---|---|
 | A (done) | The `profile` index line; `update profile add/remove` and `update profiles`; `update` and `upgrade` following profiles, with the apps they install recorded; `requires` checked by the updater, the installer and the broker. Scenarios `apps.profile`, `apps.profile_v1` and `apps.requires_newer`. |
-| B | `session = desktop` in init; `launch` in the broker with its trust rule (audited: it touches the broker's grants); `gui_demo` as a test package; `usb-image --profile`. |
+| B (done) | `session = desktop` in init; `launch` in the broker with its trust rule (audited: it touches the broker's grants); `gui_demo` as a test package; `usb-image --profile`. Scenarios `apps.launch`, `apps.desktop_session` and `usb.image_desktop`. |
 | C | The desktop applications, one branch each: launcher, terminal, editor, files, settings. The widgets they share go into `libs/gfx`, with host tests. |
 
 ## Audit of phase A (2026-11-03)
@@ -236,6 +234,67 @@ in the same branch:
     (`updater/refused`). The scenarios check it with a new expectation,
     `serial_once`.
   - `cargo test -p aricode-pkg` builds without `--features write`.
+
+## Phase B as built (2026-11-03)
+
+- **`gui_demo` is a test package** (`examples/gui_demo`). With `gui` init
+  starts only the compositor; the GUI scenarios install the demo and start
+  it from the shell.
+- **The kernel lends the screen to whoever maps it.** The design assumed
+  init could start the compositor at any time. Without `gui` on the
+  command line, though, the kernel console draws on the same screen and
+  every log line would scroll over the windows. So mapping the framebuffer
+  now lends the screen to the mapper, and the console takes it back when
+  the last mapping goes: unmapped, or with its process. The capability to
+  map it stays the right to hold it, and init hands it only to the
+  compositor.
+- **The console's keyboard follows its screen.** On a laptop, the kernel
+  reads the internal PS/2 keyboard for the console. With the desktop on the
+  screen, those keys would have reached a hidden shell. While any process
+  holds the screen, PS/2 characters are not given to the console, and the
+  kernel says how many it withheld. This also closes the same leak under
+  `gui`.
+- **The desktop needs a USB or virtio keyboard or mouse.** The compositor
+  reads the input services, and the PS/2 keyboard is not one of them yet.
+  Without such a device, init boots into the text console and says why.
+  Giving the compositor the PS/2 keyboard and touchpad, a ring-3 driver
+  for the i8042, is future work and needs the owner's go-ahead.
+- **`launch` is an endpoint of its own.** It is a send handle to a second
+  broker endpoint, so every request there comes from a `launch` holder.
+  - The broker grants it only to a `launcher` that is installed and
+    signed, never to an initrd program.
+  - There the broker serves only background launches of installed
+    applications, without a console, each with its own manifest.
+  - It refuses, and says so: an initrd program, the launcher itself, a
+    launch that waits for the exit or carries a console, and service
+    status.
+- **The session.**
+  - The shell's `session [shell|desktop]` writes `session`.
+  - Following the `desktop` profile writes `session = desktop`, and leaving
+    it writes `session = shell`.
+  - init starts the desktop only when all of these hold: the profile is
+    followed, `apps/launcher.aripkg` exists, there is a display, and there
+    is a USB or virtio input. Otherwise it says which one is missing. A
+    damaged file means the text console.
+  - The shell keeps running on COM1 and over SSH.
+- **The way back to the text console.** When the launcher exits, init:
+  1. kills the compositor;
+  2. the kernel gives the console its screen and PS/2 keyboard back;
+  3. init starts the console bridge over the input services.
+  Phase C's launcher offers this as a menu entry.
+- **`usb-image --app DIR:VER --profile NAME:APP,APP`** (both repeatable)
+  installs the apps in the stick's `apps/` directly, not in `pkgs/`, so
+  the first boot already has them.
+  - It records each profile with its apps as installed for it, and writes
+    `session = desktop` for the desktop profile.
+  - A fresh stick has nothing to replace, and the broker verifies each
+    package at every launch, so the installer's version checks have
+    nothing to decide.
+  - A profile that names an app missing from the stick is refused, and so
+    is a desktop profile without `launcher`.
+  - Since the stick is always AriFS v2, there is no older stick to refuse.
+- **Remaining limit, to decide in phase C:** the launcher's apps share the
+  broker's four running slots with the shell's `run` and `spawn`.
 
 ## Consequences
 

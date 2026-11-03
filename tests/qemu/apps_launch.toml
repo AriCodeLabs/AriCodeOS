@@ -9,7 +9,7 @@ level = "full"
 areas = ["apps", "gui", "init"]
 cmdline = "qemu_exit gui shell"
 install = ["examples/hello_ext", "examples/gui_demo", "examples/test_launcher"]
-stdin = ["run launcher 4", "shutdown"]
+stdin = ["run launcher", "shutdown"]
 timeout_secs = 120
 
 [expect]

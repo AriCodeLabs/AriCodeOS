@@ -589,6 +589,7 @@ dependencies = [
  "aricode-rt",
  "aricode-supervisor",
  "aricode-sys",
+ "aricode-update-index",
 ]
 
 [[package]]

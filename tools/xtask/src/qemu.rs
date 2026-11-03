@@ -1340,7 +1340,8 @@ pub struct Headless<'a> {
     pub keep_disk: bool,
     /// Kills QEMU (power cut) on seeing this text in the serial output.
     pub kill_on: Option<&'a str>,
-    /// Files that go into the test disk's AriFS (installed packages).
+    /// Files that go into the test disk's AriFS (installed packages, and on
+    /// a USB image the files of its profiles).
     pub installed: &'a [(String, Vec<u8>)],
     pub cpus: u32,
     /// `-cpu qemu64,+rdrand` instead of `qemu64` (scenario `cpu_rdrand`).
@@ -1382,7 +1383,13 @@ pub fn run_headless(
     let esp_drive = if usb {
         if !options.keep_disk {
             let before_0072 = disk_variant == image::DiskVariant::UsbImageBefore0072;
-            image::write_usb_image_as(&disk, esp, &[], aricode_gpt::TEST_DISK_GUID, before_0072)?;
+            image::write_usb_image_as(
+                &disk,
+                esp,
+                options.installed,
+                aricode_gpt::TEST_DISK_GUID,
+                before_0072,
+            )?;
         }
         None
     } else {

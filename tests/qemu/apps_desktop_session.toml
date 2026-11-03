@@ -1,0 +1,106 @@
+# The desktop session (ADR 0074 phase B), five boots on one disk with the
+# test package `launcher` installed. `session desktop` alone starts
+# nothing: the machine does not follow the desktop profile. Following it
+# writes `session = desktop`, and the next boot, with no `gui` on the
+# command line, starts the compositor and the launcher: the kernel lends
+# the compositor the screen, the launcher starts its apps, and when it
+# exits the desktop ends, the console gets its screen back and the console
+# bridge the input services. `session shell` returns to the text console,
+# and a damaged session file boots into it too.
+name = "apps.desktop_session"
+description = "desktop session: started only when followed and installed, ended by its launcher, the console given back"
+level = "full"
+areas = ["apps", "gui", "init", "shell"]
+install = ["examples/hello_ext", "examples/gui_demo", "examples/test_launcher"]
+timeout_secs = 240
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["session", "session desktop", "session", "shutdown"]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "session: shell (the text console)",
+    "session: the desktop from the next boot (it will not start: the desktop profile is not followed; update profile add desktop)",
+    "session: desktop (it will not start: the desktop profile is not followed; update profile add desktop)",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "compositor: screen"]
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["update profile add desktop", "shutdown"]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "AriInit: session = desktop, but this machine does not follow the desktop profile: the text console",
+    "AriInit: console bridge with 2 input device(s)",
+    "update: profile desktop followed (run update, then upgrade, to install it)",
+    "session: the desktop from the next boot\r\n",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "compositor: screen"]
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["sleep 9000", "session shell", "shutdown"]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "AriInit: desktop session: compositor started",
+    "console: the screen is lent to process",
+    "compositor: screen 1280x800",
+    "AriInit: launch launcher from AriFS (apps/launcher.aripkg version 1",
+    "AriInit: desktop session: launcher started",
+    "launcher: window presented",
+    "hello_ext v1: hello from outside the tree (arg 5)",
+    "launcher: gui_demo: started",
+    "launcher: the broker kept every rule",
+    "launcher: leaving",
+    "AriInit: the desktop ended (its launcher exited with 0): back to the text console",
+    "console: the screen is back from process",
+    "AriInit: console bridge with 2 input device(s)",
+    "session: the text console from the next boot",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_order = [
+    "AriInit: desktop session: compositor started",
+    "launcher: leaving",
+    "AriInit: the desktop ended (its launcher exited with 0): back to the text console",
+    "console: the screen is back from process",
+    "AriInit: console bridge with 2 input device(s)",
+]
+serial_absent = [
+    "KERNEL PANIC",
+    "USER STACK OVERFLOW",
+    "the broker broke a rule",
+    "the compositor did not end",
+    "console bridge not started",
+]
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["session", "write session session = kiosk", "cat updater/history.log", "shutdown"]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "AriInit: console bridge with 2 input device(s)",
+    "session: shell (the text console)",
+    "session: desktop",
+    "profile followed: desktop",
+    "session: shell",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "compositor: screen", "desktop session"]
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["session", "shutdown"]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "AriInit: the session file is damaged: the text console (session shell|desktop writes it again)",
+    "session: the session file is damaged, so the machine boots into the text console (session shell|desktop writes it again)",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "compositor: screen", "desktop session"]

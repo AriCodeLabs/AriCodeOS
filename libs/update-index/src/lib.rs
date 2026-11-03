@@ -32,8 +32,10 @@
 //! downgrade rules ([`policy`]), the source list ([`sources`]), the stored
 //! copy of a verified index ([`stored`]), optional-file reads that never
 //! mistake a failure for absence ([`files`]), the lists the updater and the
-//! installer exchange ([`lists`]), the end of a staged install ([`run`])
-//! and the install history ([`history`]).
+//! installer exchange ([`lists`]), the end of a staged install ([`run`]),
+//! the install history ([`history`]), the followed profiles
+//! ([`profiles`]), the packages refused for their level ([`refused`]) and
+//! what the machine boots into ([`session`]).
 
 #![no_std]
 
@@ -47,6 +49,7 @@ pub mod policy;
 pub mod profiles;
 pub mod refused;
 pub mod run;
+pub mod session;
 pub mod sources;
 pub mod stored;
 pub mod trust;
