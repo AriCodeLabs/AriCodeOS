@@ -17,14 +17,17 @@
 //!
 //! Lock order: `SERIAL` then `FB` (a message is queued for the screen
 //! before its serial lock is released, so the screen shows messages in the
-//! order serial does); `FB` is a leaf.
+//! order serial does), then `LEASE`, a leaf (the cursor thread takes a
+//! returned screen under `FB`; nothing takes `FB` under `LEASE`).
 
 use crate::framebuffer::MmioSurface;
 use crate::serial::Serial;
 use crate::sync::IrqLock;
+use alloc::vec::Vec;
 use aricode_fb_console::Console;
 use aricode_sync::IrqGuard;
 use core::fmt::Write;
+use core::sync::atomic::{AtomicBool, Ordering};
 use log::{Level, LevelFilter, Log, Metadata, Record};
 
 /// The console (its text and the shadow of the screen, about 64 KiB) lives here, never on the stack: at boot
@@ -68,6 +71,185 @@ pub fn take_back_framebuffer(surface: MmioSurface) {
     let mut guard = wait_fb();
     guard.reattach(surface);
     paint_in_steps(guard);
+}
+
+/// The screen while processes map it (ADR 0074 phase B): a compositor
+/// started by init without `gui` on the command line takes a screen the
+/// console was drawing on, and every kernel line would scroll the console
+/// over its windows. Mapping the framebuffer lends the screen to the
+/// mapper; when its last mapping goes (unmapped, or the process gone) the
+/// console takes the screen back and draws its text again, the lines
+/// logged meanwhile included. The capability to map it is the right to
+/// hold it: init hands it only to the compositor.
+struct Lease {
+    /// The live mappings of the framebuffer: process and page address.
+    holders: Vec<(u32, u64)>,
+    /// The console's surface while lent.
+    lent: Option<MmioSurface>,
+    /// A surface whose last holder went, for the cursor thread to give back
+    /// to the console: the release can run with interrupts off (a dying
+    /// process is reaped right after a context switch), where the console
+    /// is never repainted whole (incident 0031).
+    returned: Option<MmioSurface>,
+    /// A first holder came and its lease was not said yet.
+    announce: bool,
+}
+
+/// Whether any process maps the framebuffer: kept with `LEASE.holders`,
+/// read without a lock by the PS/2 keyboard's interrupt handler.
+static HELD: AtomicBool = AtomicBool::new(false);
+
+/// Whether a process holds the screen (maps the framebuffer), whether or
+/// not the console had it to lend: the console's keyboard follows the
+/// console's screen (`console_input`).
+pub fn screen_held() -> bool {
+    HELD.load(Ordering::Acquire)
+}
+
+static LEASE: IrqLock<Lease> = IrqLock::new(Lease {
+    holders: Vec::new(),
+    lent: None,
+    returned: None,
+    announce: false,
+});
+
+/// Process `pid` mapped (part of) the framebuffer at page `virt`. Only
+/// records it: `process::map_foreign` calls it under the process table's
+/// lock, so the holders always match the mappings; the syscall then calls
+/// [`screen_take`], which takes the screen from the console.
+pub fn screen_hold(pid: u32, virt: u64) {
+    let mut lease = LEASE.lock();
+    if lease.holders.is_empty() {
+        lease.announce = true;
+    }
+    lease.holders.push((pid, virt));
+    HELD.store(true, Ordering::Release);
+}
+
+/// Takes the screen from the console while anyone holds it. Thread code:
+/// the `mmio_map` syscall, after [`screen_hold`].
+pub fn screen_take() {
+    let detach = {
+        let mut lease = LEASE.lock();
+        if lease.holders.is_empty() || lease.lent.is_some() {
+            false
+        } else if let Some(surface) = lease.returned.take() {
+            // Released and mapped again before the cursor thread gave it
+            // back: the console never had it.
+            lease.lent = Some(surface);
+            false
+        } else {
+            true
+        }
+    };
+    let surface = if detach { wait_fb().detach() } else { None };
+    let (holder, lent) = {
+        let mut lease = LEASE.lock();
+        let holder = lease.holders.first().map(|&(pid, _)| pid);
+        match (surface, holder) {
+            (Some(s), Some(_)) => lease.lent = Some(s),
+            // Unmapped meanwhile: straight back.
+            (Some(s), None) => lease.returned = Some(s),
+            (None, _) => {}
+        }
+        let announce = core::mem::take(&mut lease.announce);
+        (holder.filter(|_| announce), lease.lent.is_some())
+    };
+    match holder {
+        Some(pid) if lent => log::info!(
+            "console: the screen is lent to process {pid}, which mapped it; until it is given back the kernel console writes to serial only and gets no PS/2 keys"
+        ),
+        // The console had no screen to lend (`gui` on the command line, or
+        // no display); its keyboard follows the screen all the same.
+        Some(pid) => log::info!(
+            "console: process {pid} holds the screen; the console gets no PS/2 keys meanwhile"
+        ),
+        None => {}
+    }
+}
+
+/// Process `pid` unmapped its framebuffer mapping at page `virt`, or, with
+/// `None`, is gone with all of them. When that was the last holder the
+/// console gets its keyboard back, and the screen, if it had lent one, is
+/// queued for it: `Some(lent)` then, for the caller to say so once it
+/// holds no lock ([`screen_returned_said`]). Paints nothing, so it is safe
+/// with interrupts off and under the process table's lock.
+#[must_use]
+pub fn screen_release(pid: u32, virt: Option<u64>) -> Option<bool> {
+    let mut lease = LEASE.lock();
+    let before = lease.holders.len();
+    lease
+        .holders
+        .retain(|&(p, v)| p != pid || virt.is_some_and(|virt| v != virt));
+    if lease.holders.len() == before || !lease.holders.is_empty() {
+        return None;
+    }
+    HELD.store(false, Ordering::Release);
+    lease.announce = false;
+    let lent = lease.lent.take();
+    let had = lent.is_some();
+    if lent.is_some() {
+        lease.returned = lent;
+    }
+    Some(had)
+}
+
+/// The line for the last holder [`screen_release`] let go: the screen (if
+/// the console had lent it) and the keyboard are the console's again, and
+/// what the PS/2 keyboard typed meanwhile at the holder's screen was not
+/// given to it.
+pub fn screen_returned_said(pid: u32, lent: bool) {
+    let withheld = crate::console_input::take_withheld();
+    if lent {
+        log::info!(
+            "console: the screen is back from process {pid}; the kernel console draws on it and gets the PS/2 keys again ({withheld} character(s) typed meanwhile were not given to it)"
+        );
+    } else {
+        log::info!(
+            "console: process {pid} no longer holds the screen; the console gets the PS/2 keys again ({withheld} character(s) typed meanwhile were not given to it)"
+        );
+    }
+}
+
+/// Ctrl+Alt+Backspace was typed on the PS/2 keyboard while the screen was
+/// held: the cursor thread stops the holders ([`stop_holders`]). Set from
+/// the keyboard's interrupt handler, which kills nothing itself.
+static WANTED_BACK: AtomicBool = AtomicBool::new(false);
+
+/// The owner asked for the screen back on the PS/2 keyboard (ADR 0074
+/// phase B). Interrupt context: only flags it.
+pub fn screen_wanted_back() {
+    WANTED_BACK.store(true, Ordering::Release);
+}
+
+/// Stops every process holding the screen, once the owner asked for it on
+/// the PS/2 keyboard: on a laptop whose only other way out is the desktop
+/// itself, this is how the text console is always reachable (ADR 0074 §4).
+/// Its death returns the screen; init then ends the desktop. Thread code.
+fn stop_holders() {
+    if !WANTED_BACK.swap(false, Ordering::AcqRel) {
+        return;
+    }
+    let mut pids: Vec<u32> = LEASE.lock().holders.iter().map(|&(p, _)| p).collect();
+    pids.sort_unstable();
+    pids.dedup();
+    for pid in pids {
+        log::info!(
+            "console: Ctrl+Alt+Backspace on the PS/2 keyboard: process {pid}, which holds the screen, is stopped so the console gets it back"
+        );
+        crate::user::process::request_kill(
+            crate::user::process::Pid(pid),
+            "stopped by Ctrl+Alt+Backspace on the PS/2 keyboard",
+        );
+    }
+}
+
+/// A screen whose holders all went: reattached to the console, which then
+/// needs a full repaint. Thread code (the cursor thread).
+fn take_back_returned(guard: &mut FbGuard) {
+    if let Some(surface) = LEASE.lock().returned.take() {
+        guard.reattach(surface);
+    }
 }
 
 /// Text rows painted per hold of `FB`. A row is at most one glyph per
@@ -167,7 +349,9 @@ pub fn start_cursor_thread() {
 extern "C" fn cursor_thread(_arg: usize) {
     loop {
         crate::task::scheduler::sleep_ms(500);
+        stop_holders();
         if let Some(mut guard) = FB.try_lock() {
+            take_back_returned(&mut guard);
             if guard.needs_redraw() {
                 paint_in_steps(guard);
             } else if guard.is_attached() {

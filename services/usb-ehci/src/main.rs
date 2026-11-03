@@ -3420,13 +3420,28 @@ fn endpoint_gone(e: sys::Error) -> bool {
 fn answer_info(ctl: &Ehci, reply_to: Handle) {
     let reply = Reply::status(Status::Ok)
         .with_name(device_name(ctl))
-        .unwrap_or(Reply::status(Status::Ok));
+        .unwrap_or(Reply::status(Status::Ok))
+        .with_kinds(device_kinds(ctl));
     answer(reply_to, reply);
 }
 
 fn answer(reply_to: Handle, reply: Reply) {
     let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
     let _ = sys::handle_close(reply_to);
+}
+
+/// What the service's devices are (`Info`, ADR 0074 phase B): init starts
+/// the desktop only with a keyboard among them.
+fn device_kinds(ctl: &Ehci) -> u8 {
+    use aricode_proto::input::{KIND_KEYBOARD, KIND_POINTER};
+    let mut kinds = 0;
+    if ctl.keyboards > 0 {
+        kinds |= KIND_KEYBOARD;
+    }
+    if ctl.mice > 0 {
+        kinds |= KIND_POINTER;
+    }
+    kinds
 }
 
 fn device_name(ctl: &Ehci) -> &'static str {

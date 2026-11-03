@@ -956,9 +956,15 @@ pub mod input {
         pub value: u32,
     }
 
+    /// `Reply::kinds` bit: the service has a keyboard (ADR 0074 phase B).
+    pub const KIND_KEYBOARD: u8 = 1;
+    /// `Reply::kinds` bit: the service has a mouse or another pointer.
+    pub const KIND_POINTER: u8 = 2;
+
     /// Reply (104 bytes): status, number of events, events, the timestamp
     /// (ms since boot) at which the service received each one, and name. The
-    /// timestamps allow ordering events from several devices.
+    /// timestamps allow ordering events from several devices. An `Info`
+    /// reply also says what the service's devices are (`kinds`).
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Reply {
         pub status: Status,
@@ -967,6 +973,8 @@ pub mod input {
         pub times: [u64; MAX_EVENTS],
         pub name: [u8; MAX_NAME],
         pub name_len: u8,
+        /// `KIND_*` bits of an `Info` reply; 0 in the others.
+        pub kinds: u8,
     }
 
     impl Reply {
@@ -982,6 +990,7 @@ pub mod input {
                 times: [0; MAX_EVENTS],
                 name: [0; MAX_NAME],
                 name_len: 0,
+                kinds: 0,
             }
         }
 
@@ -1005,6 +1014,11 @@ pub mod input {
             Some(self)
         }
 
+        pub fn with_kinds(mut self, kinds: u8) -> Self {
+            self.kinds = kinds;
+            self
+        }
+
         pub fn name_str(&self) -> &str {
             core::str::from_utf8(&self.name[..self.name_len as usize]).unwrap_or("?")
         }
@@ -1016,6 +1030,7 @@ pub mod input {
             b[2] = self.status as u8;
             b[3] = self.count;
             b[4] = self.name_len;
+            b[5] = self.kinds;
             for (i, e) in self.events.iter().enumerate() {
                 let o = 8 + 8 * i;
                 b[o..o + 2].copy_from_slice(&e.kind.to_le_bytes());
@@ -1064,6 +1079,7 @@ pub mod input {
                 times,
                 name,
                 name_len: b[4].min(MAX_NAME as u8),
+                kinds: b[5],
             })
         }
     }
@@ -1553,6 +1569,12 @@ mod tests {
         assert_eq!(d, reply);
         assert_eq!(d.count, 2);
         assert_eq!(d.name_str(), "QEMU Virtio Keyboard");
+        assert_eq!(d.kinds, 0);
+        let info = Reply::status(Status::Ok).with_kinds(KIND_KEYBOARD | KIND_POINTER);
+        assert_eq!(
+            Reply::decode(&info.encode()).unwrap().kinds,
+            KIND_KEYBOARD | KIND_POINTER
+        );
         assert!(Reply::status(Status::Ok)
             .with_name(&"x".repeat(33))
             .is_none());

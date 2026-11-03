@@ -1,0 +1,34 @@
+# A test package named `launcher` (ADR 0074 phase B): it holds `launch`, so
+# the scenarios check the broker's rule for it and the desktop session that
+# starts it. The desktop's real launcher replaces it in phase C. Built like
+# `hello_ext`.
+[package]
+name = "test-launcher"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Test launcher for the AriCodeOS desktop session and the launch capability"
+publish = false
+
+[[bin]]
+name = "launcher"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+aricode-rt = { path = "../../sdk/runtime" }
+aricode-gfx = { path = "../../libs/gfx" }
+
+[build-dependencies]
+aricode-build = { path = "../../sdk/build" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
+
+[workspace]

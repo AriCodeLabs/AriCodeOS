@@ -11,7 +11,7 @@ use crate::arch::x86_64::ioapic;
 use crate::arch::x86_64::port::{inb, io_wait, outb};
 use crate::sync::IrqLock;
 use crate::task::wait::WaitQueue;
-use aricode_input::{Keyboard, Layout, ScancodeSet1};
+use aricode_input::{EscapeChord, Keyboard, Layout, ScancodeSet1};
 use log::{info, warn};
 
 const COM1: u16 = 0x3F8;
@@ -87,6 +87,12 @@ struct Ps2 {
     /// `bytes` when the last line ended (the byte that produced the newline
     /// included), for `ps2_selftest`.
     bytes_at_newline: u64,
+    /// Characters typed while a process held the screen, never given to
+    /// the console (ADR 0074 phase B).
+    withheld: u64,
+    /// Ctrl+Alt+Backspace: while a process holds the screen, the owner's
+    /// way back to the console (ADR 0074 phase B).
+    escape: EscapeChord,
 }
 
 static PS2: IrqLock<Ps2> = IrqLock::new(Ps2 {
@@ -94,7 +100,16 @@ static PS2: IrqLock<Ps2> = IrqLock::new(Ps2 {
     keyboard: Keyboard::new(),
     bytes: 0,
     bytes_at_newline: 0,
+    withheld: 0,
+    escape: EscapeChord::new(),
 });
+
+/// Characters the PS/2 keyboard produced while a process held the screen,
+/// since the last call: they were typed at that process's screen, never at
+/// the console, so the console never got them (ADR 0074 phase B).
+pub fn take_withheld() -> u64 {
+    core::mem::take(&mut PS2.lock().withheld)
+}
 
 /// Routes the COM1 IRQ to its dedicated vector and enables the UART receive
 /// interrupt. Requires the I/O APIC and interrupts enabled.
@@ -249,7 +264,24 @@ pub fn on_keyboard_irq() {
                 continue;
             }
             if let Some(ev) = ps2.decoder.feed(byte) {
-                for &c in ps2.keyboard.feed(ev).as_slice() {
+                // Decoded either way, so a modifier held across the change
+                // is not left stuck.
+                let chord = ps2.escape.feed(ev);
+                let typed = ps2.keyboard.feed(ev);
+                // The person typing looks at the screen, and while a process
+                // (the compositor) holds it the keys are not typed at the
+                // console: a shell must never read what was meant for a
+                // window (ADR 0074 phase B). Ctrl+Alt+Backspace asks for the
+                // screen back, the only key that does anything then.
+                if crate::console::screen_held() {
+                    if chord {
+                        crate::console::screen_wanted_back();
+                    } else {
+                        ps2.withheld += typed.as_slice().len() as u64;
+                    }
+                    continue;
+                }
+                for &c in typed.as_slice() {
                     if c == b'\n' || c == b'\r' {
                         ps2.bytes_at_newline = ps2.bytes;
                     }

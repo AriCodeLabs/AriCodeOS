@@ -6,7 +6,7 @@
 //! cargo xtask build [--debug]                 builds AriBoot and AriKernel
 //! cargo xtask image [--debug]                 build + assembles build/esp/
 //! cargo xtask run   [--debug] [--cmdline S] [--cpus N] [--usb-image] [--usb-hid]   image + interactive QEMU
-//! cargo xtask usb-image [--cmdline S] [--authorized-key KEY.pub] [--public-source] [--update-source URL] [--dev-source URL] [--signing-key DIR]  GPT image for a USB stick at build/aricodeos-usb.img
+//! cargo xtask usb-image [--cmdline S] [--authorized-key KEY.pub] [--public-source] [--update-source URL] [--dev-source URL] [--app DIR:VER]... [--profile NAME:APP,APP]... [--signing-key DIR]  GPT image for a USB stick at build/aricodeos-usb.img (apps installed, profiles followed: ADR 0074)
 //!                                             (--public-source: the project's GitHub releases, ADR 0048)
 //!                                             (--dev-source: the machine opts in to the development channel, ADR 0045)
 //! cargo xtask publish-update [--version N | --no-system] [--app DIR:VERSION]... [--no-legacy-manifest] [--signing-key DIR]
@@ -126,6 +126,8 @@ fn spec(cmd: &str) -> Option<Spec> {
                 ("--public-source", Opt::Flag),
                 ("--update-source", Opt::Value),
                 ("--dev-source", Opt::Value),
+                ("--app", Opt::Repeated),
+                ("--profile", Opt::Repeated),
                 SIGNING_KEY,
             ],
             0,
@@ -292,14 +294,20 @@ fn main() -> ExitCode {
             let dir = image::publish_update_to(&image::update_dir_for(p.channel), release, &p)?;
             qemu::serve_update(&dir, port)
         }),
-        "usb-image" => signing_key(&cli).and_then(|()| image::build_usb_image(
-            release,
-            cli.value("--cmdline").unwrap_or("shell"),
-            cli.value("--authorized-key").map(Path::new),
-            cli.flag("--public-source"),
-            cli.value("--update-source"),
-            cli.value("--dev-source"),
-        ))
+        "usb-image" => signing_key(&cli)
+            .and_then(|()| stick_apps(&cli))
+            .and_then(|(apps, profiles)| {
+                image::build_usb_image(
+                    release,
+                    cli.value("--cmdline").unwrap_or("shell"),
+                    cli.value("--authorized-key").map(Path::new),
+                    cli.flag("--public-source"),
+                    cli.value("--update-source"),
+                    cli.value("--dev-source"),
+                    &apps,
+                    &profiles,
+                )
+            })
             .map(|p| {
                 println!(
                     "[xtask] write with: sudo dd if={} of=/dev/sdX bs=4M conv=fsync status=progress (see docs/hardware.md)",
@@ -389,6 +397,29 @@ fn profiles_flags(cli: &Cli) -> Result<Vec<(String, Vec<String>)>> {
         ));
     }
     Ok(profiles)
+}
+
+/// An external app directory and the version to pack it as.
+type AppSpec = (String, u32);
+/// A profile and the app names it installs.
+type ProfileSpec = (String, Vec<String>);
+
+/// `usb-image --app DIR:VERSION` and `--profile NAME:APP,APP` (both
+/// repeated, ADR 0074): the apps the stick comes with, and the profiles it
+/// follows with them. The stick's own system reads AriFS v2, so profiles
+/// need no `--all-machines-0.18`.
+fn stick_apps(cli: &Cli) -> Result<(Vec<AppSpec>, Vec<ProfileSpec>)> {
+    let apps = cli
+        .values("--app")
+        .into_iter()
+        .map(app_spec)
+        .collect::<Result<Vec<_>>>()?;
+    let profiles = cli
+        .values("--profile")
+        .into_iter()
+        .map(profile_spec)
+        .collect::<Result<Vec<_>>>()?;
+    Ok((apps, profiles))
 }
 
 /// `NAME:APP,APP...`: a profile of the index (ADR 0074) and the apps it

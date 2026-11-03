@@ -11,7 +11,7 @@
 
 use aricode_cmdline::{keys, CmdLine};
 use aricode_gfx::{Canvas, Damage, Desktop, Hit, Rect, Scene, Window};
-use aricode_input::{Keyboard, BTN_LEFT, EV_KEY, EV_REL, REL_X, REL_Y};
+use aricode_input::{EscapeChord, Keyboard, BTN_LEFT, EV_KEY, EV_REL, REL_X, REL_Y};
 use aricode_proto::window::{Event, Op, Reply, Request, Status, MAX_SIDE};
 use aricode_rt::sys::input::InputClient;
 use aricode_rt::sys::{self, abi, Handle};
@@ -170,6 +170,8 @@ struct Compositor {
     desktop: Desktop,
     contents: [Option<Content>; MAX_WINDOWS],
     keyboard: Keyboard,
+    /// Ctrl+Alt+Backspace: the owner asks for the text console (ADR 0074).
+    escape: EscapeChord,
     /// What the screen shows, and what changed since (window contents
     /// presented by their clients, plus the diff of the scene).
     shown: Scene,
@@ -349,6 +351,13 @@ impl Compositor {
                 );
             }
             return;
+        }
+        // The owner's way back to the text console (ADR 0074): the
+        // compositor leaves, and init ends the desktop and gives the console
+        // the screen and the keyboards. No window ever sees the chord.
+        if self.escape.feed(ev) {
+            say(b"Ctrl+Alt+Backspace: the owner asked for the text console; leaving");
+            sys::process_exit(0);
         }
         // Each byte of the key (editing keys are escape sequences).
         for &ch in self.keyboard.feed(ev).as_slice() {
@@ -614,6 +623,7 @@ fn main(inputs: u64) -> u64 {
         screen,
         contents: [const { None }; MAX_WINDOWS],
         keyboard: Keyboard::new(),
+        escape: EscapeChord::new(),
         next_frame_ms: 0,
         frames: 0,
         announced: false,

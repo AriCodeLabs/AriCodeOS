@@ -1,0 +1,33 @@
+# A stick written by `usb-image --app ... --profile desktop:...` (ADR 0074
+# phase B) boots into the desktop on its first boot: its apps are
+# installed, it follows the desktop profile with them recorded as its
+# own, and `session = desktop` is written. Booted as written to a stick,
+# without `selftest`.
+name = "usb.image_desktop"
+description = "a stick made with a desktop profile boots into the desktop at once"
+level = "full"
+areas = ["usb", "apps", "gui"]
+cmdline = "qemu_exit shell"
+selftest = false
+disk = "usb-image"
+install = ["examples/hello_ext", "examples/gui_demo", "examples/test_launcher"]
+stick_profiles = ["desktop:launcher,gui_demo"]
+stdin = ["sleep 9000", "update profiles", "cat updater/profiles", "session", "shutdown"]
+timeout_secs = 120
+
+[expect]
+exit = 33
+serial_contains = [
+    "AriInit: desktop session: compositor started",
+    "console: the screen is lent to process",
+    "AriInit: desktop session: launcher started",
+    "launcher: the broker kept every rule",
+    "AriInit: the desktop ended (its launcher exited with 0): back to the text console",
+    "console: the screen is back from process",
+    "update profiles:",
+    "  desktop",
+    "desktop launcher gui_demo",
+    "session: desktop\r\n",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "the broker broke a rule"]

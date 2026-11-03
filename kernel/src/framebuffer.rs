@@ -20,6 +20,12 @@ pub fn phys_range() -> Option<(u64, u64)> {
     (info.address != 0).then(|| (info.address, info.address.saturating_add(info.size)))
 }
 
+/// Whether `[phys, phys+len)` covers any of the framebuffer: mapping it
+/// takes the screen from the kernel console (ADR 0074 phase B).
+pub fn overlaps(phys: u64, len: u64) -> bool {
+    phys_range().is_some_and(|(start, end)| phys < end && start < phys.saturating_add(len))
+}
+
 /// Framebuffer description in the ABI format (`sysinfo::Framebuffer`), or
 /// `None` if there is no display.
 pub fn abi_info() -> Option<aricode_abi::sysinfo::Framebuffer> {

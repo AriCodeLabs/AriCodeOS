@@ -39,12 +39,16 @@ impl Caps {
     /// Main fsd space for installing packages (ADR 0018): only for
     /// `installer`.
     pub const INSTALL: Caps = Caps(1 << 9);
+    /// Starting installed applications, each with its own manifest (ADR
+    /// 0074): only for `launcher`, and only when it is an installed,
+    /// signed package.
+    pub const LAUNCH: Caps = Caps(1 << 10);
 
     pub const NONE: Caps = Caps(0);
     /// The ones the broker grants to normal applications.
     pub const APP_ALLOWED: Caps = Caps(Caps::SYSTEM.0 | Caps::FS.0 | Caps::NET.0 | Caps::WINDOW.0);
 
-    const NAMES: [(&'static str, Caps); 10] = [
+    const NAMES: [(&'static str, Caps); 11] = [
         ("system", Caps::SYSTEM),
         ("fs", Caps::FS),
         ("net", Caps::NET),
@@ -55,6 +59,7 @@ impl Caps {
         ("framebuffer", Caps::FRAMEBUFFER),
         ("block", Caps::BLOCK),
         ("install", Caps::INSTALL),
+        ("launch", Caps::LAUNCH),
     ];
 
     /// System applications that may also ask for `block`.
@@ -62,6 +67,9 @@ impl Caps {
     /// System applications that may also ask for `install`. Not the
     /// updater, which parses network input (ADR 0029, audit 1, M2).
     pub const TRUSTED_INSTALL: [&'static str; 1] = ["installer"];
+    /// Applications that may also ask for `launch` (ADR 0074); the broker
+    /// grants it only to an installed package, never to an initrd program.
+    pub const TRUSTED_LAUNCH: [&'static str; 1] = ["launcher"];
 
     /// Capabilities grantable to the application `name`.
     pub fn allowed_for(name: &str) -> Caps {
@@ -71,6 +79,9 @@ impl Caps {
         }
         if Self::TRUSTED_INSTALL.contains(&name) {
             caps = caps.union(Caps::INSTALL);
+        }
+        if Self::TRUSTED_LAUNCH.contains(&name) {
+            caps = caps.union(Caps::LAUNCH);
         }
         caps
     }
@@ -316,6 +327,22 @@ mod tests {
             assert_eq!(Manifest::parse(&text), Err(ManifestError::BadName), "{n}");
         }
         assert!(Manifest::parse("name = updater").is_ok());
+    }
+
+    #[test]
+    fn launch_is_only_for_the_launcher() {
+        let m = Manifest::parse("name = launcher\ncaps = window, launch\n").unwrap();
+        assert_eq!(m.caps.names().collect::<Vec<_>>(), ["window", "launch"]);
+        assert!(m.caps.difference(Caps::allowed_for("launcher")).is_empty());
+        for other in ["editor", "installer", "updater", "shell"] {
+            assert_eq!(
+                Caps::LAUNCH.difference(Caps::allowed_for(other)),
+                Caps::LAUNCH,
+                "{other}"
+            );
+        }
+        assert!(!Caps::allowed_for("launcher").contains(Caps::INSTALL));
+        assert!(!Caps::allowed_for("launcher").contains(Caps::BLOCK));
     }
 
     #[test]

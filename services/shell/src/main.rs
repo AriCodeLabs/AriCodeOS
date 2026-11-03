@@ -15,6 +15,7 @@ use aricode_proto::net::{Status as NetStatus, LINK_DOWN, LINK_UP};
 use aricode_rt::sys::net::{NetClient, NetError};
 use aricode_rt::sys::{self, abi, fs::FsClient, Handle, TIMEOUT_INFINITE};
 use aricode_rt::{fmt_hex, fmt_u64};
+use aricode_update_index::session::{self, Session};
 use aricode_update_index::{self as update_index, installer_arg, updater_arg};
 
 const FSD: Handle = Handle(0x0001_0004);
@@ -257,7 +258,7 @@ fn trim(s: &[u8]) -> &[u8] {
 fn help() {
     print(
         b"commands:\n  help      this help\n  ps        processes\n  mem       physical memory\n  ls        AriFS files\n  cat NAME  show a file\n  write NAME TEXT  save TEXT to the file (creates it or replaces it entirely)\n  devices   PCI functions\n  services  boot services (--detail: supervisor state)\n  uptime    time since boot\n  sleep MS  wait MS milliseconds (at most 60000)\n  cpus      online processors and idle time per CPU\n  diag [NAME]  full report (uptime, mem, cpus, entropy, ps, stacks, services, net, devices); with NAME saves it to AriFS\n  net       network configuration\n  ping IP   ICMP echo (4 attempts)\n  dns NAME  resolve a name\n  http URL  GET and show the body (http:// or https://)\n  run PROG  run an initrd program and wait\n\
-  update [--channel stable|dev]  fetch and verify the signed index of every source of the channel (stable by default) and show what is new (installs nothing; ADR 0029, ADR 0045)\n  update add [--channel dev] URL|IP[:PORT]  register an update source (stable unless --channel dev)\n  update remove N|URL  unregister a source\n  update sources  list the sources\n  update profile add|remove NAME  follow a profile of the sources (upgrade installs its apps) or stop following it (its apps are deleted; ADR 0074)\n  update profiles  list the followed profiles\n  update apply [--allow-downgrade]  install the image in the UPDATE partition\n  update rollback  boot the system in the other slot next (no network; then `reboot`)\n  upgrade [--channel stable|dev] [--allow-downgrade]  install what the last `update` found (system into the inactive slot, then `reboot`; apps through the installer); only --channel moves the system to another channel\n  spawn PROG  launch it in the background (cannot be stopped)\n  repeat N CMD  repeat a command N times\n  reboot    reboot\n  shutdown  power off\n  exit      exit the shell\n",
+  update [--channel stable|dev]  fetch and verify the signed index of every source of the channel (stable by default) and show what is new (installs nothing; ADR 0029, ADR 0045)\n  update add [--channel dev] URL|IP[:PORT]  register an update source (stable unless --channel dev)\n  update remove N|URL  unregister a source\n  update sources  list the sources\n  update profile add|remove NAME  follow a profile of the sources (upgrade installs its apps) or stop following it (its apps are deleted; ADR 0074)\n  update profiles  list the followed profiles\n  session [shell|desktop]  show or choose what the machine boots into: the text console, or the desktop of the desktop profile once installed (ADR 0074)\n  update apply [--allow-downgrade]  install the image in the UPDATE partition\n  update rollback  boot the system in the other slot next (no network; then `reboot`)\n  upgrade [--channel stable|dev] [--allow-downgrade]  install what the last `update` found (system into the inactive slot, then `reboot`; apps through the installer); only --channel moves the system to another channel\n  spawn PROG  launch it in the background (cannot be stopped)\n  repeat N CMD  repeat a command N times\n  reboot    reboot\n  shutdown  power off\n  exit      exit the shell\n",
     );
 }
 
@@ -1404,6 +1405,10 @@ fn profile_add(fs: &mut FsClient, name: &[u8]) {
         print(b"update: profile ");
         print(name.as_bytes());
         print(b" followed (run update, then upgrade, to install it)\n");
+        // Following the desktop is asking for it (ADR 0074).
+        if name == session::DESKTOP_PROFILE {
+            save_session(fs, Session::Desktop);
+        }
     }
 }
 
@@ -1483,6 +1488,9 @@ fn profile_remove(fs: &mut FsClient, name: &[u8]) {
     print(b"update: profile ");
     print(name.as_bytes());
     print(b" removed\n");
+    if name == session::DESKTOP_PROFILE {
+        save_session(fs, Session::Shell);
+    }
     for app in delete {
         let Some(target) = update_index::installed_path(&app) else {
             continue;
@@ -1505,6 +1513,80 @@ fn profile_remove(fs: &mut FsClient, name: &[u8]) {
                 let _ = sys::event_record(3, "sh-profile-delete");
             }
         }
+    }
+}
+
+/// `session [shell|desktop]` (ADR 0074): what the machine boots into.
+/// The desktop starts only with the `desktop` profile followed and its
+/// launcher installed; the shell says what is missing.
+fn session_command(fs: &mut FsClient, arg: &[u8]) {
+    match arg {
+        b"" => match read_small(fs, session::FILE, 256) {
+            Err(()) => print(b"session: cannot read the session file\n"),
+            Ok(None) => print(b"session: shell (the text console)\n"),
+            Ok(Some(text)) => match core::str::from_utf8(&text).ok().and_then(Session::parse) {
+                Some(Session::Shell) => print(b"session: shell (the text console)\n"),
+                Some(Session::Desktop) => {
+                    print(b"session: desktop");
+                    desktop_missing(fs);
+                }
+                None => print(
+                    b"session: the session file is damaged, so the machine boots into the text console (session shell|desktop writes it again)\n",
+                ),
+            },
+        },
+        b"shell" => save_session(fs, Session::Shell),
+        b"desktop" => save_session(fs, Session::Desktop),
+        _ => print(b"usage: session [shell|desktop]\n"),
+    }
+}
+
+/// Writes `session` and logs it in the install history.
+fn save_session(fs: &mut FsClient, chosen: Session) {
+    if save_file(fs, session::FILE, chosen.to_text().as_bytes()).is_err() {
+        print(b"session: cannot save the session file\n");
+        return;
+    }
+    log_history(fs, &alloc::format!("session: {}", chosen.name()));
+    match chosen {
+        Session::Shell => print(b"session: the text console from the next boot\n"),
+        Session::Desktop => {
+            print(b"session: the desktop from the next boot");
+            desktop_missing(fs);
+        }
+    }
+}
+
+/// Ends a line about the desktop session with what keeps it from starting,
+/// if anything.
+fn desktop_missing(fs: &mut FsClient) {
+    let profiles = read_small(
+        fs,
+        &update_index::main_path(update_index::PROFILES_FILE),
+        1024,
+    );
+    if profiles.is_err() {
+        print(b" (whether the desktop profile is followed cannot be read)\n");
+        return;
+    }
+    let followed = matches!(&profiles, Ok(Some(text))
+        if core::str::from_utf8(text).is_ok_and(session::follows_desktop));
+    use update_index::files::Files;
+    let launcher = update_index::installed_path(session::LAUNCHER).map(|path| {
+        let mut files = MainFiles(fs);
+        files
+            .open(&path)
+            .map(|fd| fd.map(|fd| files.close(fd)).is_some())
+    });
+    if !followed {
+        print(b" (it will not start: the desktop profile is not followed; update profile add desktop)\n");
+    } else if !matches!(launcher, Some(Ok(true))) {
+        print(match launcher {
+            Some(Err(_)) => b" (whether the launcher is installed cannot be read)\n".as_slice(),
+            _ => b" (it will not start until the profile is installed: update, then upgrade)\n",
+        });
+    } else {
+        print(b"\n");
     }
 }
 
@@ -1747,11 +1829,13 @@ fn services(mask: u64, fs: &FsClient) {
     } else {
         b"absent\n"
     });
+    // Started at boot, and a desktop session may have ended since (ADR
+    // 0074): the shell only knows that it was started.
     print(b"graphics  compositor  ");
     print(if mask & SERVICE_GUI != 0 {
-        b"active\n"
+        b"started at boot\n"
     } else {
-        b"absent (start with `gui`)\n"
+        b"absent (start with `gui` or the desktop session)\n"
     });
 }
 
@@ -1949,6 +2033,7 @@ fn execute(
         b"http" => http_get(fs, net_client, rest),
         b"run" => run(rest),
         b"update" => update(fs, rest),
+        b"session" => session_command(fs, rest),
         b"upgrade" => upgrade(rest),
         b"spawn" => spawn(rest),
         b"repeat" => {

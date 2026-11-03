@@ -288,6 +288,28 @@ pub fn run_scenario(
         }
         installed.push(app.installed());
     }
+    if !s.stick_profiles.is_empty() {
+        if disk_variant != image::DiskVariant::UsbImage {
+            return Err(format!(
+                "{}: stick_profiles needs disk = \"usb-image\" (a stick with AriFS v2)",
+                s.name
+            ));
+        }
+        let profiles = s
+            .stick_profiles
+            .iter()
+            .map(|p| crate::profile_spec(p))
+            .collect::<Result<Vec<_>>>()?;
+        let names: Vec<String> = installed
+            .iter()
+            .filter_map(|(path, _)| {
+                path.strip_prefix("apps/")?
+                    .strip_suffix(aricode_pkg::EXTENSION)
+                    .map(String::from)
+            })
+            .collect();
+        installed.extend(image::stick_profile_files(&names, &profiles)?);
+    }
     for spec in &s.packages {
         let mut parts = spec.split(':');
         let (Some(dir), Some(version)) = (parts.next(), parts.next()) else {
@@ -624,7 +646,7 @@ pub fn run_scenario(
                 hid: s.usb_hid,
                 hid_msi: s.usb_hid_msi,
                 hid_msi_and_msix: s.usb_hid_msi_and_msix,
-                hid_only_input: s.usb_hid_only_input,
+                hid_only_input: s.usb_hid_only_input || s.no_virtio_input,
                 legacy_controller: s.usb_legacy_controller,
                 storage: s.usb_storage,
                 ehci_hid: s.usb_ehci_hid,
