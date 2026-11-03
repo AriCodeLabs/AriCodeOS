@@ -1,0 +1,23 @@
+# ADR 0072: a machine updated from 0.17 has AriFS v1 in v1's place. Every
+# slot that holds a system declares `arifs = 2` (slot B is empty), so init
+# asks fsd to migrate at mount: the files stay where they are, the volume
+# is v2, and rename over and delete work.
+name = "filesystem.migrate_v1"
+description = "AriFS v1 disk migrated to v2 in place at mount, files kept"
+level = "full"
+areas = ["filesystem", "storage", "init"]
+cmdline = "qemu_exit"
+disk = "arifs-v1"
+
+[expect]
+exit = 33
+serial_contains = [
+    "fsd: AriFS migrated to v2 in place",
+    "fsd: AriFS v2 mounted, 4 files",
+    "fs_client: hola.txt says: Hola desde AriFS",
+    "fs_client: atomic replace and flush ok",
+    "fs_client: rename over and delete ok",
+    "AriInit: file service ok",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC", "is not migrated", "AriFS v1 mounted", "migration to AriFS v2 failed"]

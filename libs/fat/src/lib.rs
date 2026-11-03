@@ -481,43 +481,75 @@ pub struct DirEntry {
     pub size: u32,
 }
 
-/// Reader of an in-memory FAT32 partition.
-pub struct Fat32<'a> {
-    img: &'a [u8],
-    sectors_per_cluster: u32,
-    fat_start: usize,
-    data_start: usize,
-    clusters: u32,
-    root: u32,
+/// The sectors of a FAT32 partition: an image in memory, or a block device
+/// read a sector at a time (init reads the ESP's initrd so, ADR 0072).
+pub trait Sectors {
+    fn read_sector(&mut self, sector: u64, buf: &mut [u8; SECTOR]) -> Result<(), FatError>;
 }
 
-impl<'a> Fat32<'a> {
-    pub fn parse(img: &'a [u8]) -> Result<Self, FatError> {
-        if img.len() < 8 * SECTOR || img[510] != 0x55 || img[511] != 0xAA {
+impl Sectors for &[u8] {
+    fn read_sector(&mut self, sector: u64, buf: &mut [u8; SECTOR]) -> Result<(), FatError> {
+        let o = usize::try_from(sector).map_err(|_| FatError::Corrupt)? * SECTOR;
+        buf.copy_from_slice(self.get(o..o + SECTOR).ok_or(FatError::Corrupt)?);
+        Ok(())
+    }
+}
+
+/// An open file: its first cluster and size, and where the last read
+/// left the cluster chain, so reads that move forward walk it once.
+#[derive(Debug, Clone, Copy)]
+pub struct File {
+    pub cluster: u32,
+    pub size: u32,
+    /// (index of the cluster in the file, cluster number).
+    cursor: (u32, u32),
+}
+
+/// Reader of a FAT32 partition, sector by sector.
+pub struct Fat32<S: Sectors> {
+    src: S,
+    sectors_per_cluster: u32,
+    fat_start: u64,
+    data_start: u64,
+    clusters: u32,
+    root: u32,
+    /// The FAT sector read last.
+    fat_cache: Option<(u64, [u8; SECTOR])>,
+}
+
+impl<S: Sectors> Fat32<S> {
+    pub fn parse(mut src: S) -> Result<Self, FatError> {
+        let mut b = [0u8; SECTOR];
+        src.read_sector(0, &mut b)?;
+        if b[510] != 0x55 || b[511] != 0xAA {
             return Err(FatError::Corrupt);
         }
-        let u16_at = |o: usize| u16::from_le_bytes([img[o], img[o + 1]]);
-        let u32_at = |o: usize| u32::from_le_bytes([img[o], img[o + 1], img[o + 2], img[o + 3]]);
-        if u16_at(11) as usize != SECTOR || u16_at(17) != 0 || u16_at(22) != 0 || img[13] == 0 {
+        let u16_at = |o: usize| u16::from_le_bytes([b[o], b[o + 1]]);
+        let u32_at = |o: usize| u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]);
+        if u16_at(11) as usize != SECTOR || u16_at(17) != 0 || u16_at(22) != 0 || b[13] == 0 {
             return Err(FatError::Corrupt);
         }
-        let spc = img[13] as u32;
+        let spc = b[13] as u32;
         let reserved = u16_at(14) as u32;
-        let fats = img[16] as u32;
+        let fats = b[16] as u32;
         let total = u32_at(32);
         let fat_size = u32_at(36);
         let root = u32_at(44);
-        let data_sector = reserved + fats * fat_size;
-        if total as usize * SECTOR > img.len() || data_sector >= total {
+        let data_sector = fats
+            .checked_mul(fat_size)
+            .and_then(|f| f.checked_add(reserved))
+            .ok_or(FatError::Corrupt)?;
+        if data_sector >= total {
             return Err(FatError::Corrupt);
         }
         Ok(Self {
-            img,
+            src,
             sectors_per_cluster: spc,
-            fat_start: reserved as usize * SECTOR,
-            data_start: data_sector as usize * SECTOR,
+            fat_start: reserved as u64,
+            data_start: data_sector as u64,
             clusters: (total - data_sector) / spc,
             root,
+            fat_cache: None,
         })
     }
 
@@ -525,29 +557,39 @@ impl<'a> Fat32<'a> {
         self.clusters
     }
 
-    fn fat_entry(&self, c: u32) -> u32 {
-        let o = self.fat_start + 4 * c as usize;
-        u32::from_le_bytes([
-            self.img[o],
-            self.img[o + 1],
-            self.img[o + 2],
-            self.img[o + 3],
-        ]) & 0x0FFF_FFFF
+    fn in_range(&self, c: u32) -> bool {
+        (2..self.clusters + 2).contains(&c)
     }
 
-    fn cluster(&self, c: u32) -> &'a [u8] {
-        let cb = self.sectors_per_cluster as usize * SECTOR;
-        let o = self.data_start + (c as usize - 2) * cb;
-        &self.img[o..o + cb]
+    fn fat_entry(&mut self, c: u32) -> Result<u32, FatError> {
+        let sector = self.fat_start + (4 * c as u64) / SECTOR as u64;
+        let o = (4 * c as usize) % SECTOR;
+        if self.fat_cache.is_none_or(|(s, _)| s != sector) {
+            let mut b = [0u8; SECTOR];
+            self.src.read_sector(sector, &mut b)?;
+            self.fat_cache = Some((sector, b));
+        }
+        let (_, b) = self.fat_cache.as_ref().ok_or(FatError::Corrupt)?;
+        Ok(u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]) & 0x0FFF_FFFF)
     }
 
-    fn read_chain(&self, first: u32) -> Result<Vec<u8>, FatError> {
+    /// First sector of cluster `c`.
+    fn cluster_sector(&self, c: u32) -> u64 {
+        self.data_start + (c as u64 - 2) * self.sectors_per_cluster as u64
+    }
+
+    /// The whole chain from `first` (directories are small).
+    fn read_chain(&mut self, first: u32) -> Result<Vec<u8>, FatError> {
         let mut out = Vec::new();
         let mut c = first;
         let mut steps = 0;
-        while (2..self.clusters + 2).contains(&c) {
-            out.extend_from_slice(self.cluster(c));
-            c = self.fat_entry(c);
+        let mut b = [0u8; SECTOR];
+        while self.in_range(c) {
+            for k in 0..self.sectors_per_cluster as u64 {
+                self.src.read_sector(self.cluster_sector(c) + k, &mut b)?;
+                out.extend_from_slice(&b);
+            }
+            c = self.fat_entry(c)?;
             steps += 1;
             if steps > self.clusters {
                 return Err(FatError::Corrupt);
@@ -560,90 +602,144 @@ impl<'a> Fat32<'a> {
     }
 
     /// Entries of the directory whose first cluster is `cluster` (without `.`/`..`).
-    pub fn read_dir(&self, cluster: u32) -> Result<Vec<DirEntry>, FatError> {
+    pub fn read_dir(&mut self, cluster: u32) -> Result<Vec<DirEntry>, FatError> {
         let data = self.read_chain(cluster)?;
-        let mut out = Vec::new();
-        let mut lfn: Vec<u16> = Vec::new();
-        for e in data.as_chunks::<ENTRY>().0 {
-            if e[0] == 0x00 {
-                break;
-            }
-            if e[0] == 0xE5 {
-                lfn.clear();
-                continue;
-            }
-            if e[11] == ATTR_LFN {
-                let mut piece = Vec::new();
-                for off in [1usize, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30] {
-                    piece.push(u16::from_le_bytes([e[off], e[off + 1]]));
-                }
-                piece.extend(lfn.iter());
-                lfn = piece;
-                continue;
-            }
-            let mut short = [0u8; 11];
-            short.copy_from_slice(&e[..11]);
-            let short_s = short_to_string(&short);
-            if short_s == "." || short_s == ".." {
-                lfn.clear();
-                continue;
-            }
-            let long: String =
-                char::decode_utf16(lfn.iter().copied().take_while(|c| *c != 0 && *c != 0xFFFF))
-                    .map(|r| r.unwrap_or('?'))
-                    .collect();
-            lfn.clear();
-            out.push(DirEntry {
-                name: if long.is_empty() {
-                    short_s.clone()
-                } else {
-                    long
-                },
-                short: short_s,
-                attr: e[11],
-                cluster: (u16::from_le_bytes([e[26], e[27]]) as u32)
-                    | (u16::from_le_bytes([e[20], e[21]]) as u32) << 16,
-                size: u32::from_le_bytes([e[28], e[29], e[30], e[31]]),
-            });
-        }
-        Ok(out)
+        Ok(parse_dir(&data))
     }
 
-    pub fn root_dir(&self) -> Result<Vec<DirEntry>, FatError> {
+    pub fn root_dir(&mut self) -> Result<Vec<DirEntry>, FatError> {
         self.read_dir(self.root)
     }
 
-    /// Contents of `path` (`a/b/c.txt`, case-insensitive).
-    pub fn read_file(&self, path: &str) -> Result<Vec<u8>, FatError> {
+    /// Opens `path` (`a/b/c.txt`, case-insensitive).
+    pub fn open(&mut self, path: &str) -> Result<File, FatError> {
         let mut dir = self.root;
         let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
         let (name, dirs) = parts.split_last().ok_or(FatError::BadName)?;
-        for d in dirs {
-            let e = self
-                .read_dir(dir)?
+        let find = |entries: Vec<DirEntry>, wanted: &str| {
+            entries
                 .into_iter()
-                .find(|e| e.name.eq_ignore_ascii_case(d) || e.short.eq_ignore_ascii_case(d))
-                .ok_or(FatError::NotFound)?;
+                .find(|e| {
+                    e.name.eq_ignore_ascii_case(wanted) || e.short.eq_ignore_ascii_case(wanted)
+                })
+                .ok_or(FatError::NotFound)
+        };
+        for d in dirs {
+            let e = find(self.read_dir(dir)?, d)?;
             if e.attr & ATTR_DIRECTORY == 0 {
                 return Err(FatError::NotADirectory);
             }
             dir = e.cluster;
         }
-        let e = self
-            .read_dir(dir)?
-            .into_iter()
-            .find(|e| e.name.eq_ignore_ascii_case(name) || e.short.eq_ignore_ascii_case(name))
-            .ok_or(FatError::NotFound)?;
+        let e = find(self.read_dir(dir)?, name)?;
         if e.attr & ATTR_DIRECTORY != 0 {
             return Err(FatError::IsADirectory);
         }
-        if e.size == 0 {
-            return Ok(Vec::new());
+        Ok(File {
+            cluster: e.cluster,
+            size: e.size,
+            cursor: (0, e.cluster),
+        })
+    }
+
+    /// Fills `buf` from byte `offset` of `file`; `Corrupt` past its size or
+    /// its chain.
+    pub fn read_at(
+        &mut self,
+        file: &mut File,
+        offset: u32,
+        buf: &mut [u8],
+    ) -> Result<(), FatError> {
+        let end = (offset as u64) + buf.len() as u64;
+        if end > file.size as u64 {
+            return Err(FatError::Corrupt);
         }
-        let mut data = self.read_chain(e.cluster)?;
-        data.truncate(e.size as usize);
+        let cb = self.sectors_per_cluster as u64 * SECTOR as u64;
+        let mut done = 0;
+        let mut b = [0u8; SECTOR];
+        while done < buf.len() {
+            let pos = offset as u64 + done as u64;
+            let index = (pos / cb) as u32;
+            if index < file.cursor.0 {
+                file.cursor = (0, file.cluster);
+            }
+            while file.cursor.0 < index {
+                let next = self.fat_entry(file.cursor.1)?;
+                if !self.in_range(next) {
+                    return Err(FatError::Corrupt);
+                }
+                file.cursor = (file.cursor.0 + 1, next);
+            }
+            if !self.in_range(file.cursor.1) {
+                return Err(FatError::Corrupt);
+            }
+            let in_cluster = pos % cb;
+            let sector = self.cluster_sector(file.cursor.1) + in_cluster / SECTOR as u64;
+            self.src.read_sector(sector, &mut b)?;
+            let at = (in_cluster % SECTOR as u64) as usize;
+            let n = (SECTOR - at).min(buf.len() - done);
+            buf[done..done + n].copy_from_slice(&b[at..at + n]);
+            done += n;
+        }
+        Ok(())
+    }
+
+    /// Contents of `path` (`a/b/c.txt`, case-insensitive).
+    pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>, FatError> {
+        let mut file = self.open(path)?;
+        let mut data = alloc::vec![0u8; file.size as usize];
+        self.read_at(&mut file, 0, &mut data)?;
         Ok(data)
     }
+}
+
+/// The entries of a directory's clusters (without `.`/`..`).
+fn parse_dir(data: &[u8]) -> Vec<DirEntry> {
+    let mut out = Vec::new();
+    let mut lfn: Vec<u16> = Vec::new();
+    for e in data.as_chunks::<ENTRY>().0 {
+        if e[0] == 0x00 {
+            break;
+        }
+        if e[0] == 0xE5 {
+            lfn.clear();
+            continue;
+        }
+        if e[11] == ATTR_LFN {
+            let mut piece = Vec::new();
+            for off in [1usize, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30] {
+                piece.push(u16::from_le_bytes([e[off], e[off + 1]]));
+            }
+            piece.extend(lfn.iter());
+            lfn = piece;
+            continue;
+        }
+        let mut short = [0u8; 11];
+        short.copy_from_slice(&e[..11]);
+        let short_s = short_to_string(&short);
+        if short_s == "." || short_s == ".." {
+            lfn.clear();
+            continue;
+        }
+        let long: String =
+            char::decode_utf16(lfn.iter().copied().take_while(|c| *c != 0 && *c != 0xFFFF))
+                .map(|r| r.unwrap_or('?'))
+                .collect();
+        lfn.clear();
+        out.push(DirEntry {
+            name: if long.is_empty() {
+                short_s.clone()
+            } else {
+                long
+            },
+            short: short_s,
+            attr: e[11],
+            cluster: (u16::from_le_bytes([e[26], e[27]]) as u32)
+                | (u16::from_le_bytes([e[20], e[21]]) as u32) << 16,
+            size: u32::from_le_bytes([e[28], e[29], e[30], e[31]]),
+        });
+    }
+    out
 }
 
 #[cfg(test)]
@@ -654,6 +750,39 @@ mod tests {
         (0..len)
             .map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed))
             .collect()
+    }
+
+    #[test]
+    fn files_read_piece_by_piece_at_any_offset() {
+        let mut b = Fat32Builder::new(131_072, 1).unwrap();
+        let initrd = pattern(300_000, 7);
+        b.add_file("aricodeos/initrd.img", &initrd).unwrap();
+        let img = b.finish();
+        let mut fs = Fat32::parse(&img[..]).unwrap();
+        let mut f = fs.open("ARICODEOS/INITRD.IMG").unwrap();
+        assert_eq!(f.size as usize, initrd.len());
+        // Forward, across clusters, then back to the start.
+        for (offset, len) in [(0, 8), (511, 3), (100_000, 5000), (299_990, 10), (17, 900)] {
+            let mut buf = alloc::vec![0u8; len];
+            fs.read_at(&mut f, offset, &mut buf).unwrap();
+            assert_eq!(&buf[..], &initrd[offset as usize..offset as usize + len]);
+        }
+        assert_eq!(
+            fs.read_at(&mut f, 299_995, &mut [0u8; 10]),
+            Err(FatError::Corrupt)
+        );
+        assert_eq!(fs.open("aricodeos/absent").err(), Some(FatError::NotFound));
+        assert_eq!(fs.open("aricodeos").err(), Some(FatError::IsADirectory));
+        // A chain that ends early is refused, not read past.
+        let mut broken = img.clone();
+        let fat = 32 * 512 + 4 * (f.cluster as usize + 10);
+        broken[fat..fat + 4].copy_from_slice(&0x0FFF_FFFFu32.to_le_bytes());
+        let mut fs = Fat32::parse(&broken[..]).unwrap();
+        let mut f = fs.open("aricodeos/initrd.img").unwrap();
+        assert_eq!(
+            fs.read_at(&mut f, 200_000, &mut [0u8; 4]),
+            Err(FatError::Corrupt)
+        );
     }
 
     #[test]
@@ -703,7 +832,7 @@ mod tests {
             0x0FFF_FFF8
         );
 
-        let fs = Fat32::parse(&img).unwrap();
+        let mut fs = Fat32::parse(&img[..]).unwrap();
         assert!(fs.total_clusters() >= 65_525);
         assert_eq!(fs.read_file("EFI/BOOT/BOOTX64.EFI").unwrap(), efi);
         assert_eq!(
@@ -749,7 +878,7 @@ mod tests {
             b.add_file(&name, &[i as u8; 700]).unwrap();
         }
         let img = b.finish();
-        let fs = Fat32::parse(&img).unwrap();
+        let mut fs = Fat32::parse(&img[..]).unwrap();
         let dir = fs.root_dir().unwrap();
         let d = dir.iter().find(|e| e.name == "dir").unwrap();
         let entries = fs.read_dir(d.cluster).unwrap();

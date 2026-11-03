@@ -4,7 +4,8 @@
 //! service. Handles: 0x10004 = own endpoint (READ|WRITE), 0x10005 =
 //! block service endpoint (WRITE), 0x10006 = HARDWARE (DMA),
 //! 0x10007 = SYSTEM (READ, clock for timeouts). `arg` = absolute LBA of
-//! the AriFS partition.
+//! the AriFS partition, with `ARG_MIGRATE` set when init asks for a v1
+//! volume to be migrated to v2 at mount (ADR 0072).
 //!
 //! Besides its main endpoint (init, the broker) fsd serves *sessions* (ADR
 //! 0036): endpoints it creates on request of the main endpoint, bound to a
@@ -18,10 +19,10 @@
 #![no_main]
 
 use aricode_arifs::descriptors::{Descriptors, MAX_OPEN};
-use aricode_arifs::{AriFs, BlockDevice, FsError, Recovery, SECTOR};
+use aricode_arifs::{v1, v2, BlockDevice, FsError, Mounted, Volume, SECTOR};
 use aricode_faults::Meter;
 use aricode_proto::fs::{
-    Op, OwnerDescriptors, Reply, Request, Status, MAX_IO, SHARE_MAY_BE_MISSING,
+    Op, OwnerDescriptors, Reply, Request, Status, ARG_MIGRATE, MAX_IO, SHARE_MAY_BE_MISSING,
 };
 use aricode_rt::sys::{self, block::BlockClient, client_buffer, Handle};
 
@@ -29,13 +30,10 @@ use aricode_rt::sys::{self, block::BlockClient, client_buffer, Handle};
 /// oldest is unmapped to make room).
 type ClientBuffers = client_buffer::ClientBuffers<8>;
 
-// The protocol's atomic replace is the AriFS journal, and the package limit
-// of the whole system follows it (incident 0026): they never drift apart.
-const _: () = assert!(
-    aricode_proto::fs::MAX_REPLACE as usize == aricode_arifs::JOURNAL_CAPACITY_BYTES
-        && aricode_arifs::JOURNAL_CAPACITY_BYTES
-            == aricode_arifs::FILE_CAPACITY_SECTORS as usize * SECTOR
-);
+// The protocol's atomic replace is AriFS v2's largest file, and the package
+// limit of the whole system follows it (incident 0026, ADR 0072): they
+// never drift apart. A volume still in v1 refuses more than its journal.
+const _: () = assert!(aricode_proto::fs::MAX_REPLACE == v2::MAX_FILE_BYTES);
 
 const SERVICE: Handle = Handle(0x0001_0004);
 /// Exit code when the volume must be mounted again (`needs_reopen`).
@@ -47,6 +45,9 @@ const SYSTEM: Handle = Handle(0x0001_0007);
 /// owner died or went away): the next one supersedes it
 /// (audit 6ee19fb, finding 3).
 const STAGING_TIMEOUT_MS: u64 = 2_000;
+/// The longest a chunked replace may stay open, chunks or not: a 16 MiB
+/// replace of 4 KiB chunks takes seconds even over USB.
+const STAGING_MAX_MS: u64 = 120_000;
 /// Sessions served at once: every one of them and the main endpoint fit
 /// in a single `ipc_receive_any`.
 const MAX_SESSIONS: usize = sys::abi::IPC_MAX_ANY - 1;
@@ -68,6 +69,25 @@ fn say(msg: &[u8]) {
 struct PartitionDevice {
     blk: BlockClient,
     base_lba: u64,
+    /// Sectors from `base_lba` the device may reach: the disk less its
+    /// backup GPT. A volume whose geometry claims more is refused there
+    /// rather than written past (audit of ADR 0072, I1: `ARI0` is last).
+    limit: u64,
+}
+
+impl PartitionDevice {
+    /// The absolute LBA of `count` sectors from `lba`, inside `limit`.
+    /// Checked: a forged entry's start must not wrap onto another
+    /// partition (audit 2026-10-25 B, L1).
+    fn at(&self, lba: u64, count: u16) -> Result<u64, FsError> {
+        if lba
+            .checked_add(count as u64)
+            .is_none_or(|end| end > self.limit)
+        {
+            return Err(FsError::Io);
+        }
+        self.base_lba.checked_add(lba).ok_or(FsError::Io)
+    }
 }
 
 impl BlockDevice for PartitionDevice {
@@ -83,16 +103,14 @@ impl BlockDevice for PartitionDevice {
     /// A whole batch in one request to the block service (stage 5).
     fn read_sectors(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), FsError> {
         let count = (buf.len() / SECTOR) as u16;
-        // Checked: a forged entry's start must not wrap onto another
-        // partition (audit 2026-10-25 B, L1).
-        let at = self.base_lba.checked_add(lba).ok_or(FsError::Io)?;
+        let at = self.at(lba, count)?;
         self.blk.read(at, count).map_err(|_| FsError::Io)?;
         buf.copy_from_slice(&self.blk.buffer()[..buf.len()]);
         Ok(())
     }
     fn write_sectors(&mut self, lba: u64, buf: &[u8]) -> Result<(), FsError> {
         let count = (buf.len() / SECTOR) as u16;
-        let at = self.base_lba.checked_add(lba).ok_or(FsError::Io)?;
+        let at = self.at(lba, count)?;
         self.blk.buffer()[..buf.len()].copy_from_slice(buf);
         self.blk.write(at, count).map_err(|_| FsError::Io)
     }
@@ -106,6 +124,7 @@ fn status_of(e: FsError) -> Status {
         FsError::NoSpace => Status::NoSpace,
         FsError::BadName | FsError::BadTransaction => Status::Invalid,
         FsError::OutOfRange => Status::OutOfRange,
+        FsError::Unsupported => Status::Unsupported,
     }
 }
 
@@ -200,6 +219,8 @@ fn qualified<'a>(prefix: &str, name: &str, buf: &'a mut [u8; 64]) -> Option<&'a 
 struct Staging {
     index: usize,
     owner: usize,
+    /// Its first chunk, for `STAGING_MAX_MS`.
+    started_ms: u64,
     last_ms: u64,
 }
 
@@ -207,8 +228,12 @@ impl Staging {
     fn same(&self, index: usize, owner: usize) -> bool {
         self.index == index && self.owner == owner
     }
+    /// Idle too long, or open too long in all: a client that trickles
+    /// chunks must not hold the one replace slot forever (audit of ADR
+    /// 0072, L5).
     fn abandoned(&self, now: u64) -> bool {
         now.saturating_sub(self.last_ms) >= STAGING_TIMEOUT_MS
+            || now.saturating_sub(self.started_ms) >= STAGING_MAX_MS
     }
 }
 
@@ -268,7 +293,7 @@ impl Fault {
 
 /// The service: the file system, its clients' state and its sessions.
 struct Service {
-    fs: AriFs<PartitionDevice>,
+    fs: Volume<PartitionDevice>,
     fds: Descriptors,
     buffers: ClientBuffers,
     staging: Option<Staging>,
@@ -423,12 +448,12 @@ impl Service {
     /// Serves one request that arrived on `owner`'s endpoint (0 = main).
     fn serve(&mut self, owner: usize, msg: &[u8], handles: &[Handle]) {
         self.serve_one(owner, msg, handles);
-        // A committed replace could not be applied: only a fresh mount
-        // brings the volume back (it redoes the journal). Exiting lets the
-        // supervisor relaunch fsd; until then every request would fail
-        // (audit of incident 0032, M1).
+        // A v1 replace was committed but not applied: only a fresh mount
+        // redoes it. Exiting lets the supervisor relaunch fsd; until then
+        // every request would fail (audit of incident 0032, M1). v2 never
+        // asks: it resyncs its table before the next change.
         if self.fs.needs_reopen() {
-            say(b"a committed replace could not be applied; exiting to redo it at mount");
+            say(b"a commit could not be completed; exiting to mount again");
             sys::process_exit(EXIT_REMOUNT);
         }
     }
@@ -506,7 +531,7 @@ impl Service {
                 Op::List => {
                     return match (req.fd, self.fs.find(shared.name_str())) {
                         (0, Some(i)) => {
-                            let size = self.fs.entry(i).map_or(0, |e| e.size);
+                            let size = self.fs.info(i).map_or(0, |e| e.size);
                             Reply::ok(size as u64).with_name(shared.bare())
                         }
                         _ => Reply::status(Status::NotFound),
@@ -598,6 +623,45 @@ impl Service {
                     }
                 }
             }
+            // Said before any lookup, so a client learns it without
+            // creating anything first.
+            Op::Delete | Op::Rename if self.fs.version() == 1 => Reply::status(Status::Unsupported),
+            Op::Delete => {
+                let Some(index) =
+                    qualified(prefix, req.name_str(), &mut qbuf).and_then(|q| self.fs.find(q))
+                else {
+                    return Reply::status(Status::NotFound);
+                };
+                match self.fs.delete(index) {
+                    Ok(()) => {
+                        self.forget(index);
+                        Reply::ok(0)
+                    }
+                    Err(e) => Reply::status(status_of(e)),
+                }
+            }
+            Op::Rename => {
+                let Some(index) = self.fds.get(req.fd, owner) else {
+                    return Reply::status(Status::BadFd);
+                };
+                let Some(name) = qualified(prefix, req.name_str(), &mut qbuf) else {
+                    return Reply::status(Status::Invalid);
+                };
+                let replaced = self.fs.find(name).filter(|&j| j != index);
+                match self.fs.rename(index, name) {
+                    Ok(()) => {
+                        if let Some(j) = replaced {
+                            self.forget(j);
+                        }
+                        // Others' descriptors do not follow the file to a
+                        // name their prefix may not cover (audit of ADR
+                        // 0072, I3).
+                        self.fds.revoke_others(index, owner);
+                        Reply::ok(0)
+                    }
+                    Err(e) => Reply::status(status_of(e)),
+                }
+            }
             Op::Flush => match self.fs.flush() {
                 Ok(()) => Reply::ok(0),
                 Err(e) => Reply::status(status_of(e)),
@@ -645,9 +709,22 @@ impl Service {
                     Op::Write => self.fs.write(index, req.offset, &buf[..len]),
                     Op::Replace => {
                         self.staging = None;
-                        self.fs.replace(index, &buf[..len]).map(|()| len)
+                        let r = self.fs.replace(index, &buf[..len]).map(|()| len);
+                        // A refused replace gives back what it took (audit
+                        // of ADR 0072, L2).
+                        if r.is_err() {
+                            self.fs.abandon_replace();
+                        }
+                        r
                     }
+                    // An empty chunk advances nothing; accepted, it kept a
+                    // transaction alive at no cost (audit of ADR 0072, L5).
+                    _ if len == 0 => Err(FsError::BadTransaction),
                     _ => {
+                        let started_ms = match self.staging {
+                            Some(s) if req.offset != 0 && s.same(index, owner) => s.started_ms,
+                            _ => now,
+                        };
                         let r = self.fs.replace_chunk(index, req.offset, &buf[..len]);
                         // Stamped once the chunk is written: its block
                         // requests may take seconds, which must not make a
@@ -656,6 +733,7 @@ impl Service {
                         self.staging = r.is_ok().then_some(Staging {
                             index,
                             owner,
+                            started_ms,
                             last_ms: now_ms(),
                         });
                         if r.is_err() {
@@ -669,6 +747,15 @@ impl Service {
                     Err(e) => Reply::status(status_of(e)),
                 }
             }
+        }
+    }
+
+    /// File `index` was deleted: its descriptors and its replace in
+    /// progress go, since its slot may soon hold another file.
+    fn forget(&mut self, index: usize) {
+        self.fds.revoke_index(index);
+        if self.staging.is_some_and(|s| s.index == index) {
+            self.staging = None;
         }
     }
 
@@ -776,15 +863,25 @@ impl Service {
     }
 }
 
-fn main(partition_lba: u64) -> u64 {
+fn main(arg: u64) -> u64 {
+    let partition_lba = arg & !ARG_MIGRATE;
     let Ok(blk) = BlockClient::new(BLOCK, HW, aricode_arifs::MAX_BATCH_SECTORS as u16) else {
+        return 1;
+    };
+    // The backup GPT: its header and 32 sectors of entries end the disk.
+    const BACKUP_GPT: u64 = 33;
+    let Ok(capacity) = blk.capacity() else {
+        say(b"block service does not answer Info");
         return 1;
     };
     let dev = PartitionDevice {
         blk,
         base_lba: partition_lba,
+        limit: capacity
+            .saturating_sub(BACKUP_GPT)
+            .saturating_sub(partition_lba),
     };
-    let fs = match AriFs::open(dev) {
+    let mut fs = match Volume::open(dev) {
         Ok(fs) => fs,
         Err(FsError::Corrupt) => {
             say(b"AriFS corrupt: not mounting");
@@ -795,17 +892,44 @@ fn main(partition_lba: u64) -> u64 {
             return 2;
         }
     };
-    match fs.recovery() {
-        Recovery::Clean => {}
-        Recovery::Replayed { index } => {
+    match fs.mounted() {
+        Mounted::V1(v1::Recovery::Clean) | Mounted::V2(v2::Recovery::Clean) => {}
+        Mounted::V1(v1::Recovery::Replayed { index }) => {
             sys::print(b"fsd: pending replace of '");
-            sys::print(fs.entry(index).map_or("?", |e| e.name_str()).as_bytes());
+            sys::print(
+                fs.info(index)
+                    .as_ref()
+                    .map_or("?", |e| e.name_str())
+                    .as_bytes(),
+            );
             sys::print(b"' redone at mount\n");
         }
-        Recovery::Discarded => say(b"broken journal discarded at mount"),
+        Mounted::V1(v1::Recovery::Discarded) => say(b"broken journal discarded at mount"),
+        Mounted::V2(v2::Recovery::TornCommitDiscarded) => {
+            say(b"a commit cut half-written was discarded at mount")
+        }
+        Mounted::V2(v2::Recovery::MigrationCompleted) => {
+            say(b"a migration to AriFS v2 cut at its last write was completed")
+        }
+    }
+    if arg & ARG_MIGRATE != 0 && fs.version() == 1 {
+        // On an error the device went with the volume: exiting lets the
+        // supervisor mount again, which finds v1 or v2, never a mix.
+        fs = match fs.migrate() {
+            Ok(fs) => {
+                say(b"AriFS migrated to v2 in place");
+                fs
+            }
+            Err(_) => {
+                say(b"migration to AriFS v2 failed; exiting to mount again");
+                return EXIT_REMOUNT;
+            }
+        };
     }
     let mut buf = [0u8; 20];
-    sys::print(b"fsd: AriFS mounted, ");
+    sys::print(b"fsd: AriFS v");
+    sys::print(aricode_rt::fmt_u64(fs.version() as u64, &mut buf));
+    sys::print(b" mounted, ");
     sys::print(aricode_rt::fmt_u64(fs.entries().count() as u64, &mut buf));
     sys::print(b" files\n");
     let mut srv = Service {

@@ -12,7 +12,7 @@ cmdline = "qemu_exit"
 exit = 33
 serial_contains = [
     "virtio-blk: GPT with 5 partition(s)",
-    "virtio-blk:   ARI0 LBA 34..6143",
+    "virtio-blk:   ARI0 LBA 81920..98270",
     "virtio-blk: serving requests",
     "blk_client: info, read and write over IPC ok",
     "AriInit: block service ok",

@@ -29,7 +29,7 @@ serial_contains = [
     "updater: AriFS has no room for 1 more file(s) this upgrade needs: nothing installed",
     "update: updater exited with 39",
     ": upd-fs-full (code 39)",
-    "32 file(s)",
+    "255 file(s)",
     "ARICODEOS_SHUTDOWN",
 ]
 serial_absent = [

@@ -1,7 +1,8 @@
 # Stage 2 (ADR 0014): the test disk carries a replacement of `README`
 # committed to the AriFS journal but not applied (what is left after a
 # power cut right after the commit). fsd replays it at mount and the shell reads
-# the whole new content.
+# the whole new content. Both slots read AriFS v2, so the disk is then
+# migrated (ADR 0072): the replay comes first, at v1's mount.
 name = "filesystem.replace_recovery"
 description = "AriFS replays at mount an atomic replace that was committed and cut off before being applied"
 level = "full"
@@ -15,7 +16,8 @@ stdin = ["cat README", "shutdown"]
 exit = 33
 serial_contains = [
     "fsd: pending replace of 'README' redone at mount",
-    "fsd: AriFS mounted, 4 files",
+    "fsd: AriFS migrated to v2 in place",
+    "fsd: AriFS v2 mounted, 4 files",
     "AriCodeOS: recuperado tras un corte",
     "ARICODEOS_SHUTDOWN",
 ]

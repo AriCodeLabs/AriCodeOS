@@ -1375,9 +1375,14 @@ pub fn run_headless(
     use std::sync::{Arc, Mutex};
     let vars = image::ovmf_vars_for(workdir)?;
     let disk = workdir.join("disk.img");
-    let esp_drive = if disk_variant == image::DiskVariant::UsbImage {
+    let usb = matches!(
+        disk_variant,
+        image::DiskVariant::UsbImage | image::DiskVariant::UsbImageBefore0072
+    );
+    let esp_drive = if usb {
         if !options.keep_disk {
-            image::write_usb_image(&disk, esp, &[], aricode_gpt::TEST_DISK_GUID)?;
+            let before_0072 = disk_variant == image::DiskVariant::UsbImageBefore0072;
+            image::write_usb_image_as(&disk, esp, &[], aricode_gpt::TEST_DISK_GUID, before_0072)?;
         }
         None
     } else {

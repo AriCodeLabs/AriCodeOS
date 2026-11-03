@@ -21,6 +21,7 @@
 extern crate alloc;
 
 use aricode_manifest::{Caps, Manifest};
+use aricode_proto::fs::ARG_MIGRATE;
 use aricode_proto::launch::{
     Reply as LaunchReply, Request as LaunchRequest, Status as LaunchStatus,
 };
@@ -507,6 +508,99 @@ fn confirm_boot_slot(arg: u64, block_service: Handle) {
     }
 }
 
+/// Whether every slot that holds a system declares that it reads AriFS v2
+/// (ADR 0072): only then may fsd migrate a v1 volume, since a rollback to
+/// either slot finds a system that mounts it. A slot without a valid
+/// header holds no system to go back to; past the header, anything that
+/// does not show `arifs = 2` (unreadable, malformed) counts as v1, as the
+/// updater counts it (audit of ADR 0072, L3).
+fn slots_read_arifs_v2(blk: &mut BlockClient) -> bool {
+    use aricode_ab::Image;
+    for part in [aricode_ab::PART_SLOT_A, aricode_ab::PART_SLOT_B] {
+        let Some((first, last)) = find_partition(blk, part) else {
+            continue;
+        };
+        if blk.read(first, 1).is_err() {
+            return false;
+        }
+        let Ok(len) = Image::container_len(&blk.buffer()[..512]) else {
+            continue;
+        };
+        if len as u64 > (last - first) * 512 {
+            continue;
+        }
+        let features = Image::features(len as usize, |offset, buf| {
+            read_bytes(blk, first + 1, offset, buf)
+        });
+        if !features.is_ok_and(|f| f.arifs >= 2) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Whether the ESP's system, which AriBoot boots when no slot verifies,
+/// reads AriFS v2 (audit of ADR 0072, M1): every stick written before ADR
+/// 0072 keeps a v1-only system there, which nothing updates. A disk
+/// without an ESP partition, or an ESP without a system, has nothing to
+/// fall back to; anything else that does not show `arifs = 2` counts as v1.
+fn esp_reads_arifs_v2(blk: &mut BlockClient) -> bool {
+    use aricode_fat::{Fat32, FatError};
+    let Some((first, _)) = find_partition(blk, "ESP") else {
+        return true;
+    };
+    let Ok(mut fat) = Fat32::parse(EspSectors { blk, first }) else {
+        return false;
+    };
+    let mut initrd = match fat.open("aricodeos/initrd.img") {
+        Ok(f) => f,
+        Err(FatError::NotFound) => return true,
+        Err(_) => return false,
+    };
+    let len = initrd.size as usize;
+    aricode_ab::initrd_features(len, |offset, buf| {
+        fat.read_at(&mut initrd, offset as u32, buf).map_err(|_| ())
+    })
+    .is_ok_and(|f| f.arifs >= 2)
+}
+
+/// The ESP's sectors through the block client, for the FAT reader.
+struct EspSectors<'a> {
+    blk: &'a mut BlockClient,
+    first: u64,
+}
+
+impl aricode_fat::Sectors for EspSectors<'_> {
+    fn read_sector(
+        &mut self,
+        sector: u64,
+        buf: &mut [u8; 512],
+    ) -> Result<(), aricode_fat::FatError> {
+        self.blk
+            .read(self.first + sector, 1)
+            .map_err(|_| aricode_fat::FatError::Corrupt)?;
+        buf.copy_from_slice(&self.blk.buffer()[..512]);
+        Ok(())
+    }
+}
+
+/// Fills `buf` from byte `offset` of the area that starts at `base` (LBA),
+/// up to the block client's batch at a time.
+fn read_bytes(blk: &mut BlockClient, base: u64, offset: usize, buf: &mut [u8]) -> Result<(), ()> {
+    let mut done = 0;
+    while done < buf.len() {
+        let at = offset + done;
+        let in_sector = at % 512;
+        let sectors = (in_sector + buf.len() - done).div_ceil(512).min(16);
+        blk.read(base + (at / 512) as u64, sectors as u16)
+            .map_err(|_| ())?;
+        let n = (sectors * 512 - in_sector).min(buf.len() - done);
+        buf[done..done + n].copy_from_slice(&blk.buffer()[in_sector..in_sector + n]);
+        done += n;
+    }
+    Ok(())
+}
+
 /// On top of an already running block service: fsd on the ARI0 partition
 /// (found by GPT name: the test disk and the USB image place it at different
 /// LBAs). The read-only health checks always run: the block service answers
@@ -529,8 +623,14 @@ fn start_storage_stack(
     };
     let disk = BlockClient::new(service, HARDWARE, 16)
         .ok()
-        .and_then(|mut blk| Some((blk.capacity().ok()?, find_partition(&mut blk, "ARI0"))));
-    let Some((capacity, ari0)) = disk else {
+        .and_then(|mut blk| {
+            Some((
+                blk.capacity().ok()?,
+                find_partition(&mut blk, "ARI0"),
+                slots_read_arifs_v2(&mut blk) && esp_reads_arifs_v2(&mut blk),
+            ))
+        });
+    let Some((capacity, ari0, migrate)) = disk else {
         say(b"block service does not answer Info");
         return Err(11);
     };
@@ -543,12 +643,15 @@ fn start_storage_stack(
     sys::print(b" sectors, GPT read, ARI0 at LBA ");
     sys::print(aricode_rt::fmt_u64(ari0_lba, &mut buf));
     sys::print(b"\n");
+    if !migrate {
+        say(b"a slot or the ESP holds a system that reads only AriFS v1: ARI0 is not migrated");
+    }
     let launched = sup
         .register(
             "fsd",
             Kind::Fs {
                 block_service: service,
-                partition_lba: ari0_lba,
+                partition_lba: ari0_lba | if migrate { ARG_MIGRATE } else { 0 },
             },
             Probe::None,
             fs_ep,
@@ -577,7 +680,7 @@ fn start_storage_stack(
             sup,
             "blk_client",
             service,
-            ari0_lba + RAW_AREA_OFFSET,
+            RAW_AREA_LBA,
             b"block service ok",
             11,
         )?;
@@ -771,7 +874,17 @@ fn start_fsd(
         SYSTEM,
         rights::READ | rights::TRANSFER,
     )?);
-    let child = sys::process_spawn_with(SPAWNER, "fsd", partition_lba, sent.handles())?;
+    // A migration is asked for on fsd's first launch only: a relaunch
+    // (after a failed migration, or any exit) serves what the disk holds,
+    // and never migrates later than the decision taken at boot, when the
+    // updater may already have installed a system that reads only v1
+    // (audit of ADR 0072, L4 and L6).
+    let arg = if MIGRATE_ASKED.swap(true, core::sync::atomic::Ordering::Relaxed) {
+        partition_lba & !ARG_MIGRATE
+    } else {
+        partition_lba
+    };
+    let child = sys::process_spawn_with(SPAWNER, "fsd", arg, sent.handles())?;
     sent.take();
     Ok(child)
 }
@@ -1040,6 +1153,9 @@ const MAX_RESIDENTS: usize = 10;
 /// queryable status (`status` v1) for the shell.
 /// `strict` on the command line (ADR 0028): nothing is restarted.
 static STRICT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// fsd was launched once: later launches never carry `ARG_MIGRATE`.
+static MIGRATE_ASKED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 fn strict() -> bool {
     STRICT.load(core::sync::atomic::Ordering::Relaxed)
@@ -1595,10 +1711,11 @@ fn restart_storm(sup: &mut Supervisor, fs: &mut FsClient) -> Result<(), u64> {
     Ok(())
 }
 
-/// Offset of the raw area inside ARI0 that `blk_client` (`selftest` only)
-/// checks and writes: the test disk has it at LBA 4096 with ARI0 at 34,
-/// over virtio-blk or USB. The USB stick image has no raw-area pattern.
-const RAW_AREA_OFFSET: u64 = 4096 - 34;
+/// The raw area that `blk_client` (`selftest` only) checks and writes: the
+/// test disk has it at LBA 4096, over virtio-blk or USB, outside `ARI0`
+/// since that partition went last (ADR 0072). The USB stick image has no
+/// raw-area pattern.
+const RAW_AREA_LBA: u64 = 4096;
 
 /// Launches a client of a service with its endpoint (WRITE only) and a
 /// hardware capability for its DMA buffer.

@@ -151,12 +151,14 @@ it from the ARI0 partition:
 ari> diag diag.txt
 ari> shutdown
 # on the host, with the USB stick attached as /dev/sdX
-sudo dd if=/dev/sdX of=build/usb-dump.img bs=1M count=70 status=none
+sudo dd if=/dev/sdX of=build/usb-dump.img bs=1M count=166 status=none
 cargo xtask fs-cat build/usb-dump.img            # lists the files in ARI0
 cargo xtask fs-cat build/usb-dump.img diag.txt   # uptime, memory, CPUs, entropy, processes, services, PCI and events
 ```
 
-The 70 MiB cover the ARI0 partition of the USB image (LBA 133120 to 139263).
+The 166 MiB cover the ARI0 partition of the USB image, last since ADR 0072
+(LBA 208896 to 339967). A stick written before it has ARI0 at LBA 133120
+to 139263, and 70 MiB are enough; `fs-cat` reads either version of AriFS.
 
 ### Entropy: does the laptop have `rdrand`?
 
