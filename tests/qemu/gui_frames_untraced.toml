@@ -2,12 +2,15 @@
 # prints nothing per frame (COM1 busy-waits at 115200 baud). Without
 # `gui_trace` the two demo windows open, present and close with no frame
 # lines or pixel samples on the serial; no input is sent, so each demo
-# times out waiting for keys.
+# times out waiting for keys. The demos are the test package `gui_demo`
+# (ADR 0074), started from the shell.
 name = "gui.frames_untraced"
 description = "without gui_trace the compositor composes frames silently"
 level = "full"
 areas = ["gui"]
-cmdline = "qemu_exit gui"
+cmdline = "qemu_exit gui shell"
+install = ["examples/gui_demo"]
+stdin = ["spawn gui_demo 0", "run gui_demo 1", "sleep 1000", "shutdown"]
 timeout_secs = 120
 
 [expect]
@@ -21,7 +24,8 @@ serial_contains = [
     "compositor: desktop ready with 2 windows",
     "gui_demo A: no keys",
     "gui_demo B: no keys",
-    "AriInit: gui ok (2 applications)",
-    "ARICODEOS_KERNEL_READY",
+    "AriInit: gui ok (compositor started)",
+    "gui_demo A: window closed",
+    "ARICODEOS_SHUTDOWN",
 ]
 serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "compositor: frame", " sample (", "gui_trace"]

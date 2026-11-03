@@ -2636,8 +2636,9 @@ fn join<'a>(a: &str, b: &str, buf: &'a mut [u8; 48]) -> Option<&'a str> {
 }
 
 /// Launches the compositor (own endpoint, framebuffer, SYSTEM, hardware for
-/// its back buffer and the input services) and two graphical applications
-/// sharing the screen; waits for the applications to exit.
+/// its back buffer and the input services) and returns its endpoint. The
+/// applications get their sessions from the broker (ADR 0052); the
+/// graphical demos are a test package since ADR 0074.
 fn run_gui(inputs: &[Handle]) -> Result<Handle, u64> {
     let service = sys::endpoint_create().map_err(|_| 1u64)?;
     let mut handles = [Handle(0); 8];
@@ -2659,62 +2660,7 @@ fn run_gui(inputs: &[Handle]) -> Result<Handle, u64> {
     let _compositor =
         sys::process_spawn_with(SPAWNER, "compositor", inputs.len() as u64, &handles[..n])
             .map_err(|_| 7u64)?;
-    let mut apps = [None; 2];
-    let mut failed = None;
-    for (i, app) in apps.iter_mut().enumerate() {
-        match spawn_gui_app(service, i) {
-            Ok(launched) => *app = Some(launched),
-            Err(code) => {
-                failed = Some(code);
-                break;
-            }
-        }
-    }
-    // Every application launched is waited for and its session ended, even
-    // when a later one failed to start.
-    for (app, session) in apps.into_iter().flatten() {
-        let code = sys::process_wait(app, TIMEOUT_INFINITE);
-        let _ = sys::handle_close(app);
-        let _ = sys::window::detach(service, session);
-        failed = failed.or(match code {
-            Ok(0) => None,
-            Ok(code) => Some(100 + code),
-            Err(_) => Some(10),
-        });
-    }
-    match failed {
-        Some(code) => Err(code),
-        None => Ok(service),
-    }
-}
-
-/// Starts graphical demo `i` with a compositor session of its own (ADR
-/// 0052, send side only) and `HARDWARE`; returns it and the session's id.
-fn spawn_gui_app(service: Handle, i: usize) -> Result<(Handle, u32), u64> {
-    let (session, id) = sys::window::attach(service).map_err(|_| 8u64)?;
-    let narrowed = sys::handle_duplicate(session, rights::WRITE | rights::TRANSFER);
-    let _ = sys::handle_close(session);
-    let hw = sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER);
-    match (narrowed, hw) {
-        (Ok(ep), Ok(hw)) => match sys::process_spawn_with(SPAWNER, "gui_demo", i as u64, &[ep, hw])
-        {
-            Ok(app) => Ok((app, id)),
-            // The kernel takes the handles only when it creates the process.
-            Err(_) => {
-                let _ = sys::handle_close(ep);
-                let _ = sys::handle_close(hw);
-                let _ = sys::window::detach(service, id);
-                Err(9)
-            }
-        },
-        (ep, hw) => {
-            for h in [ep, hw].into_iter().flatten() {
-                let _ = sys::handle_close(h);
-            }
-            let _ = sys::window::detach(service, id);
-            Err(8)
-        }
-    }
+    Ok(service)
 }
 
 fn main(arg: u64) -> u64 {
@@ -3130,15 +3076,15 @@ fn main(arg: u64) -> u64 {
     if let Some(wait_ms) = net_wait_ms {
         report_network_address(net_service, wait_ms);
     }
-    // 10. Graphical interface: compositor with the framebuffer and the inputs,
-    //     and two applications drawing at the same time.
+    // 10. Graphical interface: the compositor with the framebuffer and the
+    //     inputs; applications ask the broker for their windows.
     let mut compositor = None;
     if arg & sys::abi::init_arg::GUI != 0 {
         match run_gui(&input_eps[..inputs]) {
             Ok(ep) => {
                 services |= SERVICE_GUI;
                 compositor = Some(ep);
-                say(b"gui ok (2 applications)");
+                say(b"gui ok (compositor started)");
             }
             Err(code) => {
                 sys::print(b"AriInit: gui failed with ");

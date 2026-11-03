@@ -177,7 +177,7 @@ cargo xtask build          # compila AriBoot y AriKernel (release)
 cargo xtask image          # monta build/esp/ (BOOTX64.EFI, aricodeos/kernel.elf, aricodeos/initrd.img)
 cargo xtask run            # arranca en QEMU + OVMF, serie en la terminal (salir: Ctrl-A X)
 cargo xtask run --cmdline shell   # arranca con el shell interactivo (arish) en la consola serie
-cargo xtask run --cmdline gui     # compositor y dos ventanas de prueba en la pantalla de QEMU
+cargo xtask run --cmdline "gui shell"   # el compositor en la pantalla de QEMU, con el shell en la consola serie
 cargo xtask run --cpus 4   # arranca con cuatro procesadores (SMP)
 cargo xtask run --usb-hid  # añade un xHCI con teclado y raton USB
 cargo xtask test           # unit + smoke (arranque nominal en QEMU)

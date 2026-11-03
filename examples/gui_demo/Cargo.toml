@@ -1,0 +1,34 @@
+# The graphical demo (ADR 0074): two windows that share the screen, used by
+# the GUI scenarios. It left the image and is a test package the scenarios
+# install. Built like `hello_ext`.
+[package]
+name = "gui-demo"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Test graphical AriCodeOS application installed on AriFS"
+publish = false
+
+[[bin]]
+name = "gui_demo"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+aricode-rt = { path = "../../sdk/runtime" }
+aricode-proto = { path = "../../sdk/proto" }
+aricode-gfx = { path = "../../libs/gfx" }
+
+[build-dependencies]
+aricode-build = { path = "../../sdk/build" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
+
+[workspace]
