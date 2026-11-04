@@ -4,7 +4,10 @@
 //! terminal endpoint and checks the rules init applies there: sshd's
 //! `Exec` is refused, a request without its handles is dropped, four
 //! interactive shells are granted and a fifth is refused. Then it closes
-//! the shells' input, so they end, and exits.
+//! the shells' input, so they end, and exits. With `arg` 1 it opens one
+//! shell, has it `run cpu_hog`, which never ends, and exits without a
+//! word: init must stop the shell and what it ran (audit of the terminal,
+//! M2).
 //!
 //! Handles, in the broker's order: the terminal endpoint (send only).
 #![no_std]
@@ -25,10 +28,14 @@ fn ask(terminals: Handle, kind: Kind) -> Option<Handle> {
     let (in_r, input) = sys::endpoint_create_pair().ok()?;
     let (output, out_w) = sys::endpoint_create_pair().ok()?;
     let (reply, reply_w) = sys::endpoint_create_pair().ok()?;
+    // The side init watches; the other stays open until this test exits,
+    // and its shells end then (a handle is never closed by going out of
+    // scope).
+    let (alive_r, _alive) = sys::endpoint_create_pair().ok()?;
     let sent = sys::ipc_send(
         terminals,
         &session::Request { kind }.encode(),
-        &[reply_w, in_r, out_w],
+        &[reply_w, in_r, out_w, alive_r],
         2000,
     );
     let mut msg = [0u8; 8];
@@ -48,7 +55,7 @@ fn ask(terminals: Handle, kind: Kind) -> Option<Handle> {
     }
 }
 
-fn main(_arg: u64) -> u64 {
+fn main(arg: u64) -> u64 {
     let mut terminals = None;
     permissions::granted(|h, _| {
         if permissions::is(h, kind::ENDPOINT) && terminals.is_none() {
@@ -59,6 +66,16 @@ fn main(_arg: u64) -> u64 {
         say(b"started without the terminal endpoint");
         return 1;
     };
+    if arg == 1 {
+        let Some(input) = ask(terminals, Kind::Shell) else {
+            say(b"no shell granted");
+            return 3;
+        };
+        let _ = sys::ipc_send(input, b"run cpu_hog\n", &[], 2000);
+        sys::thread_sleep(1500);
+        say(b"leaving its shell in run");
+        return 0;
+    }
     let mut kept = true;
     if ask(terminals, Kind::Exec).is_some() {
         say(b"an Exec session was granted");
