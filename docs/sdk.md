@@ -113,7 +113,8 @@ in the shell; following the profile writes `session = desktop`). At boot
 init starts the compositor and the profile's `launcher` (`desktop/launcher`),
 which lists the installed apps that open a window (`sys::launch::installed`)
 and starts them through the broker with the capability `launch`, up to six
-at once. Shared widgets (keys, buttons, lists, text fields) are in
+at once. The profile's `terminal` (`desktop/terminal`) shows a session shell
+in a window. Shared widgets (keys, buttons, lists, text fields) are in
 `aricode_gfx::widgets`. When the
 launcher exits, or on Ctrl+Alt+Backspace on any keyboard, the desktop ends
 and the text console gets the screen and the keyboards back. A stick can come with a profile: `cargo xtask
@@ -159,7 +160,7 @@ launches with capabilities, such as `tcp_hog` or `sock_leaker`, keeps its manife
 
 ```text
 name = hello_app
-caps = system, fs      # system | fs | net | window | block (updater only) | install (installer only) | launch (launcher only)
+caps = system, fs      # system | fs | net | window | block (updater only) | install (installer only) | launch (launcher only) | terminal (terminal only)
 memory = 128K          # DMA buffer quota (K or M, at most 8M)
 read_files = hola.txt  # up to 4 AriFS files in read-only mode (ADR 0016)
 ```
@@ -168,7 +169,7 @@ Handles arrive in this fixed order, only the requested ones: `SYSTEM`
 (read), the fsd private directory, one endpoint per `read_files` entry (in
 order; from it the program can only list, open and read that file, and
 everything else answers `Denied`), the network endpoint, a compositor
-session (its windows are its alone, ADR 0052), the block endpoint, the fsd main namespace (`install`), the broker's launch endpoint (`launch`, ADR 0074: only for an installed, signed `launcher`, which may start installed apps in the background, each with its own manifest, and nothing else) and, if any capability needs buffers (`fs`, `read_files`, `net`,
+session (its windows are its alone, ADR 0052), the block endpoint, the fsd main namespace (`install`), the broker's launch endpoint (`launch`, ADR 0074: only for an installed, signed `launcher`, which may start installed apps in the background, each with its own manifest, and nothing else), the terminal endpoint (`terminal`: only for an installed, signed `terminal`, where init grants it interactive session shells, at most four, each the owner's own) and, if any capability needs buffers (`fs`, `read_files`, `net`,
 `window`, `block`, `install`), `HARDWARE` at the end. With
 `sys::permissions::granted` the application recognises them by kind without
 depending on the position. Without a manifest only the console and `SYSTEM`

@@ -1850,6 +1850,11 @@ fn run_shell(
         if let (Some(s), Some(fs)) = (sessions.as_deref_mut(), broker.fs.as_ref()) {
             s.serve(fs, net_service, services, broker.endpoint);
         }
+        if let Some(fs) = broker.fs.as_ref() {
+            broker
+                .terminals
+                .serve(fs, net_service, services, broker.endpoint);
+        }
     }
 }
 
@@ -1969,11 +1974,14 @@ fn spawn_shell(
     Ok(child)
 }
 
-/// Session shells for sshd (ADR 0025): requests arrive on `endpoint`;
-/// finished shells are reaped on every pass.
+/// Session shells for sshd (ADR 0025), or for the desktop's terminal (ADR
+/// 0074 phase C): requests arrive on `endpoint`; finished shells are
+/// reaped on every pass.
 struct Sessions {
     endpoint: Handle,
     children: [Option<Handle>; MAX_SESSIONS],
+    /// The terminal's: interactive shells only, never sshd's `Exec`.
+    terminal: bool,
 }
 
 const MAX_SESSIONS: usize = 4;
@@ -2002,7 +2010,9 @@ impl Sessions {
         }
         let [reply_to, input, output] = handles;
         let slot = self.children.iter().position(Option::is_none);
-        let spawned = match (session::Request::decode(&msg[..n]), slot) {
+        let request = session::Request::decode(&msg[..n])
+            .filter(|r| !self.terminal || r.kind == SessionKind::Shell);
+        let spawned = match (request, slot) {
             (Some(req), Some(slot)) => {
                 let quiet = if req.kind == SessionKind::Exec {
                     session::SHELL_QUIET
@@ -2026,7 +2036,11 @@ impl Sessions {
             }
         };
         if !spawned {
-            say(b"session shell refused (limit or invalid request)");
+            say(if self.terminal {
+                b"terminal shell refused (limit or invalid request)"
+            } else {
+                b"session shell refused (limit or invalid request)"
+            });
         }
         let _ = sys::ipc_send(reply_to, &session::reply(spawned), &[], 0);
         let _ = sys::handle_close(reply_to);
@@ -2038,7 +2052,8 @@ impl Sessions {
 /// and is allowed: `SYSTEM` (read), a private directory in fsd, the network
 /// endpoint, a compositor session, the block endpoint (trusted
 /// applications only), the main file namespace (`installer`), the launch
-/// endpoint (`launcher`, ADR 0074), and finally `HARDWARE` if it needs
+/// endpoint (`launcher`, ADR 0074), the terminal endpoint (`terminal`), and
+/// finally `HARDWARE` if it needs
 /// buffers, bounded by the manifest's memory. The input services are never
 /// granted (ADR 0053).
 struct Broker {
@@ -2059,6 +2074,8 @@ struct Broker {
     running: [Option<Running>; MAX_RUNNING + DESKTOP_SLOTS],
     /// The installed applications the launcher may offer, as last listed.
     offered: Offered,
+    /// Where `terminal` holders ask for session shells (ADR 0074 phase C).
+    terminals: Sessions,
     /// DMA buffer of the package being launched (ADR 0017), the package's
     /// size: freed once the launch ends, since the kernel copies the
     /// program when it creates the process (ADR 0072, phase B).
@@ -2230,6 +2247,11 @@ impl Broker {
             compositor,
             running: [None; MAX_RUNNING + DESKTOP_SLOTS],
             offered: Offered::new(),
+            terminals: Sessions {
+                endpoint: sys::endpoint_create()?,
+                children: [None; MAX_SESSIONS],
+                terminal: true,
+            },
             stage: None,
         })
     }
@@ -2785,14 +2807,21 @@ impl Broker {
             sys::print(b"\n");
             return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
         }
-        // `launch` goes only to an installed package, which verified against
-        // the release key: never to an initrd program of that name (ADR
-        // 0074).
-        if caps.contains(Caps::LAUNCH) && !matches!(source, Source::Installed { .. }) {
-            sys::print(b"AriInit: denied, launch is granted only to an installed, signed ");
-            sys::print(name.as_bytes());
-            sys::print(b"\n");
-            return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
+        // `launch` and `terminal` go only to an installed package, which
+        // verified against the release key: never to an initrd program of
+        // that name (ADR 0074).
+        for (cap, what) in [
+            (Caps::LAUNCH, &b"launch"[..]),
+            (Caps::TERMINAL, b"terminal"),
+        ] {
+            if caps.contains(cap) && !matches!(source, Source::Installed { .. }) {
+                sys::print(b"AriInit: denied, ");
+                sys::print(what);
+                sys::print(b" is granted only to an installed, signed ");
+                sys::print(name.as_bytes());
+                sys::print(b"\n");
+                return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
+            }
         }
         let mut needs_hw = false;
         if caps.contains(Caps::SYSTEM) {
@@ -2891,6 +2920,12 @@ impl Broker {
         // Send only: the launcher asks, the broker decides (`serve_apps`).
         if caps.contains(Caps::LAUNCH) {
             match sys::handle_duplicate(self.apps, rights::WRITE | rights::TRANSFER) {
+                Ok(h) => granted.push(h),
+                Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
+            }
+        }
+        if caps.contains(Caps::TERMINAL) {
+            match sys::handle_duplicate(self.terminals.endpoint, rights::WRITE | rights::TRANSFER) {
                 Ok(h) => granted.push(h),
                 Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
             }
@@ -3956,6 +3991,7 @@ fn main(arg: u64) -> u64 {
                     sessions = Some(Sessions {
                         endpoint,
                         children: [None; MAX_SESSIONS],
+                        terminal: false,
                     });
                 } else {
                     say(b"sshd did not start");

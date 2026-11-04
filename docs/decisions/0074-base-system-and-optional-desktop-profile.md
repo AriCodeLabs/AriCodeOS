@@ -461,3 +461,35 @@ the same branch:
   with another flag, the exact pool count and the focus rule (host).
 - **L9:** `stack-check` passes for init: 26 456 of 32 768 bytes.
 
+### The terminal (2026-11-04)
+
+- **A new capability, `terminal`.** Like `launch`, the broker grants it
+  only to an installed, signed package named `terminal`
+  (`Caps::TRUSTED_TERMINAL`), never to an initrd program. It is a send
+  handle to an endpoint of its own, `terminals`, so a request there is
+  known to come from the terminal.
+- **Init serves it as it serves sshd** (`Sessions`, ADR 0025). The
+  differences:
+  - only interactive shells, never sshd's `Exec` or `Ready`;
+  - at most four shells, apart from SSH's four.
+
+  Each shell is the owner's own, the same as at the console or over
+  SSH. The shell keeps its own file and network sessions, and nothing
+  passes through the terminal's manifest, as the design said.
+- **`desktop/terminal` only carries bytes:**
+  - it sends the keys of its window to the shell;
+  - it draws the shell's text with the console's own grid
+    (`aricode-fb-console`), which already understands the line editor's
+    output;
+  - the grid (about 64 KiB) lives in a static, too large for the stack.
+- **No polling.** `Window::start_poll` sends a poll without waiting for
+  its answer, so the terminal waits on its shell's output and on its
+  window's next event in one `ipc_receive_any`.
+- **When the shell ends, the terminal closes.** Killing the terminal,
+  for instance when the desktop ends, closes the shell's input, so the
+  shell ends too.
+- **Scenario `usb.desktop_terminal`:** the launcher offers the terminal,
+  and Enter opens it. `exit` typed in its window ends the shell, and the
+  terminal reports the text it showed (the banner, the prompt and the
+  echo).
+
