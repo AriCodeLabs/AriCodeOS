@@ -1,10 +1,12 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 // SPDX-License-Identifier: Apache-2.0
 //! A test package named `launcher` (ADR 0074 phase B). It holds `launch`:
-//! it presents a window, starts `hello_ext` and `gui_demo` through the
-//! broker's launch endpoint, and checks that the broker refuses the rest
-//! (a system program, itself, a launch waited for, a console). Then it
-//! waits 4 s, so the demo's window closes, and exits; in the desktop
+//! it presents a window, starts `gui_demo` through the broker's launch
+//! endpoint, and checks that the broker refuses the rest (an application
+//! without a window, a system program, itself, a launch waited for, a
+//! console, a list with another flag), and that its own pool holds six
+//! applications. Then it waits 4 s, so the demos' windows close, and
+//! exits; in the desktop
 //! session that ends the desktop and gives the console back its screen and
 //! keyboard.
 //!
@@ -14,9 +16,10 @@
 #![no_main]
 
 use aricode_gfx::{rgb, Rect};
+use aricode_proto::launch::{Entry, Request};
 use aricode_rt::sys::launch::{self, LaunchError, Status};
 use aricode_rt::sys::window::Window;
-use aricode_rt::sys::{self, kind, permissions, Handle};
+use aricode_rt::sys::{self, kind, permissions};
 
 fn say(text: &[u8]) {
     sys::print(b"launcher: ");
@@ -72,28 +75,32 @@ fn main(_arg: u64) -> u64 {
         let mut c = win.canvas();
         c.fill(rgb(0x20, 0x30, 0x40));
         c.fill_rect(&Rect::new(0, 0, 320, 2), rgb(255, 255, 255));
-        c.text(16, 16, "AriCodeOS launcher (test)", rgb(255, 255, 255), None);
+        c.text(
+            16,
+            16,
+            "AriCodeOS launcher (test)",
+            rgb(255, 255, 255),
+            None,
+        );
     }
     if win.present().is_err() {
         return 3;
     }
     say(b"window presented");
     let mut kept = true;
+    // hello_ext opens no window: not the launcher's to start (audit of
+    // phase C, L2).
     kept &= check(
-        b"hello_ext",
+        b"hello_ext (no window)",
         launch::spawn(apps, "hello_ext", 5),
-        b"started",
+        b"denied",
     );
     kept &= check(
         b"installer (a system program)",
         launch::spawn(apps, "installer", 0),
         b"denied",
     );
-    kept &= check(
-        b"itself",
-        launch::spawn(apps, "launcher", 0),
-        b"denied",
-    );
+    kept &= check(b"itself", launch::spawn(apps, "launcher", 0), b"denied");
     kept &= check(
         b"hello_ext waited for",
         launch::run(apps, "hello_ext", 6).map(|_| ()),
@@ -112,6 +119,38 @@ fn main(_arg: u64) -> u64 {
         b"invalid",
     );
     kept &= check(b"gui_demo", launch::spawn(apps, "gui_demo", 0), b"started");
+    // The launcher's own pool (ADR 0074 phase C): six applications at
+    // once, whatever the shell runs: five more demos, then `Limit`.
+    let mut more = 0;
+    let limit = loop {
+        match launch::spawn(apps, "gui_demo", 0) {
+            Ok(()) if more < 8 => more += 1,
+            r => break r,
+        }
+    };
+    let mut b = [0u8; 20];
+    sys::print(b"launcher: the broker answered ");
+    sys::print(status_name(&limit));
+    sys::print(b" after ");
+    sys::print(aricode_rt::fmt_u64(more, &mut b));
+    sys::print(b" more gui_demo\n");
+    kept &= status_name(&limit) == b"limit" && more == 5;
+    // A list request with another flag is refused whole (audit of phase
+    // C, L3).
+    let odd = Request::list(0);
+    let mut raw = odd.encode();
+    raw[3] |= Request::DETACH;
+    let mut reply = [0u8; Entry::LEN];
+    let refused = sys::rpc::call(apps, &raw, &[], 2000, 2000, &mut reply)
+        .ok()
+        .and_then(|n| Entry::decode(&reply[..n]))
+        .is_some_and(|e| e.status == Status::Invalid);
+    say(if refused {
+        b"a list with another flag: invalid"
+    } else {
+        b"a list with another flag was answered"
+    });
+    kept &= refused;
     say(if kept {
         b"the broker kept every rule"
     } else {

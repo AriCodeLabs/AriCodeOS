@@ -6,3 +6,4 @@ license.workspace = true
 description = "Line editor for text consoles: cursor movement, insert and delete anywhere, history; emits only backspace and plain text"
 
 [dependencies]
+aricode-input = { path = "../input" }

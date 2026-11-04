@@ -53,7 +53,7 @@ serial_contains = [
     "AriInit: launch launcher from AriFS (apps/launcher.aripkg version 1",
     "AriInit: desktop session: launcher started",
     "launcher: window presented",
-    "hello_ext v1: hello from outside the tree (arg 5)",
+    "launcher: hello_ext (no window): denied",
     "launcher: gui_demo: started",
     "launcher: the broker kept every rule",
     "launcher: leaving",

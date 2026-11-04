@@ -9,6 +9,8 @@
 
 use aricode_abi::ps2;
 
+pub mod term;
+
 pub const EV_SYN: u16 = 0;
 pub const EV_KEY: u16 = 1;
 pub const EV_REL: u16 = 2;

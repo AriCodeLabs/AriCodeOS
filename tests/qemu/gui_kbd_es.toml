@@ -21,9 +21,16 @@ keys = ["shift+dot"]
 exit = 33
 serial_contains = [
     "compositor: desktop ready with 2 windows",
+    "gui_demo A: focus gained",
+    "gui_demo A: focus lost",
     "gui_demo B: focus gained",
     "gui_demo B: key ':'",
     "gui_demo A: no keys",
     "ARICODEOS_SHUTDOWN",
 ]
 serial_absent = ["KERNEL PANIC", "gui_demo B: key '>'", "gui_demo A: key"]
+# A new window takes the focus (ADR 0074 phase C): A has it until B opens.
+serial_order = [
+    "gui_demo A: focus gained",
+    "gui_demo A: focus lost",
+]

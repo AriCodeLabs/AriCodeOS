@@ -1,0 +1,364 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! Widgets the desktop applications share (ADR 0074 phase C): keys decoded
+//! from the bytes a window receives, buttons, lists and a one-line text
+//! field. They draw on a [`Canvas`] and answer hit tests; the application
+//! keeps its own state and repaints. No `alloc`.
+
+use crate::{rgb, Canvas, Color, Rect};
+use aricode_fb_console::font::GLYPH_WIDTH;
+
+/// Height of one text line of the console font.
+pub const LINE_H: u32 = 16;
+/// Height of a list row or a button.
+pub const ROW_H: u32 = 24;
+/// Inner margin of widgets and windows.
+pub const PAD: i32 = 8;
+
+pub const BG: Color = rgb(0xf1, 0xf5, 0xf9);
+pub const FG: Color = rgb(0x0f, 0x17, 0x2a);
+pub const MUTED: Color = rgb(0x64, 0x74, 0x8b);
+pub const ACCENT: Color = rgb(0x3b, 0x82, 0xf6);
+pub const ACCENT_FG: Color = rgb(0xff, 0xff, 0xff);
+pub const FIELD_BG: Color = rgb(0xff, 0xff, 0xff);
+pub const EDGE: Color = rgb(0xcb, 0xd5, 0xe1);
+pub const ERROR: Color = rgb(0xb9, 0x1c, 0x1c);
+
+/// Width in pixels of `chars` characters of the console font.
+pub const fn text_width(chars: usize) -> u32 {
+    (chars * GLYPH_WIDTH) as u32
+}
+
+/// Keys back from the bytes a window receives (`Event::Key`): the
+/// compositor sends the editing keys as a terminal's escape sequences.
+pub use aricode_input::term::{Key, KeyDecoder};
+
+/// A push button.
+#[derive(Debug, Clone, Copy)]
+pub struct Button<'a> {
+    pub rect: Rect,
+    pub label: &'a str,
+}
+
+impl<'a> Button<'a> {
+    pub const fn new(rect: Rect, label: &'a str) -> Self {
+        Self { rect, label }
+    }
+
+    /// A button `label` wide (plus margins) at `(x, y)`.
+    pub const fn at(x: i32, y: i32, label: &'a str) -> Self {
+        let w = text_width(label.len()) + 2 * PAD as u32;
+        Self::new(Rect::new(x, y, w, ROW_H), label)
+    }
+
+    pub fn contains(&self, x: i32, y: i32) -> bool {
+        self.rect.contains(x, y)
+    }
+
+    /// Draws it; `primary` in the accent color.
+    pub fn draw(&self, c: &mut Canvas, primary: bool) {
+        let (bg, fg) = if primary {
+            (ACCENT, ACCENT_FG)
+        } else {
+            (FIELD_BG, FG)
+        };
+        c.fill_rect(&self.rect, EDGE);
+        let inner = inset(&self.rect, 1);
+        c.fill_rect(&inner, bg);
+        let tx = self.rect.x + (self.rect.w as i32 - text_width(self.label.len()) as i32) / 2;
+        let ty = self.rect.y + (self.rect.h as i32 - LINE_H as i32) / 2;
+        c.text(tx, ty, self.label, fg, None);
+    }
+}
+
+/// `r` shrunk by `by` pixels on every side.
+pub fn inset(r: &Rect, by: i32) -> Rect {
+    let w = (r.w as i32 - 2 * by).max(0) as u32;
+    let h = (r.h as i32 - 2 * by).max(0) as u32;
+    Rect::new(r.x + by, r.y + by, w, h)
+}
+
+/// A vertical list of rows in `rect`, scrolled so the selected row shows.
+#[derive(Debug, Clone, Copy)]
+pub struct List {
+    pub rect: Rect,
+    /// Rows in the list.
+    pub count: usize,
+    pub selected: Option<usize>,
+    /// First row shown.
+    pub top: usize,
+}
+
+impl List {
+    pub const fn new(rect: Rect) -> Self {
+        Self {
+            rect,
+            count: 0,
+            selected: None,
+            top: 0,
+        }
+    }
+
+    /// Rows that fit.
+    pub fn visible(&self) -> usize {
+        (self.rect.h / ROW_H) as usize
+    }
+
+    /// Sets the number of rows, keeping the selection inside.
+    pub fn set_count(&mut self, count: usize) {
+        self.count = count;
+        self.selected = match self.selected {
+            _ if count == 0 => None,
+            Some(s) => Some(s.min(count - 1)),
+            None => Some(0),
+        };
+        self.top = self.top.min(count.saturating_sub(1));
+        self.follow();
+    }
+
+    /// The row at `(x, y)`, if any.
+    pub fn hit(&self, x: i32, y: i32) -> Option<usize> {
+        if !self.rect.contains(x, y) {
+            return None;
+        }
+        let row = self.top + ((y - self.rect.y) as u32 / ROW_H) as usize;
+        (row < self.count).then_some(row)
+    }
+
+    /// Moves the selection with the arrows, Home and End; whether the key
+    /// was the list's.
+    pub fn key(&mut self, key: Key) -> bool {
+        if self.count == 0 {
+            return false;
+        }
+        let s = self.selected.unwrap_or(0);
+        let to = match key {
+            Key::Up => s.saturating_sub(1),
+            Key::Down => (s + 1).min(self.count - 1),
+            Key::Home => 0,
+            Key::End => self.count - 1,
+            _ => return false,
+        };
+        self.select(to);
+        true
+    }
+
+    pub fn select(&mut self, row: usize) {
+        if row < self.count {
+            self.selected = Some(row);
+            self.follow();
+        }
+    }
+
+    /// Scrolls so the selected row is shown.
+    fn follow(&mut self) {
+        let Some(s) = self.selected else { return };
+        let visible = self.visible().max(1);
+        if s < self.top {
+            self.top = s;
+        } else if s >= self.top + visible {
+            self.top = s + 1 - visible;
+        }
+    }
+
+    /// Draws the rows shown; `label(i)` is row `i`'s text.
+    pub fn draw<'s>(&self, c: &mut Canvas, mut label: impl FnMut(usize) -> &'s str) {
+        c.fill_rect(&self.rect, FIELD_BG);
+        let mut area = c.clipped(&self.rect);
+        for (k, row) in (self.top..self.count).take(self.visible() + 1).enumerate() {
+            let y = self.rect.y + (k as u32 * ROW_H) as i32;
+            let line = Rect::new(self.rect.x, y, self.rect.w, ROW_H);
+            let fg = if self.selected == Some(row) {
+                area.fill_rect(&line, ACCENT);
+                ACCENT_FG
+            } else {
+                FG
+            };
+            let ty = y + (ROW_H - LINE_H) as i32 / 2;
+            area.text(self.rect.x + PAD, ty, label(row), fg, None);
+        }
+    }
+}
+
+/// A one-line text field of at most `N` printable ASCII characters,
+/// edited with the keys: one byte per character, so the caret and the
+/// cuts never fall inside a character (audit of phase C, M3).
+#[derive(Debug, Clone, Copy)]
+pub struct TextField<const N: usize> {
+    buf: [u8; N],
+    len: usize,
+    caret: usize,
+}
+
+impl<const N: usize> Default for TextField<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const N: usize> TextField<N> {
+    pub const fn new() -> Self {
+        Self {
+            buf: [0; N],
+            len: 0,
+            caret: 0,
+        }
+    }
+
+    pub fn text(&self) -> &str {
+        core::str::from_utf8(&self.buf[..self.len]).unwrap_or("")
+    }
+
+    pub fn caret(&self) -> usize {
+        self.caret
+    }
+
+    /// Replaces the text (cut to `N` characters; anything but printable
+    /// ASCII becomes `?`) and puts the caret at its end.
+    pub fn set(&mut self, text: &str) {
+        let n = text.len().min(N);
+        for (d, &b) in self.buf[..n].iter_mut().zip(text.as_bytes()) {
+            *d = if (0x20..=0x7E).contains(&b) { b } else { b'?' };
+        }
+        self.len = n;
+        self.caret = n;
+    }
+
+    pub fn clear(&mut self) {
+        self.set("");
+    }
+
+    /// Edits with `key`; whether it was the field's. A character beyond
+    /// `N`, or one that is not printable ASCII, is refused (still the
+    /// field's).
+    pub fn key(&mut self, key: Key) -> bool {
+        match key {
+            Key::Char(ch) => {
+                if self.len < N && (0x20..=0x7E).contains(&ch) {
+                    self.buf.copy_within(self.caret..self.len, self.caret + 1);
+                    self.buf[self.caret] = ch;
+                    self.len += 1;
+                    self.caret += 1;
+                }
+            }
+            Key::Backspace if self.caret > 0 => {
+                self.buf.copy_within(self.caret..self.len, self.caret - 1);
+                self.len -= 1;
+                self.caret -= 1;
+            }
+            Key::Delete if self.caret < self.len => {
+                self.buf.copy_within(self.caret + 1..self.len, self.caret);
+                self.len -= 1;
+            }
+            Key::Left => self.caret = self.caret.saturating_sub(1),
+            Key::Right => self.caret = (self.caret + 1).min(self.len),
+            Key::Home => self.caret = 0,
+            Key::End => self.caret = self.len,
+            Key::Backspace | Key::Delete => {}
+            _ => return false,
+        }
+        true
+    }
+
+    /// Draws it in `rect`, with the caret when `focused`; the text scrolls
+    /// so the caret shows.
+    pub fn draw(&self, c: &mut Canvas, rect: &Rect, focused: bool) {
+        c.fill_rect(rect, if focused { ACCENT } else { EDGE });
+        let inner = inset(rect, 1);
+        c.fill_rect(&inner, FIELD_BG);
+        let fits = ((inner.w as i32 - 2 * 4) / GLYPH_WIDTH as i32).max(1) as usize;
+        let first = self.caret.saturating_sub(fits - 1);
+        let shown = &self.text()[first..self.len.min(first + fits)];
+        let ty = rect.y + (rect.h as i32 - LINE_H as i32) / 2;
+        let mut area = c.clipped(&inner);
+        area.text(inner.x + 4, ty, shown, FG, None);
+        if focused {
+            let cx = inner.x + 4 + ((self.caret - first) * GLYPH_WIDTH) as i32;
+            area.fill_rect(&Rect::new(cx, ty, 1, LINE_H), FG);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    extern crate std;
+    use std::vec;
+
+    fn keys(bytes: &[u8]) -> std::vec::Vec<Key> {
+        let mut d = KeyDecoder::new();
+        bytes.iter().flat_map(|&b| d.feed(b)).flatten().collect()
+    }
+
+    #[test]
+    fn text_field_edits() {
+        let mut f = TextField::<8>::new();
+        for k in keys(b"notes\x1b[D\x1b[D\x7fX\x1b[H\x1b[3~") {
+            assert!(f.key(k));
+        }
+        assert_eq!(f.text(), "oXes");
+        assert_eq!(f.caret(), 0);
+        f.key(Key::End);
+        for k in keys(b"1234") {
+            f.key(k);
+        }
+        assert_eq!(f.text(), "oXes1234");
+        assert!(f.key(Key::Char(b'5')), "refused but the field's");
+        assert_eq!(f.text(), "oXes1234", "cut at 8 bytes");
+        assert!(!f.key(Key::Up));
+        f.set("a/b.txt");
+        assert_eq!((f.text(), f.caret()), ("a/b.txt", 7));
+        // Never anything but printable ASCII, so no cut splits a character.
+        f.set("año");
+        assert_eq!(f.text(), "a??o");
+        f.key(Key::Char(0xC3));
+        assert_eq!(f.text(), "a??o");
+        let mut c = [0u32; 64 * 32];
+        let mut canvas = Canvas::new(&mut c, 64, 32, 64).unwrap();
+        f.draw(&mut canvas, &Rect::new(0, 0, 40, ROW_H), true);
+    }
+
+    #[test]
+    fn list_selects_scrolls_and_hits() {
+        let mut l = List::new(Rect::new(0, 10, 100, 3 * ROW_H));
+        l.set_count(10);
+        assert_eq!(l.selected, Some(0));
+        for _ in 0..4 {
+            l.key(Key::Down);
+        }
+        assert_eq!((l.selected, l.top), (Some(4), 2));
+        assert_eq!(l.hit(5, 10 + ROW_H as i32), Some(3));
+        assert_eq!(l.hit(5, 5), None);
+        l.key(Key::End);
+        assert_eq!((l.selected, l.top), (Some(9), 7));
+        l.key(Key::Home);
+        assert_eq!((l.selected, l.top), (Some(0), 0));
+        l.select(6);
+        l.set_count(2);
+        assert_eq!(l.selected, Some(1));
+        assert_eq!(l.hit(5, 10 + 2 * ROW_H as i32), None, "past the last row");
+        l.set_count(0);
+        assert_eq!(l.selected, None);
+        assert!(!l.key(Key::Down));
+    }
+
+    #[test]
+    fn widgets_draw_inside_their_rects() {
+        let mut px = vec![0u32; 200 * 100];
+        let mut c = Canvas::new(&mut px, 200, 100, 200).unwrap();
+        let b = Button::at(10, 10, "Open");
+        b.draw(&mut c, true);
+        assert_eq!(b.rect.w, text_width(4) + 2 * PAD as u32);
+        assert_eq!(c.get(11, 11), Some(ACCENT));
+        assert_eq!(c.get(9, 9), Some(0), "nothing outside");
+        let mut f = TextField::<32>::new();
+        f.set("a very long name that does not fit");
+        f.draw(&mut c, &Rect::new(10, 50, 80, ROW_H), true);
+        assert_eq!(c.get(91, 60), Some(0), "the text is clipped to the field");
+        let mut l = List::new(Rect::new(100, 0, 100, 2 * ROW_H));
+        l.set_count(3);
+        l.draw(&mut c, |_| "row");
+        assert_eq!(c.get(150, 2), Some(ACCENT), "the selected row");
+        assert_eq!(c.get(150, 2 * ROW_H as i32), Some(0), "below the list");
+    }
+}

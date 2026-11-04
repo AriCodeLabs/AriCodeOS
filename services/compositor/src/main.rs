@@ -173,6 +173,9 @@ struct Compositor {
     keyboard: Keyboard,
     /// Ctrl+Alt+Backspace: the owner asks for the text console (ADR 0074).
     escape: EscapeChord,
+    /// When a key was last pressed (ms since boot): a window opened after
+    /// that by a session made before it does not take the focus.
+    last_key_ms: Option<u64>,
     /// What the screen shows, and what changed since (window contents
     /// presented by their clients, plus the diff of the scene).
     shown: Scene,
@@ -198,6 +201,10 @@ struct Session {
     endpoint: Handle,
     /// `generation << 8 | slot`.
     id: u32,
+    /// When it was made (ms since boot).
+    made_ms: u64,
+    /// It has opened a window already.
+    opened: bool,
 }
 
 impl Compositor {
@@ -227,7 +234,12 @@ impl Compositor {
         };
         self.generation = (self.generation + 1) & 0x00ff_ffff;
         let id = self.generation << 8 | slot as u32;
-        self.sessions[slot] = Some(Session { endpoint, id });
+        self.sessions[slot] = Some(Session {
+            endpoint,
+            id,
+            made_ms: now_ms,
+            opened: false,
+        });
         answer_with(reply_to, Reply::ok(id as u64), send);
     }
 
@@ -325,7 +337,8 @@ impl Compositor {
         self.deliver(id, Event::Focus(true));
     }
 
-    fn on_input(&mut self, ev: aricode_input::Event) {
+    /// One input event, received at `at` (ms since boot).
+    fn on_input(&mut self, ev: aricode_input::Event, at: u64) {
         if ev.kind == EV_REL {
             let (dx, dy) = match ev.code {
                 REL_X => (ev.value as i32, 0),
@@ -359,6 +372,9 @@ impl Compositor {
         if self.escape.feed(ev) {
             say(b"Ctrl+Alt+Backspace: the owner asked for the text console; leaving");
             sys::process_exit(0);
+        }
+        if ev.kind == EV_KEY && ev.value == 1 {
+            self.last_key_ms = Some(at);
         }
         // Each byte of the key (editing keys are escape sequences).
         for &ch in self.keyboard.feed(ev).as_slice() {
@@ -445,6 +461,22 @@ impl Compositor {
                 num(req.height as u64);
                 sys::print(b"\n");
                 answer(reply_to, Reply::ok(id as u64));
+                // The program the owner just opened gets the keys typed
+                // next, and no other window takes them (audit of phase C,
+                // M2).
+                if let Some(session) = owner.checked_sub(1).and_then(|i| self.sessions[i].as_mut())
+                {
+                    let first = !core::mem::replace(&mut session.opened, true);
+                    let made = session.made_ms;
+                    let typed = self.last_key_ms.is_some_and(|k| k >= made);
+                    if aricode_gfx::new_window_takes_focus(
+                        first,
+                        now_ms.saturating_sub(made),
+                        typed,
+                    ) {
+                        self.set_focus(id);
+                    }
+                }
             }
             Op::Present => {
                 let Some(virt) = self.owned(req.window, owner).map(|c| c.virt) else {
@@ -634,6 +666,7 @@ fn main(inputs: u64) -> u64 {
         contents: [const { None }; MAX_WINDOWS],
         keyboard,
         escape: EscapeChord::new(),
+        last_key_ms: None,
         next_frame_ms: 0,
         frames: 0,
         announced: false,
@@ -724,8 +757,8 @@ fn main(inputs: u64) -> u64 {
             }
         }
         merged[..merged_len].sort_unstable_by_key(|(t, d, _)| (*t, *d));
-        for (_, _, ev) in &merged[..merged_len] {
-            comp.on_input(*ev);
+        for (at, _, ev) in &merged[..merged_len] {
+            comp.on_input(*ev, *at);
         }
         comp.expire(t);
         comp.compose(t);

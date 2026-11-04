@@ -23,7 +23,7 @@ extern crate alloc;
 use aricode_manifest::{Caps, Manifest};
 use aricode_proto::fs::ARG_MIGRATE;
 use aricode_proto::launch::{
-    Reply as LaunchReply, Request as LaunchRequest, Status as LaunchStatus,
+    Entry, Reply as LaunchReply, Request as LaunchRequest, Status as LaunchStatus,
 };
 use aricode_proto::status;
 use aricode_rt::sys::abi::driver_arg;
@@ -2053,8 +2053,12 @@ struct Broker {
     net: Option<Handle>,
     compositor: Option<Handle>,
     /// Launched programs that have not exited yet (ADR 0015): process and,
-    /// if someone waits for its exit, the endpoint to reply to.
-    running: [Option<Running>; MAX_RUNNING],
+    /// if someone waits for its exit, the endpoint to reply to. The shell's
+    /// `run` and `spawn` take the first `MAX_RUNNING` slots, the desktop
+    /// session the rest (`Pool`).
+    running: [Option<Running>; MAX_RUNNING + DESKTOP_SLOTS],
+    /// The installed applications the launcher may offer, as last listed.
+    offered: Offered,
     /// DMA buffer of the package being launched (ADR 0017), the package's
     /// size: freed once the launch ends, since the kernel copies the
     /// program when it creates the process (ADR 0072, phase B).
@@ -2096,9 +2100,75 @@ enum Source {
     },
 }
 
-/// Programs the broker allows running at once; the next `run` or `spawn`
-/// gets `Limit`.
+/// Programs the shell may have running at once through the broker; the
+/// next `run` or `spawn` gets `Limit`.
 const MAX_RUNNING: usize = 4;
+
+/// Applications the desktop's launcher may have running at once, apart
+/// from the shell's (the owner, 2026-11-04, ADR 0074 phase C): with the
+/// launcher, seven of the compositor's eight sessions, so a graphical
+/// program started from the shell still finds one.
+const MAX_LAUNCHED: usize = 6;
+
+/// The desktop session's slots: the launcher and its applications.
+const DESKTOP_SLOTS: usize = 1 + MAX_LAUNCHED;
+
+/// Which slots a launch may take: neither the shell nor the desktop can
+/// leave the other without one.
+#[derive(Clone, Copy)]
+enum Pool {
+    /// The shell's `run` and `spawn`.
+    Shell,
+    /// The desktop session's launcher.
+    Launcher,
+    /// What the launcher starts.
+    Apps,
+}
+
+/// Installed applications the launcher may offer at most.
+const MAX_OFFERED: usize = 16;
+
+/// The installed applications the launcher may offer (ADR 0074 phase C):
+/// signed packages that verify, run on this system, open a window and ask
+/// for nothing an application may not have.
+struct Offered {
+    names: [[u8; aricode_proto::launch::MAX_NAME]; MAX_OFFERED],
+    lens: [u8; MAX_OFFERED],
+    count: usize,
+    /// When it was made (ms since boot), if it was.
+    made_ms: Option<u64>,
+}
+
+/// A list younger than this is answered again as it is: a launcher asking
+/// in a loop cannot keep init reading packages (audit of phase C, M1).
+const OFFERED_FRESH_MS: u64 = 5_000;
+
+impl Offered {
+    const fn new() -> Self {
+        Self {
+            names: [[0; aricode_proto::launch::MAX_NAME]; MAX_OFFERED],
+            lens: [0; MAX_OFFERED],
+            count: 0,
+            made_ms: None,
+        }
+    }
+
+    fn push(&mut self, name: &str) -> bool {
+        if self.count == MAX_OFFERED || name.len() > aricode_proto::launch::MAX_NAME {
+            return false;
+        }
+        self.names[self.count][..name.len()].copy_from_slice(name.as_bytes());
+        self.lens[self.count] = name.len() as u8;
+        self.count += 1;
+        true
+    }
+
+    fn get(&self, i: usize) -> Option<&str> {
+        (i < self.count)
+            .then(|| core::str::from_utf8(&self.names[i][..self.lens[i] as usize]).ok())
+            .flatten()
+    }
+}
 
 #[derive(Clone, Copy)]
 struct Running {
@@ -2158,9 +2228,62 @@ impl Broker {
             block,
             net,
             compositor,
-            running: [None; MAX_RUNNING],
+            running: [None; MAX_RUNNING + DESKTOP_SLOTS],
+            offered: Offered::new(),
             stage: None,
         })
+    }
+
+    /// A free slot of `pool`.
+    fn free_slot(&self, pool: Pool) -> Option<usize> {
+        let range = match pool {
+            Pool::Shell => 0..MAX_RUNNING,
+            Pool::Launcher => MAX_RUNNING..MAX_RUNNING + 1,
+            Pool::Apps => MAX_RUNNING + 1..MAX_RUNNING + DESKTOP_SLOTS,
+        };
+        range.into_iter().find(|&i| self.running[i].is_none())
+    }
+
+    /// Lists again the installed applications the launcher may offer:
+    /// `apps/NAME.aripkg` for each, never the launcher itself or a name an
+    /// initrd program has, and only those `offers` accepts. Says each one
+    /// left out and why, as a launch would.
+    fn refresh_offered(&mut self) {
+        let now = now_ms();
+        if self
+            .offered
+            .made_ms
+            .is_some_and(|t| now.saturating_sub(t) < OFFERED_FRESH_MS)
+        {
+            return;
+        }
+        self.offered = Offered::new();
+        self.offered.made_ms = Some(now);
+        let Some(fs) = self.fs.as_mut() else {
+            return;
+        };
+        let mut entry = [0u8; 32];
+        let mut i = 0;
+        while let Ok(Some((n, size))) = fs.list(i, &mut entry) {
+            i += 1;
+            let Some(name) = core::str::from_utf8(&entry[..n])
+                .ok()
+                .and_then(|e| e.strip_prefix("apps/"))
+                .and_then(|e| e.strip_suffix(aricode_pkg::EXTENSION))
+            else {
+                continue;
+            };
+            if name.is_empty() || Caps::TRUSTED_LAUNCH.contains(&name) || in_initrd(name) {
+                continue;
+            }
+            let mut copy = [0u8; 32];
+            copy[..name.len()].copy_from_slice(name.as_bytes());
+            let name = core::str::from_utf8(&copy[..name.len()]).unwrap_or("");
+            if offers(fs, name, size) && !self.offered.push(name) {
+                sys::print(b"AriInit: the launcher is offered the first 16 applications only\n");
+                break;
+            }
+        }
     }
 
     /// Installed package (`apps/NAME.aripkg`): copies it to the staging
@@ -2328,11 +2451,11 @@ impl Broker {
     /// own manifest (ADR 0074); its exit ends the session
     /// (`poll_launches`). `false`, said, when it does not start.
     fn launch_session(&mut self) -> bool {
-        let Some(slot) = self.running.iter().position(Option::is_none) else {
+        let Some(slot) = self.free_slot(Pool::Launcher) else {
             say(b"the desktop's launcher did not start: running program limit reached");
             return false;
         };
-        match self.launch(session::LAUNCHER, 0, None) {
+        match self.launch(session::LAUNCHER, 0, None, false) {
             Launched::Reply(r) => {
                 let mut b = [0u8; 20];
                 sys::print(b"AriInit: the desktop's launcher did not start (launch status ");
@@ -2390,18 +2513,22 @@ impl Broker {
             return refuse(LaunchStatus::Invalid);
         };
         // A console comes only with the flag that announces it, and never
-        // for a detached program, which may outlive the session.
-        if req.has_console() != console.is_some() || (req.has_console() && req.is_detached()) {
+        // for a detached program, which may outlive the session. A list is
+        // the launcher's, and unknown flags are nobody's.
+        if req.has_console() != console.is_some()
+            || (req.has_console() && req.is_detached())
+            || req.flags & !(LaunchRequest::DETACH | LaunchRequest::CONSOLE) != 0
+        {
             return refuse(LaunchStatus::Invalid);
         }
         // The slot is reserved before launching: no slot, no process.
-        let Some(slot) = self.running.iter().position(Option::is_none) else {
+        let Some(slot) = self.free_slot(Pool::Shell) else {
             sys::print(b"AriInit: ");
             sys::print(req.name_str().as_bytes());
             sys::print(b": running program limit reached\n");
             return refuse(LaunchStatus::Limit);
         };
-        match self.launch(req.name_str(), req.arg, console) {
+        match self.launch(req.name_str(), req.arg, console, false) {
             Launched::Reply(reply) => {
                 let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
                 let _ = sys::handle_close(reply_to);
@@ -2453,8 +2580,34 @@ impl Broker {
             sys::print(b"AriInit: refused, the launcher sent something other than a launch\n");
             return refuse(LaunchStatus::Invalid);
         };
+        if req.is_list() {
+            if nh == 2 || req.flags != LaunchRequest::LIST {
+                let _ = sys::ipc_send(
+                    reply_to,
+                    &Entry::status(LaunchStatus::Invalid).encode(),
+                    &[],
+                    0,
+                );
+                let _ = sys::handle_close(reply_to);
+                return;
+            }
+            // The list is made again at its start (at most every 5 s), so
+            // a launcher that reads it from 0 sees what is installed now.
+            if req.arg == 0 {
+                self.refresh_offered();
+            }
+            let entry = usize::try_from(req.arg)
+                .ok()
+                .and_then(|i| self.offered.get(i))
+                .and_then(Entry::named)
+                .unwrap_or(Entry::status(LaunchStatus::NotFound));
+            let _ = sys::ipc_send(reply_to, &entry.encode(), &[], 0);
+            let _ = sys::handle_close(reply_to);
+            return;
+        }
         let name = req.name_str();
-        if !req.is_detached() || req.has_console() || nh == 2 {
+        if !req.is_detached() || req.has_console() || nh == 2 || req.flags != LaunchRequest::DETACH
+        {
             sys::print(b"AriInit: refused, the launcher asked to start ");
             sys::print(name.as_bytes());
             sys::print(b" other than in the background without a console\n");
@@ -2472,16 +2625,16 @@ impl Broker {
             sys::print(b" is a system program\n");
             return refuse(LaunchStatus::Denied);
         }
-        let Some(slot) = self.running.iter().position(Option::is_none) else {
+        let Some(slot) = self.free_slot(Pool::Apps) else {
             sys::print(b"AriInit: ");
             sys::print(name.as_bytes());
-            sys::print(b": running program limit reached\n");
+            sys::print(b": the desktop's 6 application slots are full\n");
             return refuse(LaunchStatus::Limit);
         };
         sys::print(b"AriInit: the launcher asks to start ");
         sys::print(name.as_bytes());
         sys::print(b"\n");
-        match self.launch(name, req.arg, None) {
+        match self.launch(name, req.arg, None, true) {
             Launched::Reply(r) => reply(reply_to, r),
             Launched::Process(process, window) => {
                 reply(reply_to, LaunchReply::status(LaunchStatus::Started));
@@ -2503,13 +2656,27 @@ impl Broker {
     /// program's console (ADR 0047) and is closed if the launch fails.
     /// [`Self::launch_staged`], then the package's buffer goes, whatever the
     /// outcome.
-    fn launch(&mut self, name: &str, arg: u64, console: Option<Handle>) -> Launched {
-        let launched = self.launch_staged(name, arg, console);
+    /// Launches `name`; `for_launcher` when the desktop's launcher asked,
+    /// which may start only applications that open a window.
+    fn launch(
+        &mut self,
+        name: &str,
+        arg: u64,
+        console: Option<Handle>,
+        for_launcher: bool,
+    ) -> Launched {
+        let launched = self.launch_staged(name, arg, console, for_launcher);
         self.stage = None;
         launched
     }
 
-    fn launch_staged(&mut self, name: &str, arg: u64, console: Option<Handle>) -> Launched {
+    fn launch_staged(
+        &mut self,
+        name: &str,
+        arg: u64,
+        console: Option<Handle>,
+        for_launcher: bool,
+    ) -> Launched {
         // The prepared duplicates close themselves if any error path returns
         // before transferring them (`Granted::take` hands them to the
         // kernel). Previously, a denial after granting SYSTEM leaked one table
@@ -2601,6 +2768,14 @@ impl Broker {
             sys::print(b"]");
         }
         sys::print(b"\n");
+        if for_launcher && !caps.contains(Caps::WINDOW) {
+            sys::print(
+                b"AriInit: denied, the launcher starts applications with a window only, and ",
+            );
+            sys::print(name.as_bytes());
+            sys::print(b" opens none\n");
+            return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
+        }
         if !denied.is_empty() {
             sys::print(b"AriInit: denied, requests system capabilities:");
             for c in denied.names() {
@@ -2836,6 +3011,74 @@ fn in_initrd(name: &str) -> bool {
         sys::initrd_read(SPAWNER, name, &mut probe),
         Err(Error::NotFound)
     )
+}
+
+/// Whether the launcher may offer the installed package `apps/NAME.aripkg`
+/// of `size` bytes: its signed manifest and its application manifest verify
+/// (`inspect_streaming`: a few KiB per package; the program is not hashed,
+/// the launch verifies the whole package), it runs on this system, is
+/// `name` in both manifests, opens a window and asks for nothing an
+/// application may not have. Says why when it does not.
+fn offers(fs: &mut FsClient, name: &str, size: u64) -> bool {
+    let left_out = |why: &[u8]| {
+        sys::print(b"AriInit: the launcher is not offered ");
+        sys::print(name.as_bytes());
+        sys::print(b": ");
+        sys::print(why);
+        sys::print(b"\n");
+        false
+    };
+    let mut path = [0u8; 48];
+    let mut full = [0u8; 48];
+    let Some(path) =
+        join("apps/", name, &mut path).and_then(|p| join(p, aricode_pkg::EXTENSION, &mut full))
+    else {
+        return false;
+    };
+    if size == 0 || size > STAGE_LEN {
+        return left_out(b"its package size is out of range");
+    }
+    let Ok(fd) = fs.open(path) else {
+        return left_out(b"its package cannot be opened");
+    };
+    let mut read = |offset: usize, buf: &mut [u8]| -> Result<(), ()> {
+        let mut done = 0;
+        while done < buf.len() {
+            let want = (buf.len() - done).min(4096);
+            match fs.read(fd, (offset + done) as u32, &mut buf[done..done + want]) {
+                Ok(n) if n > 0 => done += n,
+                _ => return Err(()),
+            }
+        }
+        Ok(())
+    };
+    let pubkey = aricode_crypto::trust::public_key();
+    let mut text = [0u8; 1024];
+    let verdict = match aricode_pkg::inspect_streaming(size as usize, &mut read, &pubkey, &mut text)
+    {
+        Err(_) => Err(&b"it fails verification (signature or manifest hash)"[..]),
+        Ok((m, _)) if !m.runs_on(aricode_ab::APPS_LEVEL) => {
+            Err(&b"it needs a newer application interface"[..])
+        }
+        Ok((m, _)) if m.name_str() != name => Err(&b"its package is named otherwise"[..]),
+        Ok((_, len)) => match core::str::from_utf8(&text[..len])
+            .ok()
+            .and_then(|t| Manifest::parse(t).ok())
+        {
+            None => Err(&b"its manifest cannot be read"[..]),
+            Some(m) if m.name_str() != name => Err(&b"its manifest is named otherwise"[..]),
+            Some(m) if !m.caps.contains(Caps::WINDOW) => Err(&b"it opens no window"[..]),
+            Some(m) if !m.caps.difference(Caps::allowed_for(name)).is_empty() => {
+                Err(&b"it asks for system capabilities"[..])
+            }
+            Some(_) => Ok(()),
+        },
+    };
+    let _ = fs.close(fd);
+    match verdict {
+        Ok(()) => true,
+        Err(why) => left_out(why),
+    }
 }
 
 /// Sends a launch reply and gives up the reply endpoint.

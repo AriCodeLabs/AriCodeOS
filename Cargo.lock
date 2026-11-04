@@ -390,6 +390,7 @@ name = "aricode-gfx"
 version = "0.17.0"
 dependencies = [
  "aricode-fb-console",
+ "aricode-input",
 ]
 
 [[package]]
@@ -441,6 +442,9 @@ dependencies = [
 [[package]]
 name = "aricode-lineedit"
 version = "0.17.0"
+dependencies = [
+ "aricode-input",
+]
 
 [[package]]
 name = "aricode-manifest"

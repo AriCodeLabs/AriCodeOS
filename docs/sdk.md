@@ -110,8 +110,11 @@ installed by other means stays.
 
 The `desktop` profile also chooses what the machine boots into (`session`
 in the shell; following the profile writes `session = desktop`). At boot
-init starts the compositor and the profile's `launcher`, which starts the
-other apps through the broker with the capability `launch`. When the
+init starts the compositor and the profile's `launcher` (`desktop/launcher`),
+which lists the installed apps that open a window (`sys::launch::installed`)
+and starts them through the broker with the capability `launch`, up to six
+at once. Shared widgets (keys, buttons, lists, text fields) are in
+`aricode_gfx::widgets`. When the
 launcher exits, or on Ctrl+Alt+Backspace on any keyboard, the desktop ends
 and the text console gets the screen and the keyboards back. A stick can come with a profile: `cargo xtask
 usb-image --app DIR:VER... --profile desktop:launcher,...`.
@@ -148,8 +151,8 @@ from the shell or `sys::launch::run(broker, name, arg)`
 (`sys::launch::run_with_console(broker, name, arg, console)` gives it the
 send side of an endpoint as its console, ADR 0047); `spawn` and
 `sys::launch::spawn` launch it in the background without waiting for its
-exit. The broker allows 4 running programs at a time and answers `Limit` to
-the fifth (ADR 0015). The broker reads `NAME.manifest` from the initrd
+exit. The broker allows the shell 4 running programs at a time and answers
+`Limit` to the fifth (ADR 0015); the desktop's launcher has its own 6. The broker reads `NAME.manifest` from the initrd
 (`apps/<app>/NAME.manifest`, packed by xtask; a test program the shell
 launches with capabilities, such as `tcp_hog` or `sock_leaker`, keeps its manifest in
 `user/testprogs/manifests/`):

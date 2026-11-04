@@ -11,6 +11,8 @@
 
 use aricode_fb_console::font::{FIRST_CHAR, GLYPHS, GLYPH_WIDTH, LAST_CHAR};
 
+pub mod widgets;
+
 /// Color `0x00RRGGBB`.
 pub type Color = u32;
 
@@ -280,6 +282,25 @@ pub enum Hit {
         x: i32,
         y: i32,
     },
+}
+
+/// How long after its session was made a program's first window may
+/// still take the focus: the time to verify and start a large package.
+pub const FOCUS_GRACE_MS: u64 = 5_000;
+
+/// Whether a new window takes the focus (ADR 0074 phase C): only the first
+/// window of a session made in the last `FOCUS_GRACE_MS` (the program the
+/// owner just opened), and only if no key was pressed since that session
+/// was made (the owner has moved on and is typing elsewhere). Otherwise a
+/// program could open a window whenever it liked and take the keys meant
+/// for another, a password typed in a terminal among them (audit of phase
+/// C, M2).
+pub fn new_window_takes_focus(
+    first_of_session: bool,
+    since_session_ms: u64,
+    key_since_session: bool,
+) -> bool {
+    first_of_session && since_session_ms <= FOCUS_GRACE_MS && !key_since_session
 }
 
 /// Desktop: up to `MAX_WINDOWS` windows in z-order (the last one on top),
@@ -671,6 +692,21 @@ impl<'a> Iterator for RevIter<'a> {
 mod tests {
     extern crate std;
     use super::*;
+
+    #[test]
+    fn only_a_just_opened_program_takes_the_focus() {
+        assert!(new_window_takes_focus(true, 0, false));
+        assert!(new_window_takes_focus(true, FOCUS_GRACE_MS, false));
+        assert!(!new_window_takes_focus(false, 10, false), "a second window");
+        assert!(
+            !new_window_takes_focus(true, FOCUS_GRACE_MS + 1, false),
+            "too late"
+        );
+        assert!(
+            !new_window_takes_focus(true, 10, true),
+            "the owner typed since"
+        );
+    }
     use std::vec;
     use std::vec::Vec;
 

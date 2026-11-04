@@ -360,3 +360,104 @@ same branch:
   robotics one with serial and CAN tools once those drivers exist.
   Drivers that are not built in arrive as signed driver packages (ADR
   0073), not through profiles.
+
+## Phase C as built
+
+### The launcher (2026-11-04)
+
+- **The owner chose the launcher's own pool** of six applications, apart
+  from the shell's four (`Pool::Launcher` with one slot, `Pool::Apps` with
+  six). A launcher started from the shell (`run launcher`, in the tests)
+  takes a shell slot, but its applications still go to `Pool::Apps`;
+  `stop_desktop_apps` stops them all when a desktop session ends.
+- **The pool is not the only limit:**
+  - The compositor has eight sessions and eight windows, at most two
+    per session. One launcher, six apps and one graphical program from
+    the shell fill the eight sessions. Applications with two windows
+    each can fill the windows first: a later program then gets its
+    session, and its window is refused as busy.
+  - fsd and the network stack serve 15 sessions each (ADR 0036, 0037).
+    With every slot taken by apps that use files or the network, a
+    launch can find that table full. It then fails visibly, as those
+    ADRs already allow.
+- **The launcher asks the broker what to offer** (`Request::LIST`, an
+  `Entry` per application). At index 0 the broker lists `apps/*.aripkg`
+  again, at most every 5 s; a younger list is answered as it is. It keeps
+  the packages that:
+  - have a signed manifest and an application manifest that matches its
+    signed hash (`aricode_pkg::inspect_streaming`, a few KiB per package;
+    the program is not hashed, since the launch verifies the whole
+    package);
+  - run on this system;
+  - open a window;
+  - ask for nothing an application may not have.
+
+  It says why it leaves each other one out. The launcher gets names,
+  never files: it still holds only `window` and `launch`. The list is
+  advice, but the rule behind it is enforced: the broker starts for the
+  launcher only applications that open a window.
+- **Flags:** the shell's endpoint refuses any flag but `DETACH` and
+  `CONSOLE`. The launcher's endpoint takes `LIST` alone, or `DETACH`
+  alone.
+- **`desktop/launcher`** is a package of the desktop profile, in a new
+  `desktop/` directory for the profile's packages. It shows a list, with
+  Open, Refresh and "Leave the desktop" buttons, and the outcome of the
+  last launch. Enter or a click opens an application; leaving ends the
+  session.
+- **The widgets the applications share** are in `aricode_gfx::widgets`
+  (host-tested):
+  - `Button`, `List` and `TextField`; the text field holds printable
+    ASCII only, so no cut splits a character;
+  - keys from `aricode_input::term::KeyDecoder`. It turns the bytes a
+    window receives back into keys, since the compositor sends the
+    editing keys as terminal escape sequences. The shell's line editor
+    now uses the same decoder. A lone `Esc` is known only when the next
+    byte shows it starts no sequence, so it arrives with that key.
+- **The program just opened takes the focus.** Before, only a click gave
+  a window the focus. Now a new window takes it when all of these hold:
+  - it is the first window of its session;
+  - the session was made at most 5 s earlier;
+  - no key was pressed since (`aricode_gfx::new_window_takes_focus`).
+
+  Any other window waits for a click. A program that opens a window later
+  cannot take the keys typed in another, a password in a terminal among
+  them.
+- **Scenarios:**
+  - `usb.desktop_launcher`: the list holds gui_demo, but not hello_ext
+    (no window) nor a hello_more with a tampered signature. The first
+    application opens from the keyboard, and a click leaves the desktop;
+  - `apps.launch`: the pool answers `Limit` after six, hello_ext is
+    refused for opening no window, and a list with another flag is
+    invalid;
+  - the GUI scenarios now expect the first window to lose the focus when
+    the second opens.
+
+### Audit of the launcher (2026-11-04)
+
+An independent read-only audit found no high findings. Bounds, handles,
+names and the launch rules all checked out. It found these, all fixed in
+the same branch:
+
+- **M1:** each list re-verified every package whole inside init, with no
+  limit. Now it reads only the manifests, which the release key signed,
+  and caches the list for 5 s.
+- **M2:** any program could open a window at any time and take the
+  focus. Now only a program just opened, before any key is typed, gets
+  it.
+- **M3:** the text field could split a UTF-8 character and panic. It now
+  holds printable ASCII only.
+- **M4:** a build directory under `desktop/` was not ignored.
+- **L1:** the application manifest was read outside the verified hash.
+  It is now checked against the signed hash.
+- **L2:** the launcher could start applications without a window. The
+  broker now refuses them.
+- **L3:** unknown flags are refused on both endpoints.
+- **L4 and L5:** the limits and the shared list are described above.
+- **L6:** one key decoder now serves the shell and the windows. It
+  handles parameters and an `Esc` inside a sequence. The unreachable
+  PageUp and PageDown branches are gone.
+- **L7:** a single click no longer opens an application.
+- **L8:** new tests cover a tampered package left out of the list, a list
+  with another flag, the exact pool count and the focus rule (host).
+- **L9:** `stack-check` passes for init: 26 456 of 32 768 bytes.
+
