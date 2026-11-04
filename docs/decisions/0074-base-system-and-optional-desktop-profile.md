@@ -547,3 +547,116 @@ It found these, all fixed in the same branch:
   are closed. `Canvas::set` draws a pixel without a rectangle per pixel.
 - **L7:** both ends closed together counts as the shell's end.
 
+### The owner's folder and the editor (2026-11-04)
+
+- **The owner chose a shared folder, `home/`.** A new capability, `home`,
+  grants it, only to the official `editor` and `files`, installed and
+  signed (`Caps::TRUSTED_HOME`).
+  - With `fs`, an application sees only its own private directory, so an
+    editor could not have reached the owner's files.
+  - With the whole namespace, as `install` has, it could have reached
+    sshd's keys, `authorized_keys` and the updater's state.
+  - `home` is a directory session of fsd on `home/`, as a private
+    directory is on an application's own. Names inside it are plain
+    (`notes.txt`); the shell sees the same file as `home/notes.txt`.
+- **No application named `home` gets a private directory**, which would
+  be that folder: the broker refuses it.
+- **`desktop/editor`:**
+  - a file name field, Open and Save, and a text area
+    (`widgets::TextArea`, host-tested: lines, the caret, scrolling);
+  - files up to 64 KiB, read whole before they replace the text being
+    edited, so a file that cannot be read, or is too large, leaves that
+    text alone;
+  - Save is fsd's atomic replace.
+
+  Ctrl+S saves, Ctrl+O opens, and Tab moves between the name and the
+  text. The editor's window and file buffer need a 2 MiB manifest.
+- **Keyboards now send Ctrl with a letter as its control character**
+  (`aricode_input::Keyboard`). Before, no keyboard did: the shell's
+  Ctrl-A, Ctrl-E and Ctrl-U worked only over serial and SSH.
+- **Scenarios:**
+  - `usb.desktop_editor`: the editor writes `home/a`, and the shell
+    reads it;
+  - `apps.home_rules`: a package named `home` that asks for `fs`, and
+    one that asks for `home` without being the editor, are both denied.
+
+### Audit of the editor and `home` (2026-11-04)
+
+An independent read-only audit found that `home/` cannot be escaped:
+- fsd keeps a directory session's names flat and under its prefix;
+- only the broker makes such a session;
+- only the editor and files get `home`.
+
+It found these, all fixed:
+
+- **M1:** after an Open that failed, Save could replace that file with
+  the text of another. The editor now remembers which file the text came
+  from. A failed Open puts that name back, and saving over any other
+  existing file takes a second press.
+- **M2:** an Open threw unsaved changes away. It now takes a second press.
+- **M3:** a scenario of the branch used the old one-stage form; fixed with
+  the stages.
+- **L1:** a device whose driver died with Ctrl held left it held.
+  `Keyboard::release_modifiers` runs in the console bridge and the
+  compositor when a device or its read is lost.
+- **L2:** names are checked as fsd keeps them
+  (`aricode_proto::fs::valid_plain_name`) in the editor and files.
+- **L3:** a file created for a save that failed is deleted.
+- **L4:** Ctrl+L goes to the name at once; Esc is known only with the key
+  after it.
+- **L5:** a file that is not all ASCII is said so when opened.
+- **L6:** the initrd and allow-list refusals of `home` share the code
+  path, and its host test, with `launch` and `terminal`.
+- **L7:** a stick whose package named `home` had a private directory
+  before this change keeps those files in the owner's folder. No release
+  ever shipped such a package.
+
+### The file manager (2026-11-04)
+
+- **`desktop/files`** lists `home/` with each file's size. It creates a
+  file, renames the selected one to the name typed in the field, and
+  deletes it after a second Delete.
+  - A rename never goes over an existing name. fsd decides it in the same
+    step (`Rename` with `RENAME_KEEP`, `FsClient::rename_keeping`, which
+    answers `Exists`), whatever the window's list shows.
+  - Everything works from the keyboard: Tab, Enter in the field to
+    create, Ctrl+R to rename, Delete to delete.
+  - On a disk still in AriFS v1, which cannot rename or delete, it says
+    so.
+- **The scenarios type in stages** (`[[host_input_then]]`), each waiting
+  for the window's answer to the one before it.
+- **Scenario `usb.desktop_files`:** create `mo`, rename it to `p`, delete
+  it; the shell then finds `home/` empty.
+
+### Audit of the file manager (2026-11-04)
+
+An independent read-only audit checked:
+- the rows' bounds;
+- the folder's confinement;
+- the editor's confirmations;
+- the scenario stages.
+
+It found these, all fixed:
+
+- **H1:** a rename checked for a file of the new name only in the window's
+  list. That list holds 64 files, and another program could have made one
+  since. fsd's rename would then have deleted that file. fsd now checks
+  it in the same step (`RENAME_KEEP`, tested by `fs_client`).
+- **M1:** the selection kept its row while files moved. It now follows
+  the name.
+- **M2:** an input driver relaunched outside a read went unnoticed. Its
+  replies now say which run of the driver sent them
+  (`input::Reply::instance`, stamped by `EventQueue`). The compositor and
+  the console bridge release the modifiers when it changes.
+- **L1:** Enter in the text kept a confirmation armed. Now only Enter in
+  the name does.
+- **L2:** saving a new file that someone made meanwhile now asks first.
+- **L3:** the editor's scenario saves distinctive text, and checks the
+  empty save it refuses.
+- **L4:** a typing stage looks for its marker only in what came after the
+  stage before it started.
+- **L5:** a stage that fails, or never comes, is said in the log.
+- **L6:** a failed refresh is not hidden by the next message.
+- **L7:** files in subfolders of `home/` are counted, not listed. A list
+  of more than 64 says it shows the first ones.
+

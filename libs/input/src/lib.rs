@@ -117,13 +117,16 @@ impl Layout {
     }
 }
 
-/// Keyboard: tracks shift state and `AltGr` and translates key presses
-/// according to the layout.
+/// Keyboard: tracks shift, Ctrl and `AltGr` and translates key presses
+/// according to the layout. Ctrl with a letter gives its control character
+/// (`0x01` for Ctrl+A), as a terminal sends it; with any other key, nothing.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Keyboard {
     shift: bool,
     caps: bool,
     altgr: bool,
+    /// Bits: left Ctrl, right Ctrl.
+    ctrl: u8,
     layout: Layout,
 }
 
@@ -152,12 +155,22 @@ impl Keyboard {
             shift: false,
             caps: false,
             altgr: false,
+            ctrl: 0,
             layout,
         }
     }
 
     pub fn set_layout(&mut self, layout: Layout) {
         self.layout = layout;
+    }
+
+    /// Forgets Shift, Ctrl and AltGr held: a device whose releases were
+    /// lost (its driver restarted, its read dropped) does not leave every
+    /// letter shifted or a control character (audit of the editor, L1).
+    pub fn release_modifiers(&mut self) {
+        self.shift = false;
+        self.altgr = false;
+        self.ctrl = 0;
     }
 
     pub fn layout(&self) -> Layout {
@@ -183,6 +196,15 @@ impl Keyboard {
             }
             KEY_RIGHTALT => {
                 self.altgr = ev.value != 0;
+                return KeyBytes::NONE;
+            }
+            KEY_LEFTCTRL | KEY_RIGHTCTRL => {
+                let bit = if ev.code == KEY_LEFTCTRL { 1 } else { 2 };
+                if ev.value == 0 {
+                    self.ctrl &= !bit;
+                } else {
+                    self.ctrl |= bit;
+                }
                 return KeyBytes::NONE;
             }
             _ => {}
@@ -222,6 +244,13 @@ impl Keyboard {
             return KeyBytes::NONE;
         }
         let letter = plain.is_ascii_lowercase();
+        if self.ctrl != 0 {
+            return if letter {
+                KeyBytes::single(plain & 0x1F)
+            } else {
+                KeyBytes::NONE
+            };
+        }
         let upper = self.shift ^ (self.caps && letter);
         let b = if upper { shifted } else { plain };
         if b == 0 {
@@ -1234,6 +1263,43 @@ mod tests {
         );
         assert_eq!(m.feed(&[0, 0, 0], &mut out), 0);
         assert_eq!(m.feed(&[0, 0], &mut out), 0);
+    }
+
+    #[test]
+    fn released_modifiers_type_plain_letters() {
+        let key = |code, value| Event {
+            kind: EV_KEY,
+            code,
+            value,
+        };
+        let mut k = Keyboard::new();
+        k.feed(key(KEY_LEFTCTRL, 1));
+        k.feed(key(KEY_LEFTSHIFT, 1));
+        k.release_modifiers();
+        assert_eq!(k.feed(key(31, 1)).as_slice(), b"s");
+    }
+
+    #[test]
+    fn ctrl_with_a_letter_gives_its_control_character() {
+        let key = |code, value| Event {
+            kind: EV_KEY,
+            code,
+            value,
+        };
+        const KEY_S: u16 = 31;
+        const KEY_U: u16 = 22;
+        const KEY_1: u16 = 2;
+        for layout in [Layout::Us, Layout::Es] {
+            let mut k = Keyboard::with_layout(layout);
+            assert!(k.feed(key(KEY_LEFTCTRL, 1)).is_empty());
+            assert_eq!(k.feed(key(KEY_S, 1)).as_slice(), &[0x13]);
+            assert!(k.feed(key(KEY_1, 1)).is_empty(), "not a letter");
+            assert!(k.feed(key(KEY_RIGHTCTRL, 1)).is_empty());
+            assert!(k.feed(key(KEY_LEFTCTRL, 0)).is_empty());
+            assert_eq!(k.feed(key(KEY_U, 1)).as_slice(), &[0x15], "the other Ctrl");
+            assert!(k.feed(key(KEY_RIGHTCTRL, 0)).is_empty());
+            assert_eq!(k.feed(key(KEY_S, 1)).as_slice(), b"s");
+        }
     }
 
     #[test]

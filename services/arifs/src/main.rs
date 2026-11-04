@@ -728,6 +728,12 @@ impl Service {
                     return Reply::status(Status::Invalid);
                 };
                 let replaced = self.fs.find(name).filter(|&j| j != index);
+                // Checked here, in the same step: the caller's own look at
+                // the names could be out of date (audit of the file
+                // manager, H1).
+                if replaced.is_some() && req.len == aricode_proto::fs::RENAME_KEEP {
+                    return Reply::status(Status::Exists);
+                }
                 match self.fs.rename(index, name) {
                     Ok(()) => {
                         if let Some(j) = replaced {

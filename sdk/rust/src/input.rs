@@ -9,6 +9,35 @@ use aricode_proto::input::{Op, Reply, Request, Status, MAX_EVENTS, MAX_READ_MS};
 
 pub struct InputClient {
     service: Handle,
+    instance: core::cell::Cell<DriverInstance>,
+    restarted: core::cell::Cell<bool>,
+}
+
+/// Which run of a driver its replies come from: a reader that sees it
+/// change knows the driver was relaunched since, and that the releases of
+/// the keys it held were lost (audit of the file manager, M2).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct DriverInstance(u16);
+
+impl DriverInstance {
+    pub const fn new() -> Self {
+        Self(0)
+    }
+
+    /// Follows the reply `msg`; `true` when it came from another run of the
+    /// driver than the last one seen.
+    pub fn changed(&mut self, msg: &[u8]) -> bool {
+        let Some(now) = Reply::decode(msg).map(|r| r.instance).filter(|&i| i != 0) else {
+            return false;
+        };
+        let before = core::mem::replace(&mut self.0, now);
+        before != 0 && before != now
+    }
+}
+
+/// The run of this driver, for its replies: its main thread's id, never 0.
+fn this_instance() -> u16 {
+    (crate::thread_get_tid() as u16).max(1)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,12 +63,22 @@ impl InputError {
 
 impl InputClient {
     pub fn new(service: Handle) -> Result<Self, Error> {
-        Ok(Self { service })
+        Ok(Self {
+            service,
+            instance: core::cell::Cell::new(DriverInstance::new()),
+            restarted: core::cell::Cell::new(false),
+        })
     }
 
     /// Slack over the requested deadline so a dead service does not leave the
     /// client waiting forever (audit 4836023, finding 1).
     const REPLY_GRACE_MS: u64 = 5000;
+
+    /// Whether the driver was relaunched since the last reply this client
+    /// read (`read` follows it): the keys it held are released for nobody.
+    pub fn driver_restarted(&self) -> bool {
+        self.restarted.take()
+    }
 
     fn call(&self, req: Request) -> Result<Reply, InputError> {
         let mut msg = [0u8; Reply::LEN];
@@ -53,6 +92,11 @@ impl InputClient {
             &mut msg,
         )
         .map_err(InputError::Ipc)?;
+        let mut instance = self.instance.get();
+        if instance.changed(&msg[..len]) {
+            self.restarted.set(true);
+        }
+        self.instance.set(instance);
         let reply = Reply::decode(&msg[..len]).ok_or(InputError::Ipc(Error::Invalid))?;
         match reply.status {
             Status::Ok => Ok(reply),
@@ -265,6 +309,7 @@ impl EventQueue {
 /// Sends `reply` on the one-shot reply endpoint `reply_to` and closes it;
 /// `false` if it was not delivered (its reader is gone).
 fn answer(reply_to: Handle, reply: &Reply) -> bool {
+    let reply = reply.with_instance(this_instance());
     let sent = crate::ipc_send(reply_to, &reply.encode(), &[], 0).is_ok();
     let _ = crate::handle_close(reply_to);
     sent

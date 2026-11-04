@@ -114,7 +114,11 @@ init starts the compositor and the profile's `launcher` (`desktop/launcher`),
 which lists the installed apps that open a window (`sys::launch::installed`)
 and starts them through the broker with the capability `launch`, up to six
 at once. The profile's `terminal` (`desktop/terminal`) shows a session shell
-in a window. Shared widgets (keys, buttons, lists, text fields) are in
+in a window, and its `editor` (`desktop/editor`) edits the text files of the
+owner's folder `home/` (`cat home/notes.txt` in the shell), and its `files`
+(`desktop/files`) lists, creates, renames and deletes them. Keyboards send
+Ctrl with a letter as its control character (Ctrl+S is `0x13`), as a
+terminal does. Shared widgets (keys, buttons, lists, text fields) are in
 `aricode_gfx::widgets`. When the
 launcher exits, or on Ctrl+Alt+Backspace on any keyboard, the desktop ends
 and the text console gets the screen and the keyboards back. A stick can come with a profile: `cargo xtask
@@ -160,7 +164,7 @@ launches with capabilities, such as `tcp_hog` or `sock_leaker`, keeps its manife
 
 ```text
 name = hello_app
-caps = system, fs      # system | fs | net | window | block (updater only) | install (installer only) | launch (launcher only) | terminal (terminal only)
+caps = system, fs      # system | fs | net | window | block (updater only) | install (installer only) | launch (launcher only) | terminal (terminal only) | home (editor and files only)
 memory = 128K          # DMA buffer quota (K or M, at most 8M)
 read_files = hola.txt  # up to 4 AriFS files in read-only mode (ADR 0016)
 ```

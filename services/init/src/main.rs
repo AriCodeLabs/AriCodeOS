@@ -2059,7 +2059,8 @@ impl Sessions {
 
 /// Capability broker (Phase 28): launches programs according to their
 /// manifest. An application receives, in this order, only what it asks for
-/// and is allowed: `SYSTEM` (read), a private directory in fsd, the network
+/// and is allowed: `SYSTEM` (read), a private directory in fsd, the owner's
+/// folder `home/` (`home`), the network
 /// endpoint, a compositor session, the block endpoint (trusted
 /// applications only), the main file namespace (`installer`), the launch
 /// endpoint (`launcher`, ADR 0074), the terminal endpoint (`terminal`), and
@@ -2852,6 +2853,7 @@ impl Broker {
         for (cap, what) in [
             (Caps::LAUNCH, &b"launch"[..]),
             (Caps::TERMINAL, b"terminal"),
+            (Caps::HOME, b"home"),
         ] {
             if caps.contains(cap) && !matches!(source, Source::Installed { .. }) {
                 sys::print(b"AriInit: denied, ");
@@ -2873,7 +2875,24 @@ impl Broker {
             let Some(fs) = &self.fs else {
                 return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
             };
+            // Its private directory would be the owner's folder.
+            if name == Caps::HOME_DIR {
+                sys::print(b"AriInit: denied, no application named home gets a private directory: home/ is the owner's folder\n");
+                return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
+            }
             match fs.bind(name) {
+                Ok(h) => granted.push(h),
+                Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
+            }
+            needs_hw = true;
+        }
+        // The owner's folder (ADR 0074 phase C): a directory session on
+        // `home/`, as a private directory is on the application's own.
+        if caps.contains(Caps::HOME) {
+            let Some(fs) = &self.fs else {
+                return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
+            };
+            match fs.bind(Caps::HOME_DIR) {
                 Ok(h) => granted.push(h),
                 Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
             }

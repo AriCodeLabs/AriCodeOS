@@ -126,10 +126,21 @@ impl FsClient {
     /// called so in the same commit (AriFS v2, ADR 0072); `Unsupported` on
     /// a volume still in v1.
     pub fn rename(&self, fd: u32, name: &str) -> Result<(), FsError> {
+        self.rename_with(fd, name, 0)
+    }
+
+    /// Like `rename`, but a file already called `name` is kept: `Exists`
+    /// then, decided by fsd in the same step.
+    pub fn rename_keeping(&self, fd: u32, name: &str) -> Result<(), FsError> {
+        self.rename_with(fd, name, aricode_proto::fs::RENAME_KEEP)
+    }
+
+    fn rename_with(&self, fd: u32, name: &str, len: u32) -> Result<(), FsError> {
         let mut req = Request::new(Op::Rename)
             .with_name(name)
             .ok_or(FsError::Status(Status::Invalid))?;
         req.fd = fd;
+        req.len = len;
         self.call(req, false).map(|_| ())
     }
 

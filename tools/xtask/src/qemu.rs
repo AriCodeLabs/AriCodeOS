@@ -1466,6 +1466,8 @@ pub fn run_headless(
     let mut probe_result: Option<String> = None;
     let mut probe_thread: Option<std::thread::JoinHandle<String>> = None;
     let mut input_results: Vec<String> = Vec::new();
+    // Where in the capture the current input stage started.
+    let mut stage_from = 0usize;
     let mut hotplug_result: Option<String> = None;
     // When the hot-plug marker was first seen.
     let mut hotplug_seen: Option<Instant> = None;
@@ -1566,9 +1568,16 @@ pub fn run_headless(
             }
         }
         if let Some(p) = input_probes.get(input_results.len()) {
-            if input_thread.is_none()
-                && count_occurrences(&captured.lock().expect("capture"), p.marker.as_bytes()) > 0
-            {
+            // A stage looks for its marker only in what came after the
+            // stage before it started: text printed earlier, which may
+            // contain it, does not fire it early.
+            let fired = input_thread.is_none() && {
+                let capture = captured.lock().expect("capture");
+                let from = stage_from.min(capture.len());
+                count_occurrences(&capture[from..], p.marker.as_bytes()) > 0
+            };
+            if fired {
+                stage_from = captured.lock().expect("capture").len();
                 let path = qmp.path().to_path_buf();
                 let keys = p.keys.to_vec();
                 let rel = p.mouse_rel;
@@ -1585,9 +1594,11 @@ pub fn run_headless(
                 }));
             }
             if input_thread.as_ref().is_some_and(|t| t.is_finished()) {
-                if let Some(r) = input_thread.take().and_then(|t| t.join().ok()) {
-                    input_results.push(r);
-                }
+                // A stage whose thread failed is said, and not sent again.
+                let r = input_thread.take().and_then(|t| t.join().ok());
+                input_results.push(r.unwrap_or_else(|| {
+                    format!("[host] QMP: the stage after '{}' failed", p.marker)
+                }));
             }
         }
         std::thread::sleep(Duration::from_millis(20));
@@ -1599,6 +1610,13 @@ pub fn run_headless(
     }
     if let Some(r) = input_thread.take().and_then(|t| t.join().ok()) {
         input_results.push(r);
+    }
+    // Stages whose marker never came are said too.
+    for p in input_probes.iter().skip(input_results.len()) {
+        input_results.push(format!(
+            "[host] QMP: marker '{}' never seen; nothing sent",
+            p.marker
+        ));
     }
     if let Some(t) = ssh_thread.take() {
         ssh_result = t.join().ok();

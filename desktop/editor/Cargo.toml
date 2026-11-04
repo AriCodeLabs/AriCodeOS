@@ -1,0 +1,35 @@
+# The desktop's editor (ADR 0074 phase C): a package of the desktop
+# profile. It edits the text files of the owner's folder `home/`, the
+# only files it can reach (the `home` capability). Built like `hello_ext`.
+[package]
+name = "desktop-editor"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "The AriCodeOS desktop text editor"
+publish = false
+
+[[bin]]
+name = "editor"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+aricode-rt = { path = "../../sdk/runtime" }
+aricode-gfx = { path = "../../libs/gfx" }
+aricode-proto = { path = "../../sdk/proto" }
+aricode-sync = { path = "../../libs/sync" }
+
+[build-dependencies]
+aricode-build = { path = "../../sdk/build" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
+
+[workspace]

@@ -24,7 +24,7 @@ key_delay_ms = 100
 
 # "Leave the desktop" at (220, 268) in the launcher's content, which the
 # first window has at (40, 60); the pointer starts at the screen's centre.
-[host_input_then]
+[[host_input_then]]
 marker = "gui_demo A: window closed"
 mouse_rel = [-380, -72]
 click = "left"

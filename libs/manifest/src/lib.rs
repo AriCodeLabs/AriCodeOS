@@ -47,12 +47,17 @@ impl Caps {
     /// and only when it is an installed, signed package. Each shell is the
     /// owner's own, as at the console or over SSH.
     pub const TERMINAL: Caps = Caps(1 << 11);
+    /// The owner's folder `home/` (ADR 0074 phase C, the owner's choice):
+    /// only for the desktop's `editor` and `files`, and only when they are
+    /// installed, signed packages. The system's own files stay out of
+    /// their reach.
+    pub const HOME: Caps = Caps(1 << 12);
 
     pub const NONE: Caps = Caps(0);
     /// The ones the broker grants to normal applications.
     pub const APP_ALLOWED: Caps = Caps(Caps::SYSTEM.0 | Caps::FS.0 | Caps::NET.0 | Caps::WINDOW.0);
 
-    const NAMES: [(&'static str, Caps); 12] = [
+    const NAMES: [(&'static str, Caps); 13] = [
         ("system", Caps::SYSTEM),
         ("fs", Caps::FS),
         ("net", Caps::NET),
@@ -65,6 +70,7 @@ impl Caps {
         ("install", Caps::INSTALL),
         ("launch", Caps::LAUNCH),
         ("terminal", Caps::TERMINAL),
+        ("home", Caps::HOME),
     ];
 
     /// System applications that may also ask for `block`.
@@ -77,6 +83,11 @@ impl Caps {
     pub const TRUSTED_LAUNCH: [&'static str; 1] = ["launcher"];
     /// The application that may ask for `terminal`.
     pub const TRUSTED_TERMINAL: [&'static str; 1] = ["terminal"];
+    /// The applications that may ask for `home`.
+    pub const TRUSTED_HOME: [&'static str; 2] = ["editor", "files"];
+    /// The owner's folder: no application of this name gets a private
+    /// directory, which would be that folder.
+    pub const HOME_DIR: &'static str = "home";
 
     /// Capabilities grantable to the application `name`.
     pub fn allowed_for(name: &str) -> Caps {
@@ -92,6 +103,9 @@ impl Caps {
         }
         if Self::TRUSTED_TERMINAL.contains(&name) {
             caps = caps.union(Caps::TERMINAL);
+        }
+        if Self::TRUSTED_HOME.contains(&name) {
+            caps = caps.union(Caps::HOME);
         }
         caps
     }
@@ -337,6 +351,18 @@ mod tests {
             assert_eq!(Manifest::parse(&text), Err(ManifestError::BadName), "{n}");
         }
         assert!(Manifest::parse("name = updater").is_ok());
+    }
+
+    #[test]
+    fn home_is_only_for_the_editor_and_files() {
+        for app in ["editor", "files"] {
+            assert!(Caps::allowed_for(app).contains(Caps::HOME), "{app}");
+        }
+        for other in ["launcher", "terminal", "home", "installer"] {
+            assert!(!Caps::allowed_for(other).contains(Caps::HOME), "{other}");
+        }
+        let m = Manifest::parse("name = editor\ncaps = window, home\n").unwrap();
+        assert_eq!(m.caps.names().collect::<Vec<_>>(), ["window", "home"]);
     }
 
     #[test]
