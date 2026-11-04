@@ -490,12 +490,16 @@ the same branch:
   - A terminal sends init a fourth handle with its request: the receive
     side of an endpoint whose send side only the terminal holds. When the
     terminal is gone, however it went, that side closes, and init stops
-    the shell, even one waiting in `run`.
+    what the shell started.
+  - The shell is not killed. A shell waiting in `run` returns, and it
+    then ends by itself on its closed input, as it does after a command
+    of its own. It is never stopped halfway through an `upgrade`.
   - Each terminal shell asks for launches on an endpoint of its own, so
-    what it started is known (`Running::from_shell`). When the shell
-    ends, init stops those programs.
-  - When the desktop ends, init stops the terminals, their shells and
-    what those shells started, at once.
+    what it started, `spawn`ed programs included, is known
+    (`Running::from_shell`). When the shell ends, init stops those
+    programs, as a terminal's jobs end with it.
+  - When the desktop ends, init stops the terminals and what their shells
+    started; the shells then end the same way.
 
   The install history says when a change came from a desktop terminal
   (`session::SHELL_TERMINAL`), not from SSH.
@@ -508,14 +512,14 @@ the same branch:
   - `usb.desktop_terminal`: the launcher offers the terminal, and Enter
     opens it. `exit` typed in its window ends the shell, and the terminal
     reports the text it showed (the banner, the prompt and the echo).
-  - `usb.desktop_terminal_end`: Ctrl+Alt+Backspace stops the terminal and
-    its shell.
+  - `usb.desktop_terminal_end`: Ctrl+Alt+Backspace stops the terminal,
+    and its shell exits.
   - `apps.terminal_rules`: the test package `terminal`
     (`examples/test_terminal`) sees `Exec` refused, a request without
     handles dropped, four shells granted and a fifth refused.
     `fake_terminal` asks for `terminal` and is denied. A terminal that
-    exits while its shell runs `cpu_hog` takes the shell and `cpu_hog`
-    with it.
+    exits while its shell runs `cpu_hog` takes `cpu_hog` with it, and the
+    shell then exits; a shell that ends takes what it spawned.
 
 ### Audit of the terminal (2026-11-04)
 
@@ -531,9 +535,9 @@ It found these, all fixed in the same branch:
 - **M1:** with the compositor gone and the shell idle, the terminal waited
   forever. The compositor answers a poll within 500 ms, so a silence
   twice that long ends the terminal.
-- **M2:** a shell in `run` outlived its terminal. The desktop's end now
-  stops terminal shells and what they started; the limit that remains is
-  described above.
+- **M2:** a shell in `run` outlived its terminal. What a terminal shell
+  started now stops when its terminal or the shell goes, and the shell
+  then ends by itself (see above).
 - **M3:** steady output froze the window. At most eight messages are
   taken before each repaint.
 - **M4:** the session budget is described above.
@@ -726,4 +730,26 @@ It found these, all fixed:
   `examples/`) too; it found one more warning, fixed.
 - **L7:** a misplaced doc comment, and the keyboard layout name only
   shown when it is short ASCII.
+
+### Audit of the terminal's lifetime fix (2026-11-04)
+
+An independent read-only audit checked:
+- the handle paths;
+- the kernel's endpoint semantics (the send side closes with the
+  terminal's last capability);
+- the endpoint limits.
+
+It found these, all fixed:
+
+- **H1:** the first version killed the shell as soon as its terminal
+  went. A shell halfway through an `upgrade` or a `profile add` would
+  then have stopped writing midway. Now only what the shell started is
+  stopped, and the shell ends by itself.
+- **M1:** probing the terminal's endpoint could take handles a buggy
+  terminal sent there, one per pass, until init's table was full. The
+  probe now takes none.
+- **M2:** a terminal shell's `spawn`ed programs end with it. It is the
+  intended rule, now said here and tested.
+- **Low:** stale comments; tests for a spawned program and for the shell
+  ending by itself.
 
