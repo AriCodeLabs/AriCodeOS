@@ -1115,9 +1115,9 @@ latter briefly to add the region.
   motion and click); without `device`, because QMP only accepts displays there and
   the virtio devices, registered after the i8042, are the
   active handlers. The result is logged as `[host] QMP: ...`.
-  `[host_input_then]` is a second stage, sent once the first is done and
-  its own marker is seen (typing again after the screen changed hands,
-  ADR 0075). Without virtio or USB input the events reach the i8042.
+  `[[host_input_then]]` adds stages, each sent once the stage before it is
+  done and its own marker is seen (typing again after the screen changed
+  hands, ADR 0075, or after a window answered). Without virtio or USB input the events reach the i8042.
 - Several boots on the same disk (`[[boots]]`, stage 3): each
   boot has its own `cmdline`, its console lines, optionally
   `kill_on` (xtask kills QEMU on seeing that text: a power cut) and its
@@ -1349,7 +1349,9 @@ latter briefly to add the region.
   `editor` or `files`; no application named `home` gets a private
   directory, which would be that folder. `desktop/editor` edits up to
   64 KiB of text there (`aricode_gfx::widgets::TextArea`) and saves with
-  an atomic replace.
+  an atomic replace; `desktop/files` lists, creates, renames (never over
+  an existing name: fsd's rename would replace it) and deletes, asking for
+  a second Delete.
 - fsd serves up to 15 *sessions* besides its main endpoint (ADR 0036):
   each `Bind` (only through the main endpoint) creates an endpoint bound
   to a prefix, each `Share` (ADR 0016) one bound to a single file in read

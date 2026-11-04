@@ -24,7 +24,7 @@ timeout_secs = 120
 marker = "launcher: window presented"
 keys = ["ctrl+alt+backspace"]
 
-[host_input_then]
+[[host_input_then]]
 marker = "console: the screen is back from process"
 keys = ["u", "p", "t", "i", "m", "e", "ret"]
 key_delay_ms = 50

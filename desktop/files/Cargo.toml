@@ -1,0 +1,34 @@
+# The desktop's file manager (ADR 0074 phase C): a package of the desktop
+# profile. It lists, creates, renames and deletes the files of the owner's
+# folder `home/`, the only files it reaches (`home`). Built like `hello_ext`.
+[package]
+name = "desktop-files"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "The AriCodeOS desktop file manager"
+publish = false
+
+[[bin]]
+name = "files"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+aricode-rt = { path = "../../sdk/runtime" }
+aricode-gfx = { path = "../../libs/gfx" }
+aricode-proto = { path = "../../sdk/proto" }
+
+[build-dependencies]
+aricode-build = { path = "../../sdk/build" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
+
+[workspace]

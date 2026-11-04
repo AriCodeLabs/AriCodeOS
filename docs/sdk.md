@@ -115,7 +115,8 @@ which lists the installed apps that open a window (`sys::launch::installed`)
 and starts them through the broker with the capability `launch`, up to six
 at once. The profile's `terminal` (`desktop/terminal`) shows a session shell
 in a window, and its `editor` (`desktop/editor`) edits the text files of the
-owner's folder `home/` (`cat home/notes.txt` in the shell). Keyboards send
+owner's folder `home/` (`cat home/notes.txt` in the shell), and its `files`
+(`desktop/files`) lists, creates, renames and deletes them. Keyboards send
 Ctrl with a letter as its control character (Ctrl+S is `0x13`), as a
 terminal does. Shared widgets (keys, buttons, lists, text fields) are in
 `aricode_gfx::widgets`. When the

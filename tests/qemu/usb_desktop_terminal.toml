@@ -22,7 +22,7 @@ timeout_secs = 120
 marker = "launcher: ready"
 keys = ["ret"]
 
-[host_input_then]
+[[host_input_then]]
 marker = "terminal: shell started"
 keys = ["e", "x", "i", "t", "ret"]
 key_delay_ms = 100

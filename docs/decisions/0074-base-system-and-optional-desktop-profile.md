@@ -580,3 +580,19 @@ It found these, all fixed in the same branch:
   - `apps.home_rules`: a package named `home` that asks for `fs`, and
     one that asks for `home` without being the editor, are both denied.
 
+### The file manager (2026-11-04)
+
+- **`desktop/files`** lists `home/` with each file's size. It creates a
+  file, renames the selected one to the name typed in the field, and
+  deletes it after a second Delete.
+  - A rename never goes over an existing name: fsd's rename would delete
+    that file in the same commit.
+  - Everything works from the keyboard: Tab, Enter in the field to
+    create, Ctrl+R to rename, Delete to delete.
+  - On a disk still in AriFS v1, which cannot rename or delete, it says
+    so.
+- **The scenarios type in stages** (`[[host_input_then]]`), each waiting
+  for the window's answer to the one before it.
+- **Scenario `usb.desktop_files`:** create `mo`, rename it to `p`, delete
+  it; the shell then finds `home/` empty.
+

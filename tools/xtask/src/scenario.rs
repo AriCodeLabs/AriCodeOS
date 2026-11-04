@@ -418,9 +418,11 @@ pub struct Scenario {
     /// QMP input injection on seeing `marker`: keys (QEMU qcode names) on
     /// the virtio keyboard, relative motion and a click on the mouse.
     pub host_input: Option<HostInput>,
-    /// A second stage of QMP input, sent once `host_input` is done and its
-    /// own marker is seen (typing again after the screen changed hands).
-    pub host_input_then: Option<HostInput>,
+    /// More stages of QMP input (`[[host_input_then]]`), each sent once the
+    /// stage before it is done and its own marker is seen (typing again
+    /// after the screen changed hands).
+    #[serde(default)]
+    pub host_input_then: Vec<HostInput>,
     /// A device plugged in over QMP (`device_add`) `delay_ms` after the
     /// guest prints `marker`: hot-plug detection.
     pub host_hotplug: Option<HostHotplug>,
@@ -687,7 +689,7 @@ pub fn load_from(dir: &Path) -> Result<Vec<Scenario>> {
                 h.check_queue()
                     .map_err(|e| format!("{}: {e}", path.display()))?;
             }
-            if s.host_input_then.is_some() && s.host_input.is_none() {
+            if !s.host_input_then.is_empty() && s.host_input.is_none() {
                 return Err(format!(
                     "{}: [host_input_then] follows [host_input]: set both",
                     path.display()

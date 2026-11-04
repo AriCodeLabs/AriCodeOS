@@ -20,7 +20,7 @@ timeout_secs = 120
 marker = "launcher: ready"
 keys = ["ret"]
 
-[host_input_then]
+[[host_input_then]]
 marker = "editor: ready"
 keys = ["a", "ret", "h", "i", "ctrl+s"]
 key_delay_ms = 100
