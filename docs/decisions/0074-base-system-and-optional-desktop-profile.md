@@ -260,8 +260,9 @@ in the same branch:
   service now says in its `Info` reply whether it has a keyboard, a pointer
   or both (`input::KIND_*`), and init starts the desktop only with a
   keyboard among them. Without one, init boots into the text console and
-  says why. Giving the compositor the PS/2 keyboard and touchpad, a ring-3
-  driver for the i8042, is future work and needs the owner's go-ahead.
+  says why. Giving the compositor the PS/2 keyboard and touchpad was
+  future work at the time; ADR 0075 did it (2026-11-04), and `ps2_input`
+  now counts as a keyboard.
 - **`launch` is an endpoint of its own.** It is a send handle to a second
   broker endpoint, so every request there comes from a `launch` holder.
   - The broker grants it only to a `launcher` that is installed and

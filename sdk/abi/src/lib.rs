@@ -12,9 +12,10 @@
 //! the handles [`handle::SELF_PROCESS`], [`handle::MAIN_THREAD`] and
 //! [`handle::CONSOLE`].
 //!
-//! During `0.x` the ABI may change (section 74). Current version: 7
-//! (ADR 0047: `spawn_limits::CONSOLE_FIRST` gives the child a session
-//! console). Version 6 (ADR 0044): `ipc_receive_any` also waits on
+//! During `0.x` the ABI may change (section 74). Current version: 8
+//! (ADR 0075: the `PS2` object, `ps2_read` and `INIT_PS2`). Version 7
+//! (ADR 0047): `spawn_limits::CONSOLE_FIRST` gives the child a session
+//! console. Version 6 (ADR 0044): `ipc_receive_any` also waits on
 //! interrupt lines. Version 5
 //! added `mmio_unmap` (ADR 0038: a mapping keeps its DMA buffer alive);
 //! version 4 `Error::PeerClosed`, `endpoint_create_pair` and
@@ -22,7 +23,7 @@
 
 #![no_std]
 
-pub const ABI_VERSION: u32 = 7;
+pub const ABI_VERSION: u32 = 8;
 
 /// Kernel base signature (SHA-512), required to check and verify the origin
 /// and authorship of an AriCodeOS build. It is part of the fixed ABI: it is
@@ -51,6 +52,10 @@ pub mod handle {
     pub const INIT_CONSOLE_IN: u32 = 0x0001_0008;
     /// Handle through which `init` receives the framebuffer (`MMIO`, `READ|WRITE`).
     pub const INIT_FRAMEBUFFER: u32 = 0x0001_0009;
+    /// Handle through which `init` receives the PS/2 stream (`PS2`,
+    /// `READ|WAIT|DUPLICATE|TRANSFER`), only if the machine has an i8042 that passed
+    /// its self-test (ADR 0075). Absent otherwise: the handle is invalid.
+    pub const INIT_PS2: u32 = 0x0001_000A;
 }
 
 /// Bits of the `arg` the kernel passes to `init`.
@@ -138,6 +143,32 @@ pub mod kind {
     pub const PCI_ROOT: u64 = 10;
     /// System state (`READ`: information; `MANAGE`: power off, reboot).
     pub const SYSTEM: u64 = 11;
+    /// The i8042's bytes while a process holds the screen (ADR 0075).
+    pub const PS2: u64 = 12;
+}
+
+/// The PS/2 stream (ADR 0075): `ps2_read` copies entries of two bytes, a
+/// tag and a byte; `object_id` on the stream gives the `KIND_*` bits of
+/// what the kernel found on the controller.
+pub mod ps2 {
+    /// A reset mark (its byte is 0): the stream was cut (the screen was
+    /// lent or given back, or bytes were lost from here on). Decoders start over
+    /// and every key and button held is released.
+    pub const TAG_RESET: u8 = 0;
+    /// A byte from the keyboard port (scancode set 1, translated).
+    pub const TAG_KEYBOARD: u8 = 1;
+    /// A byte from the aux port (mouse or touchpad packets).
+    pub const TAG_AUX: u8 = 2;
+    /// Bytes per entry.
+    pub const ENTRY: usize = 2;
+    /// Entries the kernel queues at most.
+    pub const CAPACITY: usize = 512;
+    /// A keyboard acknowledged scanning on port 1.
+    pub const KIND_KEYBOARD: u64 = 1;
+    /// A pointer acknowledged reporting on port 2.
+    pub const KIND_POINTER: u64 = 2;
+    /// The pointer turned on the IntelliMouse wheel: 4-byte packets.
+    pub const KIND_WHEEL: u64 = 4;
 }
 
 /// Exclusive limit of user space (canonical lower half).
@@ -292,6 +323,14 @@ pub mod nr {
     /// supervisor"): its thread exits as soon as it returns to ring 0 or wakes
     /// from a wait. `process_wait` returns `Killed` (audit 6ee19fb, 4).
     pub const PROCESS_KILL: u64 = 32;
+    /// `ps2_read(ps2, ptr, len) -> bytes copied` (ADR 0075): the entries
+    /// queued on the PS/2 stream (see [`ps2`]), whole entries only, without
+    /// waiting (0 if none). Requires `READ` on a `PS2` object. The first
+    /// process to read becomes the stream's only reader until it is gone:
+    /// any other gets `Denied`. The stream
+    /// can be a member of `ipc_receive_any` (`WAIT`), ready while entries
+    /// are queued, and reported like an interrupt line.
+    pub const PS2_READ: u64 = 37;
 }
 
 /// `process_spawn_from` request (48 bytes in caller memory).
@@ -1163,6 +1202,27 @@ pub const fn user_range_ok(ptr: u64, len: u64) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn syscall_numbers_are_distinct() {
+        // Each `pub const NAME: u64 = N;` of `nr`: two syscalls on one
+        // number would make the second unreachable in the kernel's match.
+        let source = include_str!("lib.rs");
+        let start = source.find("pub mod nr {").unwrap();
+        let module = &source[start..start + source[start..].find("\n}\n").unwrap()];
+        let mut seen = [false; 256];
+        let mut checked = 0;
+        for line in module.lines().map(str::trim) {
+            if let Some(rest) = line.strip_prefix("pub const ") {
+                let (name, value) = rest.split_once(": u64 = ").unwrap();
+                let n: usize = value.trim_end_matches(';').parse().unwrap();
+                assert!(!seen[n], "syscall {name} reuses number {n}");
+                seen[n] = true;
+                checked += 1;
+            }
+        }
+        assert!(checked >= 37, "only {checked} syscalls parsed");
+    }
+
     #[test]
     fn spawn_limits_keep_the_console_flag_apart() {
         use super::spawn_limits::*;

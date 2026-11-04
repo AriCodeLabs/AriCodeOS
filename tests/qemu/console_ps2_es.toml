@@ -1,8 +1,8 @@
 # Phase 34: Spanish keyboard (`kbd=es`) on the PS/2 console. The host types
 # "hola", shift+period (`:` in the Spanish layout, `>` in the US one) and
-# shift+7 (`/`) over QMP; the kernel receives "hola:/". The 18 scancodes
-# (the keyboard's acknowledgement of its set-up, then every byte up to the
-# Enter press, counted when that press is decoded, incident 0031) exceed the i8042's 16-byte queue, so the host waits for the test's echo
+# shift+7 (`/`) over QMP; the kernel receives "hola:/". The 17 scancodes
+# (every byte up to the Enter press, counted when that press is decoded,
+# incident 0031; the set-up's acknowledgement is polled, ADR 0075) exceed the i8042's 16-byte queue, so the host waits for the test's echo
 # of each letter (`echo_prompt`, incident 0022); the two shifted keys,
 # whose character depends on the layout, are only paced.
 name = "console.ps2_es"
@@ -21,7 +21,7 @@ keys = ["h", "o", "l", "a", "shift+dot", "shift+7", "ret"]
 exit = 33
 serial_contains = [
     "layout es)",
-    "console: PS/2 line 'hola:/' (6 bytes, 18 scancodes)",
+    "console: PS/2 line 'hola:/' (6 bytes, 17 scancodes)",
     "ARICODEOS_KERNEL_READY",
 ]
 serial_absent = ["KERNEL PANIC", "nobody typed"]

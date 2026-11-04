@@ -7,6 +7,8 @@
 
 #![no_std]
 
+use aricode_abi::ps2;
+
 pub const EV_SYN: u16 = 0;
 pub const EV_KEY: u16 = 1;
 pub const EV_REL: u16 = 2;
@@ -537,72 +539,286 @@ impl HidBootMouse {
         if report.len() < 3 {
             return 0;
         }
-        let mut n = 0;
-        let mut push = |ev: Event, n: &mut usize| {
-            if *n < out.len() {
-                out[*n] = ev;
-                *n += 1;
-            }
+        let wheel = if report.len() >= 4 {
+            report[3] as i8 as i32
+        } else {
+            0
         };
-        let buttons = report[0];
-        for (bit, code) in [BTN_LEFT, BTN_RIGHT, BTN_MIDDLE].iter().enumerate() {
-            let was = self.buttons & (1 << bit) != 0;
-            let is = buttons & (1 << bit) != 0;
-            if was != is {
-                push(
-                    Event {
-                        kind: EV_KEY,
-                        code: *code,
-                        value: is as u32,
-                    },
-                    &mut n,
-                );
+        pointer_events(
+            &mut self.buttons,
+            report[0],
+            report[1] as i8 as i32,
+            report[2] as i8 as i32,
+            wheel,
+            out,
+        )
+    }
+}
+
+/// The events of one pointer report: the changes of the three buttons
+/// against `held` (which follows them), the motion and the wheel, then
+/// `EV_SYN` if anything changed. Shared by the HID and PS/2 mice.
+fn pointer_events(
+    held: &mut u8,
+    buttons: u8,
+    dx: i32,
+    dy: i32,
+    wheel: i32,
+    out: &mut [Event; MAX_REPORT_EVENTS],
+) -> usize {
+    let mut n = 0;
+    let mut push = |kind: u16, code: u16, value: i32, n: &mut usize| {
+        if *n < out.len() {
+            out[*n] = Event {
+                kind,
+                code,
+                value: value as u32,
+            };
+            *n += 1;
+        }
+    };
+    for (bit, code) in [BTN_LEFT, BTN_RIGHT, BTN_MIDDLE].iter().enumerate() {
+        let was = *held & (1 << bit) != 0;
+        let is = buttons & (1 << bit) != 0;
+        if was != is {
+            push(EV_KEY, *code, is as i32, &mut n);
+        }
+    }
+    *held = buttons & 0x07;
+    if dx != 0 {
+        push(EV_REL, REL_X, dx, &mut n);
+    }
+    if dy != 0 {
+        push(EV_REL, REL_Y, dy, &mut n);
+    }
+    if wheel != 0 {
+        push(EV_REL, REL_WHEEL, wheel, &mut n);
+    }
+    if n > 0 {
+        push(EV_SYN, 0, 0, &mut n);
+    }
+    n
+}
+
+/// PS/2 mouse (ADR 0075): the aux port's 3-byte packets, or 4-byte ones
+/// once the IntelliMouse wheel was turned on. Byte 0 holds the buttons,
+/// the 9th bits of X and Y and their overflow bits; bit 3 is always set,
+/// which is how a decoder that lost a byte finds the next packet (as
+/// Linux's `psmouse` does). PS/2 Y and the wheel grow the other way from
+/// evdev's, so both are inverted.
+#[derive(Debug, Clone, Copy)]
+pub struct Ps2Mouse {
+    packet: [u8; 4],
+    have: usize,
+    len: usize,
+    buttons: u8,
+}
+
+impl Ps2Mouse {
+    /// A decoder for packets of 4 bytes with `wheel`, 3 without.
+    pub const fn new(wheel: bool) -> Self {
+        Self {
+            packet: [0; 4],
+            have: 0,
+            len: if wheel { 4 } else { 3 },
+            buttons: 0,
+        }
+    }
+
+    /// Forgets a packet half received (the stream was cut).
+    pub fn resync(&mut self) {
+        self.have = 0;
+    }
+
+    /// Processes one aux byte and writes the events of the packet it
+    /// completes into `out`; returns how many. A first byte without bit 3
+    /// is skipped: the decoder is out of step and waits for a packet start.
+    /// A packet with an overflow bit set reports its buttons only.
+    pub fn feed(&mut self, byte: u8, out: &mut [Event; MAX_REPORT_EVENTS]) -> usize {
+        if self.have == 0 && byte & 0x08 == 0 {
+            return 0;
+        }
+        self.packet[self.have] = byte;
+        self.have += 1;
+        if self.have < self.len {
+            return 0;
+        }
+        self.have = 0;
+        let [b0, b1, b2, b3] = self.packet;
+        let (mut dx, mut dy) = (0, 0);
+        if b0 & 0xC0 == 0 {
+            dx = b1 as i32 - if b0 & 0x10 != 0 { 256 } else { 0 };
+            dy = b2 as i32 - if b0 & 0x20 != 0 { 256 } else { 0 };
+        }
+        // The wheel is the low nibble of byte 3, as a signed 4-bit value.
+        let wheel = if self.len == 4 {
+            ((b3 << 4) as i8 >> 4) as i32
+        } else {
+            0
+        };
+        pointer_events(&mut self.buttons, b0 & 0x07, dx, -dy, -wheel, out)
+    }
+
+    /// The releases of the buttons held, so none stays down when the
+    /// stream is cut; returns how many events.
+    pub fn release_all(&mut self, out: &mut [Event; MAX_REPORT_EVENTS]) -> usize {
+        self.have = 0;
+        pointer_events(&mut self.buttons, 0, 0, 0, 0, out)
+    }
+}
+
+/// The keys a keyboard holds down, so a stream cut in the middle (a lost
+/// release, the end of a session) can be closed with their releases and no
+/// modifier stays stuck at the reader (ADR 0075).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct KeysDown {
+    bits: [u64; 4],
+}
+
+impl KeysDown {
+    pub const fn new() -> Self {
+        Self { bits: [0; 4] }
+    }
+
+    /// Follows one event (key codes from 256 up are not tracked).
+    pub fn follow(&mut self, ev: &Event) {
+        if ev.kind != EV_KEY || ev.code >= 256 {
+            return;
+        }
+        let (word, bit) = (ev.code as usize / 64, 1u64 << (ev.code % 64));
+        if ev.value == 0 {
+            self.bits[word] &= !bit;
+        } else {
+            self.bits[word] |= bit;
+        }
+    }
+
+    /// Calls `release` with a release of each key held, lowest code first,
+    /// and forgets them.
+    pub fn release_all(&mut self, mut release: impl FnMut(Event)) {
+        for (word, bits) in self.bits.iter_mut().enumerate() {
+            while *bits != 0 {
+                let bit = bits.trailing_zeros();
+                *bits &= !(1u64 << bit);
+                release(Event {
+                    kind: EV_KEY,
+                    code: (word * 64) as u16 + bit as u16,
+                    value: 0,
+                });
             }
         }
-        self.buttons = buttons;
-        let dx = report[1] as i8 as i32;
-        let dy = report[2] as i8 as i32;
-        if dx != 0 {
-            push(
-                Event {
-                    kind: EV_REL,
-                    code: REL_X,
-                    value: dx as u32,
-                },
-                &mut n,
-            );
+    }
+}
+
+/// The PS/2 stream's queue (ADR 0075), kept by the kernel under its lock:
+/// (tag, byte) entries (`aricode_abi::ps2`) for the one process that
+/// drains them. The last free entry is kept for a reset mark, so when the
+/// queue fills the mark goes in where the bytes start being lost: the
+/// reader releases every key after the entries before the loss, never
+/// before them (a press queued before a lost release would stay down).
+pub struct Ps2Queue {
+    buf: [[u8; ps2::ENTRY]; ps2::CAPACITY],
+    head: usize,
+    len: usize,
+    /// Bytes dropped because the queue was full, not taken yet.
+    dropped: u64,
+    /// Cut (emptied when the screen changed hands, or entries lost on
+    /// their way to the reader): the next read starts with a reset mark.
+    cut: bool,
+    /// The one process that drains the queue: the first to read it, until
+    /// it is gone.
+    reader: Option<u32>,
+}
+
+impl Default for Ps2Queue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Ps2Queue {
+    pub const fn new() -> Self {
+        Self {
+            buf: [[0; ps2::ENTRY]; ps2::CAPACITY],
+            head: 0,
+            len: 0,
+            dropped: 0,
+            cut: false,
+            reader: None,
         }
-        if dy != 0 {
-            push(
-                Event {
-                    kind: EV_REL,
-                    code: REL_Y,
-                    value: dy as u32,
-                },
-                &mut n,
-            );
+    }
+
+    fn append(&mut self, entry: [u8; ps2::ENTRY]) {
+        self.buf[(self.head + self.len) % ps2::CAPACITY] = entry;
+        self.len += 1;
+    }
+
+    /// Queues one byte from port `tag`; whether the reader has something
+    /// new (the byte, or the mark that took its place).
+    pub fn push(&mut self, tag: u8, byte: u8) -> bool {
+        if self.len + 1 < ps2::CAPACITY {
+            self.append([tag, byte]);
+            return true;
         }
-        if report.len() >= 4 && report[3] != 0 {
-            push(
-                Event {
-                    kind: EV_REL,
-                    code: REL_WHEEL,
-                    value: report[3] as i8 as i32 as u32,
-                },
-                &mut n,
-            );
+        self.dropped += 1;
+        if self.len + 1 == ps2::CAPACITY {
+            self.append([ps2::TAG_RESET, 0]);
+            return true;
         }
-        if n > 0 {
-            push(
-                Event {
-                    kind: EV_SYN,
-                    code: 0,
-                    value: 0,
-                },
-                &mut n,
-            );
+        false
+    }
+
+    /// Empties the queue; the next read starts with a reset mark.
+    pub fn cut(&mut self) {
+        self.head = 0;
+        self.len = 0;
+        self.cut = true;
+    }
+
+    /// Entries taken by `read` were not delivered: the reader starts over
+    /// from a reset mark.
+    pub fn lost(&mut self) {
+        self.cut = true;
+    }
+
+    /// The entries waiting, a reset mark owed counted as one.
+    pub fn pending(&self) -> usize {
+        self.len + self.cut as usize
+    }
+
+    /// Process `pid` is gone: if it drained the queue, another may now.
+    pub fn reader_gone(&mut self, pid: u32) {
+        if self.reader == Some(pid) {
+            self.reader = None;
         }
-        n
+    }
+
+    /// Copies whole entries into `out` for process `pid`: a reset mark
+    /// first if the queue was cut, then the oldest entries. Returns the
+    /// bytes written; `None` if another process drains the queue.
+    pub fn read(&mut self, pid: u32, out: &mut [u8]) -> Option<usize> {
+        match self.reader {
+            Some(reader) if reader != pid => return None,
+            _ => self.reader = Some(pid),
+        }
+        let mut n = 0;
+        if self.cut && out.len() >= ps2::ENTRY {
+            self.cut = false;
+            out[..ps2::ENTRY].copy_from_slice(&[ps2::TAG_RESET, 0]);
+            n = ps2::ENTRY;
+        }
+        while self.len > 0 && out.len() - n >= ps2::ENTRY {
+            out[n..n + ps2::ENTRY].copy_from_slice(&self.buf[self.head]);
+            self.head = (self.head + 1) % ps2::CAPACITY;
+            self.len -= 1;
+            n += ps2::ENTRY;
+        }
+        Some(n)
+    }
+
+    /// The bytes dropped since the last call.
+    pub fn take_dropped(&mut self) -> u64 {
+        core::mem::take(&mut self.dropped)
     }
 }
 
@@ -1020,5 +1236,176 @@ mod tests {
             code: KEY_BACKSPACE,
             value: 1
         }));
+    }
+
+    fn ev(kind: u16, code: u16, value: i32) -> Event {
+        Event {
+            kind,
+            code,
+            value: value as u32,
+        }
+    }
+
+    #[test]
+    fn ps2_mouse_packets_to_events() {
+        let mut m = Ps2Mouse::new(false);
+        let mut out = [Event::default(); MAX_REPORT_EVENTS];
+        // Left button, X +10, Y +5 (up in PS/2, so -5 in evdev).
+        assert_eq!(m.feed(0x09, &mut out), 0);
+        assert_eq!(m.feed(10, &mut out), 0);
+        let n = m.feed(5, &mut out);
+        assert_eq!(
+            &out[..n],
+            &[
+                ev(EV_KEY, BTN_LEFT, 1),
+                ev(EV_REL, REL_X, 10),
+                ev(EV_REL, REL_Y, -5),
+                ev(EV_SYN, 0, 0)
+            ]
+        );
+        // The 9th bits: X -3 (0x1FD), Y -200 (0x138) is down, +200 in evdev.
+        m.feed(0x08 | 0x10 | 0x20, &mut out);
+        m.feed(0xFD, &mut out);
+        let n = m.feed(0x38, &mut out);
+        assert_eq!(
+            &out[..n],
+            &[
+                ev(EV_KEY, BTN_LEFT, 0),
+                ev(EV_REL, REL_X, -3),
+                ev(EV_REL, REL_Y, 200),
+                ev(EV_SYN, 0, 0)
+            ]
+        );
+    }
+
+    #[test]
+    fn ps2_mouse_resyncs_and_drops_overflow() {
+        let mut m = Ps2Mouse::new(false);
+        let mut out = [Event::default(); MAX_REPORT_EVENTS];
+        // A stray byte without bit 3 is skipped until a packet starts.
+        assert_eq!(m.feed(0x05, &mut out), 0);
+        m.feed(0x08, &mut out);
+        m.feed(1, &mut out);
+        assert_eq!(m.feed(0, &mut out), 2, "X only, then EV_SYN");
+        // X overflow: the motion is dropped, the right button kept.
+        m.feed(0x08 | 0x40 | 0x02, &mut out);
+        m.feed(0xFF, &mut out);
+        let n = m.feed(0x10, &mut out);
+        assert_eq!(&out[..n], &[ev(EV_KEY, BTN_RIGHT, 1), ev(EV_SYN, 0, 0)]);
+        // A cut stream: the half packet is forgotten and the button released.
+        m.feed(0x08, &mut out);
+        let n = m.release_all(&mut out);
+        assert_eq!(&out[..n], &[ev(EV_KEY, BTN_RIGHT, 0), ev(EV_SYN, 0, 0)]);
+        m.feed(0x08 | 0x04, &mut out);
+        m.feed(0, &mut out);
+        let n = m.feed(0, &mut out);
+        assert_eq!(&out[..n], &[ev(EV_KEY, BTN_MIDDLE, 1), ev(EV_SYN, 0, 0)]);
+        assert_eq!(m.release_all(&mut out), 2);
+        assert_eq!(m.release_all(&mut out), 0, "nothing left held");
+    }
+
+    #[test]
+    fn ps2_mouse_wheel() {
+        let mut m = Ps2Mouse::new(true);
+        let mut out = [Event::default(); MAX_REPORT_EVENTS];
+        // Z +1 (towards the user) is a wheel step down: -1 in evdev.
+        for b in [0x08, 0, 0] {
+            assert_eq!(m.feed(b, &mut out), 0, "4-byte packets");
+        }
+        let n = m.feed(0x01, &mut out);
+        assert_eq!(&out[..n], &[ev(EV_REL, REL_WHEEL, -1), ev(EV_SYN, 0, 0)]);
+        // Z -2 is 0xE in the low nibble; the high bits (buttons 4 and 5)
+        // are not the wheel's.
+        for b in [0x08, 0, 0] {
+            m.feed(b, &mut out);
+        }
+        let n = m.feed(0x3E, &mut out);
+        assert_eq!(&out[..n], &[ev(EV_REL, REL_WHEEL, 2), ev(EV_SYN, 0, 0)]);
+        m.resync();
+        for b in [0x08, 4, 0] {
+            m.feed(b, &mut out);
+        }
+        assert_eq!(m.feed(0, &mut out), 2, "in step again after resync");
+    }
+
+    #[test]
+    fn keys_down_releases_what_is_held() {
+        let mut k = KeysDown::new();
+        for e in [
+            ev(EV_KEY, KEY_LEFTCTRL, 1),
+            ev(EV_KEY, KEY_SPACE, 1),
+            ev(EV_KEY, KEY_SPACE, 0),
+            ev(EV_KEY, KEY_RIGHTMETA, 1),
+            ev(EV_KEY, KEY_RIGHTMETA, 1),
+            ev(EV_REL, REL_X, 1),
+            ev(EV_KEY, BTN_LEFT, 1),
+        ] {
+            k.follow(&e);
+        }
+        let mut released = [Event::default(); 4];
+        let mut n = 0;
+        k.release_all(|e| {
+            released[n] = e;
+            n += 1;
+        });
+        assert_eq!(
+            released[..n],
+            [ev(EV_KEY, KEY_LEFTCTRL, 0), ev(EV_KEY, KEY_RIGHTMETA, 0)]
+        );
+        k.release_all(|_| panic!("nothing left held"));
+    }
+
+    fn entries(q: &mut Ps2Queue, pid: u32) -> ([[u8; 2]; 8], usize) {
+        let mut buf = [0u8; 16];
+        let n = q.read(pid, &mut buf).expect("the reader");
+        let mut out = [[0u8; 2]; 8];
+        for (o, e) in out.iter_mut().zip(buf[..n].as_chunks::<2>().0) {
+            *o = *e;
+        }
+        (out, n / 2)
+    }
+
+    #[test]
+    fn ps2_queue_marks_where_bytes_are_lost() {
+        let mut q = Ps2Queue::new();
+        for i in 0..ps2::CAPACITY - 1 {
+            assert!(q.push(ps2::TAG_KEYBOARD, i as u8));
+        }
+        // The last entry becomes the mark; bytes after it are dropped.
+        assert!(q.push(ps2::TAG_KEYBOARD, 0xAA), "the mark is new");
+        assert!(!q.push(ps2::TAG_AUX, 0xBB));
+        assert_eq!(q.pending(), ps2::CAPACITY);
+        assert_eq!(q.take_dropped(), 2);
+        let mut buf = [0u8; ps2::CAPACITY * ps2::ENTRY];
+        let n = q.read(7, &mut buf).unwrap();
+        assert_eq!(n, ps2::CAPACITY * ps2::ENTRY);
+        assert_eq!(&buf[n - 4..], &[ps2::TAG_KEYBOARD, 254, ps2::TAG_RESET, 0]);
+        // Room again: bytes queue normally, no mark owed.
+        assert!(q.push(ps2::TAG_AUX, 1));
+        let (e, n) = entries(&mut q, 7);
+        assert_eq!(&e[..n], &[[ps2::TAG_AUX, 1]]);
+    }
+
+    #[test]
+    fn ps2_queue_cut_and_one_reader() {
+        let mut q = Ps2Queue::new();
+        q.push(ps2::TAG_KEYBOARD, 0x1E);
+        q.cut();
+        assert_eq!(q.pending(), 1, "the mark owed");
+        q.push(ps2::TAG_KEYBOARD, 0x9E);
+        let (e, n) = entries(&mut q, 3);
+        assert_eq!(&e[..n], &[[ps2::TAG_RESET, 0], [ps2::TAG_KEYBOARD, 0x9E]]);
+        // Process 3 drains it: another is refused until 3 is gone.
+        assert!(q.read(4, &mut [0u8; 4]).is_none());
+        q.reader_gone(4);
+        assert!(q.read(4, &mut [0u8; 4]).is_none(), "4 never was the reader");
+        q.reader_gone(3);
+        q.lost();
+        let (e, n) = entries(&mut q, 4);
+        assert_eq!(&e[..n], &[[ps2::TAG_RESET, 0]]);
+        // A buffer too small for an entry takes nothing.
+        q.push(ps2::TAG_AUX, 9);
+        assert_eq!(q.read(4, &mut [0u8; 1]), Some(0));
+        assert_eq!(q.pending(), 1);
     }
 }

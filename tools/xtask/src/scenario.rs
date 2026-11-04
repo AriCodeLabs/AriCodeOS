@@ -418,6 +418,9 @@ pub struct Scenario {
     /// QMP input injection on seeing `marker`: keys (QEMU qcode names) on
     /// the virtio keyboard, relative motion and a click on the mouse.
     pub host_input: Option<HostInput>,
+    /// A second stage of QMP input, sent once `host_input` is done and its
+    /// own marker is seen (typing again after the screen changed hands).
+    pub host_input_then: Option<HostInput>,
     /// A device plugged in over QMP (`device_add`) `delay_ms` after the
     /// guest prints `marker`: hot-plug detection.
     pub host_hotplug: Option<HostHotplug>,
@@ -474,12 +477,15 @@ pub struct Scenario {
     /// QMP input reaches them whatever the guest starts.
     #[serde(default)]
     pub usb_hid_only_input: bool,
-    /// No virtio keyboard and mouse, and no USB HID unless asked: QMP keys
-    /// reach the i8042, the PS/2 keyboard the kernel reads (ADR 0074 phase
-    /// B: a desktop needs another keyboard, the console's keys follow the
-    /// screen).
+    /// No virtio keyboard and mouse, and no USB HID unless asked: QMP input
+    /// reaches the i8042, the PS/2 keyboard and mouse the kernel reads
+    /// (ADR 0074 phase B, ADR 0075).
     #[serde(default)]
     pub no_virtio_input: bool,
+    /// No i8042 either (`i8042=off`): a machine without a PS/2 keyboard or
+    /// mouse (ADR 0075).
+    #[serde(default)]
+    pub no_ps2: bool,
     /// The `usb_hid` xHCI offers MSI only (no MSI-X), like 2012 Intel
     /// controllers: the kernel must program the MSI capability.
     #[serde(default)]
@@ -676,9 +682,15 @@ pub fn load_from(dir: &Path) -> Result<Vec<Scenario>> {
             }
             s.check_placeholders()
                 .map_err(|e| format!("{}: {e}", path.display()))?;
-            if let Some(h) = &s.host_input {
+            for h in s.host_input.iter().chain(&s.host_input_then) {
                 h.check_queue()
                     .map_err(|e| format!("{}: {e}", path.display()))?;
+            }
+            if s.host_input_then.is_some() && s.host_input.is_none() {
+                return Err(format!(
+                    "{}: [host_input_then] follows [host_input]: set both",
+                    path.display()
+                ));
             }
             if let Some(h) = &s.host_hotplug {
                 h.check().map_err(|e| format!("{}: {e}", path.display()))?;

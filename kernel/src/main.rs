@@ -189,7 +189,17 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
             aricode_input::Layout::Us
         }),
     };
-    console_input::init(layout);
+    // ADR 0075: the PS/2 bytes typed while the screen is held go to the
+    // desktop unless `ps2=console` keeps them for the console alone.
+    let ps2_pump = match cmdline.get(keys::PS2) {
+        None => true,
+        Some("console") => false,
+        Some(other) => {
+            warn!("cmdline: unknown ps2={other}, the PS/2 keyboard goes to the desktop too");
+            true
+        }
+    };
+    console_input::init(layout, ps2_pump);
     initrd::init(info);
     pci::init(match cmdline.get(keys::PCI_FAULT) {
         Some("msix") => pci::Lie::MsixOffset,
@@ -451,56 +461,61 @@ fn run_init(arg: u64, fb: boot_protocol::FramebufferInfo) {
         source_id: None,
         claim: None,
     }));
-    let pid = user::process::spawn_with_handles_and_arg(
-        "init",
-        elf,
-        alloc::vec![
-            (
-                spawner,
-                Rights::READ
-                    .union(Rights::MANAGE)
-                    .union(Rights::DUPLICATE)
-                    .union(Rights::TRANSFER)
-            ),
-            (
-                pci_root,
-                Rights::READ
-                    .union(Rights::MANAGE)
-                    .union(Rights::DUPLICATE)
-                    .union(Rights::TRANSFER)
-            ),
-            (
-                hardware,
-                Rights::MANAGE
-                    .union(Rights::DUPLICATE)
-                    .union(Rights::TRANSFER)
-            ),
-            (
-                system,
-                Rights::READ
-                    .union(Rights::MANAGE)
-                    .union(Rights::DUPLICATE)
-                    .union(Rights::TRANSFER)
-            ),
-            (
-                console_in,
-                Rights::READ
-                    .union(Rights::MANAGE)
-                    .union(Rights::DUPLICATE)
-                    .union(Rights::TRANSFER)
-            ),
-            (
-                framebuffer,
-                Rights::READ
-                    .union(Rights::WRITE)
-                    .union(Rights::DUPLICATE)
-                    .union(Rights::TRANSFER)
-            ),
-        ],
-        arg,
-        0,
-    )
-    .expect("create init");
+    let mut handles = alloc::vec![
+        (
+            spawner,
+            Rights::READ
+                .union(Rights::MANAGE)
+                .union(Rights::DUPLICATE)
+                .union(Rights::TRANSFER)
+        ),
+        (
+            pci_root,
+            Rights::READ
+                .union(Rights::MANAGE)
+                .union(Rights::DUPLICATE)
+                .union(Rights::TRANSFER)
+        ),
+        (
+            hardware,
+            Rights::MANAGE
+                .union(Rights::DUPLICATE)
+                .union(Rights::TRANSFER)
+        ),
+        (
+            system,
+            Rights::READ
+                .union(Rights::MANAGE)
+                .union(Rights::DUPLICATE)
+                .union(Rights::TRANSFER)
+        ),
+        (
+            console_in,
+            Rights::READ
+                .union(Rights::MANAGE)
+                .union(Rights::DUPLICATE)
+                .union(Rights::TRANSFER)
+        ),
+        (
+            framebuffer,
+            Rights::READ
+                .union(Rights::WRITE)
+                .union(Rights::DUPLICATE)
+                .union(Rights::TRANSFER)
+        ),
+    ];
+    // The PS/2 stream, last, so it is `INIT_PS2` when there is one (ADR 0075).
+    if console_input::ps2_stream_kinds().is_some() {
+        handles.push((
+            object::KernelObject::new(object::ObjectKind::Ps2),
+            Rights::READ
+                .union(Rights::WAIT)
+                .union(Rights::DUPLICATE)
+                .union(Rights::TRANSFER),
+        ));
+    }
+    let pid = user::process::spawn_with_handles_and_arg("init", elf, handles, arg, 0)
+        .expect("create init");
     let status = user::process::wait(pid);
     match status {
         user::process::ExitStatus::Exited(code) => info!("init exited with code {code}"),

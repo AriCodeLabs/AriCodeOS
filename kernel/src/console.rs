@@ -27,7 +27,7 @@ use alloc::vec::Vec;
 use aricode_fb_console::Console;
 use aricode_sync::IrqGuard;
 use core::fmt::Write;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use log::{Level, LevelFilter, Log, Metadata, Record};
 
 /// The console (its text and the shadow of the screen, about 64 KiB) lives here, never on the stack: at boot
@@ -121,6 +121,9 @@ pub fn screen_hold(pid: u32, virt: u64) {
     let mut lease = LEASE.lock();
     if lease.holders.is_empty() {
         lease.announce = true;
+        // A new session: the PS/2 stream starts clean, before the keys
+        // start going to it (ADR 0075).
+        crate::console_input::stream_cut();
     }
     lease.holders.push((pid, virt));
     HELD.store(true, Ordering::Release);
@@ -185,6 +188,8 @@ pub fn screen_release(pid: u32, virt: Option<u64>) -> Option<bool> {
         return None;
     }
     HELD.store(false, Ordering::Release);
+    // What the stream still holds was typed at the session that ended.
+    crate::console_input::stream_cut();
     lease.announce = false;
     let lent = lease.lent.take();
     let had = lent.is_some();
@@ -212,30 +217,48 @@ pub fn screen_returned_said(pid: u32, lent: bool) {
 }
 
 /// Ctrl+Alt+Backspace was typed on the PS/2 keyboard while the screen was
-/// held: the cursor thread stops the holders ([`stop_holders`]). Set from
-/// the keyboard's interrupt handler, which kills nothing itself.
-static WANTED_BACK: AtomicBool = AtomicBool::new(false);
+/// held: the tick it was typed at (at least 1), 0 if it was not. Set from
+/// the keyboard's interrupt handler, which kills nothing itself; the cursor
+/// thread acts on it ([`stop_holders`]).
+static WANTED_AT: AtomicU64 = AtomicU64::new(0);
+
+/// How long the screen's holders have to give it back by themselves once
+/// the owner asked for it (ADR 0075 §4): the compositor hears the chord
+/// through `ps2-input` and leaves, so its clients end cleanly.
+const GIVE_BACK_TICKS: u64 = 2 * crate::time::TICK_HZ;
 
 /// The owner asked for the screen back on the PS/2 keyboard (ADR 0074
-/// phase B). Interrupt context: only flags it.
+/// phase B). Interrupt context: only notes when.
 pub fn screen_wanted_back() {
-    WANTED_BACK.store(true, Ordering::Release);
+    let now = crate::time::ticks().max(1);
+    let _ = WANTED_AT.compare_exchange(0, now, Ordering::AcqRel, Ordering::Acquire);
 }
 
-/// Stops every process holding the screen, once the owner asked for it on
-/// the PS/2 keyboard: on a laptop whose only other way out is the desktop
-/// itself, this is how the text console is always reachable (ADR 0074 §4).
-/// Its death returns the screen; init then ends the desktop. Thread code.
+/// Stops every process still holding the screen 2 s after the owner asked
+/// for it on the PS/2 keyboard: on a laptop whose only other way out is the
+/// desktop itself, this is how the text console is always reachable even
+/// when the compositor hangs (ADR 0074 §4, ADR 0075 §4). Its death returns
+/// the screen; init then ends the desktop. Thread code.
 fn stop_holders() {
-    if !WANTED_BACK.swap(false, Ordering::AcqRel) {
+    let at = WANTED_AT.load(Ordering::Acquire);
+    if at == 0 {
         return;
     }
+    if !HELD.load(Ordering::Acquire) {
+        // Given back in time: nothing to stop.
+        WANTED_AT.store(0, Ordering::Release);
+        return;
+    }
+    if crate::time::ticks() < at + GIVE_BACK_TICKS {
+        return;
+    }
+    WANTED_AT.store(0, Ordering::Release);
     let mut pids: Vec<u32> = LEASE.lock().holders.iter().map(|&(p, _)| p).collect();
     pids.sort_unstable();
     pids.dedup();
     for pid in pids {
         log::info!(
-            "console: Ctrl+Alt+Backspace on the PS/2 keyboard: process {pid}, which holds the screen, is stopped so the console gets it back"
+            "console: Ctrl+Alt+Backspace on the PS/2 keyboard: process {pid} still holds the screen after 2 s and is stopped so the console gets it back"
         );
         crate::user::process::request_kill(
             crate::user::process::Pid(pid),

@@ -25,7 +25,8 @@ const FIRST_INPUT: u32 = 0x0001_0008;
 /// Pause before reading again from a driver that died holding the read
 /// (ADR 0030): its supervisor relaunches it on the same endpoint.
 const RETRY_MS: u64 = 50;
-const MAX_INPUTS: usize = 4;
+/// Input services: up to four USB or virtio ones and the PS/2 one (ADR 0075).
+const MAX_INPUTS: usize = 5;
 const MAX_WINDOWS: usize = aricode_gfx::MAX_WINDOWS;
 const QUEUE: usize = 8;
 /// Client sessions (ADR 0052): one per program the broker launches with
@@ -598,7 +599,7 @@ fn main(inputs: u64) -> u64 {
     num(screen.info.height as u64);
     sys::print(b"\n");
     let inputs = (inputs as usize).min(MAX_INPUTS);
-    let mut devices: [Option<InputClient>; MAX_INPUTS] = [None, None, None, None];
+    let mut devices: [Option<InputClient>; MAX_INPUTS] = [const { None }; MAX_INPUTS];
     for (i, slot) in devices.iter_mut().take(inputs).enumerate() {
         *slot = InputClient::new(Handle(FIRST_INPUT + i as u32)).ok();
     }

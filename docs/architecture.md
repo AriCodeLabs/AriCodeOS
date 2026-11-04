@@ -87,6 +87,7 @@ services/net-core/   ari-net-core: minimal IPv4 stack and NetServiceProtocol ser
 services/rtl-net/    ring 3 Realtek r8169 driver (RTL8169/8168/8101) on top of ari-net-core; no QEMU emulation
 services/compositor/ compositor: owns the framebuffer, windows, cursor and input routing in ring 3
 services/virtio-input/ inputd: virtio-input driver (one process per keyboard or mouse) and events over IPC in ring 3
+services/ps2-input/   ps2_input: decoder of the PS/2 keyboard and pointer bytes the kernel hands over while a process holds the screen (ADR 0075)
 services/arifs/      fsd: AriFS file service in ring 3 on top of the block service
 services/shell/      arish: interactive ring 3 shell (help, ps, mem, ls, cat, write, devices, services, uptime, cpus, diag, net, run, spawn, repeat, reboot, shutdown, exit; history with the arrow keys)
 boot/                ariboot: integrates the above with the `uefi` crate
@@ -1112,6 +1113,9 @@ latter briefly to add the region.
   motion and click); without `device`, because QMP only accepts displays there and
   the virtio devices, registered after the i8042, are the
   active handlers. The result is logged as `[host] QMP: ...`.
+  `[host_input_then]` is a second stage, sent once the first is done and
+  its own marker is seen (typing again after the screen changed hands,
+  ADR 0075). Without virtio or USB input the events reach the i8042.
 - Several boots on the same disk (`[[boots]]`, stage 3): each
   boot has its own `cmdline`, its console lines, optionally
   `kill_on` (xtask kills QEMU on seeing that text: a power cut) and its
@@ -1139,13 +1143,33 @@ latter briefly to add the region.
   thread reattaches and repaints it, since a release can run with
   interrupts off (a reap). The kernel says each change, with how many PS/2
   characters were withheld. Ctrl+Alt+Backspace on the PS/2 keyboard while
-  the screen is held is the one key acted on: the interrupt handler flags
-  it and the cursor thread stops every holder (`request_kill` with that
-  reason), so a laptop always has a local way back to the console.
+  the screen is held is the one key acted on: the interrupt handler notes
+  the tick, and the cursor thread stops every process still holding the
+  screen 2 s later (`request_kill` with that reason; ADR 0075 §4), so a
+  laptop always has a local way back to the console, even past a hung
+  compositor.
+- The PS/2 keyboard and touchpad in the desktop (ADR 0075): the kernel
+  stays the i8042's only owner. At boot it also brings up the aux port
+  (defaults, the IntelliMouse wheel sequence, reporting; IRQ12 on vector
+  0x42), with the devices set up by polling before either interrupt is
+  on. While a process holds the screen every i8042 byte goes, tagged with
+  its port, into the PS/2 stream (512 entries, `console_input::Stream`);
+  the stream is emptied when the screen is lent and when it comes back,
+  and a reset mark comes first then and after an overflow. Init gets the
+  stream as `INIT_PS2` (kind `PS2`, ABI 8) and hands a `READ|WAIT`
+  duplicate to `ps2_input`, which drains it (`ps2_read`, waiting in
+  `ipc_receive_any` like a line), decodes it with `ScancodeSet1` and
+  `Ps2Mouse` (releasing every key and button held, `KeysDown`, on a reset
+  mark) and serves InputServiceProtocol v1. The compositor gets it with
+  the other input services (up to five); the console bridge and
+  `input_client` never do: the console already has the PS/2 keyboard, and
+  its keys flow only while a process holds the screen. `ps2=console`
+  keeps the stream from init: the PS/2 keys are withheld, as before.
 - The desktop session (ADR 0074 phase B): `session = desktop` in AriFS,
   with the `desktop` profile followed (`updater/profiles`), its
   `launcher` installed, a display and a keyboard among the input services
-  (`input::KIND_KEYBOARD` in their `Info` replies), and no `gui` on the
+  (`input::KIND_KEYBOARD` in their `Info` replies; `ps2_input` counts),
+  and no `gui` on the
   command line, makes init start the compositor before the console bridge
   and launch `launcher` through the broker; the shell still runs on COM1
   (and over SSH). init keeps only the send side of the compositor's
@@ -1643,8 +1667,9 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
 ## Real hardware (Phase 34, preparation)
 
 - `console_input` also reads the i8042 PS/2 keyboard: initialization
-  (ports disabled, configuration with IRQ1 and translation, self-test,
-  port 1, `0xF4`), IRQ1 on vector 0x41 and decoding with
+  (ports disabled, interrupts off, translation, self-test, port 1, `0xF4`
+  polled, the aux port since ADR 0075, then the interrupts on), IRQ1 on
+  vector 0x41 and decoding with
   `aricode_input::ScancodeSet1` + `Keyboard` into the same ring as COM1. It is the
   console of a laptop without serial; real keyboards stay in ring 3.
   Without a controller (status 0xFF) it reports and carries on.

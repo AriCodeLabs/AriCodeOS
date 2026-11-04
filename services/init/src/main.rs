@@ -40,6 +40,8 @@ const HARDWARE: Handle = Handle(0x0001_0006);
 const SYSTEM: Handle = Handle(0x0001_0007);
 const CONSOLE_IN: Handle = Handle(0x0001_0008);
 const FRAMEBUFFER: Handle = Handle(0x0001_0009);
+/// The PS/2 stream, when the machine has an i8042 (ADR 0075).
+const PS2: Handle = Handle(sys::abi::handle::INIT_PS2);
 
 /// Bits of the service mask passed to the shell.
 const SERVICE_BLOCK: u64 = 1;
@@ -923,10 +925,42 @@ enum Kind {
         net: Handle,
         sessions: Handle,
     },
+    /// The PS/2 input service (ADR 0075): its endpoint, the PS/2 stream and
+    /// `SYSTEM` (read) for its clock.
+    Ps2Input,
 }
 
-/// Input services that init hands out (compositor, broker, bridge).
+/// Input services that init hands out to the console bridge (and the
+/// desktop's compositor, which also gets the PS/2 one).
 const MAX_INPUTS: usize = 4;
+
+/// Input services the compositor gets: the console bridge's and the PS/2
+/// one, which never goes to the bridge (ADR 0075): its keys flow only while
+/// a process holds the screen, and the bridge would type them at the
+/// console the kernel keeps them from.
+const MAX_GUI_INPUTS: usize = MAX_INPUTS + 1;
+
+/// Launches `ps2_input` (ADR 0075) on `endpoint` (receive side) with a
+/// duplicate of the PS/2 stream to read and wait on (and move, which a
+/// spawn needs; the kernel lets only one process drain the stream).
+fn start_ps2_input(endpoint: Handle) -> Result<Handle, Error> {
+    let mut granted = Granted::new();
+    granted.push(sys::handle_duplicate(
+        endpoint,
+        rights::READ | rights::WRITE | rights::TRANSFER,
+    )?);
+    granted.push(sys::handle_duplicate(
+        PS2,
+        rights::READ | rights::WAIT | rights::TRANSFER,
+    )?);
+    granted.push(sys::handle_duplicate(
+        SYSTEM,
+        rights::READ | rights::TRANSFER,
+    )?);
+    let child = sys::process_spawn_with(SPAWNER, "ps2_input", 0, granted.handles())?;
+    granted.take();
+    Ok(child)
+}
 
 /// Launches the console bridge with the console input (`MANAGE`) and a
 /// duplicate (`WRITE`) of each input endpoint; `arg` = how many. If a
@@ -1148,7 +1182,7 @@ impl Resident {
     }
 }
 
-const MAX_RESIDENTS: usize = 10;
+const MAX_RESIDENTS: usize = 12;
 
 /// Supervisor of resident services (stage 1 of the post-roadmap plan):
 /// states, generations, restart with increasing backoff and a budget, and
@@ -1307,6 +1341,7 @@ impl Supervisor {
             }
             Kind::ConsoleBridge { inputs, count } => start_console_bridge(&inputs[..count]),
             Kind::Sshd { fs, net, sessions } => start_sshd(fs, net, sessions),
+            Kind::Ps2Input => start_ps2_input(r.endpoint),
         };
         let now = now_ms();
         let process = match spawned {
@@ -2825,7 +2860,7 @@ fn run_gui(inputs: &[Handle]) -> Result<Gui, u64> {
     // waiting on a queue nobody reads (found with the desktop session's
     // Ctrl+Alt+Backspace, ADR 0074 phase B).
     let (receive, service) = sys::endpoint_create_pair().map_err(|_| 1u64)?;
-    let mut handles = [Handle(0); 8];
+    let mut handles = [Handle(0); 4 + MAX_GUI_INPUTS];
     handles[0] = receive;
     let mut made = 1;
     let spawned = (|| {
@@ -2846,14 +2881,14 @@ fn run_gui(inputs: &[Handle]) -> Result<Gui, u64> {
             sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER),
             5,
         )?;
-        for ep in inputs.iter().take(MAX_INPUTS) {
+        for ep in inputs.iter().take(MAX_GUI_INPUTS) {
             grant(
                 sys::handle_duplicate(*ep, rights::WRITE | rights::TRANSFER),
                 6,
             )?;
         }
-        sys::process_spawn_with(SPAWNER, "compositor", inputs.len() as u64, &handles[..made])
-            .map_err(|_| 7u64)
+        let count = inputs.len().min(MAX_GUI_INPUTS) as u64;
+        sys::process_spawn_with(SPAWNER, "compositor", count, &handles[..made]).map_err(|_| 7u64)
     })();
     match spawned {
         Ok(process) => Ok(Gui {
@@ -2937,14 +2972,14 @@ fn desktop_wanted(fs: &mut FsClient, inputs: &[Handle]) -> bool {
             return false;
         }
     }
-    // The compositor reads the input services, never the PS/2 keyboard,
-    // which stays the console's: without a keyboard among the services
-    // the desktop could not be typed at (audit of phase B, M2).
+    // The compositor reads only the input services (the PS/2 keyboard
+    // among them since ADR 0075): without a keyboard there the desktop
+    // could not be typed at (audit of phase B, M2).
     if !inputs
         .iter()
         .any(|&ep| input_kinds(ep) & aricode_proto::input::KIND_KEYBOARD != 0)
     {
-        say(b"session = desktop, but there is no USB or virtio keyboard for it (the PS/2 keyboard stays the console's): the text console");
+        say(b"session = desktop, but there is no keyboard for it: the text console");
         return false;
     }
     let mut fb = [0u8; sys::abi::sysinfo::Framebuffer::LEN];
@@ -3021,10 +3056,12 @@ fn end_desktop(desktop: Desktop, why: DesktopEnd, broker: &mut Broker, sup: &mut
     let ended = !matches!(sys::process_wait(gui.process, 5000), Err(Error::Timeout));
     let _ = sys::handle_close(gui.process);
     let _ = sys::handle_close(gui.endpoint);
-    if ended {
-        launch_console_bridge(sup, &inputs[..count]);
-    } else {
+    if !ended {
         say(b"the compositor did not end within 5 s: its input services are not handed to the console bridge");
+    } else if count > 0 {
+        // With no input service there is nothing to bridge: the console
+        // reads COM1 and the PS/2 keyboard itself.
+        launch_console_bridge(sup, &inputs[..count]);
     }
 }
 
@@ -3360,6 +3397,39 @@ fn main(arg: u64) -> u64 {
             }
         }
     }
+    // The PS/2 keyboard and touchpad (ADR 0075): an input service for the
+    // compositor only, never for the console bridge or input_client.
+    let mut ps2_input = None;
+    if sys::object_kind(PS2) == Ok(sys::kind::PS2) {
+        let Ok(ep) = sys::endpoint_create() else {
+            return 21;
+        };
+        let slot = sup.register(
+            "ps2_input",
+            Kind::Ps2Input,
+            Probe::Input,
+            ep,
+            true,
+            Policy::DRIVER,
+        );
+        if slot.is_none() {
+            let _ = sys::handle_close(ep);
+        }
+        if slot.is_some_and(|i| sup.launch(i)) {
+            say(b"ps2_input ready (the PS/2 keyboard and pointer, for the screen's holder)");
+            ps2_input = Some(ep);
+        } else {
+            say(b"ps2_input never became ready; dropped");
+        }
+    }
+    let mut gui_eps = [Handle(0); MAX_GUI_INPUTS];
+    gui_eps[..inputs].copy_from_slice(&input_eps[..inputs]);
+    let mut gui_inputs = inputs;
+    if let Some(ep) = ps2_input {
+        gui_eps[gui_inputs] = ep;
+        gui_inputs += 1;
+    }
+    let gui_eps = &gui_eps[..gui_inputs];
     if inputs > 0 {
         services |= SERVICE_INPUT;
         // Every input service answered Info before it was published (its
@@ -3476,7 +3546,7 @@ fn main(arg: u64) -> u64 {
     //     inputs; applications ask the broker for their windows.
     let mut gui = None;
     if arg & sys::abi::init_arg::GUI != 0 {
-        match run_gui(&input_eps[..inputs]) {
+        match run_gui(gui_eps) {
             Ok(g) => {
                 services |= SERVICE_GUI;
                 gui = Some(g);
@@ -3547,9 +3617,9 @@ fn main(arg: u64) -> u64 {
         let desktop_session = gui.is_none()
             && fs_client
                 .as_mut()
-                .is_some_and(|fs| desktop_wanted(fs, &input_eps[..inputs]));
+                .is_some_and(|fs| desktop_wanted(fs, gui_eps));
         if desktop_session {
-            match run_gui(&input_eps[..inputs]) {
+            match run_gui(gui_eps) {
                 Ok(g) => {
                     services |= SERVICE_GUI;
                     gui = Some(g);

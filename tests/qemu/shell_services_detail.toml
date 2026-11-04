@@ -16,6 +16,7 @@ serial_contains = [
     "fsd              ready        1    0          -",
     "virtio_net       ready        1    0          -",
     "virtio_input     ready        1    0          -",
+    "ps2_input        ready        1    0          -",
     "console_bridge   ready        1    0          -",
     "(optional)",
     "ARICODEOS_SHUTDOWN",

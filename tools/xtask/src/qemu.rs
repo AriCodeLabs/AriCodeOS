@@ -36,6 +36,9 @@ pub struct UsbOptions {
     /// An ICH9 EHCI with a UHCI companion and a full-speed keyboard: the
     /// EHCI driver must hand the port over (EHCI 4.2.2).
     pub ehci_companion_kbd: bool,
+    /// No i8042 (`i8042=off`): the machine has no PS/2 keyboard or mouse
+    /// (ADR 0075).
+    pub no_i8042: bool,
 }
 
 /// Processors of the machine.
@@ -123,7 +126,7 @@ fn base_command(
     q.current_dir(root());
     q.args([
         "-machine",
-        "q35",
+        if usb.no_i8042 { "q35,i8042=off" } else { "q35" },
         "-cpu",
         &cpu.model(),
         "-smp",
@@ -1331,7 +1334,9 @@ pub struct Headless<'a> {
     pub probe: Option<TcpProbe<'a>>,
     pub ssh_probe: Option<SshProbe<'a>>,
     pub flood: Option<FloodProbe<'a>>,
-    pub input_probe: Option<InputProbe<'a>>,
+    /// QMP input in stages: each one waits for its marker, after the
+    /// stage before it is done.
+    pub input_probe: Vec<InputProbe<'a>>,
     pub hotplug: Option<Hotplug<'a>>,
     pub disk_variant: image::DiskVariant,
     pub disk_readonly: bool,
@@ -1369,7 +1374,7 @@ pub fn run_headless(
 ) -> Result<Capture> {
     let input = &options.input;
     let probe = options.probe.as_ref();
-    let input_probe = options.input_probe.as_ref();
+    let input_probes = options.input_probe.as_slice();
     let disk_variant = options.disk_variant;
     let disk_readonly = options.disk_readonly;
     use std::io::Write;
@@ -1460,7 +1465,7 @@ pub fn run_headless(
     let mut sent = 0;
     let mut probe_result: Option<String> = None;
     let mut probe_thread: Option<std::thread::JoinHandle<String>> = None;
-    let mut input_result: Option<String> = None;
+    let mut input_results: Vec<String> = Vec::new();
     let mut hotplug_result: Option<String> = None;
     // When the hot-plug marker was first seen.
     let mut hotplug_seen: Option<Instant> = None;
@@ -1560,9 +1565,8 @@ pub fn run_headless(
                 hotplug_result = Some(run_hotplug(qmp.path(), h.driver, h.bus, h.id));
             }
         }
-        if let Some(p) = input_probe {
+        if let Some(p) = input_probes.get(input_results.len()) {
             if input_thread.is_none()
-                && input_result.is_none()
                 && count_occurrences(&captured.lock().expect("capture"), p.marker.as_bytes()) > 0
             {
                 let path = qmp.path().to_path_buf();
@@ -1581,7 +1585,9 @@ pub fn run_headless(
                 }));
             }
             if input_thread.as_ref().is_some_and(|t| t.is_finished()) {
-                input_result = input_thread.take().and_then(|t| t.join().ok());
+                if let Some(r) = input_thread.take().and_then(|t| t.join().ok()) {
+                    input_results.push(r);
+                }
             }
         }
         std::thread::sleep(Duration::from_millis(20));
@@ -1591,8 +1597,8 @@ pub fn run_headless(
     if let Some(t) = probe_thread.take() {
         probe_result = t.join().ok();
     }
-    if let Some(t) = input_thread.take() {
-        input_result = t.join().ok();
+    if let Some(r) = input_thread.take().and_then(|t| t.join().ok()) {
+        input_results.push(r);
     }
     if let Some(t) = ssh_thread.take() {
         ssh_result = t.join().ok();
@@ -1624,15 +1630,15 @@ pub fn run_headless(
             )
         })
     });
-    for line in [
-        probe_result,
-        input_result,
-        ssh_result,
-        flood_result,
-        hotplug_result,
-    ]
-    .into_iter()
-    .flatten()
+    for line in [probe_result]
+        .into_iter()
+        .flatten()
+        .chain(input_results)
+        .chain(
+            [ssh_result, flood_result, hotplug_result]
+                .into_iter()
+                .flatten(),
+        )
     {
         bytes.extend_from_slice(format!("\n{line}\n").as_bytes());
     }
