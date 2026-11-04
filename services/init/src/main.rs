@@ -963,8 +963,9 @@ fn start_ps2_input(endpoint: Handle) -> Result<Handle, Error> {
 }
 
 /// Launches the console bridge with the console input (`MANAGE`) and a
-/// duplicate (`WRITE`) of each input endpoint; `arg` = how many. If a
-/// duplicate fails, closes the ones already made.
+/// duplicate (`WRITE`) of each input endpoint; `arg` = how many, with the
+/// keyboard layout above them. If a duplicate fails, closes the ones
+/// already made.
 fn start_console_bridge(inputs: &[Handle]) -> Result<Handle, Error> {
     let mut handles = [Handle(0); MAX_INPUTS + 1];
     let mut made = 0;
@@ -975,10 +976,11 @@ fn start_console_bridge(inputs: &[Handle]) -> Result<Handle, Error> {
             handles[made] = sys::handle_duplicate(*ep, rights::WRITE | rights::TRANSFER)?;
             made += 1;
         }
+        let layout = KBD_LAYOUT.load(core::sync::atomic::Ordering::Relaxed);
         sys::process_spawn_with(
             SPAWNER,
             "console_bridge",
-            inputs.len() as u64,
+            inputs.len() as u64 | layout << 8,
             &handles[..made],
         )
     })();
@@ -1189,6 +1191,10 @@ const MAX_RESIDENTS: usize = 12;
 /// queryable status (`status` v1) for the shell.
 /// `strict` on the command line (ADR 0028): nothing is restarted.
 static STRICT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// The keyboard layout of `kbd=` (`Layout::code`), for the console bridge:
+/// USB and virtio keyboards type at the console as the kernel's PS/2 one.
+static KBD_LAYOUT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// fsd was launched once: later launches never carry `ARG_MIGRATE`.
 static MIGRATE_ASKED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
@@ -3108,6 +3114,12 @@ fn main(arg: u64) -> u64 {
             ""
         }
     });
+    if let Some(layout) = cmdline
+        .get(aricode_cmdline::keys::KBD)
+        .and_then(aricode_input::Layout::parse)
+    {
+        KBD_LAYOUT.store(layout.code(), core::sync::atomic::Ordering::Relaxed);
+    }
     if cmdline.has(aricode_cmdline::keys::STRICT) {
         STRICT.store(true, core::sync::atomic::Ordering::Relaxed);
         say(b"strict mode: a failing service is not restarted");

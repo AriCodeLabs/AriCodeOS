@@ -96,6 +96,23 @@ impl Layout {
             _ => None,
         }
     }
+
+    /// A small number for the layout, to pass it in a process's `arg`
+    /// (init to the console bridge).
+    pub const fn code(self) -> u64 {
+        match self {
+            Self::Us => 0,
+            Self::Es => 1,
+        }
+    }
+
+    /// The layout of `code`; US for an unknown one.
+    pub const fn from_code(code: u64) -> Self {
+        match code {
+            1 => Self::Es,
+            _ => Self::Us,
+        }
+    }
 }
 
 /// Keyboard: tracks shift state and `AltGr` and translates key presses
@@ -1363,6 +1380,14 @@ mod tests {
             *o = *e;
         }
         (out, n / 2)
+    }
+
+    #[test]
+    fn layout_codes_round_trip() {
+        for l in [Layout::Us, Layout::Es] {
+            assert_eq!(Layout::from_code(l.code()), l);
+        }
+        assert_eq!(Layout::from_code(9), Layout::Us);
     }
 
     #[test]

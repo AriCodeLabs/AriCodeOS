@@ -1,0 +1,29 @@
+# `kbd=es` applies in the compositor's windows too: shift+period on the
+# virtio keyboard reaches the focused window as `:`, as at the console.
+# Before, the compositor stayed on US and typed `>`.
+name = "gui.kbd_es"
+description = "the compositor types with the kbd= layout: shift+period is ':' in a window on a Spanish keyboard"
+level = "full"
+areas = ["gui", "input"]
+cmdline = "qemu_exit gui shell kbd=es"
+install = ["examples/gui_demo"]
+# Demo A waits 3 s without events after B is gone, then closes its window.
+stdin = ["spawn gui_demo 0", "run gui_demo 1", "sleep 5000", "shutdown"]
+timeout_secs = 120
+
+[host_input]
+marker = "compositor: desktop ready with 2 windows"
+mouse_rel = [-180, -20]
+click = "left"
+keys = ["shift+dot"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "compositor: desktop ready with 2 windows",
+    "gui_demo B: focus gained",
+    "gui_demo B: key ':'",
+    "gui_demo A: no keys",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "gui_demo B: key '>'", "gui_demo A: key"]
