@@ -1,5 +1,5 @@
 # TLS server trust anchors extracted by tools/mozilla-roots.py from
-# https://github.com/nss-dev/nss/blob/52c38de2a65d7b5e576427df2a208b3a02e4aba9/lib/ckfw/builtins/certdata.txt
+# https://github.com/nss-dev/nss/blob/2e636d07afa25f58502523caab0e2b0e9bd4e06c/lib/ckfw/builtins/certdata.txt
 # (Mozilla NSS certdata.txt, Mozilla Public License 2.0).
 # 117 roots; left out for a server distrust-after date or Mozilla-applied
 # name constraints (CCADB): TUBITAK Kamu SM SSL Kok Sertifikasi - Surum 1.

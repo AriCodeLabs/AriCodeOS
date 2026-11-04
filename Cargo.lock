@@ -41,7 +41,7 @@ dependencies = [
 
 [[package]]
 name = "ari-app-bench"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aricode-build",
  "aricode-crypto",
@@ -51,7 +51,7 @@ dependencies = [
 
 [[package]]
 name = "ari-app-fs-probe"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aricode-build",
  "aricode-proto",
@@ -60,7 +60,7 @@ dependencies = [
 
 [[package]]
 name = "ari-app-hello"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aricode-build",
  "aricode-rt",
@@ -68,7 +68,7 @@ dependencies = [
 
 [[package]]
 name = "ari-app-installer"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aricode-ab",
  "aricode-build",
@@ -81,7 +81,7 @@ dependencies = [
 
 [[package]]
 name = "ari-app-notes-reader"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aricode-build",
  "aricode-proto",
@@ -90,7 +90,7 @@ dependencies = [
 
 [[package]]
 name = "ari-app-perms-check"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aricode-build",
  "aricode-rt",
@@ -98,7 +98,7 @@ dependencies = [
 
 [[package]]
 name = "ari-app-updater"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aricode-ab",
  "aricode-arifs",
@@ -115,7 +115,7 @@ dependencies = [
 
 [[package]]
 name = "ari-app-wasm-runner"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aricode-build",
  "aricode-rt",
@@ -125,7 +125,7 @@ dependencies = [
 
 [[package]]
 name = "ari-app-win-probe"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aricode-build",
  "aricode-rt",
@@ -133,7 +133,7 @@ dependencies = [
 
 [[package]]
 name = "ari-compositor"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aricode-build",
  "aricode-cmdline",
@@ -146,7 +146,7 @@ dependencies = [
 
 [[package]]
 name = "ari-console-bridge"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aricode-build",
  "aricode-input",
@@ -157,7 +157,7 @@ dependencies = [
 
 [[package]]
 name = "ari-fsd"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aricode-arifs",
  "aricode-build",
@@ -170,7 +170,7 @@ dependencies = [
 
 [[package]]
 name = "ari-net-core"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aricode-faults",
  "aricode-net",
@@ -182,7 +182,7 @@ dependencies = [
 
 [[package]]
 name = "ari-ps2-input"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aricode-build",
  "aricode-input",
@@ -193,7 +193,7 @@ dependencies = [
 
 [[package]]
 name = "ari-rtl-net"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "ari-net-core",
  "aricode-build",
@@ -205,7 +205,7 @@ dependencies = [
 
 [[package]]
 name = "ari-shell"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aricode-build",
  "aricode-cmdline",
@@ -223,7 +223,7 @@ dependencies = [
 
 [[package]]
 name = "ari-sshd"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aricode-build",
  "aricode-crypto",
@@ -235,7 +235,7 @@ dependencies = [
 
 [[package]]
 name = "ari-usb-ehci"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aricode-build",
  "aricode-cmdline",
@@ -251,7 +251,7 @@ dependencies = [
 
 [[package]]
 name = "ari-usb-input"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aricode-build",
  "aricode-cmdline",
@@ -265,7 +265,7 @@ dependencies = [
 
 [[package]]
 name = "ari-virtio-blk"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aricode-build",
  "aricode-cmdline",
@@ -278,7 +278,7 @@ dependencies = [
 
 [[package]]
 name = "ari-virtio-input"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aricode-build",
  "aricode-input",
@@ -289,7 +289,7 @@ dependencies = [
 
 [[package]]
 name = "ari-virtio-net"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "ari-net-core",
  "aricode-build",
@@ -302,7 +302,7 @@ dependencies = [
 
 [[package]]
 name = "ariboot"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aricode-ab",
  "aricode-cmdline",
@@ -317,7 +317,7 @@ dependencies = [
 
 [[package]]
 name = "aricode-ab"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aricode-crypto",
  "aricode-initrd",
@@ -325,27 +325,27 @@ dependencies = [
 
 [[package]]
 name = "aricode-abi"
-version = "0.17.0"
+version = "0.18.0"
 
 [[package]]
 name = "aricode-acpi"
-version = "0.17.0"
+version = "0.18.0"
 
 [[package]]
 name = "aricode-arifs"
-version = "0.17.0"
+version = "0.18.0"
 
 [[package]]
 name = "aricode-build"
-version = "0.17.0"
+version = "0.18.0"
 
 [[package]]
 name = "aricode-cmdline"
-version = "0.17.0"
+version = "0.18.0"
 
 [[package]]
 name = "aricode-crypto"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -364,30 +364,30 @@ dependencies = [
 
 [[package]]
 name = "aricode-ehci"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aricode-xhci",
 ]
 
 [[package]]
 name = "aricode-elf"
-version = "0.17.0"
+version = "0.18.0"
 
 [[package]]
 name = "aricode-fat"
-version = "0.17.0"
+version = "0.18.0"
 
 [[package]]
 name = "aricode-faults"
-version = "0.17.0"
+version = "0.18.0"
 
 [[package]]
 name = "aricode-fb-console"
-version = "0.17.0"
+version = "0.18.0"
 
 [[package]]
 name = "aricode-gfx"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aricode-fb-console",
  "aricode-input",
@@ -395,23 +395,23 @@ dependencies = [
 
 [[package]]
 name = "aricode-gpt"
-version = "0.17.0"
+version = "0.18.0"
 
 [[package]]
 name = "aricode-handles"
-version = "0.17.0"
+version = "0.18.0"
 
 [[package]]
 name = "aricode-heap"
-version = "0.17.0"
+version = "0.18.0"
 
 [[package]]
 name = "aricode-http"
-version = "0.17.0"
+version = "0.18.0"
 
 [[package]]
 name = "aricode-https"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aricode-crypto",
  "aricode-http",
@@ -423,47 +423,47 @@ dependencies = [
 
 [[package]]
 name = "aricode-initrd"
-version = "0.17.0"
+version = "0.18.0"
 
 [[package]]
 name = "aricode-input"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aricode-abi",
 ]
 
 [[package]]
 name = "aricode-iommu"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aricode-x86-paging",
 ]
 
 [[package]]
 name = "aricode-lineedit"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aricode-input",
 ]
 
 [[package]]
 name = "aricode-manifest"
-version = "0.17.0"
+version = "0.18.0"
 
 [[package]]
 name = "aricode-net"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aricode-crypto",
 ]
 
 [[package]]
 name = "aricode-pci"
-version = "0.17.0"
+version = "0.18.0"
 
 [[package]]
 name = "aricode-pkg"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aricode-crypto",
  "aricode-initrd",
@@ -473,15 +473,15 @@ dependencies = [
 
 [[package]]
 name = "aricode-pmm"
-version = "0.17.0"
+version = "0.18.0"
 
 [[package]]
 name = "aricode-proto"
-version = "0.17.0"
+version = "0.18.0"
 
 [[package]]
 name = "aricode-rt"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aricode-heap",
  "aricode-sync",
@@ -490,30 +490,30 @@ dependencies = [
 
 [[package]]
 name = "aricode-rtl8169"
-version = "0.17.0"
+version = "0.18.0"
 
 [[package]]
 name = "aricode-sched"
-version = "0.17.0"
+version = "0.18.0"
 
 [[package]]
 name = "aricode-ssh"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aricode-crypto",
 ]
 
 [[package]]
 name = "aricode-supervisor"
-version = "0.17.0"
+version = "0.18.0"
 
 [[package]]
 name = "aricode-sync"
-version = "0.17.0"
+version = "0.18.0"
 
 [[package]]
 name = "aricode-sys"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aricode-abi",
  "aricode-gfx",
@@ -526,7 +526,7 @@ dependencies = [
 
 [[package]]
 name = "aricode-tls"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aricode-crypto",
  "aricode-sync",
@@ -541,7 +541,7 @@ dependencies = [
 
 [[package]]
 name = "aricode-update-index"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aricode-ab",
  "aricode-crypto",
@@ -552,22 +552,22 @@ dependencies = [
 
 [[package]]
 name = "aricode-usb-storage"
-version = "0.17.0"
+version = "0.18.0"
 
 [[package]]
 name = "aricode-virtio"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aricode-pci",
 ]
 
 [[package]]
 name = "aricode-vranges"
-version = "0.17.0"
+version = "0.18.0"
 
 [[package]]
 name = "aricode-wasm-host"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "wasmi",
  "wasmparser",
@@ -576,26 +576,26 @@ dependencies = [
 
 [[package]]
 name = "aricode-x509"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aricode-crypto",
 ]
 
 [[package]]
 name = "aricode-x86-cpu"
-version = "0.17.0"
+version = "0.18.0"
 
 [[package]]
 name = "aricode-x86-paging"
-version = "0.17.0"
+version = "0.18.0"
 
 [[package]]
 name = "aricode-xhci"
-version = "0.17.0"
+version = "0.18.0"
 
 [[package]]
 name = "ariinit"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aricode-ab",
  "aricode-build",
@@ -615,7 +615,7 @@ dependencies = [
 
 [[package]]
 name = "arikernel"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aricode-abi",
  "aricode-acpi",
@@ -681,7 +681,7 @@ dependencies = [
 
 [[package]]
 name = "boot-protocol"
-version = "0.17.0"
+version = "0.18.0"
 
 [[package]]
 name = "bumpalo"
@@ -1677,7 +1677,7 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "user-testprogs"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aricode-build",
  "aricode-gfx",
@@ -1702,7 +1702,7 @@ checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
 
 [[package]]
 name = "wasm-demo"
-version = "0.17.0"
+version = "0.18.0"
 
 [[package]]
 name = "wasm-encoder"
@@ -1878,7 +1878,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aricode-ab",
  "aricode-arifs",

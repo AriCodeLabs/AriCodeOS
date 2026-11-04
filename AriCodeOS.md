@@ -4124,6 +4124,70 @@ A 0.16.0 machine updates through 0.16.1 (system 17) to 0.17.0 (system 18):
 Still the owner's: agents outside the trusted base (ADR 0041) and apps over
 32 KiB.
 
+## 94.18 AriCodeOS 0.18
+
+**Status: completed (2026-11-04), tag `v0.18.0`.** The version of the
+optional desktop (ADR 0074): a base system for every machine, and a
+desktop the owner installs afterwards.
+
+- **AriFS v2** (ADR 0072, incident 0026 closed):
+  - copy-on-write replace: an atomic replace of up to 16 MiB, no longer
+    bounded by a journal of one file's size;
+  - a table kept in two copies;
+  - delete and rename;
+  - `ARI0` last on new sticks, with 64 MiB (a migrated disk keeps its
+    3 MiB);
+  - an in-place migration from v1, once both slots read v2.
+
+  Packages go up to 8 MiB. Sticks written before 0.18 stay v1 (the ESP
+  rule). Growing `ARI0` on first boot is left for later.
+- **Signed driver packages** (ADR 0073): the design of the three trust
+  levels the owner chose (an offline vendor root, owner keys enrolled at
+  the physical console, revocation at the next boot). Its phases are not
+  built yet.
+- **Profiles** (ADR 0074 phase A): the signed index names profiles, and
+  `update profile add|remove NAME` follows one; `upgrade` installs its
+  apps, and a removal deletes only what the profile installed. A package
+  can say the application interface it `requires`. An index with profiles
+  needs `publish-update --all-machines-0.18`.
+- **The desktop session** (phase B):
+  - `session = desktop` boots into the compositor and the profile's
+    launcher; the kernel lends the screen to whoever maps it and gives the
+    console no keys meanwhile.
+  - Ctrl+Alt+Backspace on any keyboard ends the desktop.
+  - The `launch` capability is only for a signed launcher.
+  - `usb-image --app --profile` writes a stick that boots into the desktop.
+- **The PS/2 keyboard and touchpad in the desktop** (ADR 0075): the
+  kernel stays the i8042's only owner and hands its bytes, while the
+  screen is held, to the ring-3 `ps2_input`. A laptop needs no USB
+  keyboard. `ps2=console` keeps them for the console.
+- **The desktop's applications** (phase C), signed packages in `desktop/`:
+  - the launcher, with its own six slots (the owner's choice);
+  - a terminal, the owner's shell in a window;
+  - an editor and a file manager over the owner's folder `home/` (the
+    owner's choice);
+  - the settings, which ask init for what they show and the one change
+    they make (the owner's choice).
+
+  Each has a capability of its own, granted only to that signed package:
+  `launch`, `terminal`, `home` and `settings`. Each was audited, and every
+  finding was fixed.
+- **Keyboards:** `kbd=` applies to every keyboard, in the desktop too, and
+  Ctrl with a letter sends its control character. Before, no keyboard
+  did, so the shell's Ctrl-A, Ctrl-E and Ctrl-U worked only over serial
+  and SSH.
+- **Certificates:** the eMudhra intermediates compromised in October are
+  refused (`DISTRUSTED`, rustls-webpki 0.103.16). Mozilla's roots
+  regenerated from NSS 2e636d0 are the same 117. The public suffix
+  extract is current (list 2026-10-31).
+- **Verified:** the full suite with 1 and with 4 CPUs, and `perf`.
+
+Still the owner's: agents outside the trusted base (ADR 0041), and the
+residuals said in ADR 0074 and 0075:
+- a PS/2 pointer that resets itself is set up again only at the next boot;
+- under the largest load, the 15-session tables of fsd and the network
+  stack can fill, and a launch then fails visibly.
+
 ---
 
 # 95. Real hardware: the right moment
