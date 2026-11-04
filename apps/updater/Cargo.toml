@@ -22,7 +22,7 @@ aricode-crypto = { path = "../../libs/crypto" }
 aricode-https = { path = "../../sdk/https" }
 aricode-proto = { path = "../../sdk/proto" }
 aricode-pkg = { path = "../../libs/pkg" }
-aricode-update-index = { path = "../../libs/update-index" }
+aricode-update-index = { path = "../../libs/update-index", features = ["client"] }
 
 [build-dependencies]
 aricode-build = { path = "../../sdk/build" }

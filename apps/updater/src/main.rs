@@ -53,7 +53,9 @@ use aricode_rt::sys::block::{find_partition, BlockClient};
 use aricode_rt::sys::fs::{FsClient, FsError};
 use aricode_rt::sys::net::NetClient;
 use aricode_rt::sys::{self, Handle};
-use aricode_update_index::files::{self, Files, ReadError};
+// The updater's private directory as `files::Files`.
+use aricode_update_index::client::FsFiles as Private;
+use aricode_update_index::files::{self, ReadError};
 use aricode_update_index::lists::{self, PlanItem, StagedEntry};
 use aricode_update_index::{
     self as upd, best_app, best_system, check_fresh, compare, compare_system, decide_system,
@@ -210,40 +212,6 @@ fn remaining_ms() -> u64 {
 }
 
 // ---------------------------------------------------------------- files
-
-/// The updater's private directory as `files::Files`: only an explicit
-/// `NotFound` from the service means a file is absent; a lost reply, a
-/// timeout or any other status is an error (incident 0008).
-struct Private<'a>(&'a mut FsClient);
-
-impl Files for Private<'_> {
-    type Fd = u32;
-    type Error = FsError;
-
-    fn open(&mut self, name: &str) -> Result<Option<u32>, FsError> {
-        match self.0.open(name) {
-            Ok(fd) => Ok(Some(fd)),
-            Err(FsError::Status(aricode_proto::fs::Status::NotFound)) => Ok(None),
-            Err(e) => Err(e),
-        }
-    }
-
-    fn read(&mut self, fd: &u32, offset: u32, out: &mut [u8]) -> Result<usize, FsError> {
-        self.0.read(*fd, offset, out)
-    }
-
-    fn close(&mut self, fd: u32) {
-        let _ = self.0.close(fd);
-    }
-
-    fn list(
-        &mut self,
-        index: u32,
-        name_out: &mut [u8; files::NAME_LEN],
-    ) -> Result<Option<(usize, u64)>, FsError> {
-        self.0.list(index, name_out)
-    }
-}
 
 type Read<T> = Result<Option<T>, ReadError<FsError>>;
 

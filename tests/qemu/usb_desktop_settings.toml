@@ -1,0 +1,70 @@
+# The desktop's settings (ADR 0074 phase C, the owner's choice: init reads
+# and changes for it, never a file in its hands). The launcher opens it;
+# it shows the system, the keyboard, the network, the update sources and
+# that the machine boots into the desktop. Up and Enter choose the text
+# console: init writes the session file, says so, and logs it in the
+# install history, which the console's shell then shows, as `session`
+# does. Down and Enter choose the desktop again; Enter once more changes
+# nothing and logs nothing (audit of the settings, M2).
+name = "usb.desktop_settings"
+description = "the desktop settings show the system and choose what the machine boots into"
+level = "full"
+areas = ["usb", "apps", "gui"]
+cmdline = "qemu_exit shell"
+selftest = false
+disk = "usb-image"
+install = ["desktop/launcher", "desktop/settings"]
+stick_profiles = ["desktop:launcher,settings"]
+stdin = ["sleep 14000", "session", "cat updater/history.log", "shutdown"]
+timeout_secs = 120
+
+[host_input]
+marker = "launcher: ready"
+keys = ["ret"]
+
+[[host_input_then]]
+marker = "settings: ready"
+keys = ["up", "ret"]
+key_delay_ms = 100
+
+[[host_input_then]]
+marker = "settings: chose Text console"
+keys = ["down", "ret"]
+key_delay_ms = 100
+
+[[host_input_then]]
+marker = "settings: chose Desktop: the desktop from the next boot"
+keys = ["ret"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "launcher: offers settings",
+    "with manifest [system window settings]",
+    "settings: System: ",
+    "processor(s), up ",
+    "settings: Keyboard: us",
+    "settings: Network: ",
+    "settings: Updates: none yet (update add URL in the shell)",
+    "settings: Boots into: desktop",
+    "AriInit: the desktop's settings chose session = shell",
+    "settings: chose Text console: the text console from the next boot",
+    "settings: chose Desktop: the desktop from the next boot",
+    "settings: chose Desktop: already the desktop",
+    "session: desktop\r\n",
+    "session: shell (from the desktop's settings)",
+    "session: desktop (from the desktop's settings)",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_order = [
+    "settings: chose Text console",
+    "settings: chose Desktop: already the desktop",
+    "ari> session",
+    "session: desktop",
+    "ari> cat updater/history.log",
+    "session: shell (from the desktop's settings)",
+    "session: desktop (from the desktop's settings)",
+]
+# One history line per change, never one per click.
+serial_once = ["session: desktop (from the desktop's settings)"]
+serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "init did not answer"]

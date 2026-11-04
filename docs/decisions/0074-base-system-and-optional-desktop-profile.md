@@ -660,3 +660,67 @@ It found these, all fixed:
 - **L7:** files in subfolders of `home/` are counted, not listed. A list
   of more than 64 says it shows the first ones.
 
+### The settings (2026-11-04)
+
+- **The owner chose a bounded capability, `settings`**, for the official,
+  signed `settings` only (`Caps::TRUSTED_SETTINGS`). It is a send handle
+  to an init endpoint of its own (`aricode_proto::settings`, protocol 9).
+  Init answers:
+  - the session, with what would keep a desktop from starting;
+  - the update sources, as `update sources` lists them;
+  - the network address.
+
+  Init makes one change: the session from the next boot. It writes the
+  file and logs the change in the install history ("from the desktop's
+  settings"). The application never holds a file.
+- **`desktop/settings`** also shows memory, processors, uptime and the
+  keyboard layout, from `system`. For driver keys it says that signed
+  driver packages are not built yet (ADR 0073). Up, Down and Enter, or a
+  click on the chosen row, apply the session.
+- **One copy of the shared code.** The adapter of fsd's client to
+  `files::Files` was copied in the shell, the installer and the updater,
+  and init would have needed a fourth. It now lives once in
+  `aricode_update_index::client`, a feature the user-space programs turn
+  on, together with:
+  - `save`;
+  - `log_history`;
+  - `session::desktop_readiness` (host-tested), the check behind the
+    shell's `session` notes and init's desktop decision.
+- **Scenarios:**
+  - `usb.desktop_settings`: the settings show the facts, and choosing
+    the text console is written, said and logged;
+  - `apps.home_rules`: `fake_settings` is denied too.
+
+### Audit of the settings (2026-11-04)
+
+An independent read-only audit found:
+- the refactors keep their behaviour (the one adapter is the three it
+  replaces, and the incident 0008 rule holds);
+- only the signed `settings` reaches the endpoint;
+- the host build never turns `client` on.
+
+It found these, all fixed:
+
+- **M1:** a reply was cut at 112 bytes, and the window clipped long
+  lines, so the reason a desktop would not start could vanish. Replies
+  now hold 240 bytes and end in `...` when cut, and the window wraps each
+  fact onto two rows.
+- **M2:** choosing the session it already was wrote the file and a
+  history line, so idle clicks could push the install lines out of the
+  2 KiB history. Init now answers "already" and writes nothing.
+- **L1:** refusals are said, and a request carrying a handle is refused.
+- **L2:** a history that cannot be read is said apart from one that
+  cannot be written, with the shell's event.
+- **L3:** a change init answered late is reported as unknown, never as
+  not made.
+- **L4:** when the session cannot be read, nothing is preselected for the
+  next Enter to write.
+- **L5:** the update sources are read as the shell reads them: the same
+  reader, the old `update_url`, and the lines refused.
+- **L6:** `desktop_readiness` is tested when the launcher cannot be read
+  and when the profiles are over 1024 bytes. `cargo xtask check` now
+  formats and lints the packages outside the workspace (`desktop/`,
+  `examples/`) too; it found one more warning, fixed.
+- **L7:** a misplaced doc comment, and the keyboard layout name only
+  shown when it is short ASCII.
+

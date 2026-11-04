@@ -1,0 +1,36 @@
+# The desktop's settings (ADR 0074 phase C): a package of the desktop
+# profile. It shows the system, its network and update sources, and
+# chooses what the machine boots into; init does the reading and the one
+# change (the `settings` capability). Built like `hello_ext`.
+[package]
+name = "desktop-settings"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "The AriCodeOS desktop settings"
+publish = false
+
+[[bin]]
+name = "settings"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+aricode-rt = { path = "../../sdk/runtime" }
+aricode-gfx = { path = "../../libs/gfx" }
+aricode-proto = { path = "../../sdk/proto" }
+aricode-cmdline = { path = "../../libs/cmdline" }
+
+[build-dependencies]
+aricode-build = { path = "../../sdk/build" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
+
+[workspace]

@@ -52,12 +52,16 @@ impl Caps {
     /// installed, signed packages. The system's own files stay out of
     /// their reach.
     pub const HOME: Caps = Caps(1 << 12);
+    /// The desktop's settings (ADR 0074 phase C, the owner's choice): what
+    /// init tells and the session it changes, never a file. Only for
+    /// `settings`, and only when it is an installed, signed package.
+    pub const SETTINGS: Caps = Caps(1 << 13);
 
     pub const NONE: Caps = Caps(0);
     /// The ones the broker grants to normal applications.
     pub const APP_ALLOWED: Caps = Caps(Caps::SYSTEM.0 | Caps::FS.0 | Caps::NET.0 | Caps::WINDOW.0);
 
-    const NAMES: [(&'static str, Caps); 13] = [
+    const NAMES: [(&'static str, Caps); 14] = [
         ("system", Caps::SYSTEM),
         ("fs", Caps::FS),
         ("net", Caps::NET),
@@ -71,6 +75,7 @@ impl Caps {
         ("launch", Caps::LAUNCH),
         ("terminal", Caps::TERMINAL),
         ("home", Caps::HOME),
+        ("settings", Caps::SETTINGS),
     ];
 
     /// System applications that may also ask for `block`.
@@ -85,6 +90,8 @@ impl Caps {
     pub const TRUSTED_TERMINAL: [&'static str; 1] = ["terminal"];
     /// The applications that may ask for `home`.
     pub const TRUSTED_HOME: [&'static str; 2] = ["editor", "files"];
+    /// The application that may ask for `settings`.
+    pub const TRUSTED_SETTINGS: [&'static str; 1] = ["settings"];
     /// The owner's folder: no application of this name gets a private
     /// directory, which would be that folder.
     pub const HOME_DIR: &'static str = "home";
@@ -106,6 +113,9 @@ impl Caps {
         }
         if Self::TRUSTED_HOME.contains(&name) {
             caps = caps.union(Caps::HOME);
+        }
+        if Self::TRUSTED_SETTINGS.contains(&name) {
+            caps = caps.union(Caps::SETTINGS);
         }
         caps
     }
@@ -351,6 +361,17 @@ mod tests {
             assert_eq!(Manifest::parse(&text), Err(ManifestError::BadName), "{n}");
         }
         assert!(Manifest::parse("name = updater").is_ok());
+    }
+
+    #[test]
+    fn settings_is_only_for_settings() {
+        assert!(Caps::allowed_for("settings").contains(Caps::SETTINGS));
+        for other in ["launcher", "terminal", "editor", "files", "shell"] {
+            assert!(
+                !Caps::allowed_for(other).contains(Caps::SETTINGS),
+                "{other}"
+            );
+        }
     }
 
     #[test]
