@@ -104,11 +104,16 @@ fn present() {
 struct Shell {
     input: Handle,
     output: Handle,
+    /// The send side of the endpoint whose other side init keeps: it
+    /// closes with the terminal, whatever ends it, and init then stops the
+    /// shell (audit of the terminal, M2).
+    alive: Handle,
 }
 
 /// Asks init for an interactive session shell. Every endpoint is a pair:
 /// the shell gets the receive side of the input and the send side of the
-/// output, the terminal keeps the other two (as sshd, ADR 0025).
+/// output, the terminal keeps the other two (as sshd, ADR 0025). A fourth
+/// tells init when the terminal is gone.
 fn open_shell(terminals: Handle) -> Result<Shell, Error> {
     let (in_r, input) = sys::endpoint_create_pair()?;
     let (output, out_w) = match sys::endpoint_create_pair() {
@@ -119,7 +124,7 @@ fn open_shell(terminals: Handle) -> Result<Shell, Error> {
             return Err(e);
         }
     };
-    let (reply, reply_w) = match sys::endpoint_create_pair() {
+    let (alive_r, alive) = match sys::endpoint_create_pair() {
         Ok(p) => p,
         Err(e) => {
             for h in [in_r, input, output, out_w] {
@@ -128,10 +133,19 @@ fn open_shell(terminals: Handle) -> Result<Shell, Error> {
             return Err(e);
         }
     };
+    let (reply, reply_w) = match sys::endpoint_create_pair() {
+        Ok(p) => p,
+        Err(e) => {
+            for h in [in_r, input, output, out_w, alive_r, alive] {
+                let _ = sys::handle_close(h);
+            }
+            return Err(e);
+        }
+    };
     let req = session::Request {
         kind: session::Kind::Shell,
     };
-    let handles = [reply_w, in_r, out_w];
+    let handles = [reply_w, in_r, out_w, alive_r];
     let sent = sys::ipc_send(terminals, &req.encode(), &handles, 2000);
     if sent.is_err() {
         // Not transferred: still ours.
@@ -148,9 +162,14 @@ fn open_shell(terminals: Handle) -> Result<Shell, Error> {
     if !ok {
         let _ = sys::handle_close(input);
         let _ = sys::handle_close(output);
+        let _ = sys::handle_close(alive);
         return Err(Error::Denied);
     }
-    Ok(Shell { input, output })
+    Ok(Shell {
+        input,
+        output,
+        alive,
+    })
 }
 
 /// Why the terminal stops.
@@ -308,6 +327,7 @@ fn main(_arg: u64) -> u64 {
     let _ = sys::ipc_send(shell.input, &[], &[], 100);
     let _ = sys::handle_close(shell.input);
     let _ = sys::handle_close(shell.output);
+    let _ = sys::handle_close(shell.alive);
     sys::print(match end {
         End::Shell => b"terminal: the shell ended; closing (",
         End::Window => b"terminal: the window is gone; closing (",

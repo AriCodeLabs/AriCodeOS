@@ -485,20 +485,21 @@ the same branch:
 - **No polling.** `Window::start_poll` sends a poll without waiting for
   its answer, so the terminal waits on its shell's output and on its
   window's next event in one `ipc_receive_any`.
-- **When the shell ends, the terminal closes.** When the desktop ends,
-  init stops:
-  - the terminals;
-  - their shells, even one waiting in `run`;
-  - what those shells started. Terminal shells ask for launches on an
-    endpoint of their own (`terminal_launches`), so the broker knows
-    those programs (`Running::from_terminal`).
+- **When the shell ends, the terminal closes; when the terminal ends, so
+  does its shell.**
+  - A terminal sends init a fourth handle with its request: the receive
+    side of an endpoint whose send side only the terminal holds. When the
+    terminal is gone, however it went, that side closes, and init stops
+    the shell, even one waiting in `run`.
+  - Each terminal shell asks for launches on an endpoint of its own, so
+    what it started is known (`Running::from_shell`). When the shell
+    ends, init stops those programs.
+  - When the desktop ends, init stops the terminals, their shells and
+    what those shells started, at once.
 
   The install history says when a change came from a desktop terminal
   (`session::SHELL_TERMINAL`), not from SSH.
-- **Two limits remain:**
-  - A terminal that dies on its own, outside a desktop's end, while its
-    shell waits in `run`, leaves that shell until the program exits. Only
-    then does the shell read its closed input and end.
+- **A limit remains:**
   - Each terminal shell holds an fsd and a netd session, like an SSH
     shell. With four terminals, four SSH shells and six apps, the
     15-session tables (ADR 0036, 0037) can be full. A launch then fails
@@ -512,7 +513,9 @@ the same branch:
   - `apps.terminal_rules`: the test package `terminal`
     (`examples/test_terminal`) sees `Exec` refused, a request without
     handles dropped, four shells granted and a fifth refused.
-    `fake_terminal` asks for `terminal` and is denied.
+    `fake_terminal` asks for `terminal` and is denied. A terminal that
+    exits while its shell runs `cpu_hog` takes the shell and `cpu_hog`
+    with it.
 
 ### Audit of the terminal (2026-11-04)
 

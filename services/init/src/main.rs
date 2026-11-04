@@ -1850,13 +1850,9 @@ fn run_shell(
             }
         }
         if let (Some(s), Some(fs)) = (sessions.as_deref_mut(), broker.fs.as_ref()) {
-            s.serve(fs, net_service, services, broker.endpoint);
+            let _ = s.serve(fs, net_service, services, broker.endpoint);
         }
-        if let Some(fs) = broker.fs.as_ref() {
-            broker
-                .terminals
-                .serve(fs, net_service, services, broker.terminal_launches);
-        }
+        broker.serve_terminals(net_service, services);
     }
 }
 
@@ -1981,7 +1977,7 @@ fn spawn_shell(
 /// reaped on every pass.
 struct Sessions {
     endpoint: Handle,
-    children: [Option<Handle>; MAX_SESSIONS],
+    children: [Option<Child>; MAX_SESSIONS],
     /// The terminal's: interactive shells only, never sshd's `Exec`.
     terminal: bool,
     /// A request without its three handles was said once already.
@@ -1990,37 +1986,85 @@ struct Sessions {
 
 const MAX_SESSIONS: usize = 4;
 
+/// A session shell init started.
+#[derive(Clone, Copy)]
+struct Child {
+    shell: Handle,
+    /// A terminal's shell: the receive side of an endpoint whose send side
+    /// only its terminal holds. Once it closes, the terminal is gone, and
+    /// the shell goes too, even one waiting in `run`.
+    terminal: Option<Handle>,
+    /// A terminal's shell: where it asks for launches (receive side), an
+    /// endpoint of its own, so what it started is known and stopped with
+    /// it.
+    launches: Option<Handle>,
+}
+
 impl Sessions {
-    fn serve(&mut self, fs: &FsClient, net: Handle, services: u64, broker: Handle) {
+    /// Reaps the shells that ended and serves at most one request. Returns
+    /// the launch endpoints of terminal shells that ended, for the broker
+    /// to stop what they started (audit of the terminal, M2).
+    fn serve(
+        &mut self,
+        fs: &FsClient,
+        net: Handle,
+        services: u64,
+        broker: Handle,
+    ) -> [Option<Handle>; MAX_SESSIONS] {
         use aricode_proto::session::{self, Kind as SessionKind};
-        for c in self.children.iter_mut() {
-            if let Some(h) = *c {
-                if sys::process_wait(h, 0) != Err(Error::Timeout) {
-                    let _ = sys::handle_close(h);
-                    *c = None;
+        let mut ended = [None; MAX_SESSIONS];
+        let mut probe = [0u8; 1];
+        let mut none = [Handle(0); 1];
+        for (c, end) in self.children.iter_mut().zip(ended.iter_mut()) {
+            let Some(child) = *c else { continue };
+            if sys::process_wait(child.shell, 0) != Err(Error::Timeout) {
+                let _ = sys::handle_close(child.shell);
+                if let Some(t) = child.terminal {
+                    let _ = sys::handle_close(t);
+                }
+                *end = child.launches;
+                *c = None;
+                continue;
+            }
+            // Its terminal is gone: the shell goes with it, whatever it
+            // waits for; it is reaped on a later pass.
+            if let Some(t) = child.terminal {
+                if matches!(sys::ipc_receive(t, &mut probe, &mut none, 0), Err(e) if e.endpoint_gone())
+                {
+                    let _ = sys::process_kill(child.shell);
                 }
             }
         }
         let mut msg = [0u8; session::Request::LEN];
-        let mut handles = [Handle(0); 3];
+        let mut handles = [Handle(0); 4];
         let Ok((n, nh)) = sys::ipc_receive(self.endpoint, &mut msg, &mut handles, 0) else {
-            return;
+            return ended;
         };
-        if nh < 3 {
+        // sshd sends three handles; a terminal a fourth, the side of the
+        // endpoint that tells init when it is gone.
+        let wanted = if self.terminal { 4 } else { 3 };
+        if nh != wanted {
             for h in &handles[..nh] {
                 let _ = sys::handle_close(*h);
             }
             if !core::mem::replace(&mut self.said_malformed, true) {
                 say(b"a session request came without its handles; dropped (said once)");
             }
-            return;
+            return ended;
         }
-        let [reply_to, input, output] = handles;
+        let [reply_to, input, output, alive] = handles;
+        let alive = self.terminal.then_some(alive);
         let slot = self.children.iter().position(Option::is_none);
         let request = session::Request::decode(&msg[..n])
             .filter(|r| !self.terminal || r.kind == SessionKind::Shell);
-        let spawned = match (request, slot) {
-            (Some(req), Some(slot)) => {
+        // A terminal's shell launches on an endpoint of its own.
+        let launches = if self.terminal {
+            sys::endpoint_create_pair().ok()
+        } else {
+            None
+        };
+        let spawned = match (request, slot, self.terminal && launches.is_none()) {
+            (Some(req), Some(slot), false) => {
                 let quiet = if req.kind == SessionKind::Exec {
                     session::SHELL_QUIET
                 } else {
@@ -2032,22 +2076,44 @@ impl Sessions {
                     0
                 };
                 let arg = services | session::SHELL_SESSION | quiet | terminal;
+                let via = launches.map_or(broker, |(_, send)| send);
                 // `spawn_shell` closes `input` and `output` if it fails.
-                match spawn_shell(fs, net, broker, input, Some(output), arg) {
-                    Ok(child) => {
-                        self.children[slot] = Some(child);
+                let result = spawn_shell(fs, net, via, input, Some(output), arg);
+                // The shell got its own duplicate of the send side.
+                if let Some((_, send)) = launches {
+                    let _ = sys::handle_close(send);
+                }
+                match result {
+                    Ok(shell) => {
+                        self.children[slot] = Some(Child {
+                            shell,
+                            terminal: alive,
+                            launches: launches.map(|(receive, _)| receive),
+                        });
                         true
                     }
-                    Err(_) => false,
+                    Err(_) => {
+                        if let Some((receive, _)) = launches {
+                            let _ = sys::handle_close(receive);
+                        }
+                        false
+                    }
                 }
             }
             _ => {
                 let _ = sys::handle_close(input);
                 let _ = sys::handle_close(output);
+                if let Some((receive, send)) = launches {
+                    let _ = sys::handle_close(receive);
+                    let _ = sys::handle_close(send);
+                }
                 false
             }
         };
         if !spawned {
+            if let Some(a) = alive {
+                let _ = sys::handle_close(a);
+            }
             say(if self.terminal {
                 b"terminal shell refused (limit or invalid request)"
             } else {
@@ -2056,6 +2122,7 @@ impl Sessions {
         }
         let _ = sys::ipc_send(reply_to, &session::reply(spawned), &[], 0);
         let _ = sys::handle_close(reply_to);
+        ended
     }
 }
 
@@ -2089,10 +2156,6 @@ struct Broker {
     offered: Offered,
     /// Where `terminal` holders ask for session shells (ADR 0074 phase C).
     terminals: Sessions,
-    /// Where those shells ask for launches: an endpoint of their own, so
-    /// what they start is known and stopped with them when the desktop
-    /// ends (audit of the terminal, M2).
-    terminal_launches: Handle,
     /// Where `settings` holders ask (ADR 0074 phase C).
     settings: Handle,
     /// DMA buffer of the package being launched (ADR 0017), the package's
@@ -2217,8 +2280,9 @@ struct Running {
     ends_session: bool,
     /// Started by the launcher: stopped when the session ends.
     from_launcher: bool,
-    /// Started by a desktop terminal's shell: stopped with it.
-    from_terminal: bool,
+    /// Started by a desktop terminal's shell, named by that shell's launch
+    /// endpoint: stopped with it.
+    from_shell: Option<Handle>,
 }
 
 /// Immediate result of `launch`: an already decided reply, or a created
@@ -2274,7 +2338,6 @@ impl Broker {
                 terminal: true,
                 said_malformed: false,
             },
-            terminal_launches: sys::endpoint_create()?,
             settings: sys::endpoint_create()?,
             stage: None,
         })
@@ -2488,15 +2551,15 @@ impl Broker {
     /// `poll_launches` as usual.
     fn stop_desktop_apps(&mut self) {
         for r in self.running.iter().flatten() {
-            if r.ends_session || r.from_launcher || r.from_terminal {
+            if r.ends_session || r.from_launcher || r.from_shell.is_some() {
                 let _ = sys::process_kill(r.process);
             }
         }
         // The terminals' shells go with the terminals, even one waiting in
         // `run` for a program that never ends (audit of the terminal, M2);
         // they are reaped by the next `Sessions::serve`.
-        for shell in self.terminals.children.iter().flatten() {
-            let _ = sys::process_kill(*shell);
+        for child in self.terminals.children.iter().flatten() {
+            let _ = sys::process_kill(child.shell);
         }
     }
 
@@ -2523,7 +2586,7 @@ impl Broker {
                     window,
                     ends_session: true,
                     from_launcher: false,
-                    from_terminal: false,
+                    from_shell: None,
                 });
                 true
             }
@@ -2534,15 +2597,21 @@ impl Broker {
     fn serve_one(&mut self, timeout_ms: u64, sup: &Supervisor) {
         let mut msg = [0u8; LaunchRequest::LEN];
         let mut handles = [Handle(0); sys::abi::IPC_MAX_HANDLES];
-        let Ok((which, n, nh)) = sys::ipc_receive_any(
-            &[self.endpoint, self.terminal_launches],
-            &mut msg,
-            &mut handles,
-            timeout_ms,
-        ) else {
+        // The main endpoint, and each terminal shell's own.
+        let mut eps = [self.endpoint; 1 + MAX_SESSIONS];
+        let mut n_eps = 1;
+        for child in self.terminals.children.iter().flatten() {
+            if let Some(l) = child.launches {
+                eps[n_eps] = l;
+                n_eps += 1;
+            }
+        }
+        let Ok((which, n, nh)) =
+            sys::ipc_receive_any(&eps[..n_eps], &mut msg, &mut handles, timeout_ms)
+        else {
             return;
         };
-        let from_terminal = which == 1;
+        let from_shell = (which > 0).then_some(eps[which]);
         // A reply endpoint and, for a launch with a console, the console.
         for h in handles.iter().take(nh).skip(2) {
             let _ = sys::handle_close(*h);
@@ -2607,7 +2676,7 @@ impl Broker {
                     window,
                     ends_session: false,
                     from_launcher: false,
-                    from_terminal,
+                    from_shell,
                 });
             }
             Launched::Process(process, window) => {
@@ -2617,9 +2686,29 @@ impl Broker {
                     window,
                     ends_session: false,
                     from_launcher: false,
-                    from_terminal,
+                    from_shell,
                 });
             }
+        }
+    }
+
+    /// Serves the terminals' session shells and stops what an ended
+    /// terminal shell started (audit of the terminal, M2): its programs
+    /// would otherwise run on with nobody to read them, holding a slot.
+    fn serve_terminals(&mut self, net: Handle, services: u64) {
+        let Some(fs) = self.fs.as_ref() else {
+            return;
+        };
+        let ended = self.terminals.serve(fs, net, services, self.endpoint);
+        for tag in ended.into_iter().flatten() {
+            for r in self.running.iter_mut().flatten() {
+                if r.from_shell == Some(tag) {
+                    let _ = sys::process_kill(r.process);
+                    // Stopped once; the handle's number may be reused.
+                    r.from_shell = None;
+                }
+            }
+            let _ = sys::handle_close(tag);
         }
     }
 
@@ -2771,7 +2860,7 @@ impl Broker {
                     window,
                     ends_session: false,
                     from_launcher: true,
-                    from_terminal: false,
+                    from_shell: None,
                 });
             }
         }

@@ -2,14 +2,16 @@
 # `terminal` holds it: init refuses sshd's `Exec` on its endpoint, drops a
 # request without its handles (said once), grants four interactive shells
 # and refuses a fifth. A package that asks for `terminal` under another
-# name is denied by the broker and never runs.
+# name is denied by the broker and never runs. A terminal that dies on its
+# own while its shell waits in `run` takes the shell and the program with
+# it (audit of the terminal, M2).
 name = "apps.terminal_rules"
 description = "terminal: interactive shells only, four at most, and only for the package named terminal"
 level = "full"
 areas = ["apps", "shell", "init"]
 cmdline = "qemu_exit shell"
 install = ["examples/test_terminal", "examples/fake_terminal"]
-stdin = ["run terminal", "run fake_terminal", "shutdown"]
+stdin = ["run terminal", "run fake_terminal", "spawn terminal 1", "sleep 4000", "shutdown"]
 timeout_secs = 90
 
 [expect]
@@ -24,6 +26,14 @@ serial_contains = [
     "terminal test: init kept every rule",
     "run: terminal exited with 0",
     "AriInit: denied, requests system capabilities: terminal",
+    "terminal test: leaving its shell in run",
+    "'shell' killed: stopped at another process's request",
+    "'cpu_hog' killed: stopped at another process's request",
     "ARICODEOS_SHUTDOWN",
 ]
 serial_absent = ["KERNEL PANIC", "fake_terminal: started", "init broke a rule"]
+serial_order = [
+    "terminal test: leaving its shell in run",
+    "'shell' killed: stopped at another process's request",
+    "'cpu_hog' killed: stopped at another process's request",
+]
