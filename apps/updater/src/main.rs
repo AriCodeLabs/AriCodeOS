@@ -53,7 +53,7 @@ use aricode_rt::sys::block::{find_partition, BlockClient};
 use aricode_rt::sys::fs::{FsClient, FsError};
 use aricode_rt::sys::net::NetClient;
 use aricode_rt::sys::{self, Handle};
-/// The updater's private directory as `files::Files`.
+// The updater's private directory as `files::Files`.
 use aricode_update_index::client::FsFiles as Private;
 use aricode_update_index::files::{self, ReadError};
 use aricode_update_index::lists::{self, PlanItem, StagedEntry};

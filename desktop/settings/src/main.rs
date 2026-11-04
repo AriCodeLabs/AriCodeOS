@@ -21,13 +21,16 @@ use aricode_proto::settings::{Item, Op, Reply, Request, Status};
 use aricode_rt::sys::window::{Event, Window};
 use aricode_rt::sys::{self, abi, kind, permissions, rpc, Handle};
 
-const W: u32 = 560;
-const H: u32 = 360;
+const W: u32 = 720;
+const H: u32 = 400;
 const LINE: i32 = widgets::LINE_H as i32 + 4;
 /// The lines of facts at the top: system, keyboard, network, updates,
-/// session, driver keys.
+/// session, driver keys; each gets two rows, so a long one (a reason the
+/// desktop will not start) wraps instead of being clipped (audit of the
+/// settings, M1).
 const FACTS: usize = 6;
-const CHOICE_Y: i32 = PAD + (FACTS as i32 + 2) * LINE;
+const COLS: usize = (W as usize - 2 * PAD as usize) / 8;
+const CHOICE_Y: i32 = PAD + (2 * FACTS as i32 + 2) * LINE;
 const CHOICE: Rect = Rect::new(PAD, CHOICE_Y, 240, 2 * ROW_H);
 const REFRESH: Button = Button::at(PAD + 256, CHOICE_Y, "Refresh");
 const STATUS_Y: i32 = CHOICE_Y + 2 * ROW_H as i32 + PAD;
@@ -86,13 +89,19 @@ impl Settings {
         let mut line = Line::new();
         let req = Request { op, item, value };
         let mut msg = [0u8; Reply::LEN];
-        match rpc::call(self.settings, &req.encode(), &[], 2000, 5000, &mut msg)
+        // Init's own file requests may take long: a change it made late is
+        // not reported as one it never made (audit of the settings, L3).
+        match rpc::call(self.settings, &req.encode(), &[], 2000, 15_000, &mut msg)
             .ok()
             .and_then(|n| Reply::decode(&msg[..n]))
         {
             Some(r) => {
                 line.set(&[r.text()]);
                 (r.status == Status::Ok, line)
+            }
+            None if op == Op::SetSession => {
+                line.set(&[b"init did not answer: whether it changed is unknown; Refresh"]);
+                (false, line)
             }
             None => {
                 line.set(&[b"init did not answer"]);
@@ -141,9 +150,15 @@ impl Settings {
             .ok()
             .and_then(|t| CmdLine::new(t).get(keys::KBD))
             .unwrap_or("us");
+        // A layout name is short ASCII; anything else is not shown.
+        let layout = if layout.len() <= 8 && layout.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            layout
+        } else {
+            "?"
+        };
         let mut kbd = [0u8; 8];
-        let n = layout.len().min(kbd.len());
-        kbd[..n].copy_from_slice(&layout.as_bytes()[..n]);
+        let n = layout.len();
+        kbd[..n].copy_from_slice(layout.as_bytes());
         self.facts[1].set(&[
             b"Keyboard: ",
             &kbd[..n],
@@ -153,14 +168,20 @@ impl Settings {
         self.facts[2].set(&[b"Network: ", address.text().as_bytes()]);
         let (_, sources) = self.ask(Op::Get, Item::UpdateSource, 0);
         self.facts[3].set(&[b"Updates: ", sources.text().as_bytes()]);
-        let (_, session) = self.ask(Op::Get, Item::Session, 0);
+        let (known, session) = self.ask(Op::Get, Item::Session, 0);
         self.facts[4].set(&[b"Boots into: ", session.text().as_bytes()]);
-        self.choice
-            .select(if session.text().starts_with("desktop") {
-                1
-            } else {
-                0
-            });
+        // Nothing is chosen for the owner when the session is not known:
+        // the next Enter would write a guess (audit of the settings, L4).
+        if known {
+            self.choice
+                .select(if session.text().starts_with("desktop") {
+                    1
+                } else {
+                    0
+                });
+        } else {
+            self.choice.selected = None;
+        }
         self.facts[5].set(&[b"Driver keys: none (signed driver packages are not built yet)"]);
         for f in &self.facts {
             say(&[f.text().as_bytes()]);
@@ -192,8 +213,16 @@ impl Settings {
         c.fill(widgets::BG);
         c.text(PAD, PAD, "Settings", widgets::FG, None);
         for (i, f) in self.facts.iter().enumerate() {
-            let y = PAD + (i as i32 + 1) * LINE + 4;
-            c.text(PAD, y, f.text(), widgets::FG, None);
+            let y = PAD + (2 * i as i32 + 1) * LINE + 4;
+            let (first, rest) = wrap(f.text(), COLS);
+            c.text(PAD, y, first, widgets::FG, None);
+            c.text(
+                PAD + 16,
+                y + LINE,
+                wrap(rest, COLS - 2).0,
+                widgets::FG,
+                None,
+            );
         }
         c.text(
             PAD,
@@ -211,6 +240,16 @@ impl Settings {
         };
         c.text(PAD, STATUS_Y, self.status.text(), color, None);
     }
+}
+
+/// `text` split where a row of `cols` ends, at the last space before it:
+/// the row and the rest.
+fn wrap(text: &str, cols: usize) -> (&str, &str) {
+    if text.len() <= cols || !text.is_char_boundary(cols) {
+        return (text, "");
+    }
+    let cut = text[..cols].rfind(' ').filter(|&i| i > 0).unwrap_or(cols);
+    (&text[..cut], text[cut..].trim_start())
 }
 
 fn main(_arg: u64) -> u64 {

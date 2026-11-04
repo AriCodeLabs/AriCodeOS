@@ -2639,24 +2639,36 @@ impl Broker {
             return;
         }
         let reply_to = handles[0];
+        let refuse = |why: &[u8]| {
+            // Refusals are said, as the launcher's are (audit of the
+            // settings, L1).
+            sys::print(b"AriInit: refused, the settings sent ");
+            sys::print(why);
+            sys::print(b"\n");
+            let _ = sys::ipc_send(reply_to, &Reply::new(Status::Invalid, b"").encode(), &[], 0);
+            let _ = sys::handle_close(reply_to);
+        };
         if nh == 2 {
             let _ = sys::handle_close(handles[1]);
+            return refuse(b"a handle with its request");
+        }
+        let Some(req) = Request::decode(&msg[..n]) else {
+            return refuse(b"something other than a settings request");
+        };
+        if req.op == Op::SetSession && (req.item != Item::Session || req.value > 1) {
+            return refuse(b"a change other than the session's");
         }
         let mut text = alloc::string::String::new();
         let net = self.net;
-        let status = match (Request::decode(&msg[..n]), self.fs.as_mut()) {
-            (None, _) => Status::Invalid,
-            (Some(_), None) => {
+        let status = match self.fs.as_mut() {
+            None => {
                 text.push_str("no file service");
                 Status::Failed
             }
-            (Some(req), Some(fs)) => match (req.op, req.item) {
+            Some(fs) => match (req.op, req.item) {
                 (Op::Get, Item::Session) => session_text(fs, &mut text),
-                (Op::SetSession, Item::Session) => match req.value {
-                    0 => set_session(fs, Session::Shell, &mut text),
-                    1 => set_session(fs, Session::Desktop, &mut text),
-                    _ => Status::Invalid,
-                },
+                (Op::SetSession, _) if req.value == 0 => set_session(fs, Session::Shell, &mut text),
+                (Op::SetSession, _) => set_session(fs, Session::Desktop, &mut text),
                 (Op::Get, Item::UpdateSource) => sources_text(fs, &mut text),
                 (Op::Get, Item::Address) => match net {
                     Some(net) => address_text(net, &mut text),
@@ -2665,7 +2677,6 @@ impl Broker {
                         Status::Ok
                     }
                 },
-                (Op::SetSession, _) => Status::Invalid,
             },
         };
         let reply = Reply::new(status, text.as_bytes());
@@ -3204,13 +3215,42 @@ fn set_session(
     text: &mut alloc::string::String,
 ) -> aricode_proto::settings::Status {
     use aricode_proto::settings::Status;
+    // The session it already is changes nothing and logs nothing: the
+    // install history is not filled by idle clicks (audit of the settings,
+    // M2).
+    let mut buf = [0u8; 256];
+    let current = match read_small(fs, session::FILE, &mut buf) {
+        Ok(Some(n)) => core::str::from_utf8(&buf[..n])
+            .ok()
+            .and_then(Session::parse),
+        Ok(None) => Some(Session::Shell),
+        Err(()) => None,
+    };
+    if current == Some(chosen) {
+        text.push_str(match chosen {
+            Session::Shell => "already the text console",
+            Session::Desktop => "already the desktop",
+        });
+        if chosen == Session::Desktop {
+            text.push_str(session::desktop_readiness(&mut FsFiles(fs)).note());
+        }
+        return Status::Ok;
+    }
     if update_index::client::save(fs, session::FILE, chosen.to_text().as_bytes()).is_err() {
         text.push_str("the session file cannot be saved");
         return Status::Failed;
     }
     let line = alloc::format!("session: {} (from the desktop's settings)", chosen.name());
-    if update_index::client::log_history(fs, &line).is_err() {
-        say(b"the desktop's settings changed the session; the install history cannot be written");
+    // As the shell does (audit of the settings, L2).
+    match update_index::client::log_history(fs, &line) {
+        Ok(()) => {}
+        Err(update_index::client::HistoryError::Read) => {
+            say(b"the desktop's settings changed the session; the install history cannot be read: not rewritten");
+            let _ = sys::event_record(2, "init-history-read");
+        }
+        Err(update_index::client::HistoryError::Write) => {
+            say(b"the desktop's settings changed the session; the install history cannot be written");
+        }
     }
     sys::print(b"AriInit: the desktop's settings chose session = ");
     sys::print(chosen.name().as_bytes());
@@ -3225,41 +3265,51 @@ fn set_session(
     Status::Ok
 }
 
-/// The update sources, as the shell's `update sources` lists them.
+/// The update sources, as the shell's `update sources` lists them: the
+/// same reader and limit, a source list not yet migrated from the old
+/// `update_url`, and the lines refused (audit of the settings, L5).
 fn sources_text(
     fs: &mut FsClient,
     text: &mut alloc::string::String,
 ) -> aricode_proto::settings::Status {
     use aricode_proto::settings::Status;
-    let mut buf = [0u8; 2048];
+    use update_index::files::read_text;
     let path = update_index::main_path(update_index::SOURCES_FILE);
-    match read_small(fs, &path, &mut buf) {
-        Err(()) => {
+    let list = match read_text(&mut FsFiles(fs), &path, 2048) {
+        Err(_) => {
             text.push_str("the source list cannot be read");
-            Status::Failed
+            return Status::Failed;
         }
-        Ok(None) => {
-            text.push_str("none yet (update add URL in the shell)");
-            Status::Ok
+        Ok(list) => list,
+    };
+    let Some(list) = list else {
+        let legacy = update_index::main_path(update_index::LEGACY_URL_FILE);
+        match read_text(&mut FsFiles(fs), &legacy, 2048) {
+            Ok(Some(url)) => {
+                text.push_str(url.trim());
+                text.push_str(" (update_url, migrated by the next update)");
+            }
+            _ => text.push_str("none yet (update add URL in the shell)"),
         }
-        Ok(Some(n)) => {
-            let list = alloc::string::String::from_utf8_lossy(&buf[..n]);
-            let (sources, _) = update_index::Sources::parse(&list);
-            if sources.is_empty() {
-                text.push_str("none yet (update add URL in the shell)");
-            }
-            for (i, source) in sources.entries().enumerate() {
-                if i > 0 {
-                    text.push_str(", ");
-                }
-                text.push_str(&source.url);
-                if source.channel == update_index::Channel::Dev {
-                    text.push_str(" (dev)");
-                }
-            }
-            Status::Ok
+        return Status::Ok;
+    };
+    let (sources, refused) = update_index::Sources::parse(&list);
+    if sources.is_empty() {
+        text.push_str("none yet (update add URL in the shell)");
+    }
+    for (i, source) in sources.entries().enumerate() {
+        if i > 0 {
+            text.push_str(", ");
+        }
+        text.push_str(&source.url);
+        if source.channel == update_index::Channel::Dev {
+            text.push_str(" (dev)");
         }
     }
+    if refused > 0 {
+        text.push_str(&alloc::format!(" ({refused} line(s) refused)"));
+    }
+    Status::Ok
 }
 
 /// The network address, or why there is none yet.

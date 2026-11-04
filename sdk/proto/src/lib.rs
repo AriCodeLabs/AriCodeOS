@@ -1594,8 +1594,9 @@ pub mod launch {
 pub mod settings {
     pub const PROTOCOL: u8 = 9;
     pub const VERSION: u8 = 1;
-    /// Bytes of text in a reply.
-    pub const MAX_TEXT: usize = 112;
+    /// Bytes of text in a reply: a message of 248 bytes, within
+    /// `IPC_MAX_DATA`.
+    pub const MAX_TEXT: usize = 240;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Op {
@@ -1682,11 +1683,15 @@ pub mod settings {
     impl Reply {
         pub const LEN: usize = 8 + MAX_TEXT;
 
-        /// `text` cut to `MAX_TEXT` bytes.
+        /// `text`, cut to `MAX_TEXT` bytes and then ending in `...` so a
+        /// cut never passes for the whole (audit of the settings, M1).
         pub fn new(status: Status, text: &[u8]) -> Self {
             let n = text.len().min(MAX_TEXT);
             let mut t = [0u8; MAX_TEXT];
             t[..n].copy_from_slice(&text[..n]);
+            if text.len() > MAX_TEXT {
+                t[MAX_TEXT - 3..].copy_from_slice(b"...");
+            }
             Self {
                 status,
                 text: t,
@@ -1750,10 +1755,16 @@ mod tests {
         let r = Reply::new(Status::Ok, b"session: desktop");
         let d = Reply::decode(&r.encode()).unwrap();
         assert_eq!(d.text(), b"session: desktop");
-        let long = Reply::new(Status::Failed, &[b'x'; 200]);
+        let long = Reply::new(Status::Failed, &[b'x'; 300]);
         assert_eq!(long.text().len(), MAX_TEXT);
+        assert!(long.text().ends_with(b"x..."), "a cut is marked");
+        assert_eq!(
+            Reply::new(Status::Ok, &[b'y'; MAX_TEXT]).text(),
+            &[b'y'; MAX_TEXT][..]
+        );
+        const _: () = assert!(Reply::LEN <= 256, "within IPC_MAX_DATA");
         let mut bad = r.encode();
-        bad[3] = 200;
+        bad[3] = MAX_TEXT as u8 + 1;
         assert!(Reply::decode(&bad).is_none());
     }
 

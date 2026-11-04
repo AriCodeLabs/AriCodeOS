@@ -765,6 +765,23 @@ const TRUSTED_CRYPTO_CFGS: &[&str] = &[
     "curve25519_dalek_backend=\"serial\"",
 ];
 
+/// The package crates outside the workspace: every folder of `desktop/`
+/// and `examples/` with a `Cargo.toml`, in name order.
+fn external_crates() -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    for parent in ["desktop", "examples"] {
+        let dir = root().join(parent);
+        for entry in std::fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))? {
+            let path = entry.map_err(|e| e.to_string())?.path();
+            if path.join("Cargo.toml").is_file() {
+                out.push(path);
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
 pub fn check() -> Result {
     let mut c = cargo();
     c.args(["fmt", "--all", "--", "--check"]);
@@ -779,6 +796,23 @@ pub fn check() -> Result {
         if let Some(t) = target {
             c.args(["--target", t]);
         }
+        c.args(["--", "-D", "warnings"]);
+        run(c)?;
+    }
+    // The packages outside the workspace (the desktop's, the test ones):
+    // formatted and linted too, as the shipped code is (audit of the
+    // settings, L6), built under `build/` and never inside their folders.
+    for dir in external_crates()? {
+        let manifest = dir.join("Cargo.toml");
+        let mut c = cargo();
+        c.arg("fmt").arg("--manifest-path").arg(&manifest);
+        c.args(["--", "--check"]);
+        run(c)?;
+        let name = dir.file_name().unwrap_or_default().to_string_lossy();
+        let mut c = user_cargo();
+        c.arg("clippy").arg("--manifest-path").arg(&manifest);
+        c.args(["--target", USER_TARGET, "--target-dir"]);
+        c.arg(crate::build_dir().join("external-check").join(&*name));
         c.args(["--", "-D", "warnings"]);
         run(c)?;
     }

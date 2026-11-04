@@ -691,3 +691,36 @@ It found these, all fixed:
     the text console is written, said and logged;
   - `apps.home_rules`: `fake_settings` is denied too.
 
+### Audit of the settings (2026-11-04)
+
+An independent read-only audit found:
+- the refactors keep their behaviour (the one adapter is the three it
+  replaces, and the incident 0008 rule holds);
+- only the signed `settings` reaches the endpoint;
+- the host build never turns `client` on.
+
+It found these, all fixed:
+
+- **M1:** a reply was cut at 112 bytes, and the window clipped long
+  lines, so the reason a desktop would not start could vanish. Replies
+  now hold 240 bytes and end in `...` when cut, and the window wraps each
+  fact onto two rows.
+- **M2:** choosing the session it already was wrote the file and a
+  history line, so idle clicks could push the install lines out of the
+  2 KiB history. Init now answers "already" and writes nothing.
+- **L1:** refusals are said, and a request carrying a handle is refused.
+- **L2:** a history that cannot be read is said apart from one that
+  cannot be written, with the shell's event.
+- **L3:** a change init answered late is reported as unknown, never as
+  not made.
+- **L4:** when the session cannot be read, nothing is preselected for the
+  next Enter to write.
+- **L5:** the update sources are read as the shell reads them: the same
+  reader, the old `update_url`, and the lines refused.
+- **L6:** `desktop_readiness` is tested when the launcher cannot be read
+  and when the profiles are over 1024 bytes. `cargo xtask check` now
+  formats and lints the packages outside the workspace (`desktop/`,
+  `examples/`) too; it found one more warning, fixed.
+- **L7:** a misplaced doc comment, and the keyboard layout name only
+  shown when it is short ASCII.
+

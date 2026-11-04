@@ -15,6 +15,7 @@ use aricode_proto::net::{Status as NetStatus, LINK_DOWN, LINK_UP};
 use aricode_rt::sys::net::{NetClient, NetError};
 use aricode_rt::sys::{self, abi, fs::FsClient, Handle, TIMEOUT_INFINITE};
 use aricode_rt::{fmt_hex, fmt_u64};
+use aricode_update_index::client::FsFiles;
 use aricode_update_index::session::{self, Session};
 use aricode_update_index::{self as update_index, installer_arg, updater_arg};
 
@@ -1215,11 +1216,6 @@ fn run_updater(arg: u64) -> Option<u64> {
 }
 
 /// Reads a whole small file: `Ok(None)` if it does not exist.
-/// The main file space as `update_index::files::Files`: only an explicit
-/// `NotFound` means a file is absent; any other failure is an error, never
-/// mistaken for "missing" (incident 0008).
-use update_index::client::FsFiles;
-
 fn read_small(
     fs: &mut FsClient,
     name: &str,

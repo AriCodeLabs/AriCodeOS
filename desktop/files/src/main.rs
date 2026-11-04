@@ -395,10 +395,8 @@ fn main(_arg: u64) -> u64 {
                     f.rename();
                 } else if DELETE.contains(x, y) {
                     f.delete();
-                } else if REFRESH.contains(x, y) {
-                    if f.refresh(None) {
-                        f.say_count();
-                    }
+                } else if REFRESH.contains(x, y) && f.refresh(None) {
+                    f.say_count();
                 }
             }
             Event::Focus(_) => {}

@@ -147,13 +147,15 @@ mod tests {
     struct Mem {
         files: alloc::vec::Vec<(&'static str, &'static [u8])>,
         fail: bool,
+        /// A name whose open fails.
+        fail_on: Option<&'static str>,
     }
 
     impl Files for Mem {
         type Fd = usize;
         type Error = ();
         fn open(&mut self, name: &str) -> Result<Option<usize>, ()> {
-            if self.fail {
+            if self.fail || self.fail_on == Some(name) {
                 return Err(());
             }
             Ok(self.files.iter().position(|(n, _)| *n == name))
@@ -180,6 +182,7 @@ mod tests {
         let mut m = Mem {
             files: alloc::vec![],
             fail: false,
+            fail_on: None,
         };
         assert_eq!(desktop_readiness(&mut m), Readiness::NotFollowed);
         m.files.push((profiles, b"desktop launcher\n"));
@@ -187,8 +190,19 @@ mod tests {
         m.files.push(("apps/launcher.aripkg", b"pkg"));
         assert_eq!(desktop_readiness(&mut m), Readiness::Ready);
         assert_eq!(Readiness::Ready.note(), "");
+        m.fail_on = Some("apps/launcher.aripkg");
+        assert_eq!(desktop_readiness(&mut m), Readiness::LauncherUnreadable);
+        m.fail_on = None;
         m.fail = true;
         assert_eq!(desktop_readiness(&mut m), Readiness::ProfilesUnreadable);
+        // A profile list over 1024 bytes is not trusted as read whole.
+        static LONG: [u8; 1100] = [b'#'; 1100];
+        let mut big = Mem {
+            files: alloc::vec![(profiles, &LONG[..])],
+            fail: false,
+            fail_on: None,
+        };
+        assert_eq!(desktop_readiness(&mut big), Readiness::ProfilesUnreadable);
     }
 
     #[test]

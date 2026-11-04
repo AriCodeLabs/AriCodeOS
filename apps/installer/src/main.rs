@@ -48,7 +48,7 @@ use aricode_crypto::sha256::Sha256;
 use aricode_proto::fs::Status;
 use aricode_rt::sys::fs::{FsClient, FsError};
 use aricode_rt::sys::{self, kind, permissions};
-/// The main file space as `files::Files`.
+// The main file space as `files::Files`.
 use aricode_update_index::client::FsFiles as Main;
 use aricode_update_index::files::{self, Files, ReadError};
 use aricode_update_index::run::{self, Outcome};

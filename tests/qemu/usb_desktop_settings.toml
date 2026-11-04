@@ -4,7 +4,8 @@
 # that the machine boots into the desktop. Up and Enter choose the text
 # console: init writes the session file, says so, and logs it in the
 # install history, which the console's shell then shows, as `session`
-# does.
+# does. Down and Enter choose the desktop again; Enter once more changes
+# nothing and logs nothing (audit of the settings, M2).
 name = "usb.desktop_settings"
 description = "the desktop settings show the system and choose what the machine boots into"
 level = "full"
@@ -26,6 +27,15 @@ marker = "settings: ready"
 keys = ["up", "ret"]
 key_delay_ms = 100
 
+[[host_input_then]]
+marker = "settings: chose Text console"
+keys = ["down", "ret"]
+key_delay_ms = 100
+
+[[host_input_then]]
+marker = "settings: chose Desktop: the desktop from the next boot"
+keys = ["ret"]
+
 [expect]
 exit = 33
 serial_contains = [
@@ -39,15 +49,22 @@ serial_contains = [
     "settings: Boots into: desktop",
     "AriInit: the desktop's settings chose session = shell",
     "settings: chose Text console: the text console from the next boot",
-    "session: shell (the text console)",
+    "settings: chose Desktop: the desktop from the next boot",
+    "settings: chose Desktop: already the desktop",
+    "session: desktop\r\n",
     "session: shell (from the desktop's settings)",
+    "session: desktop (from the desktop's settings)",
     "ARICODEOS_SHUTDOWN",
 ]
 serial_order = [
     "settings: chose Text console",
+    "settings: chose Desktop: already the desktop",
     "ari> session",
-    "session: shell (the text console)",
+    "session: desktop",
     "ari> cat updater/history.log",
     "session: shell (from the desktop's settings)",
+    "session: desktop (from the desktop's settings)",
 ]
+# One history line per change, never one per click.
+serial_once = ["session: desktop (from the desktop's settings)"]
 serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "init did not answer"]
