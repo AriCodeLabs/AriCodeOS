@@ -1,0 +1,31 @@
+# A test package that asks for `terminal` under another name (ADR 0074
+# phase C): the broker must deny it. Built like `hello_ext`.
+[package]
+name = "fake-terminal"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Test package that asks for a capability it may not have"
+publish = false
+
+[[bin]]
+name = "fake_terminal"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+aricode-rt = { path = "../../sdk/runtime" }
+
+[build-dependencies]
+aricode-build = { path = "../../sdk/build" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
+
+[workspace]

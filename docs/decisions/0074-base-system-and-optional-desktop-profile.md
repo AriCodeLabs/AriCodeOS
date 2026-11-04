@@ -485,11 +485,65 @@ the same branch:
 - **No polling.** `Window::start_poll` sends a poll without waiting for
   its answer, so the terminal waits on its shell's output and on its
   window's next event in one `ipc_receive_any`.
-- **When the shell ends, the terminal closes.** Killing the terminal,
-  for instance when the desktop ends, closes the shell's input, so the
-  shell ends too.
-- **Scenario `usb.desktop_terminal`:** the launcher offers the terminal,
-  and Enter opens it. `exit` typed in its window ends the shell, and the
-  terminal reports the text it showed (the banner, the prompt and the
-  echo).
+- **When the shell ends, the terminal closes.** When the desktop ends,
+  init stops:
+  - the terminals;
+  - their shells, even one waiting in `run`;
+  - what those shells started. Terminal shells ask for launches on an
+    endpoint of their own (`terminal_launches`), so the broker knows
+    those programs (`Running::from_terminal`).
+
+  The install history says when a change came from a desktop terminal
+  (`session::SHELL_TERMINAL`), not from SSH.
+- **Two limits remain:**
+  - A terminal that dies on its own, outside a desktop's end, while its
+    shell waits in `run`, leaves that shell until the program exits. Only
+    then does the shell read its closed input and end.
+  - Each terminal shell holds an fsd and a netd session, like an SSH
+    shell. With four terminals, four SSH shells and six apps, the
+    15-session tables (ADR 0036, 0037) can be full. A launch then fails
+    visibly.
+- **Scenarios:**
+  - `usb.desktop_terminal`: the launcher offers the terminal, and Enter
+    opens it. `exit` typed in its window ends the shell, and the terminal
+    reports the text it showed (the banner, the prompt and the echo).
+  - `usb.desktop_terminal_end`: Ctrl+Alt+Backspace stops the terminal and
+    its shell.
+  - `apps.terminal_rules`: the test package `terminal`
+    (`examples/test_terminal`) sees `Exec` refused, a request without
+    handles dropped, four shells granted and a fifth refused.
+    `fake_terminal` asks for `terminal` and is denied.
+
+### Audit of the terminal (2026-11-04)
+
+An independent read-only audit confirmed:
+- only an installed, signed `terminal` gets the endpoint;
+- the refusal paths close their handles;
+- the focus rule keeps its keys to itself.
+
+It found these, all fixed in the same branch:
+
+- **H1:** a poll's deadline took one message of the shell's text and
+  dropped it. Now every message is shown.
+- **M1:** with the compositor gone and the shell idle, the terminal waited
+  forever. The compositor answers a poll within 500 ms, so a silence
+  twice that long ends the terminal.
+- **M2:** a shell in `run` outlived its terminal. The desktop's end now
+  stops terminal shells and what they started; the limit that remains is
+  described above.
+- **M3:** steady output froze the window. At most eight messages are
+  taken before each repaint.
+- **M4:** the session budget is described above.
+- **L1:** the history said "an SSH session" for a terminal; it now names
+  it.
+- **L2:** a character cut between two messages showed as two `?`.
+  `aricode_fb_console::Utf8Stream` (host-tested) keeps it for the next
+  message.
+- **L3:** a key now goes to a busy shell without waiting, and is dropped,
+  said once.
+- **L4:** the refusal text no longer blames only the four-shell limit.
+- **L5:** a malformed session request is said once.
+- **L6:** handles that arrive with the text, or with the shell's input,
+  are closed. `Canvas::set` draws a pixel without a rectangle per pixel.
+- **L7:** both ends closed together counts as the shell's end.
 

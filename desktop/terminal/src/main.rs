@@ -13,7 +13,7 @@
 #![no_std]
 #![no_main]
 
-use aricode_fb_console::{Console, Rgb, Surface};
+use aricode_fb_console::{Console, Rgb, Surface, Utf8Stream};
 use aricode_proto::session;
 use aricode_rt::sys::window::{self, Event, Window};
 use aricode_rt::sys::{self, abi, kind, permissions, Error, Handle};
@@ -45,9 +45,7 @@ impl Surface for Screen {
     }
 
     fn put(&mut self, x: usize, y: usize, color: Rgb) {
-        let mut c = self.0.canvas();
-        let r = aricode_gfx::Rect::new(x as i32, y as i32, 1, 1);
-        c.fill_rect(&r, encode(color));
+        self.0.canvas().set(x as i32, y as i32, encode(color));
     }
 
     fn glyph(&mut self, x: usize, y: usize, rows: &[u8], fg: Rgb, bg: Rgb) {
@@ -56,8 +54,7 @@ impl Surface for Screen {
         for (dy, bits) in rows.iter().enumerate() {
             for dx in 0..8 {
                 let color = if bits & (0x80 >> dx) != 0 { fg } else { bg };
-                let r = aricode_gfx::Rect::new((x + dx) as i32, (y + dy) as i32, 1, 1);
-                c.fill_rect(&r, color);
+                c.set((x + dx) as i32, (y + dy) as i32, color);
             }
         }
     }
@@ -82,17 +79,18 @@ static CONSOLE: SpinLock<Console<Screen>> = SpinLock::new(Console::empty());
 /// Bytes of the shell's text shown, said when the terminal closes.
 static SHOWN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
+/// The shell's text as it arrives in messages: a character one message
+/// cuts is kept for the next (audit, L2).
+static STREAM: SpinLock<Utf8Stream> = SpinLock::new(Utf8Stream::new());
+
 /// Shows the shell's bytes: text, newlines, carriage returns, backspaces
 /// and tabs, as the console does at boot; anything else is a `?`.
 fn show(bytes: &[u8]) {
     SHOWN.fetch_add(bytes.len() as u64, core::sync::atomic::Ordering::Relaxed);
     let mut console = CONSOLE.lock();
-    for chunk in bytes.utf8_chunks() {
-        let _ = console.write_str(chunk.valid());
-        if !chunk.invalid().is_empty() {
-            let _ = console.write_str("?");
-        }
-    }
+    STREAM.lock().feed(bytes, |text| {
+        let _ = console.write_str(text);
+    });
 }
 
 fn present() {
@@ -159,73 +157,117 @@ fn open_shell(terminals: Handle) -> Result<Shell, Error> {
 enum End {
     /// The shell ended (`exit`, or it is gone).
     Shell,
-    /// The window or the compositor is gone.
+    /// The window or the compositor is gone, or the compositor stopped
+    /// answering.
     Window,
 }
 
+/// Messages of the shell's text taken before painting once: a shell that
+/// writes faster than the window paints still lets keys through (audit,
+/// M3).
+const DRAIN: usize = 8;
+
+/// Takes up to `DRAIN` messages of the shell's text into the window, then
+/// paints. `Some(End::Shell)` when the shell ended (an empty message, or
+/// its side closed).
+fn take_output(shell: &Shell, msg: &mut [u8], first: Option<usize>) -> Option<End> {
+    let mut handles = [Handle(0); abi::IPC_MAX_HANDLES];
+    let mut end = None;
+    let mut next = first;
+    for _ in 0..DRAIN {
+        let n = match next.take() {
+            Some(n) => n,
+            None => match sys::ipc_receive(shell.output, msg, &mut handles, 0) {
+                Ok((n, nh)) => {
+                    // Text only: a handle sent along is not kept.
+                    for h in &handles[..nh] {
+                        let _ = sys::handle_close(*h);
+                    }
+                    n
+                }
+                Err(e) if e.endpoint_gone() => {
+                    end = Some(End::Shell);
+                    break;
+                }
+                Err(_) => break,
+            },
+        };
+        if n == 0 {
+            end = Some(End::Shell);
+            break;
+        }
+        show(&msg[..n]);
+    }
+    present();
+    end
+}
+
+/// Sends one key to the shell without waiting: while the shell is busy
+/// (in `run`) and its input is full, the key is dropped, and said once,
+/// rather than freezing the window (audit, L3).
+fn send_key(shell: &Shell, b: u8, said_full: &mut bool) {
+    if sys::ipc_send(shell.input, &[b], &[], 0).is_err() && !core::mem::replace(said_full, true) {
+        say(b"the shell is not reading its keys; dropping them");
+    }
+}
+
 fn run(shell: &Shell) -> End {
-    let start = |c: &Console<Screen>| c.surface().map(|s| s.0.start_poll(POLL_MS));
-    let Some(Ok(mut pending)) = start(&CONSOLE.lock()) else {
+    let start = || CONSOLE.lock().surface().map(|s| s.0.start_poll(POLL_MS));
+    let Some(Ok(mut pending)) = start() else {
         return End::Window;
     };
     let mut msg = [0u8; abi::IPC_MAX_DATA];
     let mut handles = [Handle(0); abi::IPC_MAX_HANDLES];
-    loop {
+    let mut said_full = false;
+    let end = loop {
         let waited = sys::ipc_receive_any(
             &[pending, shell.output],
             &mut msg,
             &mut handles,
             2 * POLL_MS as u64,
         );
-        for h in handles.iter_mut().filter(|h| h.0 != 0) {
-            let _ = sys::handle_close(*h);
-            *h = Handle(0);
+        if let Ok((_, _, nh)) = waited {
+            for h in &handles[..nh] {
+                let _ = sys::handle_close(*h);
+            }
         }
         match waited {
-            // The shell's text; an empty message is its end of stream.
-            Ok((1, 0, _)) => return End::Shell,
             Ok((1, n, _)) => {
-                show(&msg[..n]);
-                // Whatever else it wrote, before painting once.
-                while let Ok((n, _)) = sys::ipc_receive(shell.output, &mut msg, &mut handles, 0) {
-                    if n == 0 {
-                        present();
-                        return End::Shell;
-                    }
-                    show(&msg[..n]);
+                if let Some(end) = take_output(shell, &mut msg, Some(n)) {
+                    break end;
                 }
-                present();
             }
             Ok((_, n, _)) => {
                 let _ = sys::handle_close(pending);
                 match window::poll_reply(&msg[..n]) {
-                    Ok(Some(Event::Key(b))) => {
-                        let _ = sys::ipc_send(shell.input, &[b], &[], 1000);
-                    }
+                    Ok(Some(Event::Key(b))) => send_key(shell, b, &mut said_full),
                     Ok(Some(_)) => {}
                     Ok(None) => {
-                        // The poll's deadline: blink, and look whether the
-                        // shell went without saying so.
+                        // The poll's deadline: blink, and take whatever
+                        // the shell wrote meanwhile (never dropped; audit,
+                        // H1), which also tells a shell that went without
+                        // saying so.
                         CONSOLE.lock().blink();
-                        present();
-                        if matches!(
-                            sys::ipc_receive(shell.output, &mut msg, &mut handles, 0),
-                            Err(e) if e.endpoint_gone()
-                        ) {
-                            return End::Shell;
+                        if let Some(end) = take_output(shell, &mut msg, None) {
+                            return end;
                         }
                     }
                     Err(_) => return End::Window,
                 }
-                match start(&CONSOLE.lock()) {
+                match start() {
                     Some(Ok(p)) => pending = p,
                     _ => return End::Window,
                 }
             }
-            Err(Error::Timeout) => {}
-            Err(_) => return End::Window,
+            // The compositor answers every poll within `POLL_MS`: silence
+            // for twice that means it is gone or hung (audit, M1).
+            Err(Error::Timeout) => break End::Window,
+            // Both sides closed: the shell's end decides.
+            Err(_) => break End::Shell,
         }
-    }
+    };
+    let _ = sys::handle_close(pending);
+    end
 }
 
 fn main(_arg: u64) -> u64 {
@@ -252,7 +294,7 @@ fn main(_arg: u64) -> u64 {
     let shell = match open_shell(terminals) {
         Ok(s) => s,
         Err(_) => {
-            show(b"init refused a shell (four terminals at most)\n");
+            show(b"init refused a shell: four terminals at most, or no file or network session left\n");
             present();
             say(b"init refused a shell");
             sys::thread_sleep(3000);

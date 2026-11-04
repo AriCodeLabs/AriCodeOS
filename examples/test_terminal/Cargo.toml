@@ -1,0 +1,33 @@
+# A test package named `terminal` (ADR 0074 phase C): it holds the
+# `terminal` capability, so the scenarios check the rules init applies to
+# the session shells it asks for. Built like `hello_ext`.
+[package]
+name = "test-terminal"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Test package for the AriCodeOS terminal capability"
+publish = false
+
+[[bin]]
+name = "terminal"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+aricode-rt = { path = "../../sdk/runtime" }
+aricode-proto = { path = "../../sdk/proto" }
+
+[build-dependencies]
+aricode-build = { path = "../../sdk/build" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
+
+[workspace]
