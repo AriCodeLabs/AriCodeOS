@@ -135,7 +135,7 @@ impl Launcher {
         OPEN.draw(&mut c, true);
         REFRESH.draw(&mut c, false);
         LEAVE.draw(&mut c, false);
-        let status = core::str::from_utf8(&self.status[..self.status_len]).unwrap_or("");
+        let status = widgets::utf8_prefix(&self.status[..self.status_len]);
         let color = if self.status_error {
             widgets::ERROR
         } else {

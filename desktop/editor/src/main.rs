@@ -101,7 +101,10 @@ impl Editor {
             return None;
         }
         if !aricode_proto::fs::valid_plain_name(text, 26) {
-            self.set_status(true, &[b"a name has letters, digits, '.', '_' or '-' only"]);
+            self.set_status(
+                true,
+                &["names: a-z, 0-9, . _ - (no accents or ñ)".as_bytes()],
+            );
             self.focus = Focus::Name;
             return None;
         }
@@ -179,11 +182,9 @@ impl Editor {
             self.set_status(true, &[name.as_bytes(), why]);
             return self.restore_name();
         }
-        // Edited a byte at a time, text that is not ASCII can change near
-        // the caret (audit of the editor, L5).
-        let plain = scratch[..loaded]
-            .iter()
-            .all(|&b| matches!(b, b'\n' | b'\t' | 0x20..=0x7E));
+        // Text that is not UTF-8 is kept and shown as `?` (ADR 0076):
+        // editing near those bytes changes them, so the owner is told.
+        let plain = core::str::from_utf8(&scratch[..loaded]).is_ok();
         TEXT.lock().set(&scratch[..loaded]);
         drop(scratch);
         self.loaded = buf;
@@ -200,7 +201,7 @@ impl Editor {
                 if plain {
                     b" bytes)"
                 } else {
-                    b" bytes; not all ASCII, shown as ?)"
+                    b" bytes; not all UTF-8, shown as ?)"
                 },
             ],
         );
@@ -319,7 +320,7 @@ impl Editor {
         } else {
             widgets::MUTED
         };
-        let shown = core::str::from_utf8(&status[..n]).unwrap_or("");
+        let shown = widgets::utf8_prefix(&status[..n]);
         c.text(PAD, STATUS_Y, shown, color, None);
         text.draw(&mut c, &TEXT_RECT, self.focus == Focus::Text);
     }

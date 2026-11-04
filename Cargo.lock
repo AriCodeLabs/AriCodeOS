@@ -444,6 +444,7 @@ dependencies = [
 name = "aricode-lineedit"
 version = "0.17.0"
 dependencies = [
+ "aricode-fb-console",
  "aricode-input",
 ]
 

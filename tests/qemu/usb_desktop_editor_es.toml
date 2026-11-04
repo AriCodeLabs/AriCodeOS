@@ -1,0 +1,46 @@
+# Spanish text in the desktop's editor (ADR 0076), on a PS/2-only machine
+# with `kbd=es`, as on the reference laptop. In the file home/a the host
+# types ñ, the dead acute and a (á), AltGr+e (€) and saves: 7 bytes of
+# UTF-8. Then the dead acute and a space, as Linux types an apostrophe,
+# and saves again: 8 bytes. The shell then shows the file.
+name = "usb.desktop_editor_es"
+description = "the desktop editor takes ñ, accents and the euro sign from a Spanish keyboard"
+level = "full"
+areas = ["usb", "apps", "gui", "input"]
+cmdline = "qemu_exit shell kbd=es"
+selftest = false
+disk = "usb-image"
+no_virtio_input = true
+install = ["desktop/launcher", "desktop/editor"]
+stick_profiles = ["desktop:launcher,editor"]
+stdin = ["sleep 16000", "cat home/a", "shutdown"]
+timeout_secs = 120
+
+[host_input]
+marker = "launcher: ready"
+keys = ["ret"]
+
+[[host_input_then]]
+marker = "editor: ready"
+keys = ["a", "ret"]
+key_delay_ms = 100
+
+[[host_input_then]]
+marker = "editor: new file a"
+keys = ["semicolon", "apostrophe", "a", "alt_r+e", "ctrl+s"]
+key_delay_ms = 100
+
+[[host_input_then]]
+marker = "editor: saved a (7 bytes)"
+keys = ["apostrophe", "spc", "ctrl+s"]
+key_delay_ms = 100
+
+[expect]
+exit = 33
+serial_contains = [
+    "editor: saved a (7 bytes)",
+    "editor: saved a (8 bytes)",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_order = ["editor: saved a (8 bytes)", "ari> cat home/a", "ñá€'"]
+serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "editor: cannot"]

@@ -27,7 +27,28 @@
 
 pub mod font;
 
-use font::{FIRST_CHAR, GLYPHS, GLYPH_HEIGHT, GLYPH_WIDTH, LAST_CHAR};
+use font::{GLYPHS, GLYPH_HEIGHT, GLYPH_WIDTH};
+
+/// The cell code that shows `ch` (ADR 0076): printable ASCII and Latin-1
+/// are their own value, the euro sign is [`font::EURO`]; `None` for what
+/// the font cannot show (controls, other scripts).
+pub const fn cell_code(ch: char) -> Option<u8> {
+    match ch {
+        ' '..='~' | '\u{A0}'..='\u{FF}' => Some(ch as u8),
+        '€' => Some(font::EURO),
+        _ => None,
+    }
+}
+
+/// The glyph of a cell code.
+pub fn glyph(code: u8) -> &'static [u8; GLYPH_HEIGHT] {
+    &GLYPHS[code as usize]
+}
+
+/// The glyph that shows `ch`, or `?`'s.
+pub fn char_glyph(ch: char) -> &'static [u8; GLYPH_HEIGHT] {
+    glyph(cell_code(ch).unwrap_or(b'?'))
+}
 
 /// RGB color, 8 bits per channel; the `Surface` encodes it to its format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -401,12 +422,7 @@ impl<S: Surface> Console<S> {
                 }
             }
             _ => {
-                let b = if ch.is_ascii() && (ch as u8) >= FIRST_CHAR && (ch as u8) <= LAST_CHAR {
-                    ch as u8
-                } else {
-                    b'?'
-                };
-                self.put_char(b);
+                self.put_char(cell_code(ch).unwrap_or(b'?'));
             }
         }
     }
@@ -473,7 +489,7 @@ impl<S: Surface> Console<S> {
         let Some(surface) = self.surface.as_mut() else {
             return;
         };
-        let glyph = &GLYPHS[(b - FIRST_CHAR) as usize];
+        let glyph = glyph(b);
         surface.glyph(
             col * GLYPH_WIDTH,
             row * GLYPH_HEIGHT,
@@ -589,7 +605,7 @@ mod tests {
                 if c.cursor_drawn == Some((col, row)) {
                     continue;
                 }
-                let glyph = &GLYPHS[(c.cell(col, row) - FIRST_CHAR) as usize];
+                let glyph = glyph(c.cell(col, row));
                 for (dy, bits) in glyph.iter().enumerate() {
                     for dx in 0..GLYPH_WIDTH {
                         let on = bits & (0x80 >> dx) != 0;
@@ -617,7 +633,7 @@ mod tests {
         let mut c = C::new(Mem::new(64, 32));
         c.write_char('|');
         // Terminus '|': central column lit in the middle rows.
-        let glyph = &GLYPHS[(b'|' - FIRST_CHAR) as usize];
+        let glyph = glyph(b'|');
         let mut lit = 0;
         for (dy, bits) in glyph.iter().enumerate() {
             for dx in 0..8 {
@@ -658,7 +674,7 @@ mod tests {
         assert_eq!(c.cell(0, 3), b' ');
         assert_eq!(c.cursor(), (0, 3));
         // What is painted matches the cells: row 0 shows 'L'.
-        let glyph = &GLYPHS[(b'L' - FIRST_CHAR) as usize];
+        let glyph = glyph(b'L');
         let (dx, dy) = (1, 8);
         let expect = if glyph[dy] & (0x80 >> dx) != 0 {
             C::DEFAULT_FG
@@ -704,7 +720,7 @@ mod tests {
         // The first blink after writing only notes that the console was
         // active; the next one, now idle, paints.
         c.blink();
-        let bottom = &GLYPHS[(b'_' - FIRST_CHAR) as usize];
+        let bottom = glyph(b'_');
         let (dy, dx) = bottom
             .iter()
             .enumerate()
@@ -734,7 +750,7 @@ mod tests {
         write!(c, "b").unwrap();
         assert_eq!(c.cursor_drawn, None);
         assert_eq!(c.cell(1, 0), b'b');
-        let glyph_b = &GLYPHS[(b'b' - FIRST_CHAR) as usize];
+        let glyph_b = glyph(b'b');
         let on = glyph_b[dy] & (0x80 >> dx) != 0;
         assert_eq!(
             c.surface().unwrap().at(x, y),
@@ -747,11 +763,17 @@ mod tests {
     }
 
     #[test]
-    fn non_ascii_becomes_question_mark() {
-        let mut c = C::new(Mem::new(64, 32));
-        write!(c, "ñ\u{1F600}").unwrap();
-        assert_eq!(c.cell(0, 0), b'?');
-        assert_eq!(c.cell(1, 0), b'?');
+    fn latin1_and_euro_shown_others_become_question_mark() {
+        let mut c = C::new(Mem::new(96, 32));
+        write!(c, "ñ€¿\u{1F600}\u{85}").unwrap();
+        assert_eq!(c.cell(0, 0), 0xF1, "ñ is its Latin-1 code");
+        assert_eq!(c.cell(1, 0), font::EURO);
+        assert_eq!(c.cell(2, 0), 0xBF);
+        assert_eq!(c.cell(3, 0), b'?', "outside the font");
+        assert_eq!(c.cell(4, 0), b'?', "a C1 control is not shown");
+        assert_screen_matches_cells(&c);
+        assert_ne!(glyph(0xF1), glyph(b'n'), "ñ has a glyph of its own");
+        assert_eq!(glyph(0x81), glyph(b'?'), "codes that show nothing");
     }
 
     /// A detached console keeps its text and draws nothing; reattaching
