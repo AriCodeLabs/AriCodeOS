@@ -279,6 +279,210 @@ impl<const N: usize> TextField<N> {
     }
 }
 
+/// A multi-line text of at most `N` bytes, edited with the keys (the
+/// desktop's editor). Lines end with `\n`; bytes that are not printable
+/// ASCII are kept as they are and shown as `?`. Long lines are not
+/// wrapped: the view scrolls sideways to the caret.
+pub struct TextArea<const N: usize> {
+    buf: [u8; N],
+    len: usize,
+    caret: usize,
+    /// First line and column shown.
+    top: usize,
+    left: usize,
+    /// Edited since `set` or `mark_saved`.
+    changed: bool,
+}
+
+impl<const N: usize> Default for TextArea<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const N: usize> TextArea<N> {
+    pub const fn new() -> Self {
+        Self {
+            buf: [0; N],
+            len: 0,
+            caret: 0,
+            top: 0,
+            left: 0,
+            changed: false,
+        }
+    }
+
+    pub fn text(&self) -> &[u8] {
+        &self.buf[..self.len]
+    }
+
+    pub fn caret(&self) -> usize {
+        self.caret
+    }
+
+    pub fn changed(&self) -> bool {
+        self.changed
+    }
+
+    pub fn mark_saved(&mut self) {
+        self.changed = false;
+    }
+
+    /// Replaces the text (cut to `N` bytes); the caret goes to the start.
+    /// Returns whether it all fitted.
+    pub fn set(&mut self, text: &[u8]) -> bool {
+        let n = text.len().min(N);
+        self.buf[..n].copy_from_slice(&text[..n]);
+        self.len = n;
+        self.caret = 0;
+        self.top = 0;
+        self.left = 0;
+        self.changed = false;
+        n == text.len()
+    }
+
+    fn line_start(&self, pos: usize) -> usize {
+        self.buf[..pos]
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map_or(0, |i| i + 1)
+    }
+
+    fn line_end(&self, pos: usize) -> usize {
+        self.buf[pos..self.len]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(self.len, |i| pos + i)
+    }
+
+    /// The caret's line and column (from 0).
+    pub fn caret_line_col(&self) -> (usize, usize) {
+        let line = self.buf[..self.caret]
+            .iter()
+            .filter(|&&b| b == b'\n')
+            .count();
+        (line, self.caret - self.line_start(self.caret))
+    }
+
+    fn insert(&mut self, b: u8) {
+        if self.len < N {
+            self.buf.copy_within(self.caret..self.len, self.caret + 1);
+            self.buf[self.caret] = b;
+            self.len += 1;
+            self.caret += 1;
+            self.changed = true;
+        }
+    }
+
+    fn remove(&mut self, at: usize) {
+        self.buf.copy_within(at + 1..self.len, at);
+        self.len -= 1;
+        self.changed = true;
+    }
+
+    /// Moves to the line before (`up`) or after, keeping the column where
+    /// the line is long enough.
+    fn vertical(&mut self, up: bool) {
+        let start = self.line_start(self.caret);
+        let col = self.caret - start;
+        let target = if up {
+            if start == 0 {
+                return;
+            }
+            self.line_start(start - 1)
+        } else {
+            let end = self.line_end(self.caret);
+            if end == self.len {
+                return;
+            }
+            end + 1
+        };
+        self.caret = (target + col).min(self.line_end(target));
+    }
+
+    /// Edits or moves with `key`; whether it was the area's. A character
+    /// beyond `N` bytes is refused (still the area's).
+    pub fn key(&mut self, key: Key) -> bool {
+        match key {
+            Key::Char(ch) => self.insert(ch),
+            Key::Enter => self.insert(b'\n'),
+            Key::Tab => self.insert(b'\t'),
+            Key::Backspace if self.caret > 0 => {
+                self.caret -= 1;
+                self.remove(self.caret);
+            }
+            Key::Delete if self.caret < self.len => self.remove(self.caret),
+            Key::Backspace | Key::Delete => {}
+            Key::Left => self.caret = self.caret.saturating_sub(1),
+            Key::Right => self.caret = (self.caret + 1).min(self.len),
+            Key::Up => self.vertical(true),
+            Key::Down => self.vertical(false),
+            Key::Home => self.caret = self.line_start(self.caret),
+            Key::End => self.caret = self.line_end(self.caret),
+            _ => return false,
+        }
+        true
+    }
+
+    /// Scrolls so the caret is inside a view of `rows` by `cols`.
+    fn follow(&mut self, rows: usize, cols: usize) {
+        let (line, col) = self.caret_line_col();
+        let (rows, cols) = (rows.max(1), cols.max(1));
+        if line < self.top {
+            self.top = line;
+        } else if line >= self.top + rows {
+            self.top = line + 1 - rows;
+        }
+        if col < self.left {
+            self.left = col;
+        } else if col >= self.left + cols {
+            self.left = col + 1 - cols;
+        }
+    }
+
+    /// Draws the lines shown in `rect`, with the caret when `focused`.
+    pub fn draw(&mut self, c: &mut Canvas, rect: &Rect, focused: bool) {
+        let rows = (rect.h / LINE_H) as usize;
+        let cols = (rect.w as usize).saturating_sub(8) / GLYPH_WIDTH;
+        self.follow(rows, cols);
+        c.fill_rect(rect, FIELD_BG);
+        let mut area = c.clipped(rect);
+        let (caret_line, caret_col) = self.caret_line_col();
+        let mut start = 0;
+        let mut line = 0;
+        // The first line shown.
+        while line < self.top && start < self.len {
+            start = self.line_end(start) + 1;
+            line += 1;
+        }
+        let mut shown = [0u8; 256];
+        for row in 0..rows {
+            if start > self.len || (start == self.len && line > caret_line) {
+                break;
+            }
+            let end = self.line_end(start);
+            let from = (start + self.left).min(end);
+            let n = (end - from).min(cols).min(shown.len());
+            for (d, &b) in shown[..n].iter_mut().zip(&self.buf[from..from + n]) {
+                *d = match b {
+                    b'\t' => b' ',
+                    0x20..=0x7E => b,
+                    _ => b'?',
+                };
+            }
+            let y = rect.y + (row as u32 * LINE_H) as i32;
+            let text = core::str::from_utf8(&shown[..n]).unwrap_or("");
+            area.text(rect.x + 4, y, text, FG, None);
+            if focused && line == caret_line {
+                let x = rect.x + 4 + ((caret_col - self.left) * GLYPH_WIDTH) as i32;
+                area.fill_rect(&Rect::new(x, y, 1, LINE_H), FG);
+            }
+            start = end + 1;
+            line += 1;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,6 +492,59 @@ mod tests {
     fn keys(bytes: &[u8]) -> std::vec::Vec<Key> {
         let mut d = KeyDecoder::new();
         bytes.iter().flat_map(|&b| d.feed(b)).flatten().collect()
+    }
+
+    #[test]
+    fn text_area_edits_and_moves() {
+        let mut t = TextArea::<64>::new();
+        assert!(t.set(b"one\ntwo words\nthree"));
+        assert!(!t.changed());
+        for k in keys(b"\x1b[B\x1b[F") {
+            t.key(k);
+        }
+        assert_eq!(t.caret_line_col(), (1, 9), "end of line 2");
+        t.key(Key::Up);
+        assert_eq!(t.caret_line_col(), (0, 3), "clamped to line 1's length");
+        t.key(Key::Down);
+        t.key(Key::Down);
+        assert_eq!(t.caret_line_col(), (2, 3));
+        t.key(Key::Down);
+        assert_eq!(t.caret_line_col(), (2, 3), "no line after the last");
+        for k in keys(b"\x1b[H\x7f!\r") {
+            t.key(k);
+        }
+        assert_eq!(t.text(), b"one\ntwo words!\nthree");
+        assert!(t.changed());
+        t.key(Key::Delete);
+        assert_eq!(
+            t.text(),
+            b"one\ntwo words!\nhree",
+            "the caret starts line 3"
+        );
+        t.mark_saved();
+        assert!(!t.changed());
+        assert!(!t.set(&[b'x'; 65]), "cut to 64 bytes");
+        assert_eq!(t.text().len(), 64);
+        assert!(t.key(Key::Char(b'y')), "refused but the area's");
+        assert_eq!(t.text().len(), 64);
+    }
+
+    #[test]
+    fn text_area_scrolls_to_the_caret() {
+        let mut px = vec![0u32; 120 * 40];
+        let mut c = Canvas::new(&mut px, 120, 40, 120).unwrap();
+        let mut t = TextArea::<256>::new();
+        t.set(b"a\nb\nc\nd\n0123456789abcdefghijklmnopqrstuvwxyz");
+        for _ in 0..4 {
+            t.key(Key::Down);
+        }
+        t.key(Key::End);
+        // Two rows of 16 px, (120 - 8) / 8 = 14 columns.
+        t.draw(&mut c, &Rect::new(0, 0, 120, 2 * LINE_H), true);
+        assert_eq!((t.top, t.left), (3, 36 - 13));
+        t.key(Key::Home);
+        t.draw(&mut c, &Rect::new(0, 0, 120, 2 * LINE_H), true);
+        assert_eq!(t.left, 0);
     }
 
     #[test]

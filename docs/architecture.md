@@ -1344,6 +1344,12 @@ latter briefly to add the region.
   sshd does, and draws the text with `aricode-fb-console` in its window (the
   grid in a static); it waits on its shell's output and on its window's
   next event together (`Window::start_poll`, `window::poll_reply`).
+- `home` (ADR 0074 phase C, the owner's choice) is a directory session of
+  fsd on `home/`, the owner's folder, granted only to an installed, signed
+  `editor` or `files`; no application named `home` gets a private
+  directory, which would be that folder. `desktop/editor` edits up to
+  64 KiB of text there (`aricode_gfx::widgets::TextArea`) and saves with
+  an atomic replace.
 - fsd serves up to 15 *sessions* besides its main endpoint (ADR 0036):
   each `Bind` (only through the main endpoint) creates an endpoint bound
   to a prefix, each `Share` (ADR 0016) one bound to a single file in read

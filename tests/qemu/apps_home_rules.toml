@@ -1,0 +1,21 @@
+# The owner's folder home/ (ADR 0074 phase C): only the desktop's editor
+# and files may ask for it, and no application named home gets a private
+# directory, which would be that folder. Both packages are denied and
+# never run.
+name = "apps.home_rules"
+description = "home: only the editor and files reach the owner's folder"
+level = "full"
+areas = ["apps", "fs"]
+cmdline = "qemu_exit shell"
+install = ["examples/home_dir", "examples/fake_editor"]
+stdin = ["run home", "run fake_editor", "shutdown"]
+timeout_secs = 60
+
+[expect]
+exit = 33
+serial_contains = [
+    "AriInit: denied, no application named home gets a private directory: home/ is the owner's folder",
+    "AriInit: denied, requests system capabilities: home",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "started with what it asked for"]

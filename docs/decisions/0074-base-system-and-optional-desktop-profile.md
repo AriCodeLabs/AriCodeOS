@@ -547,3 +547,36 @@ It found these, all fixed in the same branch:
   are closed. `Canvas::set` draws a pixel without a rectangle per pixel.
 - **L7:** both ends closed together counts as the shell's end.
 
+### The owner's folder and the editor (2026-11-04)
+
+- **The owner chose a shared folder, `home/`.** A new capability, `home`,
+  grants it, only to the official `editor` and `files`, installed and
+  signed (`Caps::TRUSTED_HOME`).
+  - With `fs`, an application sees only its own private directory, so an
+    editor could not have reached the owner's files.
+  - With the whole namespace, as `install` has, it could have reached
+    sshd's keys, `authorized_keys` and the updater's state.
+  - `home` is a directory session of fsd on `home/`, as a private
+    directory is on an application's own. Names inside it are plain
+    (`notes.txt`); the shell sees the same file as `home/notes.txt`.
+- **No application named `home` gets a private directory**, which would
+  be that folder: the broker refuses it.
+- **`desktop/editor`:**
+  - a file name field, Open and Save, and a text area
+    (`widgets::TextArea`, host-tested: lines, the caret, scrolling);
+  - files up to 64 KiB, read whole before they replace the text being
+    edited, so a file that cannot be read, or is too large, leaves that
+    text alone;
+  - Save is fsd's atomic replace.
+
+  Ctrl+S saves, Ctrl+O opens, and Tab moves between the name and the
+  text. The editor's window and file buffer need a 2 MiB manifest.
+- **Keyboards now send Ctrl with a letter as its control character**
+  (`aricode_input::Keyboard`). Before, no keyboard did: the shell's
+  Ctrl-A, Ctrl-E and Ctrl-U worked only over serial and SSH.
+- **Scenarios:**
+  - `usb.desktop_editor`: the editor writes `home/a`, and the shell
+    reads it;
+  - `apps.home_rules`: a package named `home` that asks for `fs`, and
+    one that asks for `home` without being the editor, are both denied.
+

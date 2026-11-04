@@ -1,0 +1,31 @@
+# A test package that asks for the owner's folder without being the editor or files
+# (ADR 0074 phase C): the broker must deny it. Built like `hello_ext`.
+[package]
+name = "fake-editor"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Test package that asks for what it may not have"
+publish = false
+
+[[bin]]
+name = "fake_editor"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+aricode-rt = { path = "../../sdk/runtime" }
+
+[build-dependencies]
+aricode-build = { path = "../../sdk/build" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
+
+[workspace]

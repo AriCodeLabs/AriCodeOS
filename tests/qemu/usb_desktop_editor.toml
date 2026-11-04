@@ -1,0 +1,39 @@
+# The desktop's editor (ADR 0074 phase C) and the owner's folder home/
+# (the `home` capability, the owner's choice). The launcher offers the
+# editor and Enter opens it; in its window `a` and Enter open the new
+# file home/a, `hi` goes into it and Ctrl+S saves it, atomically. The
+# shell on the console then reads home/a: the editor wrote into the
+# owner's folder, the only files it reaches.
+name = "usb.desktop_editor"
+description = "the desktop editor writes a file in the owner's home/ folder"
+level = "full"
+areas = ["usb", "apps", "gui", "fs"]
+cmdline = "qemu_exit shell"
+selftest = false
+disk = "usb-image"
+install = ["desktop/launcher", "desktop/editor"]
+stick_profiles = ["desktop:launcher,editor"]
+stdin = ["sleep 12000", "cat home/a", "shutdown"]
+timeout_secs = 120
+
+[host_input]
+marker = "launcher: ready"
+keys = ["ret"]
+
+[host_input_then]
+marker = "editor: ready"
+keys = ["a", "ret", "h", "i", "ctrl+s"]
+key_delay_ms = 100
+
+[expect]
+exit = 33
+serial_contains = [
+    "launcher: offers editor",
+    "with manifest [window home]",
+    "editor: ready",
+    "editor: new file a (saved with Save)",
+    "editor: saved a (2 bytes)",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_order = ["editor: saved a (2 bytes)", "ari> cat home/a", "hi"]
+serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "editor: cannot"]
