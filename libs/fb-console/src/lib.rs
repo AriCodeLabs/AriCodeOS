@@ -65,6 +65,72 @@ pub trait Surface {
     }
 }
 
+/// Text that arrives in pieces (a shell's output over IPC, ADR 0074 phase
+/// C): a character cut between two pieces is kept until the next one ends
+/// it, so it is never shown as two `?`. Bytes that are not UTF-8 become
+/// `?`.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Utf8Stream {
+    carry: [u8; 4],
+    len: usize,
+}
+
+impl Utf8Stream {
+    pub const fn new() -> Self {
+        Self {
+            carry: [0; 4],
+            len: 0,
+        }
+    }
+
+    /// Feeds one piece; `out` gets the text it completes, in order.
+    pub fn feed(&mut self, mut bytes: &[u8], mut out: impl FnMut(&str)) {
+        // First the character the last piece cut.
+        while self.len > 0 {
+            let Some((&b, rest)) = bytes.split_first() else {
+                return;
+            };
+            // A byte that cannot continue the character ends it as a `?`
+            // and is read again as the start of what follows.
+            if !(0x80..=0xBF).contains(&b) {
+                out("?");
+                self.len = 0;
+                break;
+            }
+            self.carry[self.len] = b;
+            self.len += 1;
+            bytes = rest;
+            match core::str::from_utf8(&self.carry[..self.len]) {
+                Ok(text) => {
+                    out(text);
+                    self.len = 0;
+                }
+                Err(e) if e.error_len().is_none() && self.len < 4 => {}
+                Err(_) => {
+                    out("?");
+                    self.len = 0;
+                }
+            }
+        }
+        let mut chunks = bytes.utf8_chunks().peekable();
+        while let Some(chunk) = chunks.next() {
+            out(chunk.valid());
+            let bad = chunk.invalid();
+            if bad.is_empty() {
+                continue;
+            }
+            // A character cut at the very end waits for the next piece.
+            let at_end = chunks.peek().is_none();
+            if at_end && core::str::from_utf8(bad).is_err_and(|e| e.error_len().is_none()) {
+                self.carry[..bad.len()].copy_from_slice(bad);
+                self.len = bad.len();
+            } else {
+                out("?");
+            }
+        }
+    }
+}
+
 /// Maximum text cells: 240 columns x 135 rows covers 1920x2160.
 pub const MAX_CELLS: usize = 240 * 135;
 
@@ -441,6 +507,31 @@ impl<S: Surface> core::fmt::Write for Console<S> {
 mod tests {
     extern crate std;
     use super::*;
+
+    #[test]
+    fn utf8_stream_keeps_cut_characters() {
+        extern crate std;
+        use std::string::String;
+        let mut text = String::new();
+        let mut s = Utf8Stream::new();
+        let all = "añ€😀b".as_bytes();
+        // Every split of every piece size.
+        for cut in 1..all.len() {
+            text.clear();
+            s.feed(&all[..cut], |t| text.push_str(t));
+            s.feed(&all[cut..], |t| text.push_str(t));
+            assert_eq!(text, "añ€😀b", "cut at {cut}");
+        }
+        text.clear();
+        for b in all {
+            s.feed(core::slice::from_ref(b), |t| text.push_str(t));
+        }
+        assert_eq!(text, "añ€😀b", "byte by byte");
+        text.clear();
+        s.feed(b"x\xffy\xe2", |t| text.push_str(t));
+        s.feed(b"z", |t| text.push_str(t));
+        assert_eq!(text, "x?y?z", "bad bytes, and a cut that never ends");
+    }
     use core::fmt::Write;
     use std::vec;
     use std::vec::Vec;

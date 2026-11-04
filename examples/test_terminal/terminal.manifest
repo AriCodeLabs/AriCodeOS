@@ -1,0 +1,4 @@
+# Test terminal: the endpoint where init grants session shells (ADR 0074).
+name = terminal
+caps = terminal
+memory = 256K

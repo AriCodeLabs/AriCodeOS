@@ -1904,6 +1904,9 @@ pub mod session {
     pub const SHELL_SESSION: u64 = 1 << 16;
     /// Shell argument bit: no banner, prompt or echo (single command).
     pub const SHELL_QUIET: u64 = 1 << 17;
+    /// Shell argument bit, with `SHELL_SESSION`: the session is a desktop
+    /// terminal's (ADR 0074 phase C), not an SSH one.
+    pub const SHELL_TERMINAL: u64 = 1 << 18;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Kind {

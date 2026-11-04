@@ -1850,6 +1850,11 @@ fn run_shell(
         if let (Some(s), Some(fs)) = (sessions.as_deref_mut(), broker.fs.as_ref()) {
             s.serve(fs, net_service, services, broker.endpoint);
         }
+        if let Some(fs) = broker.fs.as_ref() {
+            broker
+                .terminals
+                .serve(fs, net_service, services, broker.terminal_launches);
+        }
     }
 }
 
@@ -1969,11 +1974,16 @@ fn spawn_shell(
     Ok(child)
 }
 
-/// Session shells for sshd (ADR 0025): requests arrive on `endpoint`;
-/// finished shells are reaped on every pass.
+/// Session shells for sshd (ADR 0025), or for the desktop's terminal (ADR
+/// 0074 phase C): requests arrive on `endpoint`; finished shells are
+/// reaped on every pass.
 struct Sessions {
     endpoint: Handle,
     children: [Option<Handle>; MAX_SESSIONS],
+    /// The terminal's: interactive shells only, never sshd's `Exec`.
+    terminal: bool,
+    /// A request without its three handles was said once already.
+    said_malformed: bool,
 }
 
 const MAX_SESSIONS: usize = 4;
@@ -1998,18 +2008,28 @@ impl Sessions {
             for h in &handles[..nh] {
                 let _ = sys::handle_close(*h);
             }
+            if !core::mem::replace(&mut self.said_malformed, true) {
+                say(b"a session request came without its handles; dropped (said once)");
+            }
             return;
         }
         let [reply_to, input, output] = handles;
         let slot = self.children.iter().position(Option::is_none);
-        let spawned = match (session::Request::decode(&msg[..n]), slot) {
+        let request = session::Request::decode(&msg[..n])
+            .filter(|r| !self.terminal || r.kind == SessionKind::Shell);
+        let spawned = match (request, slot) {
             (Some(req), Some(slot)) => {
                 let quiet = if req.kind == SessionKind::Exec {
                     session::SHELL_QUIET
                 } else {
                     0
                 };
-                let arg = services | session::SHELL_SESSION | quiet;
+                let terminal = if self.terminal {
+                    session::SHELL_TERMINAL
+                } else {
+                    0
+                };
+                let arg = services | session::SHELL_SESSION | quiet | terminal;
                 // `spawn_shell` closes `input` and `output` if it fails.
                 match spawn_shell(fs, net, broker, input, Some(output), arg) {
                     Ok(child) => {
@@ -2026,7 +2046,11 @@ impl Sessions {
             }
         };
         if !spawned {
-            say(b"session shell refused (limit or invalid request)");
+            say(if self.terminal {
+                b"terminal shell refused (limit or invalid request)"
+            } else {
+                b"session shell refused (limit or invalid request)"
+            });
         }
         let _ = sys::ipc_send(reply_to, &session::reply(spawned), &[], 0);
         let _ = sys::handle_close(reply_to);
@@ -2038,7 +2062,8 @@ impl Sessions {
 /// and is allowed: `SYSTEM` (read), a private directory in fsd, the network
 /// endpoint, a compositor session, the block endpoint (trusted
 /// applications only), the main file namespace (`installer`), the launch
-/// endpoint (`launcher`, ADR 0074), and finally `HARDWARE` if it needs
+/// endpoint (`launcher`, ADR 0074), the terminal endpoint (`terminal`), and
+/// finally `HARDWARE` if it needs
 /// buffers, bounded by the manifest's memory. The input services are never
 /// granted (ADR 0053).
 struct Broker {
@@ -2059,6 +2084,12 @@ struct Broker {
     running: [Option<Running>; MAX_RUNNING + DESKTOP_SLOTS],
     /// The installed applications the launcher may offer, as last listed.
     offered: Offered,
+    /// Where `terminal` holders ask for session shells (ADR 0074 phase C).
+    terminals: Sessions,
+    /// Where those shells ask for launches: an endpoint of their own, so
+    /// what they start is known and stopped with them when the desktop
+    /// ends (audit of the terminal, M2).
+    terminal_launches: Handle,
     /// DMA buffer of the package being launched (ADR 0017), the package's
     /// size: freed once the launch ends, since the kernel copies the
     /// program when it creates the process (ADR 0072, phase B).
@@ -2181,6 +2212,8 @@ struct Running {
     ends_session: bool,
     /// Started by the launcher: stopped when the session ends.
     from_launcher: bool,
+    /// Started by a desktop terminal's shell: stopped with it.
+    from_terminal: bool,
 }
 
 /// Immediate result of `launch`: an already decided reply, or a created
@@ -2230,6 +2263,13 @@ impl Broker {
             compositor,
             running: [None; MAX_RUNNING + DESKTOP_SLOTS],
             offered: Offered::new(),
+            terminals: Sessions {
+                endpoint: sys::endpoint_create()?,
+                children: [None; MAX_SESSIONS],
+                terminal: true,
+                said_malformed: false,
+            },
+            terminal_launches: sys::endpoint_create()?,
             stage: None,
         })
     }
@@ -2436,14 +2476,21 @@ impl Broker {
         session_end
     }
 
-    /// Stops the desktop session's launcher and every app it started (ADR
-    /// 0074): their windows are gone with the compositor. Their exits are
-    /// collected by `poll_launches` as usual.
+    /// Stops the desktop session's launcher, every app it started and the
+    /// terminals' shells with what they ran (ADR 0074): their windows are
+    /// gone with the compositor. Their exits are collected by
+    /// `poll_launches` as usual.
     fn stop_desktop_apps(&mut self) {
         for r in self.running.iter().flatten() {
-            if r.ends_session || r.from_launcher {
+            if r.ends_session || r.from_launcher || r.from_terminal {
                 let _ = sys::process_kill(r.process);
             }
+        }
+        // The terminals' shells go with the terminals, even one waiting in
+        // `run` for a program that never ends (audit of the terminal, M2);
+        // they are reaped by the next `Sessions::serve`.
+        for shell in self.terminals.children.iter().flatten() {
+            let _ = sys::process_kill(*shell);
         }
     }
 
@@ -2470,6 +2517,7 @@ impl Broker {
                     window,
                     ends_session: true,
                     from_launcher: false,
+                    from_terminal: false,
                 });
                 true
             }
@@ -2479,11 +2527,21 @@ impl Broker {
     /// Serves at most one request (waits up to `timeout_ms`).
     fn serve_one(&mut self, timeout_ms: u64, sup: &Supervisor) {
         let mut msg = [0u8; LaunchRequest::LEN];
-        let mut handles = [Handle(0); 2];
-        let Ok((n, nh)) = sys::ipc_receive(self.endpoint, &mut msg, &mut handles, timeout_ms)
-        else {
+        let mut handles = [Handle(0); sys::abi::IPC_MAX_HANDLES];
+        let Ok((which, n, nh)) = sys::ipc_receive_any(
+            &[self.endpoint, self.terminal_launches],
+            &mut msg,
+            &mut handles,
+            timeout_ms,
+        ) else {
             return;
         };
+        let from_terminal = which == 1;
+        // A reply endpoint and, for a launch with a console, the console.
+        for h in handles.iter().take(nh).skip(2) {
+            let _ = sys::handle_close(*h);
+        }
+        let nh = nh.min(2);
         if nh == 0 {
             return;
         }
@@ -2543,6 +2601,7 @@ impl Broker {
                     window,
                     ends_session: false,
                     from_launcher: false,
+                    from_terminal,
                 });
             }
             Launched::Process(process, window) => {
@@ -2552,6 +2611,7 @@ impl Broker {
                     window,
                     ends_session: false,
                     from_launcher: false,
+                    from_terminal,
                 });
             }
         }
@@ -2644,6 +2704,7 @@ impl Broker {
                     window,
                     ends_session: false,
                     from_launcher: true,
+                    from_terminal: false,
                 });
             }
         }
@@ -2785,14 +2846,21 @@ impl Broker {
             sys::print(b"\n");
             return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
         }
-        // `launch` goes only to an installed package, which verified against
-        // the release key: never to an initrd program of that name (ADR
-        // 0074).
-        if caps.contains(Caps::LAUNCH) && !matches!(source, Source::Installed { .. }) {
-            sys::print(b"AriInit: denied, launch is granted only to an installed, signed ");
-            sys::print(name.as_bytes());
-            sys::print(b"\n");
-            return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
+        // `launch` and `terminal` go only to an installed package, which
+        // verified against the release key: never to an initrd program of
+        // that name (ADR 0074).
+        for (cap, what) in [
+            (Caps::LAUNCH, &b"launch"[..]),
+            (Caps::TERMINAL, b"terminal"),
+        ] {
+            if caps.contains(cap) && !matches!(source, Source::Installed { .. }) {
+                sys::print(b"AriInit: denied, ");
+                sys::print(what);
+                sys::print(b" is granted only to an installed, signed ");
+                sys::print(name.as_bytes());
+                sys::print(b"\n");
+                return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
+            }
         }
         let mut needs_hw = false;
         if caps.contains(Caps::SYSTEM) {
@@ -2891,6 +2959,12 @@ impl Broker {
         // Send only: the launcher asks, the broker decides (`serve_apps`).
         if caps.contains(Caps::LAUNCH) {
             match sys::handle_duplicate(self.apps, rights::WRITE | rights::TRANSFER) {
+                Ok(h) => granted.push(h),
+                Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
+            }
+        }
+        if caps.contains(Caps::TERMINAL) {
+            match sys::handle_duplicate(self.terminals.endpoint, rights::WRITE | rights::TRANSFER) {
                 Ok(h) => granted.push(h),
                 Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
             }
@@ -3956,6 +4030,8 @@ fn main(arg: u64) -> u64 {
                     sessions = Some(Sessions {
                         endpoint,
                         children: [None; MAX_SESSIONS],
+                        terminal: false,
+                        said_malformed: false,
                     });
                 } else {
                     say(b"sshd did not start");

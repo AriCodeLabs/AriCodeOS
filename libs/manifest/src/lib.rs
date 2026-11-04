@@ -43,12 +43,16 @@ impl Caps {
     /// 0074): only for `launcher`, and only when it is an installed,
     /// signed package.
     pub const LAUNCH: Caps = Caps(1 << 10);
+    /// Session shells in windows (ADR 0074 phase C): only for `terminal`,
+    /// and only when it is an installed, signed package. Each shell is the
+    /// owner's own, as at the console or over SSH.
+    pub const TERMINAL: Caps = Caps(1 << 11);
 
     pub const NONE: Caps = Caps(0);
     /// The ones the broker grants to normal applications.
     pub const APP_ALLOWED: Caps = Caps(Caps::SYSTEM.0 | Caps::FS.0 | Caps::NET.0 | Caps::WINDOW.0);
 
-    const NAMES: [(&'static str, Caps); 11] = [
+    const NAMES: [(&'static str, Caps); 12] = [
         ("system", Caps::SYSTEM),
         ("fs", Caps::FS),
         ("net", Caps::NET),
@@ -60,6 +64,7 @@ impl Caps {
         ("block", Caps::BLOCK),
         ("install", Caps::INSTALL),
         ("launch", Caps::LAUNCH),
+        ("terminal", Caps::TERMINAL),
     ];
 
     /// System applications that may also ask for `block`.
@@ -70,6 +75,8 @@ impl Caps {
     /// Applications that may also ask for `launch` (ADR 0074); the broker
     /// grants it only to an installed package, never to an initrd program.
     pub const TRUSTED_LAUNCH: [&'static str; 1] = ["launcher"];
+    /// The application that may ask for `terminal`.
+    pub const TRUSTED_TERMINAL: [&'static str; 1] = ["terminal"];
 
     /// Capabilities grantable to the application `name`.
     pub fn allowed_for(name: &str) -> Caps {
@@ -82,6 +89,9 @@ impl Caps {
         }
         if Self::TRUSTED_LAUNCH.contains(&name) {
             caps = caps.union(Caps::LAUNCH);
+        }
+        if Self::TRUSTED_TERMINAL.contains(&name) {
+            caps = caps.union(Caps::TERMINAL);
         }
         caps
     }
@@ -327,6 +337,20 @@ mod tests {
             assert_eq!(Manifest::parse(&text), Err(ManifestError::BadName), "{n}");
         }
         assert!(Manifest::parse("name = updater").is_ok());
+    }
+
+    #[test]
+    fn terminal_is_only_for_the_terminal() {
+        let m = Manifest::parse("name = terminal\ncaps = window, terminal\n").unwrap();
+        assert_eq!(m.caps.names().collect::<Vec<_>>(), ["window", "terminal"]);
+        assert!(m.caps.difference(Caps::allowed_for("terminal")).is_empty());
+        for other in ["launcher", "editor", "installer", "shell"] {
+            assert!(
+                !Caps::allowed_for(other).contains(Caps::TERMINAL),
+                "{other}"
+            );
+        }
+        assert!(!Caps::allowed_for("terminal").contains(Caps::LAUNCH));
     }
 
     #[test]

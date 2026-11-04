@@ -64,6 +64,10 @@ static MODE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0)
 const MODE_SESSION: u8 = 1;
 const MODE_QUIET: u8 = 2;
 
+/// Where the session came from, for the install history: a desktop
+/// terminal's or an SSH one.
+static FROM_TERMINAL: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 fn session() -> bool {
     MODE.load(core::sync::atomic::Ordering::Relaxed) != 0
 }
@@ -201,7 +205,13 @@ impl Input {
         while self.start == self.end {
             let n = if session() {
                 let mut handles = [Handle(0); 1];
-                match sys::ipc_receive(CONSOLE_IN, &mut self.buf, &mut handles, TIMEOUT_INFINITE) {
+                let got =
+                    sys::ipc_receive(CONSOLE_IN, &mut self.buf, &mut handles, TIMEOUT_INFINITE);
+                // Input is bytes only: a handle sent along is not kept.
+                if let Ok((_, 1)) = got {
+                    let _ = sys::handle_close(handles[0]);
+                }
+                match got {
                     Ok((0, _)) | Err(_) => return None,
                     Ok((n, _)) => n,
                 }
@@ -1308,10 +1318,12 @@ fn log_history(fs: &mut FsClient, event: &str) {
     let history_path = update_index::main_path(update_index::HISTORY_FILE);
     let line = alloc::format!(
         "{event} (from {})",
-        if session() {
-            "an SSH session"
-        } else {
+        if !session() {
             "the console"
+        } else if FROM_TERMINAL.load(core::sync::atomic::Ordering::Relaxed) {
+            "a desktop terminal"
+        } else {
+            "an SSH session"
         }
     );
     // A history that cannot be read is not rewritten (incident 0008): the
@@ -1955,8 +1967,12 @@ fn services_detail() {
 }
 
 fn main(mask: u64) -> u64 {
-    use aricode_proto::session::{SHELL_QUIET, SHELL_SESSION};
+    use aricode_proto::session::{SHELL_QUIET, SHELL_SESSION, SHELL_TERMINAL};
     if mask & SHELL_SESSION != 0 {
+        FROM_TERMINAL.store(
+            mask & SHELL_TERMINAL != 0,
+            core::sync::atomic::Ordering::Relaxed,
+        );
         let mode = if mask & SHELL_QUIET != 0 {
             MODE_QUIET
         } else {

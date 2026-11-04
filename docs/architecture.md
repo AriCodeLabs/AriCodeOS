@@ -1334,8 +1334,16 @@ latter briefly to add the region.
   for nothing an application may not have, saying why it leaves each
   other out; the launch checks it all again. The real launcher is
   `desktop/launcher` (a package of the desktop profile; the test package
-  `examples/test_launcher` has the same name). A new window takes the
-  focus.
+  `examples/test_launcher` has the same name). A program just opened takes
+  the focus (`aricode_gfx::new_window_takes_focus`).
+- `terminal` (ADR 0074 phase C) is a send handle to the broker's
+  `terminals` endpoint, granted only to an installed, signed `terminal`:
+  init serves it like sshd's session endpoint (`Sessions` with
+  `terminal`), interactive shells only, at most four. `desktop/terminal`
+  sends the shell's input and reads its output over two endpoint pairs, as
+  sshd does, and draws the text with `aricode-fb-console` in its window (the
+  grid in a static); it waits on its shell's output and on its window's
+  next event together (`Window::start_poll`, `window::poll_reply`).
 - fsd serves up to 15 *sessions* besides its main endpoint (ADR 0036):
   each `Bind` (only through the main endpoint) creates an endpoint bound
   to a prefix, each `Share` (ADR 0016) one bound to a single file in read

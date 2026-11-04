@@ -131,6 +131,13 @@ impl<'a> Canvas<'a> {
     }
 
     /// Fills the clip rectangle.
+    /// One pixel, if inside the clip.
+    pub fn set(&mut self, x: i32, y: i32, color: Color) {
+        if self.clip.contains(x, y) {
+            self.pixels[y as usize * self.stride as usize + x as usize] = color;
+        }
+    }
+
     pub fn fill(&mut self, color: Color) {
         let c = self.clip;
         self.fill_rect(&c, color);
@@ -692,6 +699,19 @@ impl<'a> Iterator for RevIter<'a> {
 mod tests {
     extern crate std;
     use super::*;
+
+    #[test]
+    fn set_is_clipped() {
+        let mut px = vec![0u32; 4 * 4];
+        let mut c = Canvas::new(&mut px, 4, 4, 4).unwrap();
+        c.set(1, 2, 7);
+        c.set(-1, 0, 9);
+        c.set(4, 0, 9);
+        let mut inner = c.clipped(&Rect::new(0, 0, 2, 2));
+        inner.set(3, 3, 9);
+        assert_eq!(c.get(1, 2), Some(7));
+        assert_eq!(px.iter().filter(|&&p| p == 9).count(), 0);
+    }
 
     #[test]
     fn only_a_just_opened_program_takes_the_focus() {

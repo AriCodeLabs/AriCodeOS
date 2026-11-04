@@ -1,0 +1,5 @@
+# The desktop's terminal (ADR 0074): a window, and the endpoint where init
+# grants it session shells, each the owner's own.
+name = terminal
+caps = window, terminal
+memory = 1M
