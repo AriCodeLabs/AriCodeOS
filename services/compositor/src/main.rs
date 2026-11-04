@@ -12,9 +12,10 @@
 use aricode_cmdline::{keys, CmdLine};
 use aricode_gfx::{Canvas, Damage, Desktop, Hit, Rect, Scene, Window};
 use aricode_input::{EscapeChord, Keyboard, Layout, BTN_LEFT, EV_KEY, EV_REL, REL_X, REL_Y};
+use aricode_proto::input::Status as InputStatus;
 use aricode_proto::input::MAX_EVENTS;
 use aricode_proto::window::{Event, Op, Reply, Request, Status, MAX_SIDE};
-use aricode_rt::sys::input::{DriverInstance, InputClient};
+use aricode_rt::sys::input::{DriverInstance, InputClient, InputError};
 use aricode_rt::sys::{self, abi, Handle};
 use aricode_rt::{fmt_hex, fmt_u64};
 
@@ -822,14 +823,18 @@ fn main(inputs: u64) -> u64 {
                     at,
                 );
             }
-            Err(_) => {}
+            Err(sys::Error::Timeout) => {}
+            // A wait that fails at once (a member revoked) would spin the
+            // loop: it pauses instead (audit of incident 0058, L2).
+            Err(_) => sys::thread_sleep(RETRY_MS),
         }
     }
 }
 
-/// Input events held between two rounds: a reply from each device after
-/// a wait, and room to spare.
-const HELD: usize = MAX_INPUTS * 4 * MAX_EVENTS;
+/// Input events held between two rounds: at most one reply from each
+/// device, since a device's next read starts only after the round (the
+/// reply the wait took, then `collect`, which skips that device).
+const HELD: usize = MAX_INPUTS * MAX_EVENTS;
 
 /// The longest message the loop receives: a request, or an input reply.
 const MSG_LEN: usize = if Request::LEN > aricode_proto::input::Reply::LEN {
@@ -837,6 +842,9 @@ const MSG_LEN: usize = if Request::LEN > aricode_proto::input::Reply::LEN {
 } else {
     aricode_proto::input::Reply::LEN
 };
+
+/// Slack past `READ_MS` before an unanswered read is given up.
+const HUNG_MS: u64 = 5000;
 
 /// Requests a read waits for at most: an idle device answers this often
 /// with nothing, and is asked again.
@@ -855,8 +863,10 @@ struct Inputs {
     retry_at: [u64; MAX_INPUTS],
     /// Which run of each driver its replies come from.
     instances: [DriverInstance; MAX_INPUTS],
+    /// When each outstanding read was started (ms since boot).
+    started: [u64; MAX_INPUTS],
     /// Each with when it was received and its order: the device, then its
-    /// place among the events taken (`Inputs::order`).
+    /// place among the events taken (`d * HELD + index`).
     events: [(u64, usize, aricode_input::Event); HELD],
     sorted: [(u64, aricode_input::Event); HELD],
     len: usize,
@@ -870,6 +880,7 @@ impl Inputs {
             waiting: [0; MAX_INPUTS],
             retry_at: [0; MAX_INPUTS],
             instances: [DriverInstance::new(); MAX_INPUTS],
+            started: [0; MAX_INPUTS],
             events: [(0, 0, aricode_input::Event::default()); HELD],
             sorted: [(0, aricode_input::Event::default()); HELD],
             len: 0,
@@ -888,7 +899,10 @@ impl Inputs {
                 continue;
             }
             match dev.start_read(READ_MS) {
-                Ok(reply) => self.pending[d] = Some(reply),
+                Ok(reply) => {
+                    self.pending[d] = Some(reply);
+                    self.started[d] = now_ms;
+                }
                 Err(e) if e.service_gone() => {
                     sys::print(b"compositor: input device ");
                     num(d as u64);
@@ -950,6 +964,18 @@ impl Inputs {
                     keyboard.release_modifiers();
                     self.retry_at[d] = now_ms + RETRY_MS;
                 }
+                // Alive but holding the read far past its time: given up
+                // and asked again, said, so a stuck driver does not leave
+                // the device dead unseen (audit of incident 0058, L1).
+                Err(_) if now_ms.saturating_sub(self.started[d]) > READ_MS as u64 + HUNG_MS => {
+                    let _ = sys::handle_close(reply);
+                    self.pending[d] = None;
+                    keyboard.release_modifiers();
+                    self.retry_at[d] = now_ms + RETRY_MS;
+                    sys::print(b"compositor: input device ");
+                    num(d as u64);
+                    sys::print(b" did not answer its read in time; asking again\n");
+                }
                 Err(_) => {}
             }
         }
@@ -993,9 +1019,6 @@ impl Inputs {
         match InputClient::read_reply(msg, &mut events, &mut times) {
             Ok(n) => {
                 for (e, t) in events[..n].iter().zip(&times[..n]) {
-                    if self.len == self.events.len() {
-                        break;
-                    }
                     self.events[self.len] = (
                         *t,
                         d * HELD + self.len,
@@ -1008,7 +1031,10 @@ impl Inputs {
                     self.len += 1;
                 }
             }
-            // Another reader holds its one place (or the reply is not one):
+            // The read's time ran out with nothing to say: read again at
+            // once, as the console bridge does (audit of incident 0058, M1).
+            Err(InputError::Status(InputStatus::Timeout)) => {}
+            // Another reader holds its one place, or the reply is not one:
             // asked again after a pause.
             Err(_) => self.retry_at[d] = now_ms + RETRY_MS,
         }

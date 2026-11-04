@@ -70,3 +70,26 @@
 Dev build 20 (e96cb65), with the owner on the touchpad: "the mouse
 reacts quite well; I turned and moved it abruptly and it reacted well".
 After about four minutes of such use, `diag` showed no `gui input late`.
+
+## Audit
+
+An independent read-only review of the fix found no high findings, one
+medium and five low ones:
+
+- **M1, fixed.** A read that ran out of time with nothing to say
+  (`Status::Timeout`, every idle second) was treated as an error and
+  paused the device for 50 ms: a key or the first move of a stroke
+  arriving then waited, late. It is now read again at once, as in the
+  console bridge; only `Busy` or a reply that does not decode pauses.
+- **L1, fixed.** A driver that is alive but holds a read far past its time
+  (`READ_MS` + 5 s) is given up and asked again, and the compositor says
+  so. Before, the device stayed dead without a word.
+- **L2, fixed.** A wait that fails at once (a member revoked) pauses
+  `RETRY_MS` instead of spinning.
+- **L3, fixed.** The held events are sized exactly (one reply per device a
+  round), and the guard that could not fire is gone.
+- **L4, fixed.** A comment named a function that does not exist.
+- **L5, not changed.** `start_read` may wait up to 5 s for a full driver
+  queue, as `read` did before this change.
+
+After the fixes, the `gui` and `input` areas pass again: 33 of 33.
