@@ -402,7 +402,13 @@ fn main(_arg: u64) -> u64 {
                     f.say_count();
                 }
             }
-            Event::Focus(_) => {}
+            // Nothing to save: it closes at once (ADR 0077).
+            Event::Close => {
+                say(&[b"closed"]);
+                let _ = win.close();
+                return 0;
+            }
+            _ => {}
         }
         f.draw(&mut win);
         let _ = win.present();

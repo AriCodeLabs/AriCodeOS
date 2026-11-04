@@ -179,6 +179,9 @@ enum End {
     /// The window or the compositor is gone, or the compositor stopped
     /// answering.
     Window,
+    /// The owner clicked the close box (ADR 0077): the shell ends with it,
+    /// on its closed input.
+    Closed,
 }
 
 /// Messages of the shell's text taken before painting once: a shell that
@@ -260,6 +263,7 @@ fn run(shell: &Shell) -> End {
                 let _ = sys::handle_close(pending);
                 match window::poll_reply(&msg[..n]) {
                     Ok(Some(Event::Key(b))) => send_key(shell, b, &mut said_full),
+                    Ok(Some(Event::Close)) => return End::Closed,
                     Ok(Some(_)) => {}
                     Ok(None) => {
                         // The poll's deadline: blink, and take whatever
@@ -331,6 +335,7 @@ fn main(_arg: u64) -> u64 {
     sys::print(match end {
         End::Shell => b"terminal: the shell ended; closing (",
         End::Window => b"terminal: the window is gone; closing (",
+        End::Closed => b"terminal: closed by the owner; ending its shell (",
     });
     let mut b = [0u8; 20];
     let shown = SHOWN.load(core::sync::atomic::Ordering::Relaxed);

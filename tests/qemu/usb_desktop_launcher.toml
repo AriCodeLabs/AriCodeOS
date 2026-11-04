@@ -4,7 +4,9 @@
 # hello_more whose signature was tampered with. Down, Up and
 # Enter open the first one; the demo's new window takes the focus. Once
 # the demo has closed its window, a click on "Leave the desktop" (which
-# also gives the launcher the focus back) ends the session.
+# also gives the launcher the focus back) only asks, since the apps it
+# started would close with it (ADR 0077, audit M1); a click on the
+# launcher's close box then ends the session.
 name = "usb.desktop_launcher"
 description = "the desktop launcher lists the window apps, opens one from the keyboard and leaves on a click"
 level = "full"
@@ -29,6 +31,13 @@ marker = "gui_demo A: window closed"
 mouse_rel = [-380, -72]
 click = "left"
 
+# The launcher's close box at (344, 40), 16x16: its frame is 324 wide from
+# x = 38, and its top is 40.
+[[host_input_then]]
+marker = "launcher: again to leave the desktop"
+mouse_rel = [90, -282]
+click = "left"
+
 [expect]
 exit = 33
 serial_contains = [
@@ -41,6 +50,8 @@ serial_contains = [
     "launcher: started gui_demo",
     "gui_demo A: focus gained",
     "gui_demo A: window closed",
+    "launcher: again to leave the desktop: open apps close with it",
+    "compositor: window 1 asked to close",
     "launcher: leaving the desktop",
     "AriInit: the desktop ended (its launcher exited with 0): back to the text console",
     "session: desktop\r\n",
@@ -50,6 +61,8 @@ serial_order = [
     "launcher: ready",
     "launcher: started gui_demo",
     "gui_demo A: window closed",
+    "launcher: again to leave the desktop",
+    "compositor: window 1 asked to close",
     "launcher: leaving the desktop",
     "AriInit: the desktop ended (its launcher exited with 0): back to the text console",
 ]

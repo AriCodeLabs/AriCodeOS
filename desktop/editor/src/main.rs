@@ -61,6 +61,8 @@ enum Confirm {
     Discard,
     /// Save over another file of that name.
     Replace,
+    /// Close the window, throwing the unsaved changes away (ADR 0077).
+    Close,
 }
 
 struct Editor {
@@ -122,6 +124,22 @@ impl Editor {
         }
         self.armed = Some((what, name));
         false
+    }
+
+    /// The owner clicked the close box: whether to close now. Unsaved
+    /// changes ask first; a second click discards them (ADR 0077).
+    fn close_asked(&mut self) -> bool {
+        if !TEXT.lock().changed() || self.confirmed(Confirm::Close, [0; 26]) {
+            return true;
+        }
+        self.set_status(true, &[b"unsaved changes: close again to discard them"]);
+        false
+    }
+
+    fn disarm_close(&mut self) {
+        if matches!(self.armed, Some((Confirm::Close, _))) {
+            self.armed = None;
+        }
     }
 
     /// The name field shows the file the text belongs to again, after an
@@ -383,6 +401,11 @@ fn main(_arg: u64) -> u64 {
             // The compositor is gone: so is the desktop.
             Err(_) => return 5,
         };
+        // Anything but a second click on the close box disarms it (audit
+        // of ADR 0077, L6).
+        if !matches!(event, Event::Close | Event::Focus(_)) {
+            ed.disarm_close();
+        }
         match event {
             Event::Key(b) => {
                 for key in keys.feed(b).into_iter().flatten() {
@@ -400,7 +423,12 @@ fn main(_arg: u64) -> u64 {
                     ed.save();
                 }
             }
-            Event::Focus(_) => {}
+            Event::Close if ed.close_asked() => {
+                say(&[b"closed"]);
+                let _ = win.close();
+                return 0;
+            }
+            _ => {}
         }
         ed.draw(&mut win);
         let _ = win.present();

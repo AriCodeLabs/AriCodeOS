@@ -319,7 +319,14 @@ fn main(_arg: u64) -> u64 {
                     s.refresh();
                 }
             }
-            Event::Focus(_) => {}
+            // Every change is applied when chosen: it closes at once (ADR
+            // 0077).
+            Event::Close => {
+                say(&[b"closed"]);
+                let _ = win.close();
+                return 0;
+            }
+            _ => {}
         }
         s.draw(&mut win);
         let _ = win.present();

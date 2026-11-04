@@ -47,6 +47,9 @@ const MAIN: usize = 0;
 /// that arrive sooner are coalesced into the next frame, so an event waits
 /// at most one frame.
 const FRAME_MS: u64 = 16;
+/// How long a request to close may wait untaken before the next click on
+/// the close box closes the window for its program (ADR 0077).
+const FORCE_CLOSE_MS: u64 = 2000;
 /// An input event handled later than this after its driver received it
 /// is late: the pointer trails the hand (incident 0058). Each is counted
 /// and recorded in the kernel event ring as `gui input late`, at most once
@@ -138,16 +141,29 @@ struct Content {
     events: [Option<Event>; QUEUE],
     count: usize,
     pending: Option<(Handle, u64)>,
+    /// When a request to close was handed to the client, queued or as the
+    /// answer to its poll (ms since boot), while it has not polled since:
+    /// it has not come back from it (ADR 0077, audit L4).
+    close_waiting: Option<u64>,
 }
 
 impl Content {
+    /// Queues `ev`; when full, the oldest event goes, never a request to
+    /// close (audit of ADR 0077, M3).
     fn push(&mut self, ev: Event) {
         if self.count == QUEUE {
-            self.events.copy_within(1..QUEUE, 0);
+            let drop = (0..QUEUE)
+                .find(|&i| self.events[i] != Some(Event::Close))
+                .unwrap_or(0);
+            self.events.copy_within(drop + 1..QUEUE, drop);
             self.count -= 1;
         }
         self.events[self.count] = Some(ev);
         self.count += 1;
+    }
+
+    fn close_queued(&self) -> bool {
+        self.events[..self.count].contains(&Some(Event::Close))
     }
     fn pop(&mut self) -> Option<Event> {
         if self.count == 0 {
@@ -324,6 +340,7 @@ impl Compositor {
         sys::print(b" gone: ");
         num(closed_windows);
         sys::print(b" window(s) closed\n");
+        self.refocus();
     }
 
     fn deliver(&mut self, id: u32, ev: Event) {
@@ -405,6 +422,71 @@ impl Compositor {
         }
     }
 
+    /// The owner clicked the close box of `id` (ADR 0077): its program is
+    /// asked to close it. A program that has not come back from the last
+    /// request for `FORCE_CLOSE_MS` is marked as not responding at the
+    /// next click, and the click after that ends its session: every window
+    /// it has closes, and its next call fails, so it ends when it can
+    /// (audit of ADR 0077, M2). A program that reads its events, even one
+    /// that asks the owner first, is never closed for it.
+    fn ask_close(&mut self, id: u32, now_ms: u64) {
+        let Some(c) = self.contents.iter_mut().flatten().find(|c| c.id == id) else {
+            return;
+        };
+        let owner = c.owner;
+        if let Some(t) = c.close_waiting {
+            if now_ms.saturating_sub(t) < FORCE_CLOSE_MS {
+                return; // asked already; the program has yet to answer
+            }
+            if self.desktop.get(id).is_some_and(|w| w.hung) {
+                sys::print(b"compositor: window ");
+                num(id as u64);
+                sys::print(b" still not responding; ending its program's session\n");
+                self.retire(owner - 1);
+                return;
+            }
+            self.desktop.set_hung(id, true);
+            sys::print(b"compositor: window ");
+            num(id as u64);
+            sys::print(b" is not responding; its close box ends its program's session\n");
+            return;
+        }
+        c.close_waiting = Some(now_ms);
+        if let Some((reply_to, _)) = c.pending.take() {
+            answer(reply_to, Reply::event(Event::Close));
+        } else {
+            c.push(Event::Close);
+        }
+        self.set_focus(id);
+        sys::print(b"compositor: window ");
+        num(id as u64);
+        sys::print(b" asked to close\n");
+    }
+
+    /// After a window closed: the front one, if any, gets the focus, so
+    /// keys reach a window again (audit of ADR 0077, L5).
+    fn refocus(&mut self) {
+        if self.desktop.focus.is_none() {
+            if let Some(front) = self.desktop.front() {
+                self.set_focus(front);
+            }
+        }
+    }
+
+    /// Closes the window of `slot`: a poll waiting on it is answered
+    /// `BadWindow`, the buffer goes once no window shows it.
+    fn close_window(&mut self, slot: usize) {
+        let Some(closed) = self.contents[slot].take() else {
+            return;
+        };
+        if let Some((h, _)) = closed.pending {
+            answer(h, Reply::status(Status::BadWindow));
+        }
+        self.unmap_unused(closed.virt);
+        self.desktop.remove(closed.id);
+        self.refocus();
+    }
+
     fn set_focus(&mut self, id: u32) {
         if self.desktop.focus == Some(id) {
             return;
@@ -432,16 +514,37 @@ impl Compositor {
                 return;
             }
             let (px, py) = self.desktop.pointer;
-            if let Hit::Window { id, x, y } = self.desktop.hit(px, py) {
-                self.set_focus(id);
-                self.deliver(
-                    id,
-                    Event::Click {
-                        x,
-                        y,
-                        button: (ev.code - BTN_LEFT) as u8 + 1,
-                    },
-                );
+            match self.desktop.hit(px, py) {
+                Hit::Window { id, x, y } => {
+                    self.set_focus(id);
+                    self.deliver(
+                        id,
+                        Event::Click {
+                            x,
+                            y,
+                            button: (ev.code - BTN_LEFT) as u8 + 1,
+                        },
+                    );
+                }
+                Hit::Close { id } if ev.code == BTN_LEFT => self.ask_close(id, at),
+                // Another button on the box is a click on the window, as
+                // before the box (audit of ADR 0077, L7).
+                Hit::Close { id } => {
+                    let Some(w) = self.desktop.get(id) else {
+                        return;
+                    };
+                    let (x, y) = (px - w.content.x, py - w.content.y);
+                    self.set_focus(id);
+                    self.deliver(
+                        id,
+                        Event::Click {
+                            x,
+                            y,
+                            button: (ev.code - BTN_LEFT) as u8 + 1,
+                        },
+                    );
+                }
+                Hit::Desktop => {}
             }
             return;
         }
@@ -529,6 +632,7 @@ impl Compositor {
                     events: [None; QUEUE],
                     count: 0,
                     pending: None,
+                    close_waiting: None,
                 });
                 sys::print(b"compositor: window ");
                 num(id as u64);
@@ -573,7 +677,17 @@ impl Compositor {
                 let Some(c) = self.owned(req.window, owner) else {
                     return answer(reply_to, Reply::status(Status::BadWindow));
                 };
-                if let Some(ev) = c.pop() {
+                let ev = c.pop();
+                // Polling again with no request left queued: it came back
+                // from the request to close (ADR 0077).
+                if c.close_waiting.is_some() && !c.close_queued() {
+                    c.close_waiting = None;
+                    self.desktop.set_hung(req.window, false);
+                }
+                let Some(c) = self.owned(req.window, owner) else {
+                    return answer(reply_to, Reply::status(Status::BadWindow));
+                };
+                if let Some(ev) = ev {
                     return answer(reply_to, Reply::event(ev));
                 }
                 if c.pending.is_some() {
@@ -589,14 +703,7 @@ impl Compositor {
                 }) else {
                     return answer(reply_to, Reply::status(Status::BadWindow));
                 };
-                let Some(closed) = self.contents[slot].take() else {
-                    return answer(reply_to, Reply::status(Status::BadWindow));
-                };
-                if let Some((h, _)) = closed.pending {
-                    answer(h, Reply::status(Status::BadWindow));
-                }
-                self.unmap_unused(closed.virt);
-                self.desktop.remove(req.window);
+                self.close_window(slot);
                 answer(reply_to, Reply::ok(0));
             }
         }
