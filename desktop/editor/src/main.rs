@@ -68,6 +68,9 @@ struct Editor {
     name: TextField<26>,
     /// The file the text came from or was last saved to (empty: none).
     loaded: [u8; 26],
+    /// That file did not exist when it was opened and was not saved yet:
+    /// if someone made it since, saving over it asks first (audit, L2).
+    loaded_new: bool,
     /// The action a first press asked to confirm, and for which name.
     armed: Option<(Confirm, [u8; 26])>,
     focus: Focus,
@@ -138,6 +141,7 @@ impl Editor {
             Err(FsError::Status(aricode_proto::fs::Status::NotFound)) => {
                 TEXT.lock().set(b"");
                 self.loaded = buf;
+                self.loaded_new = true;
                 self.focus = Focus::Text;
                 return self.set_status(
                     false,
@@ -183,6 +187,7 @@ impl Editor {
         TEXT.lock().set(&scratch[..loaded]);
         drop(scratch);
         self.loaded = buf;
+        self.loaded_new = false;
         self.focus = Focus::Text;
         let mut b = [0u8; 20];
         self.set_status(
@@ -208,7 +213,10 @@ impl Editor {
         let fd = match self.fs.open(name) {
             // Another file of that name is replaced only on a second press
             // (audit of the editor, M1).
-            Ok(fd) if buf != self.loaded && !self.confirmed(Confirm::Replace, buf) => {
+            Ok(fd)
+                if (buf != self.loaded || self.loaded_new)
+                    && !self.confirmed(Confirm::Replace, buf) =>
+            {
                 let _ = self.fs.close(fd);
                 return self.set_status(
                     true,
@@ -242,6 +250,7 @@ impl Editor {
         }
         if saved.is_ok() {
             self.loaded = buf;
+            self.loaded_new = false;
         }
         let mut b = [0u8; 20];
         match saved {
@@ -263,8 +272,11 @@ impl Editor {
     }
 
     fn key(&mut self, key: Key) {
-        // Any other key disarms a confirmation.
-        if !matches!(key, Key::Ctrl(b's' | b'o') | Key::Enter) {
+        // Any other key disarms a confirmation; Enter only in the name,
+        // where it opens (in the text it is a change; audit, L1).
+        let confirming = matches!(key, Key::Ctrl(b's' | b'o'))
+            || (key == Key::Enter && self.focus == Focus::Name);
+        if !confirming {
             self.armed = None;
         }
         match (key, self.focus) {
@@ -349,6 +361,7 @@ fn main(_arg: u64) -> u64 {
         fs,
         name: TextField::new(),
         loaded: [0; 26],
+        loaded_new: false,
         armed: None,
         focus: Focus::Name,
         status: [0; 80],

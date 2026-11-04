@@ -726,6 +726,12 @@ fn main(inputs: u64) -> u64 {
         for (d, slot) in devices.iter_mut().enumerate() {
             let Some(dev) = slot else { continue };
             let read = dev.read(1, &mut events, &mut times);
+            // Relaunched since its last reply, outside a read of ours too:
+            // the keys it held were never released (audit of the file
+            // manager, M2).
+            if dev.driver_restarted() {
+                comp.keyboard.release_modifiers();
+            }
             match read {
                 // Given up for good (ADR 0030): it would answer at once
                 // forever and the 1 ms read would no longer pace the loop.

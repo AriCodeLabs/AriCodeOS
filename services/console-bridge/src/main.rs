@@ -12,7 +12,7 @@
 
 use aricode_input::{Keyboard, Layout, EV_KEY};
 use aricode_proto::input::{Event, Reply, Status, MAX_EVENTS, MAX_READ_MS};
-use aricode_rt::sys::input::{InputClient, InputError};
+use aricode_rt::sys::input::{DriverInstance, InputClient, InputError};
 use aricode_rt::sys::{self, abi, Handle};
 
 const CONSOLE_IN: Handle = Handle(0x0001_0004);
@@ -74,6 +74,8 @@ fn main(arg: u64) -> u64 {
     for k in &mut keyboards {
         k.set_layout(layout);
     }
+    // Which run of each driver its replies come from.
+    let mut instances = [DriverInstance::new(); MAX_INPUTS];
     let mut buf = Buffers {
         events: [Event::default(); MAX_EVENTS],
         times: [0; MAX_EVENTS],
@@ -142,6 +144,7 @@ fn main(arg: u64) -> u64 {
             match finish(
                 &mut pending[i],
                 &mut keyboards[i],
+                &mut instances[i],
                 &msg[..len],
                 &none[..nh],
                 &mut buf,
@@ -167,6 +170,7 @@ fn main(arg: u64) -> u64 {
                     match finish(
                         &mut pending[i],
                         &mut keyboards[i],
+                        &mut instances[i],
                         &msg[..len],
                         &none[..nh],
                         &mut buf,
@@ -200,12 +204,18 @@ fn main(arg: u64) -> u64 {
 fn finish(
     pending: &mut Option<Handle>,
     keyboard: &mut Keyboard,
+    instance: &mut DriverInstance,
     msg: &[u8],
     handles: &[Handle],
     buf: &mut Buffers,
 ) -> Result<bool, sys::Error> {
     if let Some(reply) = pending.take() {
         let _ = sys::handle_close(reply);
+    }
+    // Relaunched since its last reply: the keys it held were never
+    // released (audit of the file manager, M2).
+    if instance.changed(msg) {
+        keyboard.release_modifiers();
     }
     deliver(keyboard, msg, handles, buf)
 }

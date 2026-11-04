@@ -616,8 +616,9 @@ It found these, all fixed:
 - **`desktop/files`** lists `home/` with each file's size. It creates a
   file, renames the selected one to the name typed in the field, and
   deletes it after a second Delete.
-  - A rename never goes over an existing name: fsd's rename would delete
-    that file in the same commit.
+  - A rename never goes over an existing name. fsd decides it in the same
+    step (`Rename` with `RENAME_KEEP`, `FsClient::rename_keeping`, which
+    answers `Exists`), whatever the window's list shows.
   - Everything works from the keyboard: Tab, Enter in the field to
     create, Ctrl+R to rename, Delete to delete.
   - On a disk still in AriFS v1, which cannot rename or delete, it says
@@ -626,4 +627,36 @@ It found these, all fixed:
   for the window's answer to the one before it.
 - **Scenario `usb.desktop_files`:** create `mo`, rename it to `p`, delete
   it; the shell then finds `home/` empty.
+
+### Audit of the file manager (2026-11-04)
+
+An independent read-only audit checked:
+- the rows' bounds;
+- the folder's confinement;
+- the editor's confirmations;
+- the scenario stages.
+
+It found these, all fixed:
+
+- **H1:** a rename checked for a file of the new name only in the window's
+  list. That list holds 64 files, and another program could have made one
+  since. fsd's rename would then have deleted that file. fsd now checks
+  it in the same step (`RENAME_KEEP`, tested by `fs_client`).
+- **M1:** the selection kept its row while files moved. It now follows
+  the name.
+- **M2:** an input driver relaunched outside a read went unnoticed. Its
+  replies now say which run of the driver sent them
+  (`input::Reply::instance`, stamped by `EventQueue`). The compositor and
+  the console bridge release the modifiers when it changes.
+- **L1:** Enter in the text kept a confirmation armed. Now only Enter in
+  the name does.
+- **L2:** saving a new file that someone made meanwhile now asks first.
+- **L3:** the editor's scenario saves distinctive text, and checks the
+  empty save it refuses.
+- **L4:** a typing stage looks for its marker only in what came after the
+  stage before it started.
+- **L5:** a stage that fails, or never comes, is said in the log.
+- **L6:** a failed refresh is not hidden by the next message.
+- **L7:** files in subfolders of `home/` are counted, not listed. A list
+  of more than 64 says it shows the first ones.
 

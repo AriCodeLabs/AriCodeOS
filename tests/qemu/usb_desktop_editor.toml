@@ -1,13 +1,13 @@
 # The desktop's editor (ADR 0074 phase C) and the owner's folder home/
 # (the `home` capability, the owner's choice). The launcher offers the
 # editor and Enter opens it; in its window `a` and Enter open the new
-# file home/a, `hi` goes into it and Ctrl+S saves it, atomically. The
+# file home/a, `zq` goes into it and Ctrl+S saves it, atomically. The
 # shell on the console then reads home/a: the editor wrote into the
 # owner's folder, the only files it reaches. Then nothing is lost on one
 # press (audit of the editor, M1 and M2): `x` changes the text, and
-# opening `ab` asks first, a second Enter discards; saving the new text
-# over `a`, which it did not come from, asks too, and is left at that, so
-# home/a still holds `hi`.
+# opening `ab` asks first, a second Enter discards (the text is empty
+# then); saving that empty text over `a`, which it did not come from,
+# asks too, and is left at that, so home/a still holds `zq`.
 name = "usb.desktop_editor"
 description = "the desktop editor writes a file in the owner's home/ folder"
 level = "full"
@@ -26,7 +26,7 @@ keys = ["ret"]
 
 [[host_input_then]]
 marker = "editor: ready"
-keys = ["a", "ret", "h", "i", "ctrl+s"]
+keys = ["a", "ret", "z", "q", "ctrl+s"]
 key_delay_ms = 100
 
 [[host_input_then]]
@@ -60,6 +60,6 @@ serial_order = [
     "editor: saved a (2 bytes)",
     "editor: a exists: Save again to replace it",
     "ari> cat home/a",
-    "hi",
+    "zq",
 ]
-serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "editor: cannot", "saved a (1 bytes)", "saved a (3 bytes)"]
+serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "editor: cannot", "saved a (0 bytes)", "saved a (1 bytes)", "saved a (3 bytes)"]

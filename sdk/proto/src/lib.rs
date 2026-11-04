@@ -212,9 +212,14 @@ pub mod fs {
         /// `fd`, name in the request: renames the file; a file already
         /// called so is deleted in the same commit, so an installer can
         /// write `x.new` and rename it over `x` atomically (ADR 0072).
-        /// `Unsupported` on a volume still in v1.
+        /// With `len` = [`RENAME_KEEP`] a file of that name is kept and the
+        /// rename answers `Exists` instead, checked in the same step (the
+        /// desktop's file manager). `Unsupported` on a volume still in v1.
         Rename = 16,
     }
+
+    /// `Request::len` of a `Rename` that never replaces a file.
+    pub const RENAME_KEEP: u32 = 1;
 
     /// Descriptor table usage as `Op::Descriptors` reports it for one
     /// owner slot (ADR 0036): what that owner holds, what everybody holds,
@@ -988,6 +993,11 @@ pub mod input {
         pub name_len: u8,
         /// `KIND_*` bits of an `Info` reply; 0 in the others.
         pub kinds: u8,
+        /// Which run of the driver sent it (bytes 6..8, never 0 when set;
+        /// 0 from a driver that does not say): one that changes means the
+        /// driver was relaunched, and the releases of the keys it held
+        /// were lost (audit of the file manager, M2).
+        pub instance: u16,
     }
 
     impl Reply {
@@ -1004,6 +1014,7 @@ pub mod input {
                 name: [0; MAX_NAME],
                 name_len: 0,
                 kinds: 0,
+                instance: 0,
             }
         }
 
@@ -1032,6 +1043,11 @@ pub mod input {
             self
         }
 
+        pub fn with_instance(mut self, instance: u16) -> Self {
+            self.instance = instance;
+            self
+        }
+
         pub fn name_str(&self) -> &str {
             core::str::from_utf8(&self.name[..self.name_len as usize]).unwrap_or("?")
         }
@@ -1044,6 +1060,7 @@ pub mod input {
             b[3] = self.count;
             b[4] = self.name_len;
             b[5] = self.kinds;
+            b[6..8].copy_from_slice(&self.instance.to_le_bytes());
             for (i, e) in self.events.iter().enumerate() {
                 let o = 8 + 8 * i;
                 b[o..o + 2].copy_from_slice(&e.kind.to_le_bytes());
@@ -1093,6 +1110,7 @@ pub mod input {
                 name,
                 name_len: b[4].min(MAX_NAME as u8),
                 kinds: b[5],
+                instance: u16::from_le_bytes([b[6], b[7]]),
             })
         }
     }
@@ -1694,7 +1712,9 @@ mod tests {
         assert_eq!(d, reply);
         assert_eq!(d.count, 2);
         assert_eq!(d.name_str(), "QEMU Virtio Keyboard");
-        assert_eq!(d.kinds, 0);
+        assert_eq!((d.kinds, d.instance), (0, 0));
+        let stamped = Reply::status(Status::Timeout).with_instance(0xBEEF);
+        assert_eq!(Reply::decode(&stamped.encode()).unwrap().instance, 0xBEEF);
         let info = Reply::status(Status::Ok).with_kinds(KIND_KEYBOARD | KIND_POINTER);
         assert_eq!(
             Reply::decode(&info.encode()).unwrap().kinds,

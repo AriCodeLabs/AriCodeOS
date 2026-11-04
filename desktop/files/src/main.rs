@@ -56,7 +56,6 @@ struct Files {
     fs: FsClient,
     names: [[u8; 32]; MAX_FILES],
     lens: [u8; MAX_FILES],
-    sizes: [u64; MAX_FILES],
     /// The rows as shown: name and size.
     rows: [[u8; 48]; MAX_FILES],
     row_lens: [u8; MAX_FILES],
@@ -65,16 +64,16 @@ struct Files {
     focus: Focus,
     /// The file a first Delete was pressed on.
     armed: Option<usize>,
+    /// More files than `MAX_FILES`: the list shows the first ones.
+    more: bool,
+    /// Files in subfolders of `home/`, not listed.
+    nested: usize,
     status: [u8; 80],
     status_len: usize,
     error: bool,
 }
 
 impl Files {
-    fn name(&self, i: usize) -> &str {
-        core::str::from_utf8(&self.names[i][..self.lens[i] as usize]).unwrap_or("?")
-    }
-
     fn set_status(&mut self, error: bool, parts: &[&[u8]]) {
         let mut n = 0;
         for p in parts {
@@ -87,16 +86,34 @@ impl Files {
         say(parts);
     }
 
-    /// Lists `home/` again.
-    fn refresh(&mut self) {
+    /// Lists `home/` again; `select` is the name to select afterwards
+    /// (files move in the list as others are made, so the selection
+    /// follows the name, not the row; audit of the file manager, M1).
+    /// `false`, said, when the folder could not be listed.
+    fn refresh(&mut self, select: Option<&str>) -> bool {
+        let before = self.list.selected.map(|i| {
+            let mut n = [0u8; 32];
+            n[..self.lens[i] as usize].copy_from_slice(&self.names[i][..self.lens[i] as usize]);
+            (n, self.lens[i] as usize)
+        });
         let mut count = 0;
+        let mut index = 0;
         let mut entry = [0u8; 32];
-        while count < MAX_FILES {
-            match self.fs.list(count as u32, &mut entry) {
+        let mut listed = true;
+        self.more = false;
+        self.nested = 0;
+        loop {
+            match self.fs.list(index, &mut entry) {
+                // Files made in subfolders from the shell cannot be renamed
+                // or deleted from here: counted, not listed (audit, L7).
+                Ok(Some((n, _))) if entry[..n].contains(&b'/') => self.nested += 1,
+                Ok(Some(_)) if count == MAX_FILES => {
+                    self.more = true;
+                    break;
+                }
                 Ok(Some((n, size))) => {
                     self.names[count] = entry;
                     self.lens[count] = n as u8;
-                    self.sizes[count] = size;
                     let mut row = [b' '; 48];
                     row[..n].copy_from_slice(&entry[..n]);
                     let mut b = [0u8; 20];
@@ -111,20 +128,49 @@ impl Files {
                 Ok(None) => break,
                 Err(_) => {
                     self.set_status(true, &[b"home/ cannot be listed"]);
+                    listed = false;
                     break;
                 }
             }
+            index += 1;
         }
         self.list.set_count(count);
         self.armed = None;
+        let wanted = match select {
+            Some(name) => Some(name.as_bytes()),
+            None => before.as_ref().map(|(n, len)| &n[..*len]),
+        };
+        if let Some(row) =
+            wanted.and_then(|w| (0..count).find(|&i| &self.names[i][..self.lens[i] as usize] == w))
+        {
+            self.list.select(row);
+        }
+        listed
+    }
+
+    /// How many files there are, said.
+    fn say_count(&mut self) {
+        let mut b = [0u8; 20];
+        let mut c = [0u8; 20];
+        let count = aricode_rt::fmt_u64(self.list.count as u64, &mut b);
+        let nested = aricode_rt::fmt_u64(self.nested as u64, &mut c);
+        match (self.more, self.nested) {
+            (true, _) => self.set_status(false, &[b"the first ", count, b" files of home/"]),
+            (false, 0) => self.set_status(false, &[count, b" file(s) in home/"]),
+            (false, _) => self.set_status(
+                false,
+                &[
+                    count,
+                    b" file(s) in home/, ",
+                    nested,
+                    b" in subfolders not shown",
+                ],
+            ),
+        }
     }
 
     fn row(&self, i: usize) -> &str {
         core::str::from_utf8(&self.rows[i][..self.row_lens[i] as usize]).unwrap_or("?")
-    }
-
-    fn exists(&self, name: &str) -> bool {
-        (0..self.list.count).any(|i| self.name(i) == name)
     }
 
     fn typed(&mut self) -> Option<[u8; NAME_MAX]> {
@@ -146,15 +192,14 @@ impl Files {
     fn create(&mut self) {
         let Some(buf) = self.typed() else { return };
         let name = name_of(&buf);
-        if self.exists(name) {
-            return self.set_status(true, &[name.as_bytes(), b" already exists"]);
-        }
+        // fsd's create refuses an existing name itself (`Exists`).
         match self.fs.create(name) {
             Ok(fd) => {
                 let _ = self.fs.close(fd);
-                self.refresh();
                 self.field.clear();
-                self.set_status(false, &[b"created ", name.as_bytes()]);
+                if self.refresh(Some(name)) {
+                    self.set_status(false, &[b"created ", name.as_bytes()]);
+                }
             }
             Err(e) => self.failed(b"cannot create ", name, e),
         }
@@ -170,13 +215,11 @@ impl Files {
         let n = self.lens[i] as usize;
         old[..n].copy_from_slice(&self.names[i][..n]);
         let old = core::str::from_utf8(&old[..n]).unwrap_or("");
-        // fsd's rename replaces a file of the new name: never here.
-        if self.exists(new) {
-            return self.set_status(true, &[new.as_bytes(), b" already exists"]);
-        }
+        // Never over a file of the new name: fsd checks it in the same
+        // step, whatever this list shows (audit of the file manager, H1).
         let renamed = match self.fs.open(old) {
             Ok(fd) => {
-                let r = self.fs.rename(fd, new);
+                let r = self.fs.rename_keeping(fd, new);
                 let _ = self.fs.close(fd);
                 r
             }
@@ -184,12 +227,13 @@ impl Files {
         };
         match renamed {
             Ok(()) => {
-                self.refresh();
                 self.field.clear();
-                self.set_status(
-                    false,
-                    &[b"renamed ", old.as_bytes(), b" to ", new.as_bytes()],
-                );
+                if self.refresh(Some(new)) {
+                    self.set_status(
+                        false,
+                        &[b"renamed ", old.as_bytes(), b" to ", new.as_bytes()],
+                    );
+                }
             }
             Err(e) => self.failed(b"cannot rename ", old, e),
         }
@@ -209,8 +253,9 @@ impl Files {
         }
         match self.fs.delete(name) {
             Ok(()) => {
-                self.refresh();
-                self.set_status(false, &[b"deleted ", name.as_bytes()]);
+                if self.refresh(None) {
+                    self.set_status(false, &[b"deleted ", name.as_bytes()]);
+                }
             }
             Err(e) => self.failed(b"cannot delete ", name, e),
         }
@@ -222,6 +267,7 @@ impl Files {
             FsError::Status(FsStatus::NotFound) => b" (it is gone)",
             FsError::Status(FsStatus::Invalid) => b" (not a valid name)",
             FsError::Status(FsStatus::NoSpace) => b" (no space left)",
+            FsError::Status(FsStatus::Exists) => b" (that name is taken)",
             _ => b"",
         };
         self.set_status(true, &[what, name.as_bytes(), why]);
@@ -300,21 +346,21 @@ fn main(_arg: u64) -> u64 {
         fs,
         names: [[0; 32]; MAX_FILES],
         lens: [0; MAX_FILES],
-        sizes: [0; MAX_FILES],
         rows: [[0; 48]; MAX_FILES],
         row_lens: [0; MAX_FILES],
         list: List::new(LIST_RECT),
         field: TextField::new(),
         focus: Focus::List,
         armed: None,
+        more: false,
+        nested: 0,
         status: [0; 80],
         status_len: 0,
         error: false,
     };
-    f.refresh();
-    let mut b = [0u8; 20];
-    let count = aricode_rt::fmt_u64(f.list.count as u64, &mut b);
-    f.set_status(false, &[count, b" file(s) in home/"]);
+    if f.refresh(None) {
+        f.say_count();
+    }
     f.draw(&mut win);
     if win.present().is_err() {
         return 4;
@@ -350,9 +396,9 @@ fn main(_arg: u64) -> u64 {
                 } else if DELETE.contains(x, y) {
                     f.delete();
                 } else if REFRESH.contains(x, y) {
-                    f.refresh();
-                    let count = aricode_rt::fmt_u64(f.list.count as u64, &mut b);
-                    f.set_status(false, &[count, b" file(s) in home/"]);
+                    if f.refresh(None) {
+                        f.say_count();
+                    }
                 }
             }
             Event::Focus(_) => {}
