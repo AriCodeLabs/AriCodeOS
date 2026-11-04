@@ -12,8 +12,9 @@
 use aricode_cmdline::{keys, CmdLine};
 use aricode_gfx::{Canvas, Damage, Desktop, Hit, Rect, Scene, Window};
 use aricode_input::{EscapeChord, Keyboard, Layout, BTN_LEFT, EV_KEY, EV_REL, REL_X, REL_Y};
+use aricode_proto::input::MAX_EVENTS;
 use aricode_proto::window::{Event, Op, Reply, Request, Status, MAX_SIDE};
-use aricode_rt::sys::input::InputClient;
+use aricode_rt::sys::input::{DriverInstance, InputClient};
 use aricode_rt::sys::{self, abi, Handle};
 use aricode_rt::{fmt_hex, fmt_u64};
 
@@ -45,6 +46,11 @@ const MAIN: usize = 0;
 /// that arrive sooner are coalesced into the next frame, so an event waits
 /// at most one frame.
 const FRAME_MS: u64 = 16;
+/// An input event handled later than this after its driver received it
+/// is late: the pointer trails the hand (incident 0058). Each is counted
+/// and recorded in the kernel event ring as `gui input late`, at most once
+/// a second, so `diag` shows it.
+const LATE_MS: u64 = 50;
 
 fn say(msg: &[u8]) {
     sys::print(b"compositor: ");
@@ -194,6 +200,8 @@ struct Compositor {
     /// client's flood cannot starve the others (audit of ADR 0052, M1).
     first: usize,
     last_sweep_ms: u64,
+    /// Late input events, recorded at most once a second (`LATE_MS`).
+    late: aricode_faults::Meter<1>,
 }
 
 #[derive(Clone, Copy)]
@@ -323,6 +331,76 @@ impl Compositor {
             answer(reply_to, Reply::event(ev));
         } else {
             c.push(ev);
+        }
+    }
+
+    /// The main endpoint and every session, to receive on all at once (ADR
+    /// 0052), starting from a different session each time; room is left
+    /// for the input devices' replies. Also returns who owns each member.
+    fn endpoints(
+        &mut self,
+    ) -> (
+        [Handle; 1 + MAX_SESSIONS + MAX_INPUTS],
+        [usize; 1 + MAX_SESSIONS],
+        usize,
+    ) {
+        let mut eps = [SERVICE; 1 + MAX_SESSIONS + MAX_INPUTS];
+        let mut owners = [MAIN; 1 + MAX_SESSIONS];
+        let mut n = 1;
+        for k in 0..MAX_SESSIONS {
+            let i = (self.first + k) % MAX_SESSIONS;
+            if let Some(s) = self.sessions[i] {
+                eps[n] = s.endpoint;
+                owners[n] = i + 1;
+                n += 1;
+            }
+        }
+        self.first = (self.first + 1) % MAX_SESSIONS;
+        (eps, owners, n)
+    }
+
+    /// How long the loop may sleep at `now_ms`: until the next frame when
+    /// something waits to be shown, a poll's deadline, the next sweep or
+    /// the end of a window of late input held back, at most `SWEEP_MS`.
+    fn next_deadline(&self, now_ms: u64) -> u64 {
+        let frame = (!self.damage.is_empty()).then_some(self.next_frame_ms);
+        let polls = self
+            .contents
+            .iter()
+            .flatten()
+            .filter_map(|c| c.pending.map(|(_, d)| d));
+        let sweep = self.last_sweep_ms + SWEEP_MS;
+        frame
+            .into_iter()
+            .chain(polls)
+            .chain(self.late.next_due())
+            .fold(sweep, u64::min)
+            .saturating_sub(now_ms)
+            .min(SWEEP_MS)
+    }
+
+    /// Counts the events of a round handled at `now` more than `LATE_MS`
+    /// after they were received, and records what is due (incident 0058).
+    fn account_late(&mut self, received: impl Iterator<Item = u64>, now: u64) {
+        let late = received
+            .filter(|&at| now.saturating_sub(at) > LATE_MS)
+            .count() as u32;
+        let mut due = if late > 0 {
+            self.late.report_many(0, now, late)
+        } else {
+            0
+        };
+        // What a window held back is recorded when it ends.
+        if let Some((_, held)) = self.late.drain_due(now) {
+            due += held;
+        }
+        if due > 0 {
+            let mut label = [0u8; aricode_faults::LABEL_LEN];
+            let label = aricode_faults::label("gui input late", due, &mut label);
+            let _ = sys::event_record(0, label);
+            sys::print(b"compositor: fault ");
+            sys::print(label.as_bytes());
+            sys::print(b"\n");
         }
     }
 
@@ -675,29 +753,18 @@ fn main(inputs: u64) -> u64 {
         generation: 0,
         first: 0,
         last_sweep_ms: 0,
+        late: aricode_faults::Meter::new(),
     };
-    let mut msg = [0u8; Request::LEN];
+    // Room for a request and for an input device's reply: the wait below
+    // receives either.
+    let mut msg = [0u8; MSG_LEN];
     let mut handles = [Handle(0); sys::abi::IPC_MAX_HANDLES];
-    let mut events = [aricode_proto::input::Event::default(); aricode_proto::input::MAX_EVENTS];
-    let mut times = [0u64; aricode_proto::input::MAX_EVENTS];
+    let mut inputs = Inputs::new(devices);
     say(b"serving requests");
     loop {
         let t = now(SYSTEM);
         for _ in 0..8 {
-            // The main endpoint and every session at once (ADR 0052),
-            // starting from a different session each time.
-            let mut eps = [SERVICE; 1 + MAX_SESSIONS];
-            let mut owners = [MAIN; 1 + MAX_SESSIONS];
-            let mut n_eps = 1;
-            for k in 0..MAX_SESSIONS {
-                let i = (comp.first + k) % MAX_SESSIONS;
-                if let Some(s) = comp.sessions[i] {
-                    eps[n_eps] = s.endpoint;
-                    owners[n_eps] = i + 1;
-                    n_eps += 1;
-                }
-            }
-            comp.first = (comp.first + 1) % MAX_SESSIONS;
+            let (eps, owners, n_eps) = comp.endpoints();
             let (which, n, nh) =
                 match sys::ipc_receive_any(&eps[..n_eps], &mut msg, &mut handles, 0) {
                     Ok(r) => r,
@@ -716,46 +783,214 @@ fn main(inputs: u64) -> u64 {
             comp.last_sweep_ms = t;
             comp.reap_gone(t);
         }
-        // Read every device and process their events in time order
-        // (a mouse click must precede the key that came after it).
-        let mut merged: [(u64, usize, aricode_input::Event);
-            MAX_INPUTS * aricode_proto::input::MAX_EVENTS] =
-            [(0, 0, aricode_input::Event::default());
-                MAX_INPUTS * aricode_proto::input::MAX_EVENTS];
-        let mut merged_len = 0;
-        for (d, slot) in devices.iter_mut().enumerate() {
-            let Some(dev) = slot else { continue };
-            let read = dev.read(1, &mut events, &mut times);
-            // Relaunched since its last reply, outside a read of ours too:
-            // the keys it held were never released (audit of the file
-            // manager, M2).
-            if dev.driver_restarted() {
-                comp.keyboard.release_modifiers();
+        // Every reply already there, in time order (a mouse click must
+        // precede the key that came after it).
+        inputs.collect(&mut comp.keyboard, t);
+        let handled = inputs.take();
+        for (at, ev) in handled {
+            comp.on_input(*ev, *at);
+        }
+        comp.account_late(handled.iter().map(|(at, _)| *at), now(SYSTEM));
+        inputs.clear();
+        comp.expire(t);
+        comp.compose(t);
+        // Sleep until a request, a device's events or the next deadline,
+        // whichever comes first (incident 0058: reading the devices in
+        // turn, each with its own wait, left the pointer behind the hand).
+        inputs.start_reads(&mut comp.keyboard, t);
+        let t = now(SYSTEM);
+        let wait = comp.next_deadline(t).min(inputs.next_retry(t));
+        let (mut eps, owners, n_eps) = comp.endpoints();
+        let n_all = inputs.add_replies(&mut eps, n_eps);
+        match sys::ipc_receive_any(&eps[..n_all], &mut msg, &mut handles, wait) {
+            Ok((which, n, nh)) if which < n_eps => {
+                serve(
+                    &mut comp,
+                    owners[which],
+                    &msg[..n],
+                    &handles[..nh],
+                    now(SYSTEM),
+                );
             }
-            match read {
-                // Given up for good (ADR 0030): it would answer at once
-                // forever and the 1 ms read would no longer pace the loop.
+            Ok((which, n, nh)) => {
+                let at = now(SYSTEM);
+                inputs.finish(
+                    which - n_eps,
+                    &msg[..n],
+                    &handles[..nh],
+                    &mut comp.keyboard,
+                    at,
+                );
+            }
+            Err(_) => {}
+        }
+    }
+}
+
+/// The longest message the loop receives: a request, or an input reply.
+const MSG_LEN: usize = if Request::LEN > aricode_proto::input::Reply::LEN {
+    Request::LEN
+} else {
+    aricode_proto::input::Reply::LEN
+};
+
+/// Requests a read waits for at most: an idle device answers this often
+/// with nothing, and is asked again.
+const READ_MS: u32 = 1000;
+
+/// The input devices, each with one read outstanding (ADR 0044), and the
+/// events of the replies received and not yet handled.
+struct Inputs {
+    devices: [Option<InputClient>; MAX_INPUTS],
+    /// The reply endpoint of each device's outstanding read.
+    pending: [Option<Handle>; MAX_INPUTS],
+    /// Which reply each member past the sessions in the wait belongs to.
+    waiting: [usize; MAX_INPUTS],
+    /// When a device that answered busy, or whose driver died holding the
+    /// read, is asked again (ms since boot).
+    retry_at: [u64; MAX_INPUTS],
+    /// Which run of each driver its replies come from.
+    instances: [DriverInstance; MAX_INPUTS],
+    events: [(u64, usize, aricode_input::Event); MAX_INPUTS * 4 * MAX_EVENTS],
+    sorted: [(u64, aricode_input::Event); MAX_INPUTS * 4 * MAX_EVENTS],
+    len: usize,
+}
+
+impl Inputs {
+    fn new(devices: [Option<InputClient>; MAX_INPUTS]) -> Self {
+        Self {
+            devices,
+            pending: [None; MAX_INPUTS],
+            waiting: [0; MAX_INPUTS],
+            retry_at: [0; MAX_INPUTS],
+            instances: [DriverInstance::new(); MAX_INPUTS],
+            events: [(0, 0, aricode_input::Event::default()); MAX_INPUTS * 4 * MAX_EVENTS],
+            sorted: [(0, aricode_input::Event::default()); MAX_INPUTS * 4 * MAX_EVENTS],
+            len: 0,
+        }
+    }
+
+    /// A read outstanding on every device that has none and is not
+    /// waiting out a pause. A device whose endpoint nobody receives on any
+    /// more is given up (ADR 0030).
+    fn start_reads(&mut self, keyboard: &mut Keyboard, now_ms: u64) {
+        for d in 0..MAX_INPUTS {
+            let Some(dev) = &self.devices[d] else {
+                continue;
+            };
+            if self.pending[d].is_some() || now_ms < self.retry_at[d] {
+                continue;
+            }
+            match dev.start_read(READ_MS) {
+                Ok(reply) => self.pending[d] = Some(reply),
                 Err(e) if e.service_gone() => {
                     sys::print(b"compositor: input device ");
-                    let mut b = [0u8; 20];
-                    sys::print(aricode_rt::fmt_u64(d as u64, &mut b));
+                    num(d as u64);
                     sys::print(b" is gone; dropping it\n");
                     // Its releases are lost: no modifier stays held.
-                    comp.keyboard.release_modifiers();
-                    *slot = None;
+                    keyboard.release_modifiers();
+                    self.devices[d] = None;
                 }
-                // The driver died holding the read: it is relaunched on the
-                // same endpoint (the next read waits for it), and whatever
-                // it held was not released.
-                Err(e) if e.reply_lost() => {
-                    comp.keyboard.release_modifiers();
-                    sys::thread_sleep(RETRY_MS);
-                }
-                _ => {}
+                Err(_) => self.retry_at[d] = now_ms + RETRY_MS,
             }
-            if let Ok(n) = read {
+        }
+    }
+
+    /// The outstanding reads' reply endpoints, after the `n` endpoints of
+    /// `eps`; returns how many members there are now.
+    fn add_replies(
+        &mut self,
+        eps: &mut [Handle; 1 + MAX_SESSIONS + MAX_INPUTS],
+        n: usize,
+    ) -> usize {
+        let mut n_all = n;
+        for (d, p) in self.pending.iter().enumerate() {
+            if let Some(reply) = p {
+                eps[n_all] = *reply;
+                self.waiting[n_all - n] = d;
+                n_all += 1;
+            }
+        }
+        n_all
+    }
+
+    /// How long until a paused device is asked again, at most `SWEEP_MS`.
+    fn next_retry(&self, now_ms: u64) -> u64 {
+        (0..MAX_INPUTS)
+            .filter(|&d| self.devices[d].is_some() && self.pending[d].is_none())
+            .map(|d| self.retry_at[d].saturating_sub(now_ms))
+            .min()
+            .unwrap_or(SWEEP_MS)
+    }
+
+    /// Looks at every outstanding read without waiting: a reply already
+    /// there is taken, and a read whose driver died holding it (its reply
+    /// endpoint closed, which a wait on several endpoints does not report
+    /// while others are open, ADR 0036) is started again after a pause.
+    fn collect(&mut self, keyboard: &mut Keyboard, now_ms: u64) {
+        let mut msg = [0u8; aricode_proto::input::Reply::LEN];
+        let mut none = [Handle(0); sys::abi::IPC_MAX_HANDLES];
+        for d in 0..MAX_INPUTS {
+            let Some(reply) = self.pending[d] else {
+                continue;
+            };
+            match sys::ipc_receive(reply, &mut msg, &mut none, 0) {
+                Ok((n, nh)) => self.take_reply(d, &msg[..n], &none[..nh], keyboard, now_ms),
+                Err(sys::Error::PeerClosed) => {
+                    let _ = sys::handle_close(reply);
+                    self.pending[d] = None;
+                    // The driver is relaunched on the same endpoint; the
+                    // keys it held were never released.
+                    keyboard.release_modifiers();
+                    self.retry_at[d] = now_ms + RETRY_MS;
+                }
+                Err(_) => {}
+            }
+        }
+    }
+
+    /// The reply the wait received, from the `i`-th outstanding read.
+    fn finish(
+        &mut self,
+        i: usize,
+        msg: &[u8],
+        handles: &[Handle],
+        keyboard: &mut Keyboard,
+        now_ms: u64,
+    ) {
+        if let Some(&d) = self.waiting.get(i) {
+            self.take_reply(d, msg, handles, keyboard, now_ms);
+        }
+    }
+
+    fn take_reply(
+        &mut self,
+        d: usize,
+        msg: &[u8],
+        handles: &[Handle],
+        keyboard: &mut Keyboard,
+        now_ms: u64,
+    ) {
+        for h in handles {
+            let _ = sys::handle_close(*h);
+        }
+        if let Some(reply) = self.pending[d].take() {
+            let _ = sys::handle_close(reply);
+        }
+        // Relaunched since its last reply, outside a read of ours too: the
+        // keys it held were never released (audit of the file manager, M2).
+        if self.instances[d].changed(msg) {
+            keyboard.release_modifiers();
+        }
+        let mut events = [aricode_proto::input::Event::default(); MAX_EVENTS];
+        let mut times = [0u64; MAX_EVENTS];
+        match InputClient::read_reply(msg, &mut events, &mut times) {
+            Ok(n) => {
                 for (e, t) in events[..n].iter().zip(&times[..n]) {
-                    merged[merged_len] = (
+                    if self.len == self.events.len() {
+                        break;
+                    }
+                    self.events[self.len] = (
                         *t,
                         d,
                         aricode_input::Event {
@@ -764,19 +999,27 @@ fn main(inputs: u64) -> u64 {
                             value: e.value,
                         },
                     );
-                    merged_len += 1;
+                    self.len += 1;
                 }
             }
+            // Another reader holds its one place (or the reply is not one):
+            // asked again after a pause.
+            Err(_) => self.retry_at[d] = now_ms + RETRY_MS,
         }
-        merged[..merged_len].sort_unstable_by_key(|(t, d, _)| (*t, *d));
-        for (at, _, ev) in &merged[..merged_len] {
-            comp.on_input(*ev, *at);
+    }
+
+    /// The events received so far, in time order (then by device).
+    fn take(&mut self) -> &[(u64, aricode_input::Event)] {
+        let held = &mut self.events[..self.len];
+        held.sort_unstable_by_key(|(t, d, _)| (*t, *d));
+        for (out, (t, _, ev)) in self.sorted.iter_mut().zip(held.iter()) {
+            *out = (*t, *ev);
         }
-        comp.expire(t);
-        comp.compose(t);
-        if devices.iter().all(Option::is_none) {
-            sys::thread_sleep(10);
-        }
+        &self.sorted[..self.len]
+    }
+
+    fn clear(&mut self) {
+        self.len = 0;
     }
 }
 

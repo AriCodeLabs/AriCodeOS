@@ -616,6 +616,7 @@ pub fn run_scenario(
                 marker: &h.marker,
                 keys: &h.keys,
                 mouse_rel: h.mouse_rel,
+                mouse_steps: h.mouse_steps,
                 click: h.click.as_deref(),
                 key_delay_ms: h.key_delay_ms,
                 echo_prompt: h.echo_prompt.as_deref(),
