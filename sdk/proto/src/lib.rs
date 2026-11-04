@@ -1241,8 +1241,10 @@ pub mod window {
         Timeout = 5,
     }
 
-    /// Event delivered to a window.
+    /// Event delivered to a window. More kinds may come: a program matches
+    /// the ones it knows (audit of ADR 0077, L8).
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[non_exhaustive]
     pub enum Event {
         /// Character already translated by the compositor.
         Key(u8),

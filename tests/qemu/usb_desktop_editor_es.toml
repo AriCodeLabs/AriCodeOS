@@ -2,7 +2,10 @@
 # with `kbd=es`, as on the reference laptop. In the file home/a the host
 # types ñ, the dead acute and a (á), AltGr+e (€) and saves: 7 bytes of
 # UTF-8. Then the dead acute and a space, as Linux types an apostrophe,
-# and saves again: 8 bytes. The shell then shows the file.
+# and saves again: 8 bytes. The shell then shows the file. Then the close
+# box (ADR 0077): with an unsaved `x` typed, the first click asks, and the
+# second closes. The editor, the launcher's second window, has its content
+# at (80, 100), 640 wide: its close box is at (704, 80), 16x16.
 name = "usb.desktop_editor_es"
 description = "the desktop editor takes ñ, accents and the euro sign from a Spanish keyboard"
 level = "full"
@@ -32,14 +35,27 @@ key_delay_ms = 100
 
 [[host_input_then]]
 marker = "editor: saved a (7 bytes)"
-keys = ["apostrophe", "spc", "ctrl+s"]
+# An `x` after the save: the change the close box asks about. A stage
+# points and clicks before it types, so the key goes with this one.
+keys = ["apostrophe", "spc", "ctrl+s", "x"]
 key_delay_ms = 100
+
+[[host_input_then]]
+marker = "editor: saved a (8 bytes)"
+mouse_rel = [70, -314]
+click = "left"
+
+[[host_input_then]]
+marker = "editor: unsaved changes: close again to discard them"
+click = "left"
 
 [expect]
 exit = 33
 serial_contains = [
     "editor: saved a (7 bytes)",
     "editor: saved a (8 bytes)",
+    "editor: unsaved changes: close again to discard them",
+    "editor: closed",
     "ARICODEOS_SHUTDOWN",
 ]
 serial_order = ["editor: saved a (8 bytes)", "ari> cat home/a", "ñá€'"]

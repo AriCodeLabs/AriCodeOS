@@ -408,7 +408,7 @@ fn main(_arg: u64) -> u64 {
                 let _ = win.close();
                 return 0;
             }
-            Event::Focus(_) => {}
+            _ => {}
         }
         f.draw(&mut win);
         let _ = win.present();

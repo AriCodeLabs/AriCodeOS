@@ -136,6 +136,12 @@ impl Editor {
         false
     }
 
+    fn disarm_close(&mut self) {
+        if matches!(self.armed, Some((Confirm::Close, _))) {
+            self.armed = None;
+        }
+    }
+
     /// The name field shows the file the text belongs to again, after an
     /// Open that failed (audit of the editor, M1).
     fn restore_name(&mut self) {
@@ -395,6 +401,11 @@ fn main(_arg: u64) -> u64 {
             // The compositor is gone: so is the desktop.
             Err(_) => return 5,
         };
+        // Anything but a second click on the close box disarms it (audit
+        // of ADR 0077, L6).
+        if !matches!(event, Event::Close | Event::Focus(_)) {
+            ed.disarm_close();
+        }
         match event {
             Event::Key(b) => {
                 for key in keys.feed(b).into_iter().flatten() {
@@ -412,14 +423,12 @@ fn main(_arg: u64) -> u64 {
                     ed.save();
                 }
             }
-            Event::Close => {
-                if ed.close_asked() {
-                    say(&[b"closed"]);
-                    let _ = win.close();
-                    return 0;
-                }
+            Event::Close if ed.close_asked() => {
+                say(&[b"closed"]);
+                let _ = win.close();
+                return 0;
             }
-            Event::Focus(_) => {}
+            _ => {}
         }
         ed.draw(&mut win);
         let _ = win.present();

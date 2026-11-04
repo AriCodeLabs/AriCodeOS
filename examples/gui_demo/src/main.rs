@@ -131,7 +131,12 @@ fn main(index: u64) -> u64 {
             Ok(Some(Event::Close)) => {
                 sys::print(name);
                 sys::print(b": asked to close; closing\n");
-                break;
+                if win.close().is_err() {
+                    return 5;
+                }
+                sys::print(name);
+                sys::print(b": window closed\n");
+                return 0;
             }
             Ok(Some(Event::Focus(f))) => {
                 sys::print(name);
@@ -142,6 +147,7 @@ fn main(index: u64) -> u64 {
                 });
                 idle = 0;
             }
+            Ok(Some(_)) => {}
             Ok(None) => idle += 1,
             Err(_) => return 3,
         }
