@@ -137,6 +137,7 @@ version = "0.17.0"
 dependencies = [
  "aricode-build",
  "aricode-cmdline",
+ "aricode-faults",
  "aricode-gfx",
  "aricode-input",
  "aricode-proto",

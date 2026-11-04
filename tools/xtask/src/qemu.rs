@@ -277,6 +277,8 @@ pub struct InputProbe<'a> {
     pub marker: &'a str,
     pub keys: &'a [String],
     pub mouse_rel: Option<(i32, i32)>,
+    /// `count` moves of (dx, dy), one every `every_ms` (`HostInput`).
+    pub mouse_steps: Option<(u32, i32, i32, u64)>,
     pub click: Option<&'a str>,
     /// Minimum pause after each key event (ms); none by default.
     pub key_delay_ms: u64,
@@ -351,6 +353,7 @@ fn run_input_probe(
     path: &Path,
     keys: &[String],
     mouse_rel: Option<(i32, i32)>,
+    mouse_steps: Option<(u32, i32, i32, u64)>,
     click: Option<&str>,
     key_delay: Duration,
     echo: Option<EchoWait>,
@@ -381,6 +384,17 @@ fn run_input_probe(
                     r#"{{"type":"rel","data":{{"axis":"y","value":{dy}}}}}"#
                 )],
             )?;
+        }
+        // Each move of a stroke is one QMP command: the mouse makes one
+        // packet of it, as a real one at its sampling rate.
+        if let Some((count, dx, dy, every_ms)) = mouse_steps {
+            let rel = |axis: &str, v: i32| {
+                format!(r#"{{"type":"rel","data":{{"axis":"{axis}","value":{v}}}}}"#)
+            };
+            for _ in 0..count {
+                step(&mut qmp, &[rel("x", dx), rel("y", dy)])?;
+                std::thread::sleep(Duration::from_millis(every_ms));
+            }
         }
         // A short pause between phases: the compositor orders by arrival time
         // and a real user does not click and type in the same millisecond.
@@ -1581,6 +1595,7 @@ pub fn run_headless(
                 let path = qmp.path().to_path_buf();
                 let keys = p.keys.to_vec();
                 let rel = p.mouse_rel;
+                let steps = p.mouse_steps;
                 let click = p.click.map(String::from);
                 let delay = Duration::from_millis(p.key_delay_ms);
                 let echo = p.echo_prompt.map(|prompt| EchoWait {
@@ -1590,7 +1605,7 @@ pub fn run_headless(
                     qemu_pid: child.id(),
                 });
                 input_thread = Some(std::thread::spawn(move || {
-                    run_input_probe(&path, &keys, rel, click.as_deref(), delay, echo)
+                    run_input_probe(&path, &keys, rel, steps, click.as_deref(), delay, echo)
                 }));
             }
             if input_thread.as_ref().is_some_and(|t| t.is_finished()) {
