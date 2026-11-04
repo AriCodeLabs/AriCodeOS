@@ -11,7 +11,7 @@
 
 use aricode_cmdline::{keys, CmdLine};
 use aricode_gfx::{Canvas, Damage, Desktop, Hit, Rect, Scene, Window};
-use aricode_input::{EscapeChord, Keyboard, BTN_LEFT, EV_KEY, EV_REL, REL_X, REL_Y};
+use aricode_input::{EscapeChord, Keyboard, Layout, BTN_LEFT, EV_KEY, EV_REL, REL_X, REL_Y};
 use aricode_proto::window::{Event, Op, Reply, Request, Status, MAX_SIDE};
 use aricode_rt::sys::input::InputClient;
 use aricode_rt::sys::{self, abi, Handle};
@@ -604,15 +604,24 @@ fn main(inputs: u64) -> u64 {
         *slot = InputClient::new(Handle(FIRST_INPUT + i as u32)).ok();
     }
     let mut args = [0u8; sys::CMDLINE_MAX];
-    let trace = match sys::cmdline(SYSTEM, &mut args) {
-        Ok(text) => CmdLine::new(text).has_flag(keys::GUI_TRACE),
+    // The keyboard layout of `kbd=`, the one the console uses too: a
+    // Spanish keyboard types the same characters in a window as at the
+    // console.
+    let (trace, layout) = match sys::cmdline(SYSTEM, &mut args) {
+        Ok(text) => {
+            let line = CmdLine::new(text);
+            let layout = line.get(keys::KBD).and_then(Layout::parse);
+            (line.has_flag(keys::GUI_TRACE), layout.unwrap_or_default())
+        }
         // A line that does not fit or is not text is reported, not read as
         // empty (ADR 0045, L5): the trace stays off.
         Err(_) => {
-            say(b"cannot read the command line (too long or not text): gui_trace off");
-            false
+            say(b"cannot read the command line (too long or not text): gui_trace off, US keyboard");
+            (false, Layout::Us)
         }
     };
+    let mut keyboard = Keyboard::new();
+    keyboard.set_layout(layout);
     if trace {
         say(b"gui_trace: logging every frame");
     }
@@ -623,7 +632,7 @@ fn main(inputs: u64) -> u64 {
         desktop,
         screen,
         contents: [const { None }; MAX_WINDOWS],
-        keyboard: Keyboard::new(),
+        keyboard,
         escape: EscapeChord::new(),
         next_frame_ms: 0,
         frames: 0,

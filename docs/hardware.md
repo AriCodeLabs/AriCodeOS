@@ -223,7 +223,7 @@ system) or regenerate the image with `--cmdline`:
 | Black screen or unresponsive devices after "iommu:" | `iommu=off` |
 | Too much output | `log=warn`; too little: `log=debug` |
 | No keyboard | check that the firmware exposes the i8042 (some disable it with "USB legacy"); the `console: PS/2 keyboard` trace must appear |
-| Shift+period types `>` instead of `:` | The keyboard is Spanish and the console uses the US layout: `kbd=es` on the cmdline (`cargo xtask usb-image --cmdline "shell kbd=es"`). Only affects the kernel's PS/2 keyboard; USB and virtio stay on US |
+| Shift+period types `>` instead of `:` | The keyboard is Spanish and the console uses the US layout: `kbd=es` on the cmdline (`cargo xtask usb-image --cmdline "shell kbd=es"`). It applies to the PS/2, USB and virtio keyboards, at the console and in the desktop |
 | "usb-input: no BAR 0 or no IRQ among the capabilities" | The function has neither MSI nor MSI-X (the `pci: … claimed (…)` trace says so); INTx is not supported |
 | "usb-input: xHCI initialization failed: …" | The step that failed: capabilities, DMA memory (the buffer is sized with the scratchpads the controller requests), reset or start |
 | "usb-input: no USB storage" with the USB stick plugged in | The USB stick is not on the xHCI: check the `Intel ports routed to xHCI` trace; if it is missing or the port is not switchable, the stick hangs off an EHCI and `usb-ehci: port 1.N: USB storage ...` should appear instead (see "EHCI ports" below) |

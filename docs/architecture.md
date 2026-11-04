@@ -182,9 +182,11 @@ and `page_tables_base/size` which tables it reclaims when activating its own.
   cells never contain the cursor.
 - Layouts: `aricode_input::Layout` (`Us`, `Es`; the Spanish one with
   `AltGr` for `@ # [ ] { } \ | ~` and without the non-ASCII keys). `kbd=es` on
-  the cmdline applies it to the kernel's PS/2 keyboard (scenario
-  `console.ps2_es`, with `shift+dot` combinations via QMP); the console
-  bridge and the compositor remain on US.
+  the cmdline applies it to every keyboard: the kernel's PS/2 one
+  (scenario `console.ps2_es`, with `shift+dot` combinations via QMP), the
+  console bridge's (init passes the layout in its `arg`,
+  `console.bridge_kbd_es`) and the compositor's, which reads the cmdline
+  itself (`gui.kbd_es`). Before 2026-11-04 the last two stayed on US.
 - Editing keys (arrows, home, end, delete) reach the console
   as a serial terminal's escape sequences (`ESC [ A`…, `ESC [ 3 ~`),
   whether they come from the kernel's PS/2 keyboard, the console bridge or the compositor:

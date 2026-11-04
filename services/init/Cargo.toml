@@ -19,6 +19,7 @@ aricode-manifest = { path = "../../libs/manifest" }
 aricode-proto = { path = "../../sdk/proto" }
 aricode-gpt = { path = "../../libs/gpt" }
 aricode-cmdline = { path = "../../libs/cmdline" }
+aricode-input = { path = "../../libs/input" }
 aricode-ab = { path = "../../libs/ab" }
 aricode-fat = { path = "../../libs/fat" }
 aricode-supervisor = { path = "../../libs/supervisor" }

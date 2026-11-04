@@ -4,11 +4,13 @@
 //! user-space keyboards (virtio-input, USB HID) to the kernel console input
 //! ring, so the shell reads from them just like from COM1 or the PS/2
 //! keyboard. Handles: 0x10004 = console input (`MANAGE`), 0x10005.. =
-//! endpoints of the input services (`arg` = how many).
+//! endpoints of the input services. `arg`: how many (bits 0..7) and the
+//! keyboard layout of `kbd=` (`Layout::code`, bits 8..15), the same the
+//! kernel gives its PS/2 keyboard.
 #![no_std]
 #![no_main]
 
-use aricode_input::{Keyboard, EV_KEY};
+use aricode_input::{Keyboard, Layout, EV_KEY};
 use aricode_proto::input::{Event, Reply, Status, MAX_EVENTS, MAX_READ_MS};
 use aricode_rt::sys::input::{InputClient, InputError};
 use aricode_rt::sys::{self, abi, Handle};
@@ -46,8 +48,9 @@ fn dropped(i: usize) {
     sys::print(b" is gone; dropping it\n");
 }
 
-fn main(count: u64) -> u64 {
-    let count = (count as usize).min(MAX_INPUTS);
+fn main(arg: u64) -> u64 {
+    let count = ((arg & 0xFF) as usize).min(MAX_INPUTS);
+    let layout = Layout::from_code((arg >> 8) & 0xFF);
     if count == 0 {
         say(b"no input devices");
         return 1;
@@ -68,6 +71,9 @@ fn main(count: u64) -> u64 {
     let mut backoff = [false; MAX_INPUTS];
     // One keyboard state per device: shift and lock state belong to it.
     let mut keyboards = [Keyboard::new(); MAX_INPUTS];
+    for k in &mut keyboards {
+        k.set_layout(layout);
+    }
     let mut buf = Buffers {
         events: [Event::default(); MAX_EVENTS],
         times: [0; MAX_EVENTS],

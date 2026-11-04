@@ -95,7 +95,9 @@ pub mod keys {
     pub const SHELL: &str = "shell";
     /// `gui`: the kernel hands the framebuffer to the user-space compositor.
     pub const GUI: &str = "gui";
-    /// `kbd=us|es`: PS/2 keyboard layout of the console (US by default).
+    /// `kbd=us|es`: keyboard layout (US by default) of every keyboard: the
+    /// console's PS/2 one, the USB and virtio ones through the console
+    /// bridge, and all of them in the compositor's windows.
     pub const KBD: &str = "kbd";
     /// `ps2=console`: the PS/2 keyboard and touchpad serve only the kernel
     /// console; while a process holds the screen their keys are withheld
