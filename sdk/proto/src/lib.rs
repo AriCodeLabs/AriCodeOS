@@ -1250,6 +1250,10 @@ pub mod window {
         Click { x: i32, y: i32, button: u8 },
         /// The window gained (`true`) or lost focus.
         Focus(bool),
+        /// The owner clicked the window's close box: the program closes it,
+        /// or asks first (unsaved changes). One that never takes this
+        /// event has its window closed for it at the next click (ADR 0077).
+        Close,
     }
 
     /// Reply (32 bytes): status, value and optional event.
@@ -1307,6 +1311,7 @@ pub mod window {
                     b[3] = 3;
                     b[16] = f as u8;
                 }
+                Some(Event::Close) => b[3] = 4,
             }
             b
         }
@@ -1333,6 +1338,7 @@ pub mod window {
                     button: b[24],
                 }),
                 3 => Some(Event::Focus(b[16] != 0)),
+                4 => Some(Event::Close),
                 _ => return None,
             };
             Some(Self {
@@ -1848,6 +1854,7 @@ mod tests {
                 button: 1,
             },
             Event::Focus(true),
+            Event::Close,
         ] {
             let reply = Reply::event(ev);
             assert_eq!(Reply::decode(&reply.encode()), Some(reply));

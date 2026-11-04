@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Test graphical application (Phase 26), a test package since ADR 0074:
 //! paints its window and listens for events. `arg` = 0 (Demo A) or 1 (Demo
-//! B, created 300 ms later so it ends up on top). The broker grants what
+//! B, created 300 ms later so it ends up on top), or 2 (Demo C, which never
+//! reads its events: the compositor closes its window for it at the second
+//! click on its close box, ADR 0077). The broker grants what
 //! its manifest asks for: its compositor session (WRITE, ADR 0052) and
 //! `HARDWARE` for the window's buffer. Demo B also checks that Demo A's
 //! window is out of its reach and leaves without closing its own: the
@@ -55,6 +57,8 @@ fn main(index: u64) -> u64 {
     };
     let (name, title, color) = if index == 0 {
         (b"gui_demo A" as &[u8], "Demo A", rgb(0xc0, 0x40, 0x40))
+    } else if index == 2 {
+        (b"gui_demo C" as &[u8], "Demo C", rgb(0x40, 0xa0, 0x40))
     } else {
         sys::thread_sleep(300);
         (b"gui_demo B" as &[u8], "Demo B", rgb(0x40, 0x80, 0xc0))
@@ -93,6 +97,15 @@ fn main(index: u64) -> u64 {
     }
     sys::print(name);
     sys::print(b": window presented\n");
+    if index == 2 {
+        // Hung, as far as the compositor can tell: no poll for 12 s.
+        sys::thread_sleep(12_000);
+        sys::print(match win.poll(10) {
+            Err(_) => b"gui_demo C: its window was closed for it\n" as &[u8],
+            Ok(_) => b"gui_demo C: its window is still open\n",
+        });
+        return 0;
+    }
     let mut got_key = false;
     let mut idle = 0;
     while !got_key && idle < 10 {
@@ -114,6 +127,11 @@ fn main(index: u64) -> u64 {
                 num_i32(y);
                 sys::print(b")\n");
                 idle = 0;
+            }
+            Ok(Some(Event::Close)) => {
+                sys::print(name);
+                sys::print(b": asked to close; closing\n");
+                break;
             }
             Ok(Some(Event::Focus(f))) => {
                 sys::print(name);

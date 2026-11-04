@@ -222,6 +222,9 @@ fn main(_arg: u64) -> u64 {
                     }
                 }
             }
+            // Its close box leaves the desktop, as the button does (ADR
+            // 0077).
+            Event::Close => break,
             Event::Focus(_) => {}
         }
         l.draw(&mut win);

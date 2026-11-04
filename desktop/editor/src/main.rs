@@ -61,6 +61,8 @@ enum Confirm {
     Discard,
     /// Save over another file of that name.
     Replace,
+    /// Close the window, throwing the unsaved changes away (ADR 0077).
+    Close,
 }
 
 struct Editor {
@@ -121,6 +123,16 @@ impl Editor {
             return true;
         }
         self.armed = Some((what, name));
+        false
+    }
+
+    /// The owner clicked the close box: whether to close now. Unsaved
+    /// changes ask first; a second click discards them (ADR 0077).
+    fn close_asked(&mut self) -> bool {
+        if !TEXT.lock().changed() || self.confirmed(Confirm::Close, [0; 26]) {
+            return true;
+        }
+        self.set_status(true, &[b"unsaved changes: close again to discard them"]);
         false
     }
 
@@ -398,6 +410,13 @@ fn main(_arg: u64) -> u64 {
                     ed.open();
                 } else if SAVE.contains(x, y) {
                     ed.save();
+                }
+            }
+            Event::Close => {
+                if ed.close_asked() {
+                    say(&[b"closed"]);
+                    let _ = win.close();
+                    return 0;
                 }
             }
             Event::Focus(_) => {}

@@ -251,6 +251,10 @@ pub const DESKTOP_BG: Color = rgb(0x1e, 0x29, 0x3b);
 pub const TITLE_ACTIVE: Color = rgb(0x3b, 0x82, 0xf6);
 pub const TITLE_INACTIVE: Color = rgb(0x64, 0x74, 0x8b);
 pub const TITLE_TEXT: Color = rgb(0xff, 0xff, 0xff);
+/// The close box at the right of a title bar (ADR 0077).
+pub const CLOSE_BG: Color = rgb(0xdc, 0x26, 0x26);
+/// Side of the close box, inside the title bar.
+pub const CLOSE_SIDE: u32 = TITLE_H - 4;
 
 /// Desktop window: the client paints the content in its own
 /// buffer; only its geometry is kept here.
@@ -267,6 +271,17 @@ impl Window {
     pub fn title_str(&self) -> &str {
         core::str::from_utf8(&self.title[..self.title_len as usize]).unwrap_or("?")
     }
+    /// The close box: a square at the right end of the title bar.
+    pub fn close_box(&self) -> Rect {
+        let f = self.frame();
+        Rect::new(
+            f.x + f.w as i32 - (BORDER + CLOSE_SIDE) as i32,
+            f.y + 2,
+            CLOSE_SIDE,
+            CLOSE_SIDE,
+        )
+    }
+
     /// Full frame: border and title bar.
     pub fn frame(&self) -> Rect {
         Rect::new(
@@ -287,6 +302,10 @@ pub enum Hit {
         id: u32,
         x: i32,
         y: i32,
+    },
+    /// The close box of a window's title bar (ADR 0077).
+    Close {
+        id: u32,
     },
 }
 
@@ -408,13 +427,17 @@ impl Desktop {
     /// Topmost window under `(x, y)` (frame included).
     pub fn hit(&self, x: i32, y: i32) -> Hit {
         for w in self.iter().collect_rev() {
-            if w.frame().contains(x, y) {
-                return Hit::Window {
-                    id: w.id,
-                    x: x - w.content.x,
-                    y: y - w.content.y,
-                };
+            if !w.frame().contains(x, y) {
+                continue;
             }
+            if w.close_box().contains(x, y) {
+                return Hit::Close { id: w.id };
+            }
+            return Hit::Window {
+                id: w.id,
+                x: x - w.content.x,
+                y: y - w.content.y,
+            };
         }
         Hit::Desktop
     }
@@ -492,8 +515,18 @@ impl Desktop {
                 TITLE_INACTIVE
             };
             out.fill_rect(&frame, title);
-            out.clipped(&frame)
+            let close = w.close_box();
+            // The title stops short of the close box.
+            let mut bar = frame;
+            bar.w = (close.x - frame.x - 2).max(0) as u32;
+            out.clipped(&bar)
                 .text(frame.x + 6, frame.y + 2, w.title_str(), TITLE_TEXT, None);
+            // Inside the frame, however narrow the window.
+            let mut boxed = out.clipped(&frame);
+            boxed.fill_rect(&close, CLOSE_BG);
+            boxed
+                .clipped(&close)
+                .text(close.x + 4, close.y, "×", TITLE_TEXT, None);
             out.fill_rect(&w.content, rgb(0, 0, 0));
             draw_content(w, &mut out.clipped(&w.content));
         }
@@ -821,6 +854,15 @@ mod tests {
                 y: -15
             }
         );
+        // The close box at the right end of A's title bar.
+        let close = d.get(a).unwrap().close_box();
+        let frame = d.get(a).unwrap().frame();
+        assert_eq!(
+            close.x + close.w as i32,
+            frame.x + frame.w as i32 - BORDER as i32
+        );
+        assert_eq!(d.hit(close.x + 1, close.y + 1), Hit::Close { id: a });
+        assert_ne!(d.hit(close.x - 1, close.y + 1), Hit::Close { id: a });
         d.raise(a);
         assert_eq!(d.focus, Some(a));
         assert_eq!(
@@ -879,7 +921,7 @@ mod tests {
         );
         // B's title bar active, A's inactive; background outside.
         assert_eq!(
-            screen.get(wb.content.x + 90, wb.content.y - 5),
+            screen.get(wb.content.x + 70, wb.content.y - 5),
             Some(TITLE_ACTIVE)
         );
         assert_eq!(

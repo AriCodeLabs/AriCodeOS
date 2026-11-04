@@ -1,0 +1,50 @@
+# The close box of the title bars (ADR 0077). Demo C (gui_demo 2) never
+# reads its events; Demo A does. The host clicks A's close box: A gets the
+# request, says so and closes its window. Then it clicks C's close box: the
+# request waits in C's queue, untaken; a second click 2.5 s later
+# (FORCE_CLOSE_MS is 2 s) closes C's window for it, and C, polling at last,
+# finds it gone. Window C is at content (40,60), A at (80,100), both
+# 400x300, so their close boxes are at (424,40) and (464,80), 16x16; the
+# pointer starts at the centre of the 1280x800 screen.
+name = "gui.close_box"
+description = "the close box asks a window's program to close, and closes a hung one's window at the second click"
+level = "full"
+areas = ["gui"]
+cmdline = "qemu_exit gui shell"
+install = ["examples/gui_demo"]
+stdin = ["spawn gui_demo 2", "sleep 500", "run gui_demo 0", "sleep 13000", "shutdown"]
+timeout_secs = 120
+
+[host_input]
+marker = "gui_demo A: focus gained"
+mouse_rel = [-170, -314]
+click = "left"
+
+[[host_input_then]]
+marker = "gui_demo A: window closed"
+mouse_rel = [-40, -40]
+click = "left"
+
+[[host_input_then]]
+marker = "compositor: window 1 asked to close"
+wait_ms = 2500
+click = "left"
+
+[expect]
+exit = 33
+serial_contains = [
+    "compositor: window 2 asked to close",
+    "gui_demo A: asked to close; closing",
+    "gui_demo A: window closed",
+    "compositor: window 1 asked to close",
+    "compositor: window 1 did not take the request to close; closed for it",
+    "gui_demo C: its window was closed for it",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "gui_demo C: its window is still open"]
+serial_order = [
+    "gui_demo A: asked to close; closing",
+    "compositor: window 1 asked to close",
+    "compositor: window 1 did not take the request to close; closed for it",
+    "gui_demo C: its window was closed for it",
+]
