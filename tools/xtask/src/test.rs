@@ -207,10 +207,10 @@ fn prebuild_packages(selected: &[&Scenario]) -> Result {
             .install
             .iter()
             .map(|spec| {
-                let dir = spec
-                    .split_once(":requires=")
-                    .map_or(spec.as_str(), |(d, _)| d);
-                (dir.to_string(), 1, false)
+                let corrupt = spec.strip_suffix(":corrupt");
+                let dir = corrupt.unwrap_or(spec);
+                let dir = dir.split_once(":requires=").map_or(dir, |(d, _)| d);
+                (dir.to_string(), 1, corrupt.is_some())
             })
             .collect();
         for spec in &s.packages {
@@ -274,15 +274,26 @@ pub fn run_scenario(
         .ok_or_else(|| format!("{}: unknown disk '{}'", s.name, s.disk))?;
     let mut installed: Vec<(String, Vec<u8>)> = Vec::new();
     for spec in &s.install {
-        let (dir, requires) = match spec.split_once(":requires=") {
-            None => (spec.as_str(), 0),
+        let corrupt = spec.strip_suffix(":corrupt");
+        let base = corrupt.unwrap_or(spec);
+        let (dir, requires) = match base.split_once(":requires=") {
+            None => (base, 0),
             Some((dir, level)) => match level.parse::<u32>() {
-                Ok(level) if level > 0 => (dir, level),
-                _ => return Err(format!("{}: install '{spec}': DIR[:requires=N]", s.name)),
+                Ok(level) if level > 0 && corrupt.is_none() => (dir, level),
+                _ => {
+                    return Err(format!(
+                        "{}: install '{spec}': DIR[:requires=N] or DIR:corrupt",
+                        s.name
+                    ))
+                }
             },
         };
-        let mut app =
-            build::build_external(std::path::Path::new(dir), 1, build::PACKAGES_RELEASE, false)?;
+        let mut app = build::build_external(
+            std::path::Path::new(dir),
+            1,
+            build::PACKAGES_RELEASE,
+            corrupt.is_some(),
+        )?;
         if requires > 0 {
             app = app.resigned(0, requires)?;
         }

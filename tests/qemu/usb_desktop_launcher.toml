@@ -1,0 +1,56 @@
+# The desktop's real launcher (ADR 0074 phase C) on a stick that boots
+# into the desktop. The broker offers it the installed applications that
+# open a window, each verified: gui_demo, not hello_ext (no window) nor a
+# hello_more whose signature was tampered with. Down, Up and
+# Enter open the first one; the demo's new window takes the focus. Once
+# the demo has closed its window, a click on "Leave the desktop" (which
+# also gives the launcher the focus back) ends the session.
+name = "usb.desktop_launcher"
+description = "the desktop launcher lists the window apps, opens one from the keyboard and leaves on a click"
+level = "full"
+areas = ["usb", "apps", "gui"]
+cmdline = "qemu_exit shell"
+selftest = false
+disk = "usb-image"
+install = ["examples/hello_ext", "examples/gui_demo", "examples/hello_more:corrupt", "desktop/launcher"]
+stick_profiles = ["desktop:launcher,gui_demo,hello_ext"]
+stdin = ["sleep 15000", "session", "shutdown"]
+timeout_secs = 120
+
+[host_input]
+marker = "launcher: ready"
+keys = ["down", "up", "ret"]
+key_delay_ms = 100
+
+# "Leave the desktop" at (220, 268) in the launcher's content, which the
+# first window has at (40, 60); the pointer starts at the screen's centre.
+[host_input_then]
+marker = "gui_demo A: window closed"
+mouse_rel = [-380, -72]
+click = "left"
+
+[expect]
+exit = 33
+serial_contains = [
+    "AriInit: the launcher is not offered hello_ext: it opens no window",
+    "AriInit: the launcher is not offered hello_more: it fails verification (signature or manifest hash)",
+    "launcher: offers gui_demo",
+    "launcher: 1 application(s) offered",
+    "launcher: ready",
+    "AriInit: the launcher asks to start gui_demo",
+    "launcher: started gui_demo",
+    "gui_demo A: focus gained",
+    "gui_demo A: window closed",
+    "launcher: leaving the desktop",
+    "AriInit: the desktop ended (its launcher exited with 0): back to the text console",
+    "session: desktop\r\n",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_order = [
+    "launcher: ready",
+    "launcher: started gui_demo",
+    "gui_demo A: window closed",
+    "launcher: leaving the desktop",
+    "AriInit: the desktop ended (its launcher exited with 0): back to the text console",
+]
+serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "launcher: offers hello_ext", "did not start"]

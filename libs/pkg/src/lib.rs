@@ -286,8 +286,74 @@ pub fn verify_streaming(
             aricode_initrd::InitrdError::Truncated
         })
     };
+    let (parsed, program, app_manifest) = signed_head(len, &mut fetch, pubkey, &unreadable)?;
+    let mut digest = |(offset, len): aricode_initrd::Span| {
+        let mut h = sha256::Sha256::new();
+        let mut piece = [0u8; HASH_PIECE];
+        let mut done = 0;
+        while done < len {
+            let n = (len - done).min(HASH_PIECE);
+            fetch(offset + done, &mut piece[..n]).map_err(|_| PkgError::Unreadable)?;
+            h.update(&piece[..n]);
+            done += n;
+        }
+        Ok(h.finish())
+    };
+    if digest(program)? != parsed.program_sha256 {
+        return Err(PkgError::HashMismatch("program"));
+    }
+    if digest(app_manifest)? != parsed.manifest_sha256 {
+        return Err(PkgError::HashMismatch("program.manifest"));
+    }
+    Ok(StreamVerified {
+        manifest: parsed,
+        program,
+        app_manifest,
+    })
+}
+
+/// What a package says it is, read piece by piece without hashing its
+/// program (ADR 0074 phase C: the launcher's list): the package manifest's
+/// signature is checked, and its application manifest is read into
+/// `app_out` and checked against the signed hash, so both are what the
+/// release key signed. The program is not checked: whoever runs the
+/// package verifies it whole first ([`verify`], [`verify_streaming`]).
+/// Returns the package manifest and the application manifest's length; an
+/// application manifest longer than `app_out` is `BadManifest`.
+pub fn inspect_streaming(
+    len: usize,
+    mut read: impl FnMut(usize, &mut [u8]) -> Result<(), ()>,
+    pubkey: &[u8; 32],
+    app_out: &mut [u8],
+) -> Result<(PkgManifest, usize), PkgError> {
+    let unreadable = core::cell::Cell::new(false);
+    let mut fetch = |offset: usize, buf: &mut [u8]| {
+        read(offset, buf).map_err(|()| {
+            unreadable.set(true);
+            aricode_initrd::InitrdError::Truncated
+        })
+    };
+    let (parsed, _, (offset, app_len)) = signed_head(len, &mut fetch, pubkey, &unreadable)?;
+    let app = app_out.get_mut(..app_len).ok_or(PkgError::BadManifest)?;
+    fetch(offset, app).map_err(|_| PkgError::Unreadable)?;
+    if sha256::sha256(app) != parsed.manifest_sha256 {
+        return Err(PkgError::HashMismatch("program.manifest"));
+    }
+    Ok((parsed, app_len))
+}
+
+/// The four files of a package read piece by piece, and its manifest with
+/// the signature checked: the manifest and the spans of the program and the
+/// application manifest. `unreadable` tells a failed read from a bad
+/// container.
+fn signed_head(
+    len: usize,
+    fetch: &mut impl FnMut(usize, &mut [u8]) -> Result<(), aricode_initrd::InitrdError>,
+    pubkey: &[u8; 32],
+    unreadable: &core::cell::Cell<bool>,
+) -> Result<(PkgManifest, aricode_initrd::Span, aricode_initrd::Span), PkgError> {
     let names = ["manifest", "manifest.sig", "program", "program.manifest"];
-    let [manifest, sig, program, app_manifest] = aricode_initrd::locate(len, &mut fetch, names)
+    let [manifest, sig, program, app_manifest] = aricode_initrd::locate(len, &mut *fetch, names)
         .map_err(|_| {
             if unreadable.get() {
                 PkgError::Unreadable
@@ -315,29 +381,7 @@ pub fn verify_streaming(
     }
     let text = core::str::from_utf8(manifest_bytes).map_err(|_| PkgError::BadManifest)?;
     let parsed = PkgManifest::parse(text).ok_or(PkgError::BadManifest)?;
-    let mut digest = |(offset, len): aricode_initrd::Span| {
-        let mut h = sha256::Sha256::new();
-        let mut piece = [0u8; HASH_PIECE];
-        let mut done = 0;
-        while done < len {
-            let n = (len - done).min(HASH_PIECE);
-            fetch(offset + done, &mut piece[..n]).map_err(|_| PkgError::Unreadable)?;
-            h.update(&piece[..n]);
-            done += n;
-        }
-        Ok(h.finish())
-    };
-    if digest(program)? != parsed.program_sha256 {
-        return Err(PkgError::HashMismatch("program"));
-    }
-    if digest(app_manifest)? != parsed.manifest_sha256 {
-        return Err(PkgError::HashMismatch("program.manifest"));
-    }
-    Ok(StreamVerified {
-        manifest: parsed,
-        program,
-        app_manifest,
-    })
+    Ok((parsed, program, app_manifest))
 }
 
 /// Builds and signs a package (host tools); `requires` is its lowest
@@ -461,6 +505,48 @@ mod tests {
             },
             pk,
         )
+    }
+
+    #[test]
+    fn inspection_checks_the_manifests_not_the_program() {
+        let pk = ed25519::public_key(&SEED);
+        let elf: std::vec::Vec<u8> = (0..50_000u32).map(|i| (i * 3) as u8).collect();
+        let app = b"name = demo\ncaps = window\n";
+        let pkg = build("demo", 2, 0, &elf, app, &SEED, false).unwrap();
+        let inspect = |pkg: &[u8], out: &mut [u8]| {
+            inspect_streaming(
+                pkg.len(),
+                |o, b| {
+                    b.copy_from_slice(pkg.get(o..o + b.len()).ok_or(())?);
+                    Ok(())
+                },
+                &pk,
+                out,
+            )
+        };
+        let mut out = [0u8; 64];
+        let (m, n) = inspect(&pkg, &mut out).unwrap();
+        assert_eq!((m.name_str(), m.version), ("demo", 2));
+        assert_eq!(&out[..n], app);
+        assert_eq!(
+            inspect(&pkg, &mut [0u8; 8]).err(),
+            Some(PkgError::BadManifest)
+        );
+        let v = streaming(&pkg, &pk).unwrap();
+        // A changed program is not seen here (the launch sees it)...
+        let mut program = pkg.clone();
+        program[v.program.0 + 10] ^= 1;
+        assert!(inspect(&program, &mut out).is_ok());
+        assert!(streaming(&program, &pk).is_err());
+        // ...a changed application manifest or signature is.
+        let mut manifest = pkg.clone();
+        manifest[v.app_manifest.0] ^= 1;
+        assert_eq!(
+            inspect(&manifest, &mut out).err(),
+            Some(PkgError::HashMismatch("program.manifest"))
+        );
+        let bad = build("demo", 2, 0, &elf, app, &SEED, true).unwrap();
+        assert_eq!(inspect(&bad, &mut out).err(), Some(PkgError::BadSignature));
     }
 
     #[test]

@@ -5,3 +5,7 @@
 
 # Agent worktrees (local only)
 /.claude/worktrees/
+
+# Out-of-workspace package crates built by hand (cargo clippy --manifest-path)
+/desktop/*/target
+/examples/*/target

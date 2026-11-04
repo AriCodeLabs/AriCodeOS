@@ -1,8 +1,11 @@
 # The `launch` capability (ADR 0074 phase B). The test package `launcher`
 # holds it: through the broker's launch endpoint it starts the installed
-# hello_ext and gui_demo, each with its own manifest, and the broker
-# refuses the rest, each refusal said: a system program from the initrd,
-# the launcher itself, a launch waited for and one with a console.
+# gui_demo with its own manifest, and the broker refuses the rest, each
+# refusal said: hello_ext, which opens no window (phase C), a system
+# program from the initrd, the launcher itself, a launch waited for, one
+# with a console and a list request with another flag. Its
+# apps have a pool of their own (ADR 0074 phase C): six at once, then
+# `Limit`, though it was started from the shell.
 name = "apps.launch"
 description = "launch: the launcher starts installed apps with their own manifests and nothing else"
 level = "full"
@@ -19,8 +22,8 @@ serial_contains = [
     "with manifest [window launch]",
     "launcher: window presented",
     "AriInit: the launcher asks to start hello_ext",
-    "launcher: hello_ext: started",
-    "hello_ext v1: hello from outside the tree (arg 5)",
+    "AriInit: denied, the launcher starts applications with a window only, and hello_ext opens none",
+    "launcher: hello_ext (no window): denied",
     "AriInit: refused, the launcher may start installed applications only, and installer is a system program",
     "launcher: installer (a system program): denied",
     "AriInit: refused, the launcher asked to start itself",
@@ -31,6 +34,9 @@ serial_contains = [
     "AriInit: the launcher asks to start gui_demo",
     "launcher: gui_demo: started",
     "gui_demo A: window presented",
+    "AriInit: gui_demo: the desktop's 6 application slots are full",
+    "launcher: the broker answered limit after 5 more gui_demo",
+    "launcher: a list with another flag: invalid",
     "launcher: the broker kept every rule",
     "gui_demo A: window closed",
     "launcher: leaving",
@@ -41,6 +47,7 @@ serial_absent = [
     "KERNEL PANIC",
     "USER STACK OVERFLOW",
     "the broker broke a rule",
+    "hello_ext v1: hello from outside the tree (arg 5)",
     "hello_ext v1: hello from outside the tree (arg 6)",
     "hello_ext v1: hello from outside the tree (arg 7)",
     "AriInit: launch installer",

@@ -1293,9 +1293,12 @@ latter briefly to add the region.
   compositor and input endpoints only if requested, adds `HARDWARE` only when there are
   buffers to reserve and launches with the manifest's quota; it replies with the
   exit code or `Killed` when the program ends, without blocking
-  init: `launch` leaves the process in one of the `MAX_RUNNING` (4) slots and
-  `poll_launches` replies when it reaps it (ADR 0015). With no free slot the
-  launch gets `Limit`. With `Request::DETACH` (`sys::launch::spawn`,
+  init: `launch` leaves the process in a slot and `poll_launches` replies
+  when it reaps it (ADR 0015). The shell's launches have `MAX_RUNNING` (4)
+  slots; the desktop's launcher one of its own and its applications
+  `MAX_LAUNCHED` (6), so neither leaves the other without one (`Pool`,
+  the owner's choice in ADR 0074 phase C). With no free slot in its pool
+  the launch gets `Limit`. With `Request::DETACH` (`sys::launch::spawn`,
   `spawn` in the shell) the broker replies `Started` when it creates the process and
   nobody waits for its exit. If the program is not in the initrd, the broker
   looks for it installed in AriFS (`apps/NAME.aripkg`, ADR 0017): it copies the
@@ -1324,7 +1327,15 @@ latter briefly to add the region.
   applications, without a console, each with its own manifest: an initrd
   program (installer, updater, shell), the launcher itself, a launch that
   waits for the exit or carries a console, and service status requests are
-  refused and said. The launcher's apps share the `MAX_RUNNING` slots.
+  refused and said. `Request::LIST` there asks for the `arg`-th
+  application the launcher may offer (an `Entry`): the broker lists
+  `apps/*.aripkg` again at index 0 and keeps those that verify piece by
+  piece (`verify_streaming`), run on this system, open a window and ask
+  for nothing an application may not have, saying why it leaves each
+  other out; the launch checks it all again. The real launcher is
+  `desktop/launcher` (a package of the desktop profile; the test package
+  `examples/test_launcher` has the same name). A new window takes the
+  focus.
 - fsd serves up to 15 *sessions* besides its main endpoint (ADR 0036):
   each `Bind` (only through the main endpoint) creates an endpoint bound
   to a prefix, each `Share` (ADR 0016) one bound to a single file in read

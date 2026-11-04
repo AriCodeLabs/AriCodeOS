@@ -9,6 +9,8 @@
 
 #![no_std]
 
+use aricode_input::term::{Key, KeyDecoder};
+
 /// Previous lines, most recent first: `back(1)` is the last one entered.
 pub trait History {
     fn back(&self, n: usize) -> Option<&[u8]>;
@@ -23,20 +25,11 @@ pub enum Event {
     Submit,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Esc {
-    None,
-    /// After `ESC`.
-    Start,
-    /// After `ESC [` (or `ESC O`), collecting a numeric parameter.
-    Csi(u8),
-}
-
 pub struct Editor<const N: usize> {
     buf: [u8; N],
     len: usize,
     pos: usize,
-    esc: Esc,
+    keys: KeyDecoder,
     /// Position in the history: 0 = the line being edited, n = `n` back.
     back: usize,
 }
@@ -53,7 +46,7 @@ impl<const N: usize> Editor<N> {
             buf: [0; N],
             len: 0,
             pos: 0,
-            esc: Esc::None,
+            keys: KeyDecoder::new(),
             back: 0,
         }
     }
@@ -62,7 +55,7 @@ impl<const N: usize> Editor<N> {
     pub fn reset(&mut self) {
         self.len = 0;
         self.pos = 0;
-        self.esc = Esc::None;
+        self.keys = KeyDecoder::new();
         self.back = 0;
     }
 
@@ -76,59 +69,33 @@ impl<const N: usize> Editor<N> {
 
     /// Processes one input byte, writing the screen updates to `out`.
     pub fn feed(&mut self, b: u8, history: &dyn History, out: &mut dyn FnMut(&[u8])) -> Event {
-        match self.esc {
-            Esc::Start => {
-                self.esc = if b == b'[' || b == b'O' {
-                    Esc::Csi(0)
-                } else {
-                    Esc::None
-                };
-                return Event::Pending;
-            }
-            Esc::Csi(n) => {
-                match b {
-                    b'0'..=b'9' => {
-                        self.esc = Esc::Csi(n.saturating_mul(10).saturating_add(b - b'0'));
-                        return Event::Pending;
+        let mut event = Event::Pending;
+        for key in self.keys.feed(b).into_iter().flatten() {
+            match key {
+                Key::Enter => {
+                    self.end(out);
+                    out(b"\n");
+                    event = Event::Submit;
+                }
+                Key::Backspace => {
+                    if self.pos > 0 {
+                        self.left(out);
+                        self.delete(out);
                     }
-                    b';' => return Event::Pending,
-                    _ => {}
                 }
-                self.esc = Esc::None;
-                match (b, n) {
-                    (b'A', _) => self.history(1, history, out),
-                    (b'B', _) => self.history(-1, history, out),
-                    (b'C', _) => self.right(out),
-                    (b'D', _) => self.left(out),
-                    (b'H', _) | (b'~', 1) | (b'~', 7) => self.home(out),
-                    (b'F', _) | (b'~', 4) | (b'~', 8) => self.end(out),
-                    (b'~', 3) => self.delete(out),
-                    _ => {}
-                }
-                return Event::Pending;
+                Key::Up => self.history(1, history, out),
+                Key::Down => self.history(-1, history, out),
+                Key::Right => self.right(out),
+                Key::Left => self.left(out),
+                Key::Home | Key::Ctrl(b'a') => self.home(out),
+                Key::End | Key::Ctrl(b'e') => self.end(out),
+                Key::Delete => self.delete(out),
+                Key::Ctrl(b'u') => self.replace(b"", out), // clear the line
+                Key::Char(c) => self.insert(c, out),
+                Key::Tab | Key::Escape | Key::Ctrl(_) => {}
             }
-            Esc::None => {}
         }
-        match b {
-            0x1B => self.esc = Esc::Start,
-            b'\r' | b'\n' => {
-                self.end(out);
-                out(b"\n");
-                return Event::Submit;
-            }
-            0x08 | 0x7F => {
-                if self.pos > 0 {
-                    self.left(out);
-                    self.delete(out);
-                }
-            }
-            0x01 => self.home(out),         // Ctrl-A
-            0x05 => self.end(out),          // Ctrl-E
-            0x15 => self.replace(b"", out), // Ctrl-U: clear the line
-            0x20..=0x7E => self.insert(b, out),
-            _ => {}
-        }
-        Event::Pending
+        event
     }
 
     fn left(&mut self, out: &mut dyn FnMut(&[u8])) {
@@ -292,6 +259,15 @@ mod tests {
 
     fn keys(parts: &[&[u8]]) -> Vec<u8> {
         parts.concat()
+    }
+
+    #[test]
+    fn a_lone_escape_types_nothing_and_the_next_key_counts() {
+        let h = Hist(Vec::new());
+        // Since the shared decoder (audit of ADR 0074 phase C, L6) the key
+        // after a lone ESC is typed, as terminals do for Alt+key.
+        let (line, pos, _) = run(b"a\x1bbc\x1b[1;5D\x1b[Zd", &h);
+        assert_eq!((line.as_slice(), pos), (&b"abdc"[..], 3));
     }
 
     #[test]

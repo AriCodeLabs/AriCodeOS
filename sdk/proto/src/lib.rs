@@ -1339,6 +1339,10 @@ pub mod launch {
         /// The request carries the program's console (the send side of an
         /// endpoint); never with `DETACH`.
         pub const CONSOLE: u8 = 2;
+        /// The launcher asks for the `arg`-th installed application it may
+        /// offer (ADR 0074 phase C); the reply is an [`Entry`]. The name is
+        /// empty.
+        pub const LIST: u8 = 4;
 
         /// `None` if the name does not fit.
         pub fn new(name: &str, arg: u64) -> Option<Self> {
@@ -1353,6 +1357,20 @@ pub mod launch {
                 name_len: name.len() as u8,
                 flags: 0,
             })
+        }
+
+        /// The request for the `index`-th installed application (`LIST`).
+        pub fn list(index: u64) -> Self {
+            Self {
+                arg: index,
+                name: [0; MAX_NAME],
+                name_len: 0,
+                flags: Self::LIST,
+            }
+        }
+
+        pub fn is_list(&self) -> bool {
+            self.flags & Self::LIST != 0
         }
 
         pub fn detached(mut self) -> Self {
@@ -1473,11 +1491,93 @@ pub mod launch {
             })
         }
     }
+    /// Reply to a `LIST` request (48 bytes): `Ok` with an installed
+    /// application's name, or `NotFound` past the last one.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Entry {
+        pub status: Status,
+        pub name: [u8; MAX_NAME],
+        pub name_len: u8,
+    }
+
+    impl Entry {
+        pub const LEN: usize = 48;
+
+        pub fn status(status: Status) -> Self {
+            Self {
+                status,
+                name: [0; MAX_NAME],
+                name_len: 0,
+            }
+        }
+
+        /// `None` if the name is empty or does not fit.
+        pub fn named(name: &str) -> Option<Self> {
+            if name.is_empty() || name.len() > MAX_NAME {
+                return None;
+            }
+            let mut e = Self::status(Status::Ok);
+            e.name[..name.len()].copy_from_slice(name.as_bytes());
+            e.name_len = name.len() as u8;
+            Some(e)
+        }
+
+        pub fn name_str(&self) -> &str {
+            core::str::from_utf8(&self.name[..self.name_len as usize]).unwrap_or("")
+        }
+
+        pub fn encode(&self) -> [u8; Self::LEN] {
+            let mut b = [0u8; Self::LEN];
+            b[0] = PROTOCOL;
+            b[1] = VERSION;
+            b[2] = self.status as u8;
+            b[3] = self.name_len;
+            b[16..48].copy_from_slice(&self.name);
+            b
+        }
+
+        pub fn decode(b: &[u8]) -> Option<Self> {
+            if b.len() < Self::LEN || b[0] != PROTOCOL || b[1] != VERSION {
+                return None;
+            }
+            let status = Reply::decode(&b[..Reply::LEN])?.status;
+            let name_len = b[3];
+            if name_len as usize > MAX_NAME {
+                return None;
+            }
+            let mut name = [0u8; MAX_NAME];
+            name.copy_from_slice(&b[16..48]);
+            Some(Self {
+                status,
+                name,
+                name_len,
+            })
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::block::*;
+
+    #[test]
+    fn launch_list_round_trip() {
+        use super::launch::{Entry, Request, Status};
+        let req = Request::decode(&Request::list(3).encode()).unwrap();
+        assert!(req.is_list() && !req.is_detached() && req.arg == 3);
+        assert_eq!(req.name_str(), "");
+        let e = Entry::decode(&Entry::named("editor").unwrap().encode()).unwrap();
+        assert_eq!((e.status, e.name_str()), (Status::Ok, "editor"));
+        let end = Entry::decode(&Entry::status(Status::NotFound).encode()).unwrap();
+        assert_eq!((end.status, end.name_str()), (Status::NotFound, ""));
+        assert!(Entry::named("").is_none());
+        let mut bad = Entry::named("x").unwrap().encode();
+        bad[3] = 40;
+        assert!(
+            Entry::decode(&bad).is_none(),
+            "a name longer than its field"
+        );
+    }
 
     #[test]
     fn launch_round_trip() {
