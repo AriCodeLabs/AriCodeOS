@@ -238,9 +238,13 @@ impl Keyboard {
                 es::Sym::None,
             ],
             Layout::Es if i < es::KEYS.len() => es::KEYS[i],
-            _ => return KeyBytes::NONE,
+            // A key that types nothing ends a dead key unused (audit of
+            // ADR 0076, L6).
+            _ => {
+                self.dead = None;
+                return KeyBytes::NONE;
+            }
         };
-        let letter = matches!(levels[0], es::Sym::Char(c) if c.is_lowercase());
         if self.ctrl != 0 {
             // Ctrl with a letter of the alphabet is its control character;
             // anything else gives nothing and ends a dead key.
@@ -250,10 +254,18 @@ impl Keyboard {
                 _ => KeyBytes::NONE,
             };
         }
-        let upper = self.shift ^ (self.caps && letter && !self.altgr);
-        let sym = levels[usize::from(self.altgr) * 2 + usize::from(upper)];
+        // Caps Lock acts on a pair of levels that is a letter and its
+        // capital, as xkb's alphabetic key types do: a and A, ñ and Ñ, æ and
+        // Æ with AltGr; not º and ª (audit of ADR 0076, L5).
+        let base = usize::from(self.altgr) * 2;
+        let letter = es::is_case_pair(levels[base], levels[base + 1]);
+        let upper = self.shift ^ (self.caps && letter);
+        let sym = levels[base + usize::from(upper)];
         let ch = match sym {
-            es::Sym::None => return KeyBytes::NONE,
+            es::Sym::None => {
+                self.dead = None;
+                return KeyBytes::NONE;
+            }
             es::Sym::Dead(dead) => {
                 return match self.dead.replace(dead) {
                     // The same dead key twice: the accent itself.
@@ -1087,10 +1099,14 @@ mod tests {
         }
         k.feed(key(KEY_RIGHTALT, 0));
         assert_eq!(typed(&mut k, 30), "a");
-        // Caps Lock reaches ñ and ç, as letters.
+        // Caps Lock reaches ñ and ç, as letters, and æ with AltGr; not º.
         typed(&mut k, KEY_CAPSLOCK);
         assert_eq!(typed(&mut k, KEY_SEMICOLON), "Ñ");
         assert_eq!(typed(&mut k, KEY_BACKSLASH), "Ç");
+        assert_eq!(typed(&mut k, KEY_GRAVE), "º");
+        k.feed(key(KEY_RIGHTALT, 1));
+        assert_eq!(typed(&mut k, 30), "Æ");
+        k.feed(key(KEY_RIGHTALT, 0));
         typed(&mut k, KEY_CAPSLOCK);
         // Ctrl with ñ gives nothing; with a letter, its control character.
         k.feed(key(KEY_LEFTCTRL, 1));
@@ -1170,6 +1186,9 @@ mod tests {
         typed(&mut k, &[acute]);
         k.release_modifiers();
         assert_eq!(typed(&mut k, &[a]), "a");
+        // So does a key that types nothing: F1 (59) or Page Down (109).
+        assert_eq!(typed(&mut k, &[acute, (59, false), a]), "a");
+        assert_eq!(typed(&mut k, &[acute, (109, false), a]), "a");
         // The longest output fits: an accent and the euro sign.
         typed(&mut k, &[acute]);
         k.feed(key(KEY_RIGHTALT, 1));

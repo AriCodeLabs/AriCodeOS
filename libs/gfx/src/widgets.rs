@@ -24,6 +24,20 @@ pub const FIELD_BG: Color = rgb(0xff, 0xff, 0xff);
 pub const EDGE: Color = rgb(0xcb, 0xd5, 0xe1);
 pub const ERROR: Color = rgb(0xb9, 0x1c, 0x1c);
 
+/// Characters of `s`, one cell each (ADR 0076): its bytes that are not
+/// UTF-8 continuation bytes.
+pub const fn char_count(s: &str) -> usize {
+    let b = s.as_bytes();
+    let (mut i, mut n) = (0, 0);
+    while i < b.len() {
+        if b[i] & 0xC0 != 0x80 {
+            n += 1;
+        }
+        i += 1;
+    }
+    n
+}
+
 /// Width in pixels of `chars` characters of the console font.
 pub const fn text_width(chars: usize) -> u32 {
     (chars * GLYPH_WIDTH) as u32
@@ -47,7 +61,7 @@ impl<'a> Button<'a> {
 
     /// A button `label` wide (plus margins) at `(x, y)`.
     pub const fn at(x: i32, y: i32, label: &'a str) -> Self {
-        let w = text_width(label.len()) + 2 * PAD as u32;
+        let w = text_width(char_count(label)) + 2 * PAD as u32;
         Self::new(Rect::new(x, y, w, ROW_H), label)
     }
 
@@ -65,7 +79,7 @@ impl<'a> Button<'a> {
         c.fill_rect(&self.rect, EDGE);
         let inner = inset(&self.rect, 1);
         c.fill_rect(&inner, bg);
-        let tx = self.rect.x + (self.rect.w as i32 - text_width(self.label.len()) as i32) / 2;
+        let tx = self.rect.x + (self.rect.w as i32 - text_width(char_count(self.label)) as i32) / 2;
         let ty = self.rect.y + (self.rect.h as i32 - LINE_H as i32) / 2;
         c.text(tx, ty, self.label, fg, None);
     }
@@ -190,23 +204,41 @@ pub fn utf8_prefix(bytes: &[u8]) -> &str {
     }
 }
 
-/// Where the character before `pos` starts: one step back over UTF-8, at
-/// most three continuation bytes (a stray one is a character of its own).
-fn prev_char(buf: &[u8], pos: usize) -> usize {
-    let mut p = pos.saturating_sub(1);
-    while p > 0 && pos - p < 4 && buf[p] & 0xC0 == 0x80 {
-        p -= 1;
+/// Where the character after the one at `pos` starts, within `len`: a lead
+/// byte takes as many continuation bytes as it announces and finds; any
+/// other byte (ASCII, a stray continuation byte, one that starts nothing)
+/// is a character of its own, shown as `?` when it is not text (audit of
+/// ADR 0076, M2).
+fn next_char(buf: &[u8], pos: usize, len: usize) -> usize {
+    let need = match buf[pos] {
+        0xC2..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        0xF0..=0xF4 => 4,
+        _ => 1,
+    };
+    let mut p = pos + 1;
+    while p < len && p - pos < need && buf[p] & 0xC0 == 0x80 {
+        p += 1;
     }
     p
 }
 
-/// Where the character after the one at `pos` starts, within `len`.
-fn next_char(buf: &[u8], pos: usize, len: usize) -> usize {
-    let mut p = (pos + 1).min(len);
-    while p < len && p - pos < 4 && buf[p] & 0xC0 == 0x80 {
-        p += 1;
+/// Where the character before `pos` starts, by the same rule as
+/// `next_char`: the lead byte up to three bytes back whose character ends
+/// exactly at `pos`, or else the byte just before.
+fn prev_char(buf: &[u8], pos: usize) -> usize {
+    if pos == 0 {
+        return 0;
     }
-    p
+    let mut p = pos - 1;
+    while p > 0 && pos - p < 4 && buf[p] & 0xC0 == 0x80 {
+        p -= 1;
+    }
+    if next_char(buf, p, pos) == pos {
+        p
+    } else {
+        pos - 1
+    }
 }
 
 /// The character that `buf[from..to]` holds, as it is shown: a tab as a
@@ -425,8 +457,10 @@ impl<const N: usize> TextArea<N> {
     pub fn set(&mut self, text: &[u8]) -> bool {
         let mut n = text.len().min(N);
         if n < text.len() {
-            // Not inside a character.
-            while n > 0 && text[n] & 0xC0 == 0x80 && text.len() - n < 4 {
+            // Not inside a character: back over at most three continuation
+            // bytes from the cut (audit of ADR 0076, L3).
+            let cut = n;
+            while n > 0 && text[n] & 0xC0 == 0x80 && cut - n < 3 {
                 n -= 1;
             }
         }
@@ -645,6 +679,23 @@ mod tests {
         assert_eq!(small.text(), "añ".as_bytes());
         assert!(!small.set("aañ".as_bytes()));
         assert_eq!(small.text(), b"aa");
+        assert!(!small.set("añ€€€".as_bytes()), "cut far from the end");
+        assert_eq!(small.text(), "añ".as_bytes());
+        // Stray bytes are one `?` each, and never swallow a character.
+        t.set(b"said \x93hi\x94");
+        t.key(Key::End);
+        assert_eq!(t.caret_line_col(), (0, 9));
+        t.key(Key::Backspace);
+        assert_eq!(t.text(), b"said \x93hi");
+        t.key(Key::Backspace);
+        assert_eq!(t.text(), b"said \x93h");
+        t.set(b"a\x80\x80\x80\x80");
+        t.key(Key::End);
+        assert_eq!(t.caret_line_col(), (0, 5));
+        for _ in 0..5 {
+            t.key(Key::Left);
+        }
+        assert_eq!(t.caret(), 0, "left and right agree on the steps");
         t.set(b"a\xFFb");
         t.key(Key::End);
         assert_eq!(t.caret_line_col(), (0, 3));

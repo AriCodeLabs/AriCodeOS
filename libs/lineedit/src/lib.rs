@@ -93,7 +93,13 @@ impl<const N: usize> Editor<N> {
                 Key::End | Key::Ctrl(b'e') => self.end(out),
                 Key::Delete => self.delete(out),
                 Key::Ctrl(b'u') => self.replace(b"", out), // clear the line
-                Key::Char(c) => self.insert(c, out),
+                // Only what takes one cell everywhere: the characters the
+                // console shows. A combining mark, a wide or zero-width
+                // character or a direction override would put a host
+                // terminal's cursor where the editor does not think it is
+                // (audit of ADR 0076, L9).
+                Key::Char(c) if aricode_fb_console::cell_code(c).is_some() => self.insert(c, out),
+                Key::Char(_) => {}
                 Key::Tab | Key::Escape | Key::Ctrl(_) => {}
             }
         }
@@ -229,7 +235,12 @@ impl<const N: usize> Editor<N> {
             }
         };
         let mut copy = [0u8; N];
-        let n = text.len().min(N);
+        let mut n = text.len().min(N);
+        // Not inside a character (audit of ADR 0076, L4).
+        let cut = n;
+        while n > 0 && n < text.len() && text[n] & 0xC0 == 0x80 && cut - n < 3 {
+            n -= 1;
+        }
         copy[..n].copy_from_slice(&text[..n]);
         self.back = target;
         self.replace(&copy[..n], out);
@@ -429,6 +440,9 @@ mod tests {
         let (line, _, screen) = run(&k, &h);
         assert_eq!(line, "añil".as_bytes());
         assert_eq!(screen, "añil".as_bytes());
+        // What the console does not show in one cell is refused.
+        let k = keys(&["a\u{301}b\u{202E}c漢".as_bytes()]);
+        assert_eq!(run(&k, &h).0, b"abc");
         // A full line refuses a character that does not fit whole.
         let mut e: Editor<4> = Editor::new();
         let mut sink = |_: &[u8]| {};

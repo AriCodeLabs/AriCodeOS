@@ -242,13 +242,13 @@ impl Settings {
     }
 }
 
-/// `text` split where a row of `cols` ends, at the last space before it:
-/// the row and the rest.
+/// `text` split where a row of `cols` characters ends, at the last space
+/// before it: the row and the rest (a character is a cell, ADR 0076).
 fn wrap(text: &str, cols: usize) -> (&str, &str) {
-    if text.len() <= cols || !text.is_char_boundary(cols) {
+    let Some((end, _)) = text.char_indices().nth(cols) else {
         return (text, "");
-    }
-    let cut = text[..cols].rfind(' ').filter(|&i| i > 0).unwrap_or(cols);
+    };
+    let cut = text[..end].rfind(' ').filter(|&i| i > 0).unwrap_or(end);
     (&text[..cut], text[cut..].trim_start())
 }
 

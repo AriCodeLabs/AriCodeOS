@@ -182,10 +182,7 @@ impl Files {
         if !aricode_proto::fs::valid_plain_name(self.field.text(), NAME_MAX) {
             self.set_status(
                 true,
-                &[
-                    "a name has a-z, A-Z, digits, '.', '_' or '-' only (no accents or ñ)"
-                        .as_bytes(),
-                ],
+                &["names: a-z, 0-9, . _ - (no accents or ñ)".as_bytes()],
             );
             self.focus = Focus::Name;
             return None;

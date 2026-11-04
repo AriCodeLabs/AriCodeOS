@@ -95,3 +95,38 @@ AltGr = 100, the evdev codes `symbols/es` names.
 - **The US layout** does not change.
 - **Not done.** Scripts beyond Latin-1, and right-to-left or combining
   characters, would need a larger font and wider cells.
+
+## On the laptop
+
+The owner, 2026-11-05, with dev build 22 and the desktop apps at version
+2: "it works now in the terminal and in the editor".
+
+## Audit
+
+An independent read-only review found no high findings: no byte stream,
+from the keyboard, serial, SSH or a file, makes any of these panic. It
+found two medium and seven low ones, all fixed:
+
+- **M1.** The editor still called any file that was not ASCII damaged
+  ("shown as ?"). It now says so only of text that is not UTF-8.
+- **M2.** `next_char` joined stray continuation bytes to the character
+  before them, so `i` in a cp1252 `“hi”` disappeared into a `?`. A lead
+  byte now takes only the continuation bytes it announces; any other byte
+  is a character of its own, and `prev_char` follows the same rule.
+- **L3.** `TextArea::set` could cut inside a character when the text was
+  more than three bytes too long. It now backs off from the cut.
+- **L4.** A line from the history was cut to the editor's size anywhere.
+  It is now cut between characters.
+- **L5.** Caps Lock now acts on a pair of levels that is a letter and its
+  capital, as xkb's alphabetic types do: AltGr+a gives Æ, and º no longer
+  becomes ª.
+- **L6.** A key that types nothing (F1, Page Down) now ends a dead key, as
+  the editing keys do.
+- **L7.** The message about file names was cut off in the file manager. It
+  is now `names: a-z, 0-9, . _ - (no accents or ñ)`.
+- **L8.** Buttons and the settings' line wrap now count characters, not
+  bytes.
+- **L9.** The shell's line editor now takes only the characters the
+  console shows, each in one cell. A combining mark, a wide or zero-width
+  character, or a direction override would have moved a host terminal's
+  cursor, over SSH, away from where the editor counts it.

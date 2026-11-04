@@ -69,6 +69,16 @@ impl Dead {
     }
 }
 
+/// Whether two levels are a letter and its capital (`a`/`A`, `ñ`/`Ñ`,
+/// `æ`/`Æ`): the levels Caps Lock swaps.
+pub fn is_case_pair(lower: Sym, upper: Sym) -> bool {
+    let (Sym::Char(l), Sym::Char(u)) = (lower, upper) else {
+        return false;
+    };
+    let mut up = l.to_uppercase();
+    l != u && up.next() == Some(u) && up.next().is_none()
+}
+
 const N: Sym = Sym::None;
 
 const fn c(ch: char) -> Sym {
