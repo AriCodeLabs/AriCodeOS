@@ -69,7 +69,7 @@ impl Line {
     }
 
     fn text(&self) -> &str {
-        core::str::from_utf8(&self.buf[..self.len]).unwrap_or("?")
+        widgets::utf8_prefix(&self.buf[..self.len])
     }
 }
 

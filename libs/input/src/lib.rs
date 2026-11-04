@@ -9,6 +9,7 @@
 
 use aricode_abi::ps2;
 
+pub mod es;
 pub mod term;
 
 pub const EV_SYN: u16 = 0;
@@ -81,7 +82,8 @@ impl Event {
     }
 }
 
-/// Keyboard layout: US (ANSI QWERTY) or Spanish (ISO, with `AltGr`).
+/// Keyboard layout: US (ANSI QWERTY) or Spanish (ISO, with `AltGr` and
+/// dead keys, as Linux types it: [`es`]).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum Layout {
     #[default]
@@ -118,8 +120,11 @@ impl Layout {
 }
 
 /// Keyboard: tracks shift, Ctrl and `AltGr` and translates key presses
-/// according to the layout. Ctrl with a letter gives its control character
-/// (`0x01` for Ctrl+A), as a terminal sends it; with any other key, nothing.
+/// according to the layout into UTF-8 (ADR 0076). Ctrl with a letter gives
+/// its control character (`0x01` for Ctrl+A), as a terminal sends it; with
+/// any other key, nothing. A dead key gives nothing until the next key:
+/// the accented letter, or the accent and that key when they do not
+/// combine (as the Linux console does).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Keyboard {
     shift: bool,
@@ -128,16 +133,9 @@ pub struct Keyboard {
     /// Bits: left Ctrl, right Ctrl.
     ctrl: u8,
     layout: Layout,
+    /// A dead key pressed, waiting for the next key.
+    dead: Option<es::Dead>,
 }
-
-/// Spanish keyboard (ISO): evdev codes 1..=86 (esc..`<`). Anything that is
-/// not ASCII (ñ, ç, accents, º, ¡, ¿, ·) produces nothing.
-const ES_PLAIN: &[u8; 87] =
-    b"\0\x1b1234567890'\0\x08\tqwertyuiop`+\n\0asdfghjkl\0\0\0\0\0zxcvbnm,.-\0*\0 \0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0<";
-const ES_SHIFTED: &[u8; 87] =
-    b"\0\x1b!\"\0$%&/()=?\0\x08\tQWERTYUIOP^*\n\0ASDFGHJKL\0\0\0\0\0ZXCVBNM;:_\0*\0 \0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0>";
-const ES_ALTGR: &[u8; 87] =
-    b"\0\0|@#~\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0[]\0\0\0\0\0\0\0\0\0\0\0\0{\\\0}\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
 
 /// Row of evdev codes 1..=57 (esc..space) without and with shift.
 const PLAIN: &[u8; 58] =
@@ -157,6 +155,7 @@ impl Keyboard {
             altgr: false,
             ctrl: 0,
             layout,
+            dead: None,
         }
     }
 
@@ -171,6 +170,7 @@ impl Keyboard {
         self.shift = false;
         self.altgr = false;
         self.ctrl = 0;
+        self.dead = None;
     }
 
     pub fn layout(&self) -> Layout {
@@ -225,66 +225,109 @@ impl Keyboard {
             _ => None,
         };
         if let Some(seq) = escape {
+            // An editing key ends a dead key unused.
+            self.dead = None;
             return KeyBytes::sequence(seq);
         }
         let i = ev.code as usize;
-        let (plain, shifted, altgr) = match self.layout {
-            Layout::Us if i < PLAIN.len() => (PLAIN[i], SHIFTED[i], 0),
-            Layout::Es if i < ES_PLAIN.len() => (ES_PLAIN[i], ES_SHIFTED[i], ES_ALTGR[i]),
+        let levels = match self.layout {
+            Layout::Us if i < PLAIN.len() => [
+                ascii(PLAIN[i]),
+                ascii(SHIFTED[i]),
+                es::Sym::None,
+                es::Sym::None,
+            ],
+            Layout::Es if i < es::KEYS.len() => es::KEYS[i],
             _ => return KeyBytes::NONE,
         };
-        if self.altgr {
-            return if altgr == 0 {
-                KeyBytes::NONE
-            } else {
-                KeyBytes::single(altgr)
-            };
-        }
-        if plain == 0 {
-            return KeyBytes::NONE;
-        }
-        let letter = plain.is_ascii_lowercase();
+        let letter = matches!(levels[0], es::Sym::Char(c) if c.is_lowercase());
         if self.ctrl != 0 {
-            return if letter {
-                KeyBytes::single(plain & 0x1F)
-            } else {
-                KeyBytes::NONE
+            // Ctrl with a letter of the alphabet is its control character;
+            // anything else gives nothing and ends a dead key.
+            self.dead = None;
+            return match levels[0] {
+                es::Sym::Char(c) if c.is_ascii_lowercase() => KeyBytes::single(c as u8 & 0x1F),
+                _ => KeyBytes::NONE,
             };
         }
-        let upper = self.shift ^ (self.caps && letter);
-        let b = if upper { shifted } else { plain };
-        if b == 0 {
-            KeyBytes::NONE
-        } else {
-            KeyBytes::single(b)
+        let upper = self.shift ^ (self.caps && letter && !self.altgr);
+        let sym = levels[usize::from(self.altgr) * 2 + usize::from(upper)];
+        let ch = match sym {
+            es::Sym::None => return KeyBytes::NONE,
+            es::Sym::Dead(dead) => {
+                return match self.dead.replace(dead) {
+                    // The same dead key twice: the accent itself.
+                    Some(first) if first == dead => {
+                        self.dead = None;
+                        KeyBytes::chars(&[dead.alone()])
+                    }
+                    // Another dead key: the first one's accent, and this
+                    // one waits.
+                    Some(first) => KeyBytes::chars(&[first.alone()]),
+                    None => KeyBytes::NONE,
+                };
+            }
+            es::Sym::Char(ch) => ch,
+        };
+        match self.dead.take() {
+            None => KeyBytes::chars(&[ch]),
+            Some(dead) if ch == ' ' => KeyBytes::chars(&[dead.with_space()]),
+            Some(dead) => match dead.combine(ch) {
+                Some(accented) => KeyBytes::chars(&[accented]),
+                // Control keys (Enter, Tab, Backspace, Esc) end it unused.
+                None if ch.is_control() => KeyBytes::chars(&[ch]),
+                None => KeyBytes::chars(&[dead.alone(), ch]),
+            },
         }
     }
 }
 
-/// Bytes produced by a key press: nothing, one character or an escape
-/// sequence (up to 4 bytes).
+/// Bytes produced by a key press: nothing, a character or two in UTF-8
+/// (an accent that did not combine and the key after it) or an escape
+/// sequence; at most [`KeyBytes::MAX`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyBytes {
-    buf: [u8; 4],
+    buf: [u8; KeyBytes::MAX],
     len: u8,
 }
 
+/// A level of a US key: its ASCII character, or nothing.
+const fn ascii(b: u8) -> es::Sym {
+    if b == 0 {
+        es::Sym::None
+    } else {
+        es::Sym::Char(b as char)
+    }
+}
+
 impl KeyBytes {
+    /// Two characters of up to four bytes each in UTF-8.
+    pub const MAX: usize = 8;
+
     pub const NONE: Self = Self {
-        buf: [0; 4],
+        buf: [0; Self::MAX],
         len: 0,
     };
 
     const fn single(b: u8) -> Self {
-        Self {
-            buf: [b, 0, 0, 0],
-            len: 1,
+        let mut buf = [0; Self::MAX];
+        buf[0] = b;
+        Self { buf, len: 1 }
+    }
+
+    /// `chars` in UTF-8; at most two fit.
+    fn chars(chars: &[char]) -> Self {
+        let mut k = Self::NONE;
+        for ch in chars.iter().take(2) {
+            let n = ch.encode_utf8(&mut k.buf[k.len as usize..]).len();
+            k.len += n as u8;
         }
+        k
     }
 
     fn sequence(seq: &[u8]) -> Self {
-        let mut buf = [0u8; 4];
-        let len = seq.len().min(4);
+        let mut buf = [0u8; Self::MAX];
+        let len = seq.len().min(Self::MAX);
         buf[..len].copy_from_slice(&seq[..len]);
         Self {
             buf,
@@ -913,6 +956,7 @@ impl EscapeChord {
 #[cfg(test)]
 mod tests {
     use super::*;
+    extern crate std;
 
     fn key(code: u16, value: u32) -> Event {
         Event {
@@ -995,39 +1039,64 @@ mod tests {
     #[test]
     fn spanish_layout_shift_altgr_and_dead_keys() {
         let mut k = Keyboard::with_layout(Layout::Es);
+        let mut typed = |k: &mut Keyboard, code: u16| {
+            let out = k.feed(key(code, 1));
+            k.feed(key(code, 0));
+            std::string::String::from_utf8(out.as_slice().to_vec()).unwrap()
+        };
         assert_eq!(Layout::parse("es"), Some(Layout::Es));
         assert_eq!(Layout::parse("fr"), None);
         // `.` and, with shift, `:`; `7` and `/`; `-` and `_`; `<` and `>`.
-        assert_eq!(k.feed(key(KEY_DOT, 1)).as_slice(), b".");
+        assert_eq!(typed(&mut k, KEY_DOT), ".");
         k.feed(key(KEY_LEFTSHIFT, 1));
-        assert_eq!(k.feed(key(KEY_DOT, 1)).as_slice(), b":");
-        assert_eq!(k.feed(key(8, 1)).as_slice(), b"/");
-        assert_eq!(k.feed(key(KEY_SLASH, 1)).as_slice(), b"_");
-        assert_eq!(k.feed(key(KEY_102ND, 1)).as_slice(), b">");
-        assert_eq!(k.feed(key(3, 1)).as_slice(), b"\"");
-        assert!(k.feed(key(4, 1)).is_empty(), "shift+3 is · (not ASCII)");
+        assert_eq!(typed(&mut k, KEY_DOT), ":");
+        assert_eq!(typed(&mut k, 8), "/");
+        assert_eq!(typed(&mut k, KEY_SLASH), "_");
+        assert_eq!(typed(&mut k, KEY_102ND), ">");
+        assert_eq!(typed(&mut k, 3), "\"");
+        assert_eq!(typed(&mut k, 4), "·");
+        assert_eq!(typed(&mut k, KEY_SEMICOLON), "Ñ");
+        assert_eq!(typed(&mut k, KEY_EQUAL), "¿");
         k.feed(key(KEY_LEFTSHIFT, 0));
-        assert_eq!(k.feed(key(KEY_102ND, 1)).as_slice(), b"<");
-        assert_eq!(k.feed(key(KEY_SLASH, 1)).as_slice(), b"-");
-        assert_eq!(k.feed(key(KEY_MINUS, 1)).as_slice(), b"'");
-        // AltGr: @ # [ ] { } \ | ~.
+        assert_eq!(typed(&mut k, KEY_102ND), "<");
+        assert_eq!(typed(&mut k, KEY_SLASH), "-");
+        assert_eq!(typed(&mut k, KEY_MINUS), "'");
+        assert_eq!(typed(&mut k, KEY_SEMICOLON), "ñ");
+        assert_eq!(typed(&mut k, KEY_BACKSLASH), "ç");
+        assert_eq!(typed(&mut k, KEY_GRAVE), "º");
+        assert_eq!(typed(&mut k, KEY_EQUAL), "¡");
+        // AltGr, as Linux's `es`: @ # [ ] { } \\ | ~ € ¬, and { } on 7 and 0.
         k.feed(key(KEY_RIGHTALT, 1));
-        assert_eq!(k.feed(key(3, 1)).as_slice(), b"@");
-        assert_eq!(k.feed(key(4, 1)).as_slice(), b"#");
-        assert_eq!(k.feed(key(KEY_LEFTBRACE, 1)).as_slice(), b"[");
-        assert_eq!(k.feed(key(KEY_RIGHTBRACE, 1)).as_slice(), b"]");
-        assert_eq!(k.feed(key(KEY_APOSTROPHE, 1)).as_slice(), b"{");
-        assert_eq!(k.feed(key(KEY_BACKSLASH, 1)).as_slice(), b"}");
-        assert_eq!(k.feed(key(KEY_GRAVE, 1)).as_slice(), b"\\");
-        assert_eq!(k.feed(key(2, 1)).as_slice(), b"|");
-        assert_eq!(k.feed(key(5, 1)).as_slice(), b"~");
-        assert!(k.feed(key(30, 1)).is_empty(), "AltGr+a produces nothing");
+        for (code, out) in [
+            (3, "@"),
+            (4, "#"),
+            (KEY_LEFTBRACE, "["),
+            (KEY_RIGHTBRACE, "]"),
+            (KEY_APOSTROPHE, "{"),
+            (KEY_BACKSLASH, "}"),
+            (KEY_GRAVE, "\\"),
+            (2, "|"),
+            (5, "~"),
+            (18, "€"),
+            (7, "¬"),
+            (8, "{"),
+            (11, "}"),
+            (30, "æ"),
+        ] {
+            assert_eq!(typed(&mut k, code), out, "AltGr+{code}");
+        }
         k.feed(key(KEY_RIGHTALT, 0));
-        assert_eq!(k.feed(key(30, 1)).as_slice(), b"a");
-        // ñ, ç and the º key are not ASCII.
-        assert!(k.feed(key(KEY_SEMICOLON, 1)).is_empty());
-        assert!(k.feed(key(KEY_BACKSLASH, 1)).is_empty());
-        assert!(k.feed(key(KEY_GRAVE, 1)).is_empty());
+        assert_eq!(typed(&mut k, 30), "a");
+        // Caps Lock reaches ñ and ç, as letters.
+        typed(&mut k, KEY_CAPSLOCK);
+        assert_eq!(typed(&mut k, KEY_SEMICOLON), "Ñ");
+        assert_eq!(typed(&mut k, KEY_BACKSLASH), "Ç");
+        typed(&mut k, KEY_CAPSLOCK);
+        // Ctrl with ñ gives nothing; with a letter, its control character.
+        k.feed(key(KEY_LEFTCTRL, 1));
+        assert_eq!(typed(&mut k, KEY_SEMICOLON), "");
+        assert_eq!(typed(&mut k, 30), "\x01");
+        k.feed(key(KEY_LEFTCTRL, 0));
         // The US keyboard does not change.
         let mut us = Keyboard::new();
         us.feed(key(KEY_LEFTSHIFT, 1));
@@ -1035,6 +1104,78 @@ mod tests {
         us.set_layout(Layout::Es);
         assert_eq!(us.feed(key(KEY_DOT, 1)).as_slice(), b":");
     }
+
+    #[test]
+    fn spanish_dead_keys_combine_as_linux_does() {
+        let mut k = Keyboard::with_layout(Layout::Es);
+        let mut typed = |k: &mut Keyboard, codes: &[(u16, bool)]| {
+            let mut out = std::vec::Vec::new();
+            for &(code, shift) in codes {
+                if shift {
+                    k.feed(key(KEY_LEFTSHIFT, 1));
+                }
+                out.extend_from_slice(k.feed(key(code, 1)).as_slice());
+                k.feed(key(code, 0));
+                if shift {
+                    k.feed(key(KEY_LEFTSHIFT, 0));
+                }
+            }
+            std::string::String::from_utf8(out).unwrap()
+        };
+        let acute = (KEY_APOSTROPHE, false);
+        let diaeresis = (KEY_APOSTROPHE, true);
+        let grave = (KEY_LEFTBRACE, false);
+        let circumflex = (KEY_LEFTBRACE, true);
+        let (a, e, u, n, x) = (
+            (30, false),
+            (18, false),
+            (22, false),
+            (49, false),
+            (45, false),
+        );
+        let space = (KEY_SPACE, false);
+        // The dead key gives nothing until the next key.
+        assert_eq!(typed(&mut k, &[acute]), "");
+        assert_eq!(typed(&mut k, &[a]), "á");
+        assert_eq!(typed(&mut k, &[acute, (30, true)]), "Á");
+        assert_eq!(typed(&mut k, &[diaeresis, u]), "ü");
+        assert_eq!(typed(&mut k, &[grave, e]), "è");
+        assert_eq!(typed(&mut k, &[circumflex, e]), "ê");
+        // With a space, the `Compose` file's character; twice, the accent.
+        assert_eq!(typed(&mut k, &[acute, space]), "'");
+        assert_eq!(typed(&mut k, &[grave, space]), "`");
+        assert_eq!(typed(&mut k, &[circumflex, space]), "^");
+        assert_eq!(typed(&mut k, &[diaeresis, space]), "\"");
+        assert_eq!(typed(&mut k, &[acute, acute]), "´");
+        // With a key it does not combine with: the accent, then the key.
+        assert_eq!(typed(&mut k, &[acute, x]), "´x");
+        assert_eq!(typed(&mut k, &[acute, n]), "´n");
+        // Another dead key: the first one's accent, and the second waits.
+        assert_eq!(typed(&mut k, &[acute, grave, a]), "´à");
+        // AltGr+ñ is the dead tilde; AltGr+¡ the dead cedilla.
+        k.feed(key(KEY_RIGHTALT, 1));
+        assert_eq!(typed(&mut k, &[(KEY_SEMICOLON, false)]), "");
+        k.feed(key(KEY_RIGHTALT, 0));
+        assert_eq!(typed(&mut k, &[n]), "ñ");
+        k.feed(key(KEY_RIGHTALT, 1));
+        typed(&mut k, &[(KEY_EQUAL, false)]);
+        k.feed(key(KEY_RIGHTALT, 0));
+        assert_eq!(typed(&mut k, &[(46, false)]), "ç");
+        // Enter, an arrow or a lost release end it unused.
+        assert_eq!(typed(&mut k, &[acute, (KEY_ENTER, false)]), "\n");
+        assert_eq!(typed(&mut k, &[a]), "a");
+        typed(&mut k, &[acute]);
+        assert_eq!(k.feed(key(KEY_LEFT, 1)).as_slice(), b"\x1b[D");
+        assert_eq!(typed(&mut k, &[a]), "a");
+        typed(&mut k, &[acute]);
+        k.release_modifiers();
+        assert_eq!(typed(&mut k, &[a]), "a");
+        // The longest output fits: an accent and the euro sign.
+        typed(&mut k, &[acute]);
+        k.feed(key(KEY_RIGHTALT, 1));
+        assert_eq!(typed(&mut k, &[e]), "´€");
+    }
+
     #[test]
     fn scancode_set1_to_evdev_and_ascii() {
         let mut d = ScancodeSet1::new();

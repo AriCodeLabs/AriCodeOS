@@ -180,8 +180,12 @@ and `page_tables_base/size` which tables it reclaims when activating its own.
   blinks while the console is idle (no writes since the previous
   blink); any write hides it before painting, so the
   cells never contain the cursor.
-- Layouts: `aricode_input::Layout` (`Us`, `Es`; the Spanish one with
-  `AltGr` for `@ # [ ] { } \ | ~` and without the non-ASCII keys). `kbd=es` on
+- Layouts: `aricode_input::Layout` (`Us`, `Es`). The Spanish one is the
+  layout Linux types (ADR 0076, `libs/input/src/es.rs`, checked against the
+  host's xkeyboard-config by `tools/check-keymap.py`): four levels per key,
+  ñ, ç and the dead accents, which combine as Linux's `Compose` does. Keys
+  give UTF-8; the console and the windows show Latin-1 and € (the font's
+  cell codes), and anything else as `?`. `kbd=es` on
   the cmdline applies it to every keyboard: the kernel's PS/2 one
   (scenario `console.ps2_es`, with `shift+dot` combinations via QMP), the
   console bridge's (init passes the layout in its `arg`,

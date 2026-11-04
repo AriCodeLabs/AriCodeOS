@@ -101,7 +101,13 @@ impl Editor {
             return None;
         }
         if !aricode_proto::fs::valid_plain_name(text, 26) {
-            self.set_status(true, &[b"a name has letters, digits, '.', '_' or '-' only"]);
+            self.set_status(
+                true,
+                &[
+                    "a name has a-z, A-Z, digits, '.', '_' or '-' only (no accents or ñ)"
+                        .as_bytes(),
+                ],
+            );
             self.focus = Focus::Name;
             return None;
         }
@@ -319,7 +325,7 @@ impl Editor {
         } else {
             widgets::MUTED
         };
-        let shown = core::str::from_utf8(&status[..n]).unwrap_or("");
+        let shown = widgets::utf8_prefix(&status[..n]);
         c.text(PAD, STATUS_Y, shown, color, None);
         text.draw(&mut c, &TEXT_RECT, self.focus == Focus::Text);
     }

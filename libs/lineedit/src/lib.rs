@@ -1,10 +1,12 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 // SPDX-License-Identifier: Apache-2.0
 //! Line editor for text consoles (the shell's `read_line`). It understands
-//! the keys a terminal sends (printable ASCII, backspace `0x08`/`0x7F`,
+//! the keys a terminal sends (characters in UTF-8, ADR 0076; backspace
+//! `0x08`/`0x7F`,
 //! Enter, Ctrl-A/E/U, and the escape sequences of the arrows, Home, End and
 //! Delete) and redraws using only plain text and backspace, which both the
-//! framebuffer console and a serial terminal understand. History is
+//! framebuffer console and a serial terminal understand: one cell per
+//! character, so the cursor moves a character at a time. History is
 //! provided by the caller through [`History`].
 
 #![no_std]
@@ -98,17 +100,45 @@ impl<const N: usize> Editor<N> {
         event
     }
 
+    /// Where the character before `pos` starts (UTF-8: back over at most
+    /// three continuation bytes).
+    fn before(&self, pos: usize) -> usize {
+        let mut p = pos.saturating_sub(1);
+        while p > 0 && pos - p < 4 && self.buf[p] & 0xC0 == 0x80 {
+            p -= 1;
+        }
+        p
+    }
+
+    /// Where the character at `pos` ends.
+    fn after(&self, pos: usize) -> usize {
+        let mut p = (pos + 1).min(self.len);
+        while p < self.len && p - pos < 4 && self.buf[p] & 0xC0 == 0x80 {
+            p += 1;
+        }
+        p
+    }
+
+    /// Cells the bytes `from..to` take on the screen: one per character.
+    fn cells(&self, from: usize, to: usize) -> usize {
+        self.buf[from..to]
+            .iter()
+            .filter(|&&b| b & 0xC0 != 0x80)
+            .count()
+    }
+
     fn left(&mut self, out: &mut dyn FnMut(&[u8])) {
         if self.pos > 0 {
-            self.pos -= 1;
+            self.pos = self.before(self.pos);
             out(b"\x08");
         }
     }
 
     fn right(&mut self, out: &mut dyn FnMut(&[u8])) {
         if self.pos < self.len {
-            out(&self.buf[self.pos..self.pos + 1]);
-            self.pos += 1;
+            let next = self.after(self.pos);
+            out(&self.buf[self.pos..next]);
+            self.pos = next;
         }
     }
 
@@ -132,28 +162,32 @@ impl<const N: usize> Editor<N> {
         for _ in 0..extra {
             out(b" ");
         }
-        for _ in 0..(self.len - self.pos + extra) {
+        for _ in 0..(self.cells(self.pos, self.len) + extra) {
             out(b"\x08");
         }
     }
 
-    fn insert(&mut self, b: u8, out: &mut dyn FnMut(&[u8])) {
-        if self.len == N {
+    /// Inserts `ch` at the cursor; a character that does not fit whole is
+    /// refused.
+    fn insert(&mut self, ch: char, out: &mut dyn FnMut(&[u8])) {
+        let n = ch.len_utf8();
+        if self.len + n > N {
             return;
         }
-        self.buf.copy_within(self.pos..self.len, self.pos + 1);
-        self.buf[self.pos] = b;
-        self.len += 1;
-        out(&[b]);
-        self.pos += 1;
+        self.buf.copy_within(self.pos..self.len, self.pos + n);
+        ch.encode_utf8(&mut self.buf[self.pos..self.pos + n]);
+        self.len += n;
+        out(&self.buf[self.pos..self.pos + n]);
+        self.pos += n;
         self.redraw_tail(0, out);
     }
 
     /// Deletes the character under the cursor.
     fn delete(&mut self, out: &mut dyn FnMut(&[u8])) {
         if self.pos < self.len {
-            self.buf.copy_within(self.pos + 1..self.len, self.pos);
-            self.len -= 1;
+            let next = self.after(self.pos);
+            self.buf.copy_within(next..self.len, self.pos);
+            self.len -= next - self.pos;
             self.redraw_tail(1, out);
         }
     }
@@ -161,15 +195,20 @@ impl<const N: usize> Editor<N> {
     /// Replaces the whole line with `text` and leaves the cursor at its end.
     fn replace(&mut self, text: &[u8], out: &mut dyn FnMut(&[u8])) {
         self.home(out);
-        let old = self.len;
-        let n = text.len().min(N);
+        let old = self.cells(0, self.len);
+        let mut n = text.len().min(N);
+        // Not inside a character.
+        while n > 0 && n < text.len() && text[n] & 0xC0 == 0x80 {
+            n -= 1;
+        }
         self.buf[..n].copy_from_slice(&text[..n]);
         self.len = n;
         out(&self.buf[..n]);
-        for _ in n..old {
+        let new = self.cells(0, n);
+        for _ in new..old {
             out(b" ");
         }
-        for _ in n..old {
+        for _ in new..old {
             out(b"\x08");
         }
         self.pos = n;
@@ -222,18 +261,26 @@ mod tests {
         (e.line().to_vec(), e.cursor(), screen.text())
     }
 
-    /// One-row terminal: text overwrites, backspace moves left.
+    /// One-row terminal: text overwrites a cell per character (UTF-8),
+    /// backspace moves left.
     #[derive(Default)]
     struct Screen {
-        cells: Vec<u8>,
+        cells: Vec<char>,
         col: usize,
+        pending: Vec<u8>,
     }
     impl Screen {
         fn write(&mut self, b: &[u8]) {
-            for &c in b {
+            self.pending.extend_from_slice(b);
+            let Ok(text) = core::str::from_utf8(&self.pending) else {
+                return; // a character cut between two writes
+            };
+            let text: std::string::String = text.into();
+            self.pending.clear();
+            for c in text.chars() {
                 match c {
-                    0x08 => self.col = self.col.saturating_sub(1),
-                    b'\n' => {}
+                    '\x08' => self.col = self.col.saturating_sub(1),
+                    '\n' => {}
                     _ => {
                         if self.col == self.cells.len() {
                             self.cells.push(c);
@@ -246,11 +293,11 @@ mod tests {
             }
         }
         fn text(&self) -> Vec<u8> {
-            let mut t = self.cells.clone();
-            while t.last() == Some(&b' ') {
+            let mut t: std::string::String = self.cells.iter().collect();
+            while t.ends_with(' ') {
                 t.pop();
             }
-            t
+            t.into_bytes()
         }
     }
 
@@ -361,5 +408,33 @@ mod tests {
         }
         assert_eq!(e.line(), b"abcd", "full line ignores extra input");
         assert_eq!(e.feed(b'\r', &h, &mut sink), Event::Submit);
+    }
+
+    #[test]
+    fn characters_of_several_bytes_are_one_cell() {
+        let h = Hist(std::vec!["añil".as_bytes()]);
+        // ñ and € are typed, moved over and deleted whole.
+        let k = keys(&["añb€".as_bytes(), LEFT, LEFT, b"\x7f", RIGHT, b"x"]);
+        let (line, pos, screen) = run(&k, &h);
+        assert_eq!(line, "abx€".as_bytes());
+        assert_eq!(pos, 3);
+        assert_eq!(screen, "abx€".as_bytes());
+        // Home, Delete at a two-byte character, End.
+        let k = keys(&["ñandú".as_bytes(), b"\x1b[H\x1b[3~\x1b[F!"]);
+        let (line, pos, screen) = run(&k, &h);
+        assert_eq!((line.as_slice(), pos), ("andú!".as_bytes(), 6));
+        assert_eq!(screen, "andú!".as_bytes());
+        // A line from the history with ñ replaces a longer one cell for cell.
+        let k = keys(&["ñandúes".as_bytes(), b"\x1b[A"]);
+        let (line, _, screen) = run(&k, &h);
+        assert_eq!(line, "añil".as_bytes());
+        assert_eq!(screen, "añil".as_bytes());
+        // A full line refuses a character that does not fit whole.
+        let mut e: Editor<4> = Editor::new();
+        let mut sink = |_: &[u8]| {};
+        for &k in "abc€".as_bytes() {
+            e.feed(k, &h, &mut sink);
+        }
+        assert_eq!(e.line(), b"abc");
     }
 }

@@ -9,7 +9,8 @@
 
 #![no_std]
 
-use aricode_fb_console::font::{FIRST_CHAR, GLYPHS, GLYPH_WIDTH, LAST_CHAR};
+use aricode_fb_console::char_glyph;
+use aricode_fb_console::font::GLYPH_WIDTH;
 
 pub mod widgets;
 
@@ -167,12 +168,10 @@ impl<'a> Canvas<'a> {
     /// Text with the console 8x16 font; `None` as background leaves the
     /// pixel unchanged.
     pub fn text(&mut self, x: i32, y: i32, s: &str, fg: Color, bg: Option<Color>) {
-        for (i, ch) in s.bytes().enumerate() {
-            let glyph = if (FIRST_CHAR..=LAST_CHAR).contains(&ch) {
-                &GLYPHS[(ch - FIRST_CHAR) as usize]
-            } else {
-                &GLYPHS[(b'?' - FIRST_CHAR) as usize]
-            };
+        // One cell per character (ADR 0076); what the font cannot show is
+        // `?`.
+        for (i, ch) in s.chars().enumerate() {
+            let glyph = char_glyph(ch);
             let gx = x + (i * GLYPH_WIDTH) as i32;
             let cell = Rect::new(gx, y, GLYPH_WIDTH as u32, glyph.len() as u32);
             if !cell.intersects(&self.clip) {
