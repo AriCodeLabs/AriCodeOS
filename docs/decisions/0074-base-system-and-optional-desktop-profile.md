@@ -202,7 +202,7 @@ declares.
 |---|---|
 | A (done) | The `profile` index line; `update profile add/remove` and `update profiles`; `update` and `upgrade` following profiles, with the apps they install recorded; `requires` checked by the updater, the installer and the broker. Scenarios `apps.profile`, `apps.profile_v1` and `apps.requires_newer`. |
 | B (done) | `session = desktop` in init; `launch` in the broker with its trust rule (audited: it touches the broker's grants); `gui_demo` as a test package; `usb-image --profile`. Scenarios `apps.launch`, `apps.desktop_session` and `usb.image_desktop`. |
-| C | The desktop applications, one branch each: launcher, terminal, editor, files, settings. The widgets they share go into `libs/gfx`, with host tests. |
+| C (done) | The desktop applications, one branch each: launcher, terminal, editor, files, settings. The widgets they share go into `libs/gfx`, with host tests. The owner chose the launcher's own pool of six, the shared folder `home/` and the bounded `settings` capability (see "Phase C as built"). |
 
 ## Audit of phase A (2026-11-03)
 

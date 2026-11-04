@@ -43,6 +43,7 @@ hardware`, que se ha ejercitado en el portátil y la evidencia está en
 | Red IPv4: DHCP, ARP, ICMP, UDP, TCP, DNS, cliente HTTP | prototipo, validado en QEMU | `network.*`; sin TLS ni renovación DHCP |
 | Shell `arish` por consola serie, teclado PS/2 o teclados USB/virtio (puente de consola) | validado en QEMU | `shell.*`, `console.*` |
 | GUI: compositor, ventanas, entrada | prototipo, validado en QEMU | `gui.*` |
+| Escritorio opcional (perfil `desktop`): lanzador, terminal, editor, gestor de archivos, ajustes; teclado y touchpad PS/2 | validado en QEMU | `usb.desktop_*`, `apps.*_rules`, `gui.ps2_*` |
 | WASM: wasmi con combustible, perfil v2 (lo estable salvo SIMD, ver el perfil) y manifiesto por módulo | validado en QEMU | `wasm.*`, `docs/wasm-profile.md`, ADR 0071; no es WASI |
 | Criptografía propia, RNG, imágenes firmadas, A/B con rollback | validado en QEMU | `crypto.*`, `update.*`; no es Secure Boot |
 | IOMMU VT-d con dominio por driver | validado en QEMU | `iommu.*` |

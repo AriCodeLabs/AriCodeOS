@@ -43,6 +43,7 @@ the evidence is recorded in `docs/hardware.md`.
 | IPv4 networking: DHCP, ARP, ICMP, UDP, TCP, DNS, HTTP client | prototype, validated in QEMU | `network.*`; no TLS, no DHCP renewal |
 | `arish` shell over the serial console, a PS/2 keyboard or USB/virtio keyboards (console bridge) | validated in QEMU | `shell.*`, `console.*` |
 | GUI: compositor, windows, input | prototype, validated in QEMU | `gui.*` |
+| Optional desktop (profile `desktop`): launcher, terminal, editor, file manager, settings; PS/2 keyboard and touchpad | validated in QEMU | `usb.desktop_*`, `apps.*_rules`, `gui.ps2_*` |
 | WASM: wasmi with fuel, profile v2 (stable features but SIMD, see the profile) and a per-module manifest | validated in QEMU | `wasm.*`, `docs/wasm-profile.md`, ADR 0071; not WASI |
 | In-house cryptography, RNG, signed images, A/B with rollback | validated in QEMU | `crypto.*`, `update.*`; not Secure Boot |
 | VT-d IOMMU with one domain per driver | validated in QEMU | `iommu.*` |
