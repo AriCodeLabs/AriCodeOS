@@ -546,6 +546,8 @@ dependencies = [
  "aricode-ab",
  "aricode-crypto",
  "aricode-pkg",
+ "aricode-proto",
+ "aricode-sys",
 ]
 
 [[package]]

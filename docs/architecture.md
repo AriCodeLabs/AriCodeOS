@@ -1352,6 +1352,15 @@ latter briefly to add the region.
   an atomic replace; `desktop/files` lists, creates, renames (never over
   an existing name: fsd's rename would replace it) and deletes, asking for
   a second Delete.
+- `settings` (ADR 0074 phase C, the owner's choice) is a send handle to
+  the broker's `settings` endpoint (`aricode_proto::settings`, protocol 9),
+  granted only to an installed, signed `settings`: init answers the
+  session, the update sources and the network address as text and makes
+  the one change, the session, logged in the install history; the
+  application never holds a file. The shell, init, the installer and the
+  updater share `aricode_update_index::client` (feature `client`): the
+  adapter of fsd's client to `files::Files`, `save`, `log_history`, and
+  `session::desktop_readiness`.
 - fsd serves up to 15 *sessions* besides its main endpoint (ADR 0036):
   each `Bind` (only through the main endpoint) creates an endpoint bound
   to a prefix, each `Share` (ADR 0016) one bound to a single file in read

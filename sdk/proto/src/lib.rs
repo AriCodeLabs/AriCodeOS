@@ -1587,9 +1587,175 @@ pub mod launch {
     }
 }
 
+/// The desktop's settings (ADR 0074 phase C, the owner's choice): what
+/// init answers its `settings` application, and the one change it makes.
+/// Never a file: init reads and writes what is asked, and logs a change in
+/// the install history as the shell does.
+pub mod settings {
+    pub const PROTOCOL: u8 = 9;
+    pub const VERSION: u8 = 1;
+    /// Bytes of text in a reply.
+    pub const MAX_TEXT: usize = 112;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Op {
+        /// The text of `item`.
+        Get = 1,
+        /// Chooses what the machine boots into from the next boot:
+        /// `value` 0 the text console, 1 the desktop.
+        SetSession = 2,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Item {
+        /// What the machine boots into, and what keeps a desktop from it.
+        Session = 1,
+        /// The update sources, as the shell lists them.
+        UpdateSource = 2,
+        /// The network address.
+        Address = 3,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Request {
+        pub op: Op,
+        pub item: Item,
+        pub value: u8,
+    }
+
+    impl Request {
+        pub const LEN: usize = 8;
+
+        pub fn encode(&self) -> [u8; Self::LEN] {
+            [
+                PROTOCOL,
+                VERSION,
+                self.op as u8,
+                self.item as u8,
+                self.value,
+                0,
+                0,
+                0,
+            ]
+        }
+
+        pub fn decode(b: &[u8]) -> Option<Self> {
+            if b.len() < Self::LEN || b[0] != PROTOCOL || b[1] != VERSION {
+                return None;
+            }
+            let op = match b[2] {
+                1 => Op::Get,
+                2 => Op::SetSession,
+                _ => return None,
+            };
+            let item = match b[3] {
+                1 => Item::Session,
+                2 => Item::UpdateSource,
+                3 => Item::Address,
+                _ => return None,
+            };
+            Some(Self {
+                op,
+                item,
+                value: b[4],
+            })
+        }
+    }
+
+    #[repr(u8)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Status {
+        Ok = 0,
+        Invalid = 1,
+        /// Init could not read or write what was asked; the text says why.
+        Failed = 2,
+    }
+
+    /// Reply: status and a line of text.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Reply {
+        pub status: Status,
+        pub text: [u8; MAX_TEXT],
+        pub len: u8,
+    }
+
+    impl Reply {
+        pub const LEN: usize = 8 + MAX_TEXT;
+
+        /// `text` cut to `MAX_TEXT` bytes.
+        pub fn new(status: Status, text: &[u8]) -> Self {
+            let n = text.len().min(MAX_TEXT);
+            let mut t = [0u8; MAX_TEXT];
+            t[..n].copy_from_slice(&text[..n]);
+            Self {
+                status,
+                text: t,
+                len: n as u8,
+            }
+        }
+
+        pub fn text(&self) -> &[u8] {
+            &self.text[..self.len as usize]
+        }
+
+        pub fn encode(&self) -> [u8; Self::LEN] {
+            let mut b = [0u8; Self::LEN];
+            b[0] = PROTOCOL;
+            b[1] = VERSION;
+            b[2] = self.status as u8;
+            b[3] = self.len;
+            b[8..].copy_from_slice(&self.text);
+            b
+        }
+
+        pub fn decode(b: &[u8]) -> Option<Self> {
+            if b.len() < Self::LEN || b[0] != PROTOCOL || b[1] != VERSION {
+                return None;
+            }
+            let status = match b[2] {
+                0 => Status::Ok,
+                1 => Status::Invalid,
+                2 => Status::Failed,
+                _ => return None,
+            };
+            if b[3] as usize > MAX_TEXT {
+                return None;
+            }
+            let mut text = [0u8; MAX_TEXT];
+            text.copy_from_slice(&b[8..Self::LEN]);
+            Some(Self {
+                status,
+                text,
+                len: b[3],
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::block::*;
+
+    #[test]
+    fn settings_round_trip() {
+        use super::settings::*;
+        let req = Request {
+            op: Op::SetSession,
+            item: Item::Session,
+            value: 1,
+        };
+        assert_eq!(Request::decode(&req.encode()), Some(req));
+        assert_eq!(Request::decode(&[9, 1, 3, 1, 0, 0, 0, 0]), None);
+        assert_eq!(Request::decode(&[9, 1, 1, 7, 0, 0, 0, 0]), None);
+        let r = Reply::new(Status::Ok, b"session: desktop");
+        let d = Reply::decode(&r.encode()).unwrap();
+        assert_eq!(d.text(), b"session: desktop");
+        let long = Reply::new(Status::Failed, &[b'x'; 200]);
+        assert_eq!(long.text().len(), MAX_TEXT);
+        let mut bad = r.encode();
+        bad[3] = 200;
+        assert!(Reply::decode(&bad).is_none());
+    }
 
     #[test]
     fn plain_names() {

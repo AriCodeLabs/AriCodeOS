@@ -1,0 +1,5 @@
+# The desktop's settings (ADR 0074): a window, the system's information,
+# and what init tells it and changes for it (the session).
+name = settings
+caps = system, window, settings
+memory = 1M

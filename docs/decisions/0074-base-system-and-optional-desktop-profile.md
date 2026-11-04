@@ -660,3 +660,34 @@ It found these, all fixed:
 - **L7:** files in subfolders of `home/` are counted, not listed. A list
   of more than 64 says it shows the first ones.
 
+### The settings (2026-11-04)
+
+- **The owner chose a bounded capability, `settings`**, for the official,
+  signed `settings` only (`Caps::TRUSTED_SETTINGS`). It is a send handle
+  to an init endpoint of its own (`aricode_proto::settings`, protocol 9).
+  Init answers:
+  - the session, with what would keep a desktop from starting;
+  - the update sources, as `update sources` lists them;
+  - the network address.
+
+  Init makes one change: the session from the next boot. It writes the
+  file and logs the change in the install history ("from the desktop's
+  settings"). The application never holds a file.
+- **`desktop/settings`** also shows memory, processors, uptime and the
+  keyboard layout, from `system`. For driver keys it says that signed
+  driver packages are not built yet (ADR 0073). Up, Down and Enter, or a
+  click on the chosen row, apply the session.
+- **One copy of the shared code.** The adapter of fsd's client to
+  `files::Files` was copied in the shell, the installer and the updater,
+  and init would have needed a fourth. It now lives once in
+  `aricode_update_index::client`, a feature the user-space programs turn
+  on, together with:
+  - `save`;
+  - `log_history`;
+  - `session::desktop_readiness` (host-tested), the check behind the
+    shell's `session` notes and init's desktop decision.
+- **Scenarios:**
+  - `usb.desktop_settings`: the settings show the facts, and choosing
+    the text console is written, said and logged;
+  - `apps.home_rules`: `fake_settings` is denied too.
+

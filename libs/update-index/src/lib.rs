@@ -41,6 +41,8 @@
 
 extern crate alloc;
 
+#[cfg(feature = "client")]
+pub mod client;
 pub mod files;
 pub mod history;
 pub mod index;

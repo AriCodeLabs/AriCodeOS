@@ -32,6 +32,7 @@ use aricode_rt::sys::fs::{FsClient, FsError};
 use aricode_rt::sys::{self, rights, Error, Handle, TIMEOUT_INFINITE};
 use aricode_supervisor::{Action, Exit, Policy, Service, State};
 use aricode_update_index as update_index;
+use aricode_update_index::client::FsFiles;
 use aricode_update_index::session::{self, Session};
 
 const SPAWNER: Handle = Handle(0x0001_0004);
@@ -1825,6 +1826,7 @@ fn run_shell(
         sup.poll();
         broker.serve_one(20, sup);
         broker.serve_apps();
+        broker.serve_settings();
         // The session ends with its launcher or with its compositor (audit
         // of phase B, M1): with the compositor gone and nothing done, the
         // input services would have no reader. The compositor is looked at
@@ -2063,8 +2065,8 @@ impl Sessions {
 /// folder `home/` (`home`), the network
 /// endpoint, a compositor session, the block endpoint (trusted
 /// applications only), the main file namespace (`installer`), the launch
-/// endpoint (`launcher`, ADR 0074), the terminal endpoint (`terminal`), and
-/// finally `HARDWARE` if it needs
+/// endpoint (`launcher`, ADR 0074), the settings endpoint (`settings`), the
+/// terminal endpoint (`terminal`), and finally `HARDWARE` if it needs
 /// buffers, bounded by the manifest's memory. The input services are never
 /// granted (ADR 0053).
 struct Broker {
@@ -2091,6 +2093,8 @@ struct Broker {
     /// what they start is known and stopped with them when the desktop
     /// ends (audit of the terminal, M2).
     terminal_launches: Handle,
+    /// Where `settings` holders ask (ADR 0074 phase C).
+    settings: Handle,
     /// DMA buffer of the package being launched (ADR 0017), the package's
     /// size: freed once the launch ends, since the kernel copies the
     /// program when it creates the process (ADR 0072, phase B).
@@ -2271,6 +2275,7 @@ impl Broker {
                 said_malformed: false,
             },
             terminal_launches: sys::endpoint_create()?,
+            settings: sys::endpoint_create()?,
             stage: None,
         })
     }
@@ -2618,6 +2623,56 @@ impl Broker {
         }
     }
 
+    /// Serves at most one request from a `settings` holder, without waiting
+    /// (ADR 0074 phase C, the owner's choice): the text of what it asks
+    /// for, and the one change it may make, the session. It never reaches
+    /// a file itself; a change is said on the console and logged in the
+    /// install history, as from the shell.
+    fn serve_settings(&mut self) {
+        use aricode_proto::settings::{Item, Op, Reply, Request, Status};
+        let mut msg = [0u8; Request::LEN];
+        let mut handles = [Handle(0); 2];
+        let Ok((n, nh)) = sys::ipc_receive(self.settings, &mut msg, &mut handles, 0) else {
+            return;
+        };
+        if nh == 0 {
+            return;
+        }
+        let reply_to = handles[0];
+        if nh == 2 {
+            let _ = sys::handle_close(handles[1]);
+        }
+        let mut text = alloc::string::String::new();
+        let net = self.net;
+        let status = match (Request::decode(&msg[..n]), self.fs.as_mut()) {
+            (None, _) => Status::Invalid,
+            (Some(_), None) => {
+                text.push_str("no file service");
+                Status::Failed
+            }
+            (Some(req), Some(fs)) => match (req.op, req.item) {
+                (Op::Get, Item::Session) => session_text(fs, &mut text),
+                (Op::SetSession, Item::Session) => match req.value {
+                    0 => set_session(fs, Session::Shell, &mut text),
+                    1 => set_session(fs, Session::Desktop, &mut text),
+                    _ => Status::Invalid,
+                },
+                (Op::Get, Item::UpdateSource) => sources_text(fs, &mut text),
+                (Op::Get, Item::Address) => match net {
+                    Some(net) => address_text(net, &mut text),
+                    None => {
+                        text.push_str("no network service");
+                        Status::Ok
+                    }
+                },
+                (Op::SetSession, _) => Status::Invalid,
+            },
+        };
+        let reply = Reply::new(status, text.as_bytes());
+        let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
+        let _ = sys::handle_close(reply_to);
+    }
+
     /// Serves at most one request from a `launch` holder, without waiting
     /// (ADR 0074). The launcher starts installed applications in the
     /// background, each with its own manifest, and nothing more: no initrd
@@ -2854,6 +2909,7 @@ impl Broker {
             (Caps::LAUNCH, &b"launch"[..]),
             (Caps::TERMINAL, b"terminal"),
             (Caps::HOME, b"home"),
+            (Caps::SETTINGS, b"settings"),
         ] {
             if caps.contains(cap) && !matches!(source, Source::Installed { .. }) {
                 sys::print(b"AriInit: denied, ");
@@ -2982,6 +3038,12 @@ impl Broker {
                 Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
             }
         }
+        if caps.contains(Caps::SETTINGS) {
+            match sys::handle_duplicate(self.settings, rights::WRITE | rights::TRANSFER) {
+                Ok(h) => granted.push(h),
+                Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
+            }
+        }
         if caps.contains(Caps::TERMINAL) {
             match sys::handle_duplicate(self.terminals.endpoint, rights::WRITE | rights::TRANSFER) {
                 Ok(h) => granted.push(h),
@@ -3104,6 +3166,129 @@ fn in_initrd(name: &str) -> bool {
         sys::initrd_read(SPAWNER, name, &mut probe),
         Err(Error::NotFound)
     )
+}
+
+/// What the machine boots into, as the shell's `session` says it.
+fn session_text(
+    fs: &mut FsClient,
+    text: &mut alloc::string::String,
+) -> aricode_proto::settings::Status {
+    use aricode_proto::settings::Status;
+    let mut buf = [0u8; 256];
+    match read_small(fs, session::FILE, &mut buf) {
+        Err(()) => {
+            text.push_str("the session file cannot be read");
+            return Status::Failed;
+        }
+        Ok(None) => text.push_str("shell (the text console)"),
+        Ok(Some(n)) => match core::str::from_utf8(&buf[..n])
+            .ok()
+            .and_then(Session::parse)
+        {
+            Some(Session::Shell) => text.push_str("shell (the text console)"),
+            Some(Session::Desktop) => {
+                text.push_str("desktop");
+                text.push_str(session::desktop_readiness(&mut FsFiles(fs)).note());
+            }
+            None => text.push_str("the session file is damaged: the text console"),
+        },
+    }
+    Status::Ok
+}
+
+/// Chooses the session from the next boot for the desktop's settings,
+/// said and logged as the shell's `session` does.
+fn set_session(
+    fs: &mut FsClient,
+    chosen: Session,
+    text: &mut alloc::string::String,
+) -> aricode_proto::settings::Status {
+    use aricode_proto::settings::Status;
+    if update_index::client::save(fs, session::FILE, chosen.to_text().as_bytes()).is_err() {
+        text.push_str("the session file cannot be saved");
+        return Status::Failed;
+    }
+    let line = alloc::format!("session: {} (from the desktop's settings)", chosen.name());
+    if update_index::client::log_history(fs, &line).is_err() {
+        say(b"the desktop's settings changed the session; the install history cannot be written");
+    }
+    sys::print(b"AriInit: the desktop's settings chose session = ");
+    sys::print(chosen.name().as_bytes());
+    sys::print(b"\n");
+    match chosen {
+        Session::Shell => text.push_str("the text console from the next boot"),
+        Session::Desktop => {
+            text.push_str("the desktop from the next boot");
+            text.push_str(session::desktop_readiness(&mut FsFiles(fs)).note());
+        }
+    }
+    Status::Ok
+}
+
+/// The update sources, as the shell's `update sources` lists them.
+fn sources_text(
+    fs: &mut FsClient,
+    text: &mut alloc::string::String,
+) -> aricode_proto::settings::Status {
+    use aricode_proto::settings::Status;
+    let mut buf = [0u8; 2048];
+    let path = update_index::main_path(update_index::SOURCES_FILE);
+    match read_small(fs, &path, &mut buf) {
+        Err(()) => {
+            text.push_str("the source list cannot be read");
+            Status::Failed
+        }
+        Ok(None) => {
+            text.push_str("none yet (update add URL in the shell)");
+            Status::Ok
+        }
+        Ok(Some(n)) => {
+            let list = alloc::string::String::from_utf8_lossy(&buf[..n]);
+            let (sources, _) = update_index::Sources::parse(&list);
+            if sources.is_empty() {
+                text.push_str("none yet (update add URL in the shell)");
+            }
+            for (i, source) in sources.entries().enumerate() {
+                if i > 0 {
+                    text.push_str(", ");
+                }
+                text.push_str(&source.url);
+                if source.channel == update_index::Channel::Dev {
+                    text.push_str(" (dev)");
+                }
+            }
+            Status::Ok
+        }
+    }
+}
+
+/// The network address, or why there is none yet.
+fn address_text(net: Handle, text: &mut alloc::string::String) -> aricode_proto::settings::Status {
+    use aricode_proto::net::{Info, Op, Reply, Request, Status as NetStatus};
+    let mut msg = [0u8; Reply::LEN];
+    let reply = sys::rpc::call(
+        net,
+        &Request::new(Op::Info).encode(),
+        &[],
+        NET_CALL_MS,
+        NET_CALL_MS,
+        &mut msg,
+    )
+    .ok()
+    .and_then(|n| Reply::decode(&msg[..n]));
+    match reply {
+        Some(r) if r.status == NetStatus::Ok => {
+            for (i, octet) in Info::decode(&r.data).address.iter().enumerate() {
+                if i > 0 {
+                    text.push('.');
+                }
+                text.push_str(&alloc::format!("{octet}"));
+            }
+        }
+        Some(r) if r.status == NetStatus::NoRoute => text.push_str("none yet (no DHCP answer)"),
+        _ => text.push_str("the network service does not answer"),
+    }
+    aricode_proto::settings::Status::Ok
 }
 
 /// Whether the launcher may offer the installed package `apps/NAME.aripkg`
@@ -3288,31 +3473,25 @@ fn desktop_wanted(fs: &mut FsClient, inputs: &[Handle]) -> bool {
             return false;
         }
     }
-    let mut profiles = [0u8; 1024];
-    let path = update_index::main_path(update_index::PROFILES_FILE);
-    match read_small(fs, &path, &mut profiles) {
-        Ok(Some(n)) if core::str::from_utf8(&profiles[..n]).is_ok_and(session::follows_desktop) => {
+    use session::Readiness;
+    let why: &[u8] = match session::desktop_readiness(&mut FsFiles(fs)) {
+        Readiness::Ready => b"",
+        Readiness::NotFollowed => {
+            b"session = desktop, but this machine does not follow the desktop profile: the text console"
         }
-        Ok(_) => {
-            say(b"session = desktop, but this machine does not follow the desktop profile: the text console");
-            return false;
+        Readiness::ProfilesUnreadable => {
+            b"session = desktop, but the profile list cannot be read: the text console"
         }
-        Err(()) => {
-            say(b"session = desktop, but the profile list cannot be read: the text console");
-            return false;
+        Readiness::NotInstalled => {
+            b"session = desktop, but the desktop's launcher is not installed yet (update, then upgrade): the text console"
         }
-    }
-    let path = update_index::installed_path(session::LAUNCHER);
-    match path.as_deref().map(|p| exists(fs, p)) {
-        Some(Ok(true)) => {}
-        Some(Ok(false)) | None => {
-            say(b"session = desktop, but the desktop's launcher is not installed yet (update, then upgrade): the text console");
-            return false;
+        Readiness::LauncherUnreadable => {
+            b"session = desktop, but whether the launcher is installed cannot be read: the text console"
         }
-        Some(Err(())) => {
-            say(b"session = desktop, but whether the launcher is installed cannot be read: the text console");
-            return false;
-        }
+    };
+    if !why.is_empty() {
+        say(why);
+        return false;
     }
     // The compositor reads only the input services (the PS/2 keyboard
     // among them since ADR 0075): without a keyboard there the desktop
@@ -3343,18 +3522,6 @@ fn input_kinds(service: Handle) -> u8 {
     ask(service, &req.encode(), 500, &mut [0u8; Reply::LEN])
         .and_then(Reply::decode)
         .map_or(0, |r| r.kinds)
-}
-
-/// Whether `name` exists: `Err` when fsd's answer says neither.
-fn exists(fs: &mut FsClient, name: &str) -> Result<bool, ()> {
-    match fs.open(name) {
-        Ok(fd) => {
-            let _ = fs.close(fd);
-            Ok(true)
-        }
-        Err(FsError::Status(aricode_proto::fs::Status::NotFound)) => Ok(false),
-        Err(_) => Err(()),
-    }
 }
 
 /// Why the desktop session ends.

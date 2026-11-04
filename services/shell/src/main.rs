@@ -525,10 +525,7 @@ fn diag(fs: &mut FsClient, net_client: &NetClient, mask: u64, rest: &[u8]) {
 
 /// Creates the file `name`, or replaces it entirely, with `data`.
 fn save_file(fs: &mut FsClient, name: &str, data: &[u8]) -> Result<usize, ()> {
-    let fd = fs.open(name).or_else(|_| fs.create(name)).map_err(|_| ())?;
-    let r = fs.replace(fd, data).map_err(|_| ());
-    let _ = fs.close(fd);
-    r
+    update_index::client::save(fs, name, data).map_err(|_| ())
 }
 
 /// Recent kernel events (`sysinfo::EVENTS`): the last 32 (half the
@@ -1221,45 +1218,14 @@ fn run_updater(arg: u64) -> Option<u64> {
 /// The main file space as `update_index::files::Files`: only an explicit
 /// `NotFound` means a file is absent; any other failure is an error, never
 /// mistaken for "missing" (incident 0008).
-struct MainFiles<'a>(&'a mut FsClient);
-
-impl update_index::files::Files for MainFiles<'_> {
-    type Fd = u32;
-    type Error = aricode_rt::sys::fs::FsError;
-
-    fn open(&mut self, name: &str) -> Result<Option<u32>, Self::Error> {
-        use aricode_proto::fs::Status;
-        use aricode_rt::sys::fs::FsError;
-        match self.0.open(name) {
-            Ok(fd) => Ok(Some(fd)),
-            Err(FsError::Status(Status::NotFound)) => Ok(None),
-            Err(e) => Err(e),
-        }
-    }
-
-    fn read(&mut self, fd: &u32, offset: u32, out: &mut [u8]) -> Result<usize, Self::Error> {
-        self.0.read(*fd, offset, out)
-    }
-
-    fn close(&mut self, fd: u32) {
-        let _ = self.0.close(fd);
-    }
-
-    fn list(
-        &mut self,
-        index: u32,
-        name_out: &mut [u8; update_index::files::NAME_LEN],
-    ) -> Result<Option<(usize, u64)>, Self::Error> {
-        self.0.list(index, name_out)
-    }
-}
+use update_index::client::FsFiles;
 
 fn read_small(
     fs: &mut FsClient,
     name: &str,
     max: usize,
 ) -> Result<Option<alloc::vec::Vec<u8>>, ()> {
-    update_index::files::read_optional(&mut MainFiles(fs), name, max).map_err(|_| ())
+    update_index::files::read_optional(&mut FsFiles(fs), name, max).map_err(|_| ())
 }
 
 /// The source list, migrating `update_url` (ADR 0027) when there is no
@@ -1315,7 +1281,6 @@ fn save_sources(fs: &mut FsClient, sources: &update_index::Sources, event: &str)
 /// Appends `event` to the install history, saying where the owner typed
 /// it.
 fn log_history(fs: &mut FsClient, event: &str) {
-    let history_path = update_index::main_path(update_index::HISTORY_FILE);
     let line = alloc::format!(
         "{event} (from {})",
         if !session() {
@@ -1329,21 +1294,15 @@ fn log_history(fs: &mut FsClient, event: &str) {
     // A history that cannot be read is not rewritten (incident 0008): the
     // source change is done and was said, but the older lines are never
     // replaced by this one.
-    let log = match update_index::history::appended(
-        &mut MainFiles(fs),
-        &history_path,
-        &line,
-        update_index::HISTORY_MAX,
-    ) {
-        Ok(log) => log,
-        Err(_) => {
+    match update_index::client::log_history(fs, &line) {
+        Ok(()) => {}
+        Err(update_index::client::HistoryError::Read) => {
             print(b"update: cannot read the install history: not rewritten\n");
             let _ = sys::event_record(2, "sh-history-read");
-            return;
         }
-    };
-    if save_file(fs, &history_path, &log).is_err() {
-        print(b"update: cannot write the install history\n");
+        Err(update_index::client::HistoryError::Write) => {
+            print(b"update: cannot write the install history\n");
+        }
     }
 }
 
@@ -1572,34 +1531,9 @@ fn save_session(fs: &mut FsClient, chosen: Session) {
 /// Ends a line about the desktop session with what keeps it from starting,
 /// if anything.
 fn desktop_missing(fs: &mut FsClient) {
-    let profiles = read_small(
-        fs,
-        &update_index::main_path(update_index::PROFILES_FILE),
-        1024,
-    );
-    if profiles.is_err() {
-        print(b" (whether the desktop profile is followed cannot be read)\n");
-        return;
-    }
-    let followed = matches!(&profiles, Ok(Some(text))
-        if core::str::from_utf8(text).is_ok_and(session::follows_desktop));
-    use update_index::files::Files;
-    let launcher = update_index::installed_path(session::LAUNCHER).map(|path| {
-        let mut files = MainFiles(fs);
-        files
-            .open(&path)
-            .map(|fd| fd.map(|fd| files.close(fd)).is_some())
-    });
-    if !followed {
-        print(b" (it will not start: the desktop profile is not followed; update profile add desktop)\n");
-    } else if !matches!(launcher, Some(Ok(true))) {
-        print(match launcher {
-            Some(Err(_)) => b" (whether the launcher is installed cannot be read)\n".as_slice(),
-            _ => b" (it will not start until the profile is installed: update, then upgrade)\n",
-        });
-    } else {
-        print(b"\n");
-    }
+    let readiness = update_index::session::desktop_readiness(&mut FsFiles(fs));
+    print(readiness.note().as_bytes());
+    print(b"\n");
 }
 
 fn sources_list(fs: &mut FsClient) {

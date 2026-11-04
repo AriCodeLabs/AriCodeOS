@@ -116,7 +116,9 @@ and starts them through the broker with the capability `launch`, up to six
 at once. The profile's `terminal` (`desktop/terminal`) shows a session shell
 in a window, and its `editor` (`desktop/editor`) edits the text files of the
 owner's folder `home/` (`cat home/notes.txt` in the shell), and its `files`
-(`desktop/files`) lists, creates, renames and deletes them. Keyboards send
+(`desktop/files`) lists, creates, renames and deletes them. Its `settings`
+(`desktop/settings`) shows the system, the network and the update sources,
+and chooses what the machine boots into, through init. Keyboards send
 Ctrl with a letter as its control character (Ctrl+S is `0x13`), as a
 terminal does. Shared widgets (keys, buttons, lists, text fields) are in
 `aricode_gfx::widgets`. When the
@@ -164,7 +166,7 @@ launches with capabilities, such as `tcp_hog` or `sock_leaker`, keeps its manife
 
 ```text
 name = hello_app
-caps = system, fs      # system | fs | net | window | block (updater only) | install (installer only) | launch (launcher only) | terminal (terminal only) | home (editor and files only)
+caps = system, fs      # system | fs | net | window | block (updater only) | install (installer only) | launch (launcher only) | terminal (terminal only) | home (editor and files only) | settings (settings only)
 memory = 128K          # DMA buffer quota (K or M, at most 8M)
 read_files = hola.txt  # up to 4 AriFS files in read-only mode (ADR 0016)
 ```
