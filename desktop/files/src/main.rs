@@ -133,6 +133,11 @@ impl Files {
             self.focus = Focus::Name;
             return None;
         }
+        if !aricode_proto::fs::valid_plain_name(self.field.text(), NAME_MAX) {
+            self.set_status(true, &[b"a name has letters, digits, '.', '_' or '-' only"]);
+            self.focus = Focus::Name;
+            return None;
+        }
         let mut n = [0u8; NAME_MAX];
         n[..self.field.text().len()].copy_from_slice(self.field.text().as_bytes());
         Some(n)

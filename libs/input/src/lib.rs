@@ -164,6 +164,15 @@ impl Keyboard {
         self.layout = layout;
     }
 
+    /// Forgets Shift, Ctrl and AltGr held: a device whose releases were
+    /// lost (its driver restarted, its read dropped) does not leave every
+    /// letter shifted or a control character (audit of the editor, L1).
+    pub fn release_modifiers(&mut self) {
+        self.shift = false;
+        self.altgr = false;
+        self.ctrl = 0;
+    }
+
     pub fn layout(&self) -> Layout {
         self.layout
     }
@@ -1254,6 +1263,20 @@ mod tests {
         );
         assert_eq!(m.feed(&[0, 0, 0], &mut out), 0);
         assert_eq!(m.feed(&[0, 0], &mut out), 0);
+    }
+
+    #[test]
+    fn released_modifiers_type_plain_letters() {
+        let key = |code, value| Event {
+            kind: EV_KEY,
+            code,
+            value,
+        };
+        let mut k = Keyboard::new();
+        k.feed(key(KEY_LEFTCTRL, 1));
+        k.feed(key(KEY_LEFTSHIFT, 1));
+        k.release_modifiers();
+        assert_eq!(k.feed(key(31, 1)).as_slice(), b"s");
     }
 
     #[test]

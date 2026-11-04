@@ -182,6 +182,8 @@ fn main(arg: u64) -> u64 {
                     let _ = sys::handle_close(reply);
                     pending[i] = None;
                     lost = true;
+                    // Its driver died: the releases of keys held are lost.
+                    keyboards[i].release_modifiers();
                 }
                 Err(_) => {}
             }

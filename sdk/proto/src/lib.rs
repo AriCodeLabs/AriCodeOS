@@ -124,6 +124,19 @@ pub mod block {
 /// File data does not travel in the message (256 bytes): the client
 /// transfers a DMA buffer and the service reads from or writes to it.
 pub mod fs {
+    /// A name inside a directory session (an application's own, or the
+    /// owner's `home/`), as AriFS keeps it: 1 to `max` letters, digits,
+    /// `.`, `_` or `-`, and not `.` or `..`, which would only confuse.
+    pub fn valid_plain_name(name: &str, max: usize) -> bool {
+        !name.is_empty()
+            && name.len() <= max
+            && name != "."
+            && name != ".."
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    }
+
     pub const PROTOCOL: u8 = 2;
     pub const VERSION: u8 = 1;
     pub const MAX_NAME: usize = 32;
@@ -1559,6 +1572,18 @@ pub mod launch {
 #[cfg(test)]
 mod tests {
     use super::block::*;
+
+    #[test]
+    fn plain_names() {
+        use super::fs::valid_plain_name as ok;
+        for good in ["notes.txt", "a", "x-1_y.md", ".config"] {
+            assert!(ok(good, 27), "{good}");
+        }
+        for bad in ["", ".", "..", "a b", "a/b", "ñ", "x*"] {
+            assert!(!ok(bad, 27), "{bad}");
+        }
+        assert!(!ok("abc", 2), "too long");
+    }
 
     #[test]
     fn launch_list_round_trip() {

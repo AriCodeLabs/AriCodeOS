@@ -734,11 +734,17 @@ fn main(inputs: u64) -> u64 {
                     let mut b = [0u8; 20];
                     sys::print(aricode_rt::fmt_u64(d as u64, &mut b));
                     sys::print(b" is gone; dropping it\n");
+                    // Its releases are lost: no modifier stays held.
+                    comp.keyboard.release_modifiers();
                     *slot = None;
                 }
                 // The driver died holding the read: it is relaunched on the
-                // same endpoint; the next read waits for it.
-                Err(e) if e.reply_lost() => sys::thread_sleep(RETRY_MS),
+                // same endpoint (the next read waits for it), and whatever
+                // it held was not released.
+                Err(e) if e.reply_lost() => {
+                    comp.keyboard.release_modifiers();
+                    sys::thread_sleep(RETRY_MS);
+                }
                 _ => {}
             }
             if let Ok(n) = read {

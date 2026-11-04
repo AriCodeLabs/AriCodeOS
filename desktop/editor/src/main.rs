@@ -5,7 +5,9 @@
 //! capability: a directory session of fsd on that folder, so names are
 //! plain, `notes.txt`). The file name goes in the field at the top; Open
 //! (or Enter there, or Ctrl+O) reads it, Save (or Ctrl+S) replaces it
-//! atomically. Tab moves between the name and the text.
+//! atomically. Tab moves from the name to the text, Ctrl+L back. Opening
+//! over unsaved changes, or saving over another file than the one opened,
+//! takes a second press.
 //!
 //! Handles, in the broker's order: the folder's file session, its
 //! compositor session (both endpoints) and `HARDWARE`.
@@ -52,9 +54,22 @@ enum Focus {
     Text,
 }
 
+/// What a second press confirms.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Confirm {
+    /// Open, throwing the unsaved changes away.
+    Discard,
+    /// Save over another file of that name.
+    Replace,
+}
+
 struct Editor {
     fs: FsClient,
     name: TextField<26>,
+    /// The file the text came from or was last saved to (empty: none).
+    loaded: [u8; 26],
+    /// The action a first press asked to confirm, and for which name.
+    armed: Option<(Confirm, [u8; 26])>,
     focus: Focus,
     status: [u8; 80],
     status_len: usize,
@@ -74,31 +89,65 @@ impl Editor {
         say(parts);
     }
 
+    /// The name typed, if it is one fsd keeps (audit of the editor, L2).
     fn named(&mut self) -> Option<[u8; 26]> {
-        if self.name.text().is_empty() {
+        let text = self.name.text();
+        if text.is_empty() {
             self.set_status(true, &[b"type a file name first"]);
             self.focus = Focus::Name;
             return None;
         }
+        if !aricode_proto::fs::valid_plain_name(text, 26) {
+            self.set_status(true, &[b"a name has letters, digits, '.', '_' or '-' only"]);
+            self.focus = Focus::Name;
+            return None;
+        }
         let mut n = [0u8; 26];
-        n[..self.name.text().len()].copy_from_slice(self.name.text().as_bytes());
+        n[..text.len()].copy_from_slice(text.as_bytes());
         Some(n)
+    }
+
+    /// Whether this is the second press of `what` for `name`; the first
+    /// one only arms it.
+    fn confirmed(&mut self, what: Confirm, name: [u8; 26]) -> bool {
+        if self.armed == Some((what, name)) {
+            self.armed = None;
+            return true;
+        }
+        self.armed = Some((what, name));
+        false
+    }
+
+    /// The name field shows the file the text belongs to again, after an
+    /// Open that failed (audit of the editor, M1).
+    fn restore_name(&mut self) {
+        let loaded = self.loaded;
+        self.name.set(name_of(&loaded));
     }
 
     fn open(&mut self) {
         let Some(buf) = self.named() else { return };
         let name = name_of(&buf);
+        // Unsaved changes are never thrown away on one press (audit of the
+        // editor, M2).
+        if TEXT.lock().changed() && !self.confirmed(Confirm::Discard, buf) {
+            return self.set_status(true, &[b"unsaved changes: Open again to discard them"]);
+        }
         let fd = match self.fs.open(name) {
             Ok(fd) => fd,
             Err(FsError::Status(aricode_proto::fs::Status::NotFound)) => {
                 TEXT.lock().set(b"");
+                self.loaded = buf;
                 self.focus = Focus::Text;
                 return self.set_status(
                     false,
                     &[b"new file ", name.as_bytes(), b" (saved with Save)"],
                 );
             }
-            Err(_) => return self.set_status(true, &[b"cannot open ", name.as_bytes()]),
+            Err(_) => {
+                self.set_status(true, &[b"cannot open ", name.as_bytes()]);
+                return self.restore_name();
+            }
         };
         // Read whole into the scratch buffer first: a file that cannot be
         // read, or is too large, leaves the text being edited as it was.
@@ -123,20 +172,31 @@ impl Editor {
         };
         let _ = self.fs.close(fd);
         if let Err(why) = outcome {
-            return self.set_status(true, &[name.as_bytes(), why]);
+            self.set_status(true, &[name.as_bytes(), why]);
+            return self.restore_name();
         }
+        // Edited a byte at a time, text that is not ASCII can change near
+        // the caret (audit of the editor, L5).
+        let plain = scratch[..loaded]
+            .iter()
+            .all(|&b| matches!(b, b'\n' | b'\t' | 0x20..=0x7E));
         TEXT.lock().set(&scratch[..loaded]);
         drop(scratch);
+        self.loaded = buf;
         self.focus = Focus::Text;
         let mut b = [0u8; 20];
         self.set_status(
-            false,
+            !plain,
             &[
                 b"opened ",
                 name.as_bytes(),
                 b" (",
                 aricode_rt::fmt_u64(loaded as u64, &mut b),
-                b" bytes)",
+                if plain {
+                    b" bytes)"
+                } else {
+                    b" bytes; not all ASCII, shown as ?)"
+                },
             ],
         );
     }
@@ -144,11 +204,24 @@ impl Editor {
     fn save(&mut self) {
         let Some(buf) = self.named() else { return };
         let name = name_of(&buf);
+        let mut created = false;
         let fd = match self.fs.open(name) {
+            // Another file of that name is replaced only on a second press
+            // (audit of the editor, M1).
+            Ok(fd) if buf != self.loaded && !self.confirmed(Confirm::Replace, buf) => {
+                let _ = self.fs.close(fd);
+                return self.set_status(
+                    true,
+                    &[name.as_bytes(), b" exists: Save again to replace it"],
+                );
+            }
             Ok(fd) => fd,
             Err(FsError::Status(aricode_proto::fs::Status::NotFound)) => {
                 match self.fs.create(name) {
-                    Ok(fd) => fd,
+                    Ok(fd) => {
+                        created = true;
+                        fd
+                    }
                     Err(_) => return self.set_status(true, &[b"cannot create ", name.as_bytes()]),
                 }
             }
@@ -162,6 +235,14 @@ impl Editor {
         }
         drop(text);
         let _ = self.fs.close(fd);
+        // A file made for a save that failed is not left behind empty
+        // (audit of the editor, L3).
+        if saved.is_err() && created {
+            let _ = self.fs.delete(name);
+        }
+        if saved.is_ok() {
+            self.loaded = buf;
+        }
         let mut b = [0u8; 20];
         match saved {
             Ok(_) => self.set_status(
@@ -174,14 +255,24 @@ impl Editor {
                     b" bytes)",
                 ],
             ),
-            Err(_) => self.set_status(true, &[b"cannot save ", name.as_bytes()]),
+            Err(_) => self.set_status(
+                true,
+                &[b"cannot save ", name.as_bytes(), b" (nothing written)"],
+            ),
         }
     }
 
     fn key(&mut self, key: Key) {
+        // Any other key disarms a confirmation.
+        if !matches!(key, Key::Ctrl(b's' | b'o') | Key::Enter) {
+            self.armed = None;
+        }
         match (key, self.focus) {
             (Key::Ctrl(b's'), _) => self.save(),
             (Key::Ctrl(b'o'), _) => self.open(),
+            // Esc is known only with the key after it: Ctrl+L goes to the
+            // name at once (audit of the editor, L4).
+            (Key::Ctrl(b'l'), _) => self.focus = Focus::Name,
             (Key::Tab, Focus::Name) => self.focus = Focus::Text,
             (Key::Escape, Focus::Text) => self.focus = Focus::Name,
             (Key::Enter, Focus::Name) => self.open(),
@@ -257,6 +348,8 @@ fn main(_arg: u64) -> u64 {
     let mut ed = Editor {
         fs,
         name: TextField::new(),
+        loaded: [0; 26],
+        armed: None,
         focus: Focus::Name,
         status: [0; 80],
         status_len: 0,

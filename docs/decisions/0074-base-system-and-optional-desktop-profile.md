@@ -580,6 +580,37 @@ It found these, all fixed in the same branch:
   - `apps.home_rules`: a package named `home` that asks for `fs`, and
     one that asks for `home` without being the editor, are both denied.
 
+### Audit of the editor and `home` (2026-11-04)
+
+An independent read-only audit found that `home/` cannot be escaped:
+- fsd keeps a directory session's names flat and under its prefix;
+- only the broker makes such a session;
+- only the editor and files get `home`.
+
+It found these, all fixed:
+
+- **M1:** after an Open that failed, Save could replace that file with
+  the text of another. The editor now remembers which file the text came
+  from. A failed Open puts that name back, and saving over any other
+  existing file takes a second press.
+- **M2:** an Open threw unsaved changes away. It now takes a second press.
+- **M3:** a scenario of the branch used the old one-stage form; fixed with
+  the stages.
+- **L1:** a device whose driver died with Ctrl held left it held.
+  `Keyboard::release_modifiers` runs in the console bridge and the
+  compositor when a device or its read is lost.
+- **L2:** names are checked as fsd keeps them
+  (`aricode_proto::fs::valid_plain_name`) in the editor and files.
+- **L3:** a file created for a save that failed is deleted.
+- **L4:** Ctrl+L goes to the name at once; Esc is known only with the key
+  after it.
+- **L5:** a file that is not all ASCII is said so when opened.
+- **L6:** the initrd and allow-list refusals of `home` share the code
+  path, and its host test, with `launch` and `terminal`.
+- **L7:** a stick whose package named `home` had a private directory
+  before this change keeps those files in the owner's folder. No release
+  ever shipped such a package.
+
 ### The file manager (2026-11-04)
 
 - **`desktop/files`** lists `home/` with each file's size. It creates a
