@@ -827,6 +827,10 @@ fn main(inputs: u64) -> u64 {
     }
 }
 
+/// Input events held between two rounds: a reply from each device after
+/// a wait, and room to spare.
+const HELD: usize = MAX_INPUTS * 4 * MAX_EVENTS;
+
 /// The longest message the loop receives: a request, or an input reply.
 const MSG_LEN: usize = if Request::LEN > aricode_proto::input::Reply::LEN {
     Request::LEN
@@ -851,8 +855,10 @@ struct Inputs {
     retry_at: [u64; MAX_INPUTS],
     /// Which run of each driver its replies come from.
     instances: [DriverInstance; MAX_INPUTS],
-    events: [(u64, usize, aricode_input::Event); MAX_INPUTS * 4 * MAX_EVENTS],
-    sorted: [(u64, aricode_input::Event); MAX_INPUTS * 4 * MAX_EVENTS],
+    /// Each with when it was received and its order: the device, then its
+    /// place among the events taken (`Inputs::order`).
+    events: [(u64, usize, aricode_input::Event); HELD],
+    sorted: [(u64, aricode_input::Event); HELD],
     len: usize,
 }
 
@@ -864,8 +870,8 @@ impl Inputs {
             waiting: [0; MAX_INPUTS],
             retry_at: [0; MAX_INPUTS],
             instances: [DriverInstance::new(); MAX_INPUTS],
-            events: [(0, 0, aricode_input::Event::default()); MAX_INPUTS * 4 * MAX_EVENTS],
-            sorted: [(0, aricode_input::Event::default()); MAX_INPUTS * 4 * MAX_EVENTS],
+            events: [(0, 0, aricode_input::Event::default()); HELD],
+            sorted: [(0, aricode_input::Event::default()); HELD],
             len: 0,
         }
     }
@@ -992,7 +998,7 @@ impl Inputs {
                     }
                     self.events[self.len] = (
                         *t,
-                        d,
+                        d * HELD + self.len,
                         aricode_input::Event {
                             kind: e.kind,
                             code: e.code,
@@ -1008,10 +1014,14 @@ impl Inputs {
         }
     }
 
-    /// The events received so far, in time order (then by device).
+    /// The events received so far, in time order, then by device, then as
+    /// each device sent them. A driver stamps the events it read together
+    /// with one time (ps2_input: a whole round), so the time alone does not
+    /// keep a press before its release; neither does an unstable sort,
+    /// which the order key makes total.
     fn take(&mut self) -> &[(u64, aricode_input::Event)] {
         let held = &mut self.events[..self.len];
-        held.sort_unstable_by_key(|(t, d, _)| (*t, *d));
+        held.sort_unstable_by_key(|(t, order, _)| (*t, *order));
         for (out, (t, _, ev)) in self.sorted.iter_mut().zip(held.iter()) {
             *out = (*t, *ev);
         }

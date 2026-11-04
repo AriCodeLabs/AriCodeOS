@@ -46,7 +46,12 @@
    is looked at without waiting. The events are handled in time order, as
    before, and a driver that died holding a read is noticed even while
    another device keeps sending (as in the console bridge).
-3. **Late input is recorded.** An event handled more than 50 ms
+3. **A total order.** Events are handled in time order, then by device,
+   then in the order each device sent them. A driver stamps the events
+   it read together with one time (ps2_input stamps a whole round), and
+   the unstable sort used before could put a release before its press
+   among more than 20 events.
+4. **Late input is recorded.** An event handled more than 50 ms
    (`LATE_MS`) after its driver received it is counted. The count goes
    into the kernel event ring as `gui input late xN` at most once a
    second, so `diag` shows it on a real machine.
@@ -62,4 +67,6 @@
 
 ## On the laptop
 
-To be filled in with the owner's test of the dev build.
+Dev build 20 (e96cb65), with the owner on the touchpad: "the mouse
+reacts quite well; I turned and moved it abruptly and it reacted well".
+After about four minutes of such use, `diag` showed no `gui input late`.
