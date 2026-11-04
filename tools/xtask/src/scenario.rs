@@ -227,6 +227,10 @@ pub struct HostInput {
     #[serde(default)]
     pub keys: Vec<String>,
     pub mouse_rel: Option<(i32, i32)>,
+    /// A stroke after `mouse_rel`: `[count, dx, dy, every_ms]` moves the
+    /// mouse by (dx, dy) `count` times, one move every `every_ms`, as a
+    /// finger on a touchpad does (incident 0058: about 100 moves a second).
+    pub mouse_steps: Option<(u32, i32, i32, u64)>,
     pub click: Option<String>,
     /// Minimum pause after each key event (ms). QEMU's usb-kbd queues at
     /// most 16 scancodes (`QUEUE_LENGTH`, hw/input/hid.c) and drops whole

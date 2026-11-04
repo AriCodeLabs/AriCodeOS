@@ -18,6 +18,7 @@ aricode-proto = { path = "../../sdk/proto" }
 aricode-cmdline = { path = "../../libs/cmdline" }
 aricode-gfx = { path = "../../libs/gfx" }
 aricode-input = { path = "../../libs/input" }
+aricode-faults = { path = "../../libs/faults" }
 aricode-rt = { path = "../../sdk/runtime" }
 
 [build-dependencies]

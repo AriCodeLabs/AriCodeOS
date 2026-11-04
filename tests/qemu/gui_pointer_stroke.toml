@@ -1,0 +1,47 @@
+# A finger moving on a touchpad (incident 0058), with idle devices beside
+# the one that moves, as on the reference laptop: the host moves the USB
+# mouse 150 times, one move every 10 ms (a touchpad reports about 100
+# times a second), while an empty EHCI and the PS/2 pointer stay idle,
+# then clicks and types on window B. The compositor read its devices in
+# turn, each read waiting up to a timer tick when idle, and fell behind:
+# it must now handle every event within LATE_MS of its arrival (no `gui
+# input late`), and the pointer must end where the moves add up to (the
+# click lands at the same point of B as in gui.ps2_two_windows), so no
+# move was dropped on the way.
+name = "gui.pointer_stroke"
+description = "a touchpad-rate stroke is followed without lag or loss while other input devices are idle"
+level = "full"
+areas = ["gui", "input", "pointer"]
+cmdline = "qemu_exit gui shell"
+no_virtio_input = true
+usb_hid = true
+usb_hid_only_input = true
+usb_legacy_controller = true
+install = ["examples/gui_demo"]
+stdin = ["spawn gui_demo 0", "run gui_demo 1", "sleep 5000", "shutdown"]
+timeout_secs = 120
+
+[host_input]
+marker = "compositor: desktop ready with 2 windows"
+mouse_rel = [-330, -20]
+mouse_steps = [150, 1, 0, 10]
+click = "left"
+keys = ["h"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "usb-input: device ready: USB HID Keyboard+Mouse",
+    "usb-ehci: device ready: EHCI HID (no devices)",
+    "AriInit: ps2_input ready (the PS/2 keyboard and pointer, for the screen's holder)",
+    "compositor: desktop ready with 2 windows",
+    "gui_demo B: click button 1 at (380,280)",
+    "gui_demo B: key 'h'",
+    "[host] QMP: 306 input events sent",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = [
+    "KERNEL PANIC",
+    "gui input late",
+    "input event queue full",
+]
