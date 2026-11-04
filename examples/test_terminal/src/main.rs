@@ -6,8 +6,10 @@
 //! interactive shells are granted and a fifth is refused. Then it closes
 //! the shells' input, so they end, and exits. With `arg` 1 it opens one
 //! shell, has it `run cpu_hog`, which never ends, and exits without a
-//! word: init must stop the shell and what it ran (audit of the terminal,
-//! M2).
+//! word: init must stop `cpu_hog`, and the shell then ends on its closed
+//! input (audit of the terminal, M2). With `arg` 2 its shell `spawn`s
+//! `cpu_hog` and the test closes the shell's input: the shell ends, and
+//! what it spawned goes with it, as a terminal's job would.
 //!
 //! Handles, in the broker's order: the terminal endpoint (send only).
 #![no_std]
@@ -66,6 +68,19 @@ fn main(arg: u64) -> u64 {
         say(b"started without the terminal endpoint");
         return 1;
     };
+    if arg == 2 {
+        let Some(input) = ask(terminals, Kind::Shell) else {
+            say(b"no shell granted");
+            return 3;
+        };
+        let _ = sys::ipc_send(input, b"spawn cpu_hog\n", &[], 2000);
+        sys::thread_sleep(1500);
+        say(b"closing a shell that spawned cpu_hog");
+        let _ = sys::ipc_send(input, &[], &[], 100);
+        let _ = sys::handle_close(input);
+        sys::thread_sleep(1500);
+        return 0;
+    }
     if arg == 1 {
         let Some(input) = ask(terminals, Kind::Shell) else {
             say(b"no shell granted");

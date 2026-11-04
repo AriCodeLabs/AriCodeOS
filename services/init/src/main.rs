@@ -1980,19 +1980,31 @@ struct Sessions {
     children: [Option<Child>; MAX_SESSIONS],
     /// The terminal's: interactive shells only, never sshd's `Exec`.
     terminal: bool,
-    /// A request without its three handles was said once already.
+    /// A request without its handles (three from sshd, four from a
+    /// terminal) was said once already.
     said_malformed: bool,
 }
 
 const MAX_SESSIONS: usize = 4;
+
+/// Terminal shells whose programs `Broker::serve_terminals` stops, named
+/// by their launch endpoints.
+struct Shells {
+    /// The shell ended: its endpoint is closed after.
+    ended: [Option<Handle>; MAX_SESSIONS],
+    /// Its terminal went: the shell ends by itself once `run` returns.
+    orphaned: [Option<Handle>; MAX_SESSIONS],
+}
 
 /// A session shell init started.
 #[derive(Clone, Copy)]
 struct Child {
     shell: Handle,
     /// A terminal's shell: the receive side of an endpoint whose send side
-    /// only its terminal holds. Once it closes, the terminal is gone, and
-    /// the shell goes too, even one waiting in `run`.
+    /// only its terminal holds. Once it closes, the terminal is gone: what
+    /// the shell started is stopped, so a shell waiting in `run` returns,
+    /// and the shell ends by itself on its closed input, never halfway
+    /// through a command of its own (audit of the lifetime fix, H1).
     terminal: Option<Handle>,
     /// A terminal's shell: where it asks for launches (receive side), an
     /// endpoint of its own, so what it started is known and stopped with
@@ -2002,43 +2014,43 @@ struct Child {
 
 impl Sessions {
     /// Reaps the shells that ended and serves at most one request. Returns
-    /// the launch endpoints of terminal shells that ended, for the broker
-    /// to stop what they started (audit of the terminal, M2).
-    fn serve(
-        &mut self,
-        fs: &FsClient,
-        net: Handle,
-        services: u64,
-        broker: Handle,
-    ) -> [Option<Handle>; MAX_SESSIONS] {
+    /// the launch endpoints of terminal shells whose programs must stop:
+    /// `ended` for shells gone (the endpoint is closed after), `orphaned`
+    /// for shells whose terminal went (audit of the terminal, M2).
+    fn serve(&mut self, fs: &FsClient, net: Handle, services: u64, broker: Handle) -> Shells {
         use aricode_proto::session::{self, Kind as SessionKind};
-        let mut ended = [None; MAX_SESSIONS];
+        let mut out = Shells {
+            ended: [None; MAX_SESSIONS],
+            orphaned: [None; MAX_SESSIONS],
+        };
         let mut probe = [0u8; 1];
-        let mut none = [Handle(0); 1];
-        for (c, end) in self.children.iter_mut().zip(ended.iter_mut()) {
-            let Some(child) = *c else { continue };
+        for (i, c) in self.children.iter_mut().enumerate() {
+            let Some(child) = c.as_mut() else { continue };
             if sys::process_wait(child.shell, 0) != Err(Error::Timeout) {
                 let _ = sys::handle_close(child.shell);
                 if let Some(t) = child.terminal {
                     let _ = sys::handle_close(t);
                 }
-                *end = child.launches;
+                out.ended[i] = child.launches;
                 *c = None;
                 continue;
             }
-            // Its terminal is gone: the shell goes with it, whatever it
-            // waits for; it is reaped on a later pass.
+            // Its terminal is gone. No handle is taken from the probe (a
+            // buggy terminal sending some would fill init's table; audit
+            // of the lifetime fix, M1).
             if let Some(t) = child.terminal {
-                if matches!(sys::ipc_receive(t, &mut probe, &mut none, 0), Err(e) if e.endpoint_gone())
+                if matches!(sys::ipc_receive(t, &mut probe, &mut [], 0), Err(e) if e.endpoint_gone())
                 {
-                    let _ = sys::process_kill(child.shell);
+                    let _ = sys::handle_close(t);
+                    child.terminal = None;
+                    out.orphaned[i] = child.launches;
                 }
             }
         }
         let mut msg = [0u8; session::Request::LEN];
         let mut handles = [Handle(0); 4];
         let Ok((n, nh)) = sys::ipc_receive(self.endpoint, &mut msg, &mut handles, 0) else {
-            return ended;
+            return out;
         };
         // sshd sends three handles; a terminal a fourth, the side of the
         // endpoint that tells init when it is gone.
@@ -2050,7 +2062,7 @@ impl Sessions {
             if !core::mem::replace(&mut self.said_malformed, true) {
                 say(b"a session request came without its handles; dropped (said once)");
             }
-            return ended;
+            return out;
         }
         let [reply_to, input, output, alive] = handles;
         let alive = self.terminal.then_some(alive);
@@ -2122,7 +2134,7 @@ impl Sessions {
         }
         let _ = sys::ipc_send(reply_to, &session::reply(spawned), &[], 0);
         let _ = sys::handle_close(reply_to);
-        ended
+        out
     }
 }
 
@@ -2545,22 +2557,20 @@ impl Broker {
         session_end
     }
 
-    /// Stops the desktop session's launcher, every app it started and the
-    /// terminals' shells with what they ran (ADR 0074): their windows are
-    /// gone with the compositor. Their exits are collected by
-    /// `poll_launches` as usual.
+    /// Stops the desktop session's launcher, every app it started and what
+    /// the terminals' shells ran (ADR 0074): their windows are gone with
+    /// the compositor, and the shells end on their closed input. Their
+    /// exits are collected by `poll_launches` as usual.
     fn stop_desktop_apps(&mut self) {
         for r in self.running.iter().flatten() {
             if r.ends_session || r.from_launcher || r.from_shell.is_some() {
                 let _ = sys::process_kill(r.process);
             }
         }
-        // The terminals' shells go with the terminals, even one waiting in
-        // `run` for a program that never ends (audit of the terminal, M2);
-        // they are reaped by the next `Sessions::serve`.
-        for child in self.terminals.children.iter().flatten() {
-            let _ = sys::process_kill(child.shell);
-        }
+        // The terminals' shells are not killed: with their programs
+        // stopped above and their terminals gone, each reads its closed
+        // input and ends by itself, never halfway through a command of its
+        // own (audit of the lifetime fix, H1).
     }
 
     /// Starts the desktop session's launcher in the background with its
@@ -2699,16 +2709,29 @@ impl Broker {
         let Some(fs) = self.fs.as_ref() else {
             return;
         };
-        let ended = self.terminals.serve(fs, net, services, self.endpoint);
-        for tag in ended.into_iter().flatten() {
-            for r in self.running.iter_mut().flatten() {
-                if r.from_shell == Some(tag) {
-                    let _ = sys::process_kill(r.process);
-                    // Stopped once; the handle's number may be reused.
-                    r.from_shell = None;
-                }
+        let shells = self.terminals.serve(fs, net, services, self.endpoint);
+        for (tag, close) in shells
+            .ended
+            .iter()
+            .map(|t| (t, true))
+            .chain(shells.orphaned.iter().map(|t| (t, false)))
+        {
+            let Some(tag) = *tag else { continue };
+            self.stop_launches_of(tag);
+            if close {
+                let _ = sys::handle_close(tag);
             }
-            let _ = sys::handle_close(tag);
+        }
+    }
+
+    /// Stops what the terminal shell of launch endpoint `tag` started.
+    fn stop_launches_of(&mut self, tag: Handle) {
+        for r in self.running.iter_mut().flatten() {
+            if r.from_shell == Some(tag) {
+                let _ = sys::process_kill(r.process);
+                // Stopped once; the handle's number may be reused.
+                r.from_shell = None;
+            }
         }
     }
 
