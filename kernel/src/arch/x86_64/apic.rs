@@ -240,8 +240,8 @@ pub fn handle_interrupt(vector: u8, from_user: bool) {
             crate::console_input::on_irq();
             eoi();
         }
-        crate::console_input::KEYBOARD_VECTOR => {
-            crate::console_input::on_keyboard_irq();
+        crate::console_input::KEYBOARD_VECTOR | crate::console_input::AUX_VECTOR => {
+            crate::console_input::on_ps2_irq();
             eoi();
         }
         v => {

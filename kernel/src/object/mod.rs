@@ -31,6 +31,9 @@ pub enum ObjectKind {
     PciRoot,
     /// System state: information (`READ`) and shutdown/reboot (`MANAGE`).
     System,
+    /// The PS/2 stream (ADR 0075): `ps2_read` (`READ`), and a member of
+    /// `ipc_receive_any` (`WAIT`).
+    Ps2,
 }
 
 /// Object shared by every handle that refers to it. Revoking it invalidates
@@ -56,6 +59,7 @@ impl KernelObject {
             ObjectKind::Thread(t) => t.0 as u64,
             ObjectKind::Process(p) => p.0 as u64,
             ObjectKind::Irq(ref l) => l.gsi() as u64,
+            ObjectKind::Ps2 => crate::console_input::ps2_stream_kinds().unwrap_or(0),
             _ => 0,
         }
     }
@@ -73,6 +77,7 @@ impl KernelObject {
             ObjectKind::Hardware => kind::HARDWARE,
             ObjectKind::PciRoot => kind::PCI_ROOT,
             ObjectKind::System => kind::SYSTEM,
+            ObjectKind::Ps2 => kind::PS2,
         }
     }
 

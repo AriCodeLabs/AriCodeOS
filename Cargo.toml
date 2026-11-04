@@ -65,6 +65,7 @@ members = [
     "services/sshd",
     "services/virtio-net",
     "services/virtio-input",
+    "services/ps2-input",
     "services/usb-input",
     "services/usb-ehci",
     "services/console-bridge",

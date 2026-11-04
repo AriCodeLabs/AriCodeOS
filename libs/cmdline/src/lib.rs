@@ -97,6 +97,10 @@ pub mod keys {
     pub const GUI: &str = "gui";
     /// `kbd=us|es`: PS/2 keyboard layout of the console (US by default).
     pub const KBD: &str = "kbd";
+    /// `ps2=console`: the PS/2 keyboard and touchpad serve only the kernel
+    /// console; while a process holds the screen their keys are withheld
+    /// instead of going to the desktop (ADR 0075).
+    pub const PS2: &str = "ps2";
     /// `boot_slot=A|B`: AriBoot adds it when booting from a slot
     /// partition; `boot_pending` comes along if the slot awaits confirmation.
     pub const BOOT_SLOT: &str = "boot_slot";

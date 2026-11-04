@@ -1,15 +1,16 @@
-# A stick that boots into the desktop, on a machine whose only keyboard is
-# the PS/2 one (ADR 0074 phase B, audit M2): the compositor reads only the
-# input services, so the desktop could not be typed at. init boots into
-# the text console and says why.
+# A stick that boots into the desktop, on a machine with no keyboard at
+# all: no virtio or USB input and no i8042 (ADR 0074 phase B, audit M2;
+# ADR 0075). The desktop could not be typed at, so init boots into the
+# text console and says why.
 name = "usb.image_desktop_no_keyboard"
-description = "without a USB or virtio keyboard the desktop is not started"
+description = "without any keyboard the desktop is not started"
 level = "full"
 areas = ["usb", "apps", "gui"]
 cmdline = "qemu_exit shell"
 selftest = false
 disk = "usb-image"
 no_virtio_input = true
+no_ps2 = true
 install = ["examples/test_launcher"]
 stick_profiles = ["desktop:launcher"]
 stdin = ["session", "shutdown"]
@@ -18,8 +19,9 @@ timeout_secs = 90
 [expect]
 exit = 33
 serial_contains = [
-    "AriInit: session = desktop, but there is no USB or virtio keyboard for it (the PS/2 keyboard stays the console's): the text console",
+    "AriInit: session = desktop, but there is no keyboard for it: the text console",
+    "console: no PS/2 controller",
     "session: desktop\r\n",
     "ARICODEOS_SHUTDOWN",
 ]
-serial_absent = ["KERNEL PANIC", "compositor: screen", "desktop session"]
+serial_absent = ["KERNEL PANIC", "compositor: screen", "desktop session", "ps2_input"]

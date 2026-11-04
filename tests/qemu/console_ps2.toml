@@ -1,8 +1,9 @@
 # Phase 34: console of a laptop without a serial port. The host types "hola" +
 # Enter over QMP; with no inputd running QEMU delivers it to the i8042 PS/2 keyboard and
 # the kernel receives it via IRQ1 into the console ring.
-# The guest's own count (10 scancodes: the keyboard's acknowledgement of
-# its set-up, then every byte up to the Enter press) is what proves
+# The guest's own count (9 scancodes: every byte up to the Enter press;
+# the keyboard's acknowledgement of its set-up is polled before the
+# interrupts are on since ADR 0075, so it is not one of them) is what proves
 # delivery. It is taken when the Enter press is decoded: taken when the
 # line was printed, it took in the Enter release or not depending on how
 # fast the console printed (incident 0031). The kernel exits QEMU right
@@ -28,7 +29,7 @@ keys = ["h", "o", "l", "a", "ret"]
 exit = 33
 serial_contains = [
     "console: PS/2 keyboard (GSI 1, vector 0x41, layout us)",
-    "console: PS/2 line 'hola' (4 bytes, 10 scancodes)",
+    "console: PS/2 line 'hola' (4 bytes, 9 scancodes)",
     "ARICODEOS_KERNEL_READY",
 ]
 serial_absent = ["KERNEL PANIC", "nobody typed"]

@@ -17,9 +17,9 @@ serial_contains = [
     "run: hello_app exited with 0",
     "run: kernel_read: was killed by the kernel",
     "recent kernel events:",
-    "s] process 21 'hello_app' created",
-    "s] process 21 'hello_app' exited with code 0",
-    "s] process 22 killed by fault: #PF read",
+    "s] process 22 'hello_app' created",
+    "s] process 22 'hello_app' exited with code 0",
+    "s] process 23 killed by fault: #PF read",
     "=== end of diagnostics ===",
     "ARICODEOS_SHUTDOWN",
 ]

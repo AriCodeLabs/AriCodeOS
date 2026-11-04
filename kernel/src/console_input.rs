@@ -6,12 +6,18 @@
 //! kernel: processes only see it through a `CONSOLE` handle with `READ`.
 //! The PS/2 keyboard is the console of a laptop without a serial port
 //! (Phase 34); real keyboard drivers (virtio, USB) stay in ring 3.
+//!
+//! While a process holds the screen the i8042's bytes, the keyboard's and
+//! the aux port's (touchpad, mouse), go untouched into the PS/2 stream
+//! instead, for the ring-3 `ps2-input` to decode (ADR 0075).
 
 use crate::arch::x86_64::ioapic;
 use crate::arch::x86_64::port::{inb, io_wait, outb};
 use crate::sync::IrqLock;
 use crate::task::wait::WaitQueue;
-use aricode_input::{EscapeChord, Keyboard, Layout, ScancodeSet1};
+use aricode_abi::ps2;
+use aricode_input::{EscapeChord, Keyboard, Layout, Ps2Queue, ScancodeSet1};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use log::{info, warn};
 
 const COM1: u16 = 0x3F8;
@@ -21,10 +27,17 @@ const COM1_ISA_IRQ: u8 = 4;
 pub const SERIAL_VECTOR: u8 = 0x40;
 /// PS/2 keyboard vector.
 pub const KEYBOARD_VECTOR: u8 = 0x41;
+/// PS/2 aux port (touchpad, mouse) vector (ADR 0075).
+pub const AUX_VECTOR: u8 = 0x42;
 const PS2_DATA: u16 = 0x60;
 const PS2_STATUS: u16 = 0x64;
 const PS2_COMMAND: u16 = 0x64;
 const PS2_ISA_IRQ: u8 = 1;
+const PS2_AUX_ISA_IRQ: u8 = 12;
+/// Device acknowledgement of a command.
+const PS2_ACK: u8 = 0xFA;
+/// Device request to send the last byte again.
+const PS2_RESEND: u8 = 0xFE;
 const CAPACITY: usize = 1024;
 
 struct Ring {
@@ -104,6 +117,74 @@ static PS2: IrqLock<Ps2> = IrqLock::new(Ps2 {
     escape: EscapeChord::new(),
 });
 
+/// The PS/2 stream (ADR 0075): what the i8042 delivered while a process
+/// held the screen, as (tag, byte) entries for `ps2-input`. The console
+/// never sees these bytes; the stream never sees the console's.
+static STREAM: IrqLock<Ps2Queue> = IrqLock::new(Ps2Queue::new());
+static STREAM_WAITERS: WaitQueue = WaitQueue::new();
+
+/// Whether the bytes typed while the screen is held go to the stream
+/// (`ps2=console` keeps them from it: they are withheld, as before ADR
+/// 0075). Set once at boot.
+static PUMP: AtomicBool = AtomicBool::new(false);
+
+/// What the controller has (`ps2::KIND_*`), plus `PRESENT` once it passed
+/// its self-test. Set once at boot.
+static FOUND: AtomicU64 = AtomicU64::new(0);
+const PRESENT: u64 = 1 << 63;
+
+/// `Some(ps2::KIND_* bits)` if the machine has an i8042 that passed its
+/// self-test and its stream is for the desktop (not `ps2=console`): init
+/// then gets the stream (`INIT_PS2`).
+pub fn ps2_stream_kinds() -> Option<u64> {
+    let found = FOUND.load(Ordering::Acquire);
+    (found & PRESENT != 0 && PUMP.load(Ordering::Acquire)).then_some(found & !PRESENT)
+}
+
+/// The stream is cut: a process took the screen, or the last one gave it
+/// back. What it held was for the session that ended, so it is emptied,
+/// and the reader starts over from a reset mark. Under `LEASE`; takes only
+/// the stream's lock and wakes nobody (the reader sees the mark with the
+/// next byte, or at its next look).
+pub fn stream_cut() {
+    STREAM.lock().cut();
+}
+
+/// Whether the stream has entries or a reset mark for its reader.
+pub fn stream_ready() -> bool {
+    STREAM.lock().pending() > 0
+}
+
+/// The entries waiting (a reset mark counts as one), for `receive_any`.
+pub fn stream_pending() -> u32 {
+    STREAM.lock().pending() as u32
+}
+
+/// The queue woken when bytes enter the stream (`receive_any`).
+pub fn stream_waiters() -> &'static WaitQueue {
+    &STREAM_WAITERS
+}
+
+/// Copies whole entries into `out` for process `pid` (`ps2_read`): a reset
+/// mark first if the stream was cut, then the oldest entries. Returns the
+/// bytes written; `None` if another live process drains the stream.
+pub fn stream_read(pid: u32, out: &mut [u8]) -> Option<usize> {
+    let (n, dropped) = {
+        let mut stream = STREAM.lock();
+        (stream.read(pid, out), stream.take_dropped())
+    };
+    if dropped > 0 {
+        warn!("console: {dropped} PS/2 byte(s) dropped: the stream was full (its reader is told to start over)");
+    }
+    n
+}
+
+/// Entries `stream_read` took could not be delivered (the reader's buffer
+/// went away meanwhile): the reader starts over from a reset mark.
+pub fn stream_lost() {
+    STREAM.lock().lost();
+}
+
 /// Characters the PS/2 keyboard produced while a process held the screen,
 /// since the last call: they were typed at that process's screen, never at
 /// the console, so the console never got them (ADR 0074 phase B).
@@ -113,7 +194,7 @@ pub fn take_withheld() -> u64 {
 
 /// Routes the COM1 IRQ to its dedicated vector and enables the UART receive
 /// interrupt. Requires the I/O APIC and interrupts enabled.
-pub fn init(layout: Layout) {
+pub fn init(layout: Layout, pump: bool) {
     PS2.lock().keyboard.set_layout(layout);
     let (gsi, ov) = crate::acpi::with(|a| a.madt.isa_irq_to_gsi(COM1_ISA_IRQ));
     let (level, low) = ov
@@ -127,7 +208,7 @@ pub fn init(layout: Layout) {
     // SAFETY: COM1 IER; only enables the "data received" interrupt.
     unsafe { outb(COM1 + 1, 0x01) };
     info!("console: input on COM1 (GSI {gsi}, vector {SERIAL_VECTOR:#x})");
-    init_ps2();
+    init_ps2(pump);
 }
 
 /// Bounded wait for the controller to accept a byte (input buffer empty).
@@ -186,10 +267,74 @@ fn ps2_flush() {
     }
 }
 
-/// Initializes the i8042 controller and its keyboard if present: ports
-/// disabled, configuration with IRQ1 and translation to set 1, self-test,
-/// port 1 enabled, IRQ1 routed and keyboard scanning.
-fn init_ps2() {
+/// Sends `byte` to the keyboard (port 1), or with `aux` to the aux port,
+/// and waits for the device's acknowledgement. Only before the ports'
+/// interrupts are on (`init_ps2`): the reply is polled.
+fn ps2_device_command(aux: bool, byte: u8) -> bool {
+    // A device that answers "resend" (0xFE) gets the byte again, as Linux's
+    // i8042 driver does, a few times at most.
+    for _ in 0..3 {
+        if aux && !ps2_command(0xD4) {
+            return false;
+        }
+        if !ps2_write_data(byte) {
+            return false;
+        }
+        // A device may queue a byte of its own before the acknowledgement.
+        for _ in 0..4 {
+            match ps2_read() {
+                Some(PS2_ACK) => return true,
+                Some(PS2_RESEND) => break,
+                Some(_) => {}
+                None => return false,
+            }
+        }
+    }
+    false
+}
+
+/// Routes ISA `irq` to `vector` on the boot CPU.
+fn ps2_route(irq: u8, vector: u8) -> Result<u32, &'static str> {
+    let (gsi, ov) = crate::acpi::with(|a| a.madt.isa_irq_to_gsi(irq));
+    let (level, low) = ov
+        .map(|o| (o.level_triggered(), o.active_low()))
+        .unwrap_or((false, false));
+    ioapic::route(gsi, vector, crate::arch::x86_64::apic::bsp_id(), level, low).map(|()| gsi)
+}
+
+/// Brings up the aux port's device (ADR 0075): its defaults, the
+/// IntelliMouse wheel if it has one (sample rates 200, 100, 80, then its ID
+/// reads 3), and reporting. Returns its `ps2::KIND_*` bits (0 if nothing
+/// acknowledged). The port is enabled and the interrupts still off.
+fn init_aux() -> u64 {
+    if !ps2_device_command(true, 0xF6) {
+        return 0;
+    }
+    let mut kinds = ps2::KIND_POINTER;
+    let rates = [200, 100, 80];
+    if rates
+        .iter()
+        .all(|&r| ps2_device_command(true, 0xF3) && ps2_device_command(true, r))
+        && ps2_device_command(true, 0xF2)
+        && ps2_read() == Some(3)
+    {
+        kinds |= ps2::KIND_WHEEL;
+    }
+    // The wheel sequence left the rate at 80: back to the default.
+    let _ = ps2_device_command(true, 0xF3) && ps2_device_command(true, 100);
+    if !ps2_device_command(true, 0xF4) {
+        return 0;
+    }
+    kinds
+}
+
+/// Initializes the i8042 controller and its devices: both ports disabled
+/// and their interrupts off while the devices are set up by polling (so no
+/// handler takes an acknowledgement), translation to set 1, self-test,
+/// keyboard scanning on port 1, the aux port's pointer if the controller
+/// has one (ADR 0075), then the interrupts on and routed. `pump`: the
+/// bytes typed while the screen is held go to the stream.
+fn init_ps2(pump: bool) {
     ps2_command(0xAD);
     ps2_command(0xA7);
     ps2_flush();
@@ -201,10 +346,10 @@ fn init_ps2() {
         info!("console: no PS/2 controller");
         return;
     };
-    // IRQ1 on, IRQ12 off, port 1 clock enabled, translation to set 1.
-    let cfg = (cfg | 0x01 | 0x40) & !0x02 & !0x10;
+    // Interrupts off, port 1 clock enabled, translation to set 1.
+    let setup = (cfg | 0x40) & !(0x01 | 0x02 | 0x10);
     ps2_command(0x60);
-    ps2_write_data(cfg);
+    ps2_write_data(setup);
     ps2_command(0xAA);
     match ps2_read() {
         Some(0x55) => {}
@@ -215,44 +360,119 @@ fn init_ps2() {
     }
     // Some controllers lose their configuration on self-test.
     ps2_command(0x60);
-    ps2_write_data(cfg);
-    ps2_command(0xAE);
-    let (gsi, ov) = crate::acpi::with(|a| a.madt.isa_irq_to_gsi(PS2_ISA_IRQ));
-    let (level, low) = ov
-        .map(|o| (o.level_triggered(), o.active_low()))
-        .unwrap_or((false, false));
-    if let Err(e) = ioapic::route(
-        gsi,
-        KEYBOARD_VECTOR,
-        crate::arch::x86_64::apic::bsp_id(),
-        level,
-        low,
-    ) {
-        warn!("console: PS/2 keyboard without interrupt ({e})");
-        return;
-    }
-    // Keyboard: enable scanning (0xF4); the ACK arrives via the interrupt or is discarded.
-    ps2_write_data(0xF4);
-    let _ = ps2_read();
+    ps2_write_data(setup);
+    // A second port exists if enabling it clears its clock-disabled bit.
+    // Its interface test answers 0, but many chipsets answer 0xFA or 0xFF
+    // on a working port, which Linux accepts too; the device's own
+    // acknowledgement (`init_aux`) is what proves a pointer is there.
+    ps2_command(0xA8);
+    let aux_port = ps2_command(0x20)
+        && ps2_read().is_some_and(|c| c & 0x20 == 0)
+        && ps2_command(0xA7)
+        && ps2_command(0xA9)
+        && matches!(ps2_read(), Some(0x00 | 0xFA | 0xFF));
+    ps2_command(0xA7);
     ps2_flush();
+    // Each device is set up with the other port disabled, so a key pressed
+    // or a touchpad touched meanwhile cannot land where a reply is
+    // expected (the wheel's ID above all: a wrong one would decode 4-byte
+    // packets as 3-byte ones the whole boot).
+    let mut found = 0;
+    if aux_port {
+        ps2_command(0xA8);
+        found |= init_aux();
+        ps2_command(0xA7);
+    }
+    ps2_command(0xAE);
+    if ps2_device_command(false, 0xF4) {
+        found |= ps2::KIND_KEYBOARD;
+    }
+    let pointer = found & ps2::KIND_POINTER != 0;
+    // The I/O APIC entries are routed before the controller may raise
+    // either line: an edge on a still masked entry would be lost, and with
+    // its byte left in the shared output buffer no other byte, and so no
+    // other edge, would ever come (audit of ADR 0075, H1).
+    let gsi = match ps2_route(PS2_ISA_IRQ, KEYBOARD_VECTOR) {
+        Ok(gsi) => gsi,
+        Err(e) => {
+            warn!("console: PS/2 keyboard without interrupt ({e})");
+            return;
+        }
+    };
+    let aux_gsi = if pointer {
+        match ps2_route(PS2_AUX_ISA_IRQ, AUX_VECTOR) {
+            Ok(gsi) => Some(gsi),
+            Err(e) => {
+                warn!("console: PS/2 pointer without interrupt ({e})");
+                found &= !(ps2::KIND_POINTER | ps2::KIND_WHEEL);
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let pointer = found & ps2::KIND_POINTER != 0;
+    let mut cfg = setup | 0x01;
+    if pointer {
+        ps2_command(0xA8);
+        cfg = (cfg | 0x02) & !0x20;
+    } else {
+        cfg |= 0x20;
+    }
+    FOUND.store(found | PRESENT, Ordering::Release);
+    PUMP.store(pump, Ordering::Release);
+    ps2_command(0x60);
+    ps2_write_data(cfg);
+    // Whatever came in before the interrupts were on is taken now, through
+    // the handler, so the buffer is empty for the next edge.
+    on_ps2_irq();
     info!(
-        "console: PS/2 keyboard (GSI {gsi}, vector {KEYBOARD_VECTOR:#x}, layout {})",
+        "console: PS/2 keyboard{} (GSI {gsi}, vector {KEYBOARD_VECTOR:#x}, layout {})",
+        if found & ps2::KIND_KEYBOARD != 0 {
+            ""
+        } else {
+            " port (no keyboard acknowledged)"
+        },
         match PS2.lock().keyboard.layout() {
             Layout::Us => "us",
             Layout::Es => "es",
         }
     );
+    if let Some(gsi) = aux_gsi {
+        info!(
+            "console: PS/2 pointer{} (GSI {gsi}, vector {AUX_VECTOR:#x})",
+            if found & ps2::KIND_WHEEL != 0 {
+                " with a wheel"
+            } else {
+                ""
+            }
+        );
+    }
+    info!(
+        "console: {}",
+        if pump {
+            "while a process holds the screen, the PS/2 bytes go to its input service"
+        } else {
+            "ps2=console: the PS/2 keyboard serves only the console"
+        }
+    );
 }
 
-/// Keyboard vector handler: set 1 scancodes to text.
-pub fn on_keyboard_irq() {
+/// Keyboard and aux vector handler: the i8042 has one output buffer for
+/// both ports, so either interrupt drains it all. Keyboard bytes become
+/// text for the console (set 1 scancodes); while a process holds the screen
+/// they and the aux bytes go to the stream instead (ADR 0075), and without
+/// one the aux bytes are dropped.
+pub fn on_ps2_irq() {
     crate::random::stir();
     let mut pushed = false;
+    let mut streamed = false;
     {
         let mut ps2 = PS2.lock();
         let mut ring = RING.lock();
+        let pump = PUMP.load(Ordering::Relaxed);
         loop {
-            // SAFETY: i8042 status and data; bit 5 = mouse data.
+            // SAFETY: i8042 status and data; bit 5 = aux data.
             let status = unsafe { inb(PS2_STATUS) };
             if status & 0x01 == 0 {
                 break;
@@ -260,8 +480,15 @@ pub fn on_keyboard_irq() {
             // SAFETY: same as above.
             let byte = unsafe { inb(PS2_DATA) };
             ps2.bytes += 1;
+            let held = crate::console::screen_held();
             if status & 0x20 != 0 {
+                if held && pump {
+                    streamed |= STREAM.lock().push(ps2::TAG_AUX, byte);
+                }
                 continue;
+            }
+            if held && pump {
+                streamed |= STREAM.lock().push(ps2::TAG_KEYBOARD, byte);
             }
             if let Some(ev) = ps2.decoder.feed(byte) {
                 // Decoded either way, so a modifier held across the change
@@ -272,8 +499,8 @@ pub fn on_keyboard_irq() {
                 // (the compositor) holds it the keys are not typed at the
                 // console: a shell must never read what was meant for a
                 // window (ADR 0074 phase B). Ctrl+Alt+Backspace asks for the
-                // screen back, the only key that does anything then.
-                if crate::console::screen_held() {
+                // screen back, the only key the kernel acts on then.
+                if held {
                     if chord {
                         crate::console::screen_wanted_back();
                     } else {
@@ -293,6 +520,9 @@ pub fn on_keyboard_irq() {
     }
     if pushed {
         WAITERS.wake_all();
+    }
+    if streamed {
+        STREAM_WAITERS.wake_all();
     }
 }
 
@@ -340,6 +570,7 @@ pub fn take(pid: u32) {
 /// reader takes the console (`take`). Called before anyone can see that
 /// it exited, so its successor never reads first.
 pub fn process_gone(pid: u32) {
+    STREAM.lock().reader_gone(pid);
     let discarded = {
         let mut ring = RING.lock();
         if ring.reader != Some(pid) {

@@ -597,14 +597,19 @@ pub fn run_scenario(
             marker: &h.marker,
             payload: &h.payload,
         });
-        let input_probe = s.host_input.as_ref().map(|h| qemu::InputProbe {
-            marker: &h.marker,
-            keys: &h.keys,
-            mouse_rel: h.mouse_rel,
-            click: h.click.as_deref(),
-            key_delay_ms: h.key_delay_ms,
-            echo_prompt: h.echo_prompt.as_deref(),
-        });
+        let input_probe = s
+            .host_input
+            .iter()
+            .chain(&s.host_input_then)
+            .map(|h| qemu::InputProbe {
+                marker: &h.marker,
+                keys: &h.keys,
+                mouse_rel: h.mouse_rel,
+                click: h.click.as_deref(),
+                key_delay_ms: h.key_delay_ms,
+                echo_prompt: h.echo_prompt.as_deref(),
+            })
+            .collect();
         let hotplug = s.host_hotplug.as_ref().map(|h| qemu::Hotplug {
             marker: &h.marker,
             delay: Duration::from_millis(h.delay_ms),
@@ -652,6 +657,7 @@ pub fn run_scenario(
                 ehci_hid: s.usb_ehci_hid,
                 ehci_storage: s.usb_ehci_storage,
                 ehci_companion_kbd: s.usb_ehci_companion_kbd,
+                no_i8042: s.no_ps2,
             },
             nic: !s.no_nic,
             flr_device: s.flr_device,

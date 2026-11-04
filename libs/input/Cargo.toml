@@ -9,3 +9,4 @@ description = "AriCodeOS input events (evdev/virtio-input) and US keyboard (no_s
 path = "src/lib.rs"
 
 [dependencies]
+aricode-abi = { path = "../../sdk/abi" }

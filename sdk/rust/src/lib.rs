@@ -335,6 +335,20 @@ pub fn irq_wait(irq: Handle, timeout_ms: u64) -> Result<u64, Error> {
     call(nr::IRQ_WAIT, irq.0 as u64, timeout_ms, 0, 0)
 }
 
+/// Copies the PS/2 stream's queued entries into `buf` (requires `READ` on a
+/// `PS2` object, ADR 0075): whole entries of [`abi::ps2::ENTRY`] bytes,
+/// without waiting; returns the bytes copied (0 if none).
+pub fn ps2_read(ps2: Handle, buf: &mut [u8]) -> Result<usize, Error> {
+    call(
+        nr::PS2_READ,
+        ps2.0 as u64,
+        buf.as_mut_ptr() as u64,
+        buf.len() as u64,
+        0,
+    )
+    .map(|n| n as usize)
+}
+
 /// Maps an MMIO or DMA region into the process; returns its virtual address.
 pub fn mmio_map(region: Handle) -> Result<u64, Error> {
     call(nr::MMIO_MAP, region.0 as u64, 0, 0, 0)

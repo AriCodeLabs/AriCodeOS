@@ -19,15 +19,15 @@ serial_contains = [
     "event_flood: 201 events asked for",
     "run: event_flood exited with 0",
     "recent kernel events:",
-    "s] process 21 'hello_app' exited with code 0",
-    "s] fault reported by process 22: events dropped (code 184)",
-    "s] fault reported by process 22: event flood end (code 200)",
+    "s] process 22 'hello_app' exited with code 0",
+    "s] fault reported by process 23: events dropped (code 184)",
+    "s] fault reported by process 23: event flood end (code 200)",
     "=== end of diagnostics ===",
     "ARICODEOS_SHUTDOWN",
 ]
 serial_absent = ["KERNEL PANIC", "diag: no access"]
 serial_order = [
-    "s] process 21 'hello_app' exited with code 0",
-    "s] fault reported by process 22: events dropped (code 184)",
-    "s] fault reported by process 22: event flood end (code 200)",
+    "s] process 22 'hello_app' exited with code 0",
+    "s] fault reported by process 23: events dropped (code 184)",
+    "s] fault reported by process 23: event flood end (code 200)",
 ]

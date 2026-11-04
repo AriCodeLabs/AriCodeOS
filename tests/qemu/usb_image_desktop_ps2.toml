@@ -1,0 +1,63 @@
+# A laptop's case (ADR 0075): a stick that boots into the desktop on a
+# machine whose only keyboard and mouse are behind the i8042. The desktop
+# starts on the PS/2 keyboard, and Ctrl+Alt+Backspace typed there reaches
+# the compositor through ps2_input, which leaves by itself well within the
+# kernel's 2 s, so the kernel stops nobody. init ends the desktop and the
+# console gets its screen and PS/2 keyboard back: `uptime` typed on the
+# PS/2 keyboard then reaches the shell (the stream carried keys only while
+# the screen was held). There is no other input service, so no console
+# bridge is started: ps2_input is never one of its inputs.
+name = "usb.image_desktop_ps2"
+description = "a desktop stick on a PS/2-only machine: the desktop starts and Ctrl+Alt+Backspace there ends it cleanly"
+level = "full"
+areas = ["usb", "apps", "gui", "input", "console"]
+cmdline = "qemu_exit shell"
+selftest = false
+disk = "usb-image"
+no_virtio_input = true
+install = ["examples/hello_ext", "examples/gui_demo", "examples/test_launcher"]
+stick_profiles = ["desktop:launcher,gui_demo"]
+stdin = ["sleep 9000", "session", "shutdown"]
+timeout_secs = 120
+
+[host_input]
+marker = "launcher: window presented"
+keys = ["ctrl+alt+backspace"]
+
+[host_input_then]
+marker = "console: the screen is back from process"
+keys = ["u", "p", "t", "i", "m", "e", "ret"]
+key_delay_ms = 50
+
+[expect]
+exit = 33
+serial_contains = [
+    "AriInit: ps2_input ready (the PS/2 keyboard and pointer, for the screen's holder)",
+    "AriInit: desktop session: launcher started",
+    "compositor: Ctrl+Alt+Backspace: the owner asked for the text console; leaving",
+    "AriInit: the desktop ended (the compositor ended): back to the text console",
+    "'launcher' killed: stopped at another process's request",
+    "AriInit: no input devices",
+    "console: the screen is back from process",
+    "uptime: ",
+    "session: desktop\r\n",
+    "ARICODEOS_SHUTDOWN",
+]
+# The kernel takes the screen back as the compositor exits, before or
+# after init says the desktop ended: only what follows each is ordered.
+serial_order = [
+    "compositor: Ctrl+Alt+Backspace: the owner asked for the text console; leaving",
+    "console: the screen is back from process",
+    "uptime: ",
+    "session: desktop\r\n",
+]
+serial_absent = [
+    "KERNEL PANIC",
+    "USER STACK OVERFLOW",
+    "launcher: leaving",
+    "gui_demo A: key",
+    "the compositor did not end",
+    "still holds the screen after 2 s",
+    "killed: stopped by Ctrl+Alt+Backspace",
+    "console bridge with",
+]

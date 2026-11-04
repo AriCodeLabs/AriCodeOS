@@ -211,6 +211,9 @@ impl Endpoint {
 pub enum Member<'a> {
     Endpoint(&'a Endpoint),
     Irq(&'a IrqLine),
+    /// The PS/2 stream (ADR 0075): ready while entries are queued, which
+    /// its reader then takes with `ps2_read`; reported like a line.
+    Ps2,
 }
 
 impl Member<'_> {
@@ -218,6 +221,7 @@ impl Member<'_> {
         match self {
             Member::Endpoint(e) => e.has_message(),
             Member::Irq(l) => l.is_pending(),
+            Member::Ps2 => crate::console_input::stream_ready(),
         }
     }
 
@@ -226,6 +230,10 @@ impl Member<'_> {
         match self {
             Member::Endpoint(e) => e.try_receive().map(Ready::Message),
             Member::Irq(l) => l.take_pending().map(Ready::Irq),
+            // Nothing is taken: the entries stay for `ps2_read`.
+            Member::Ps2 => Some(crate::console_input::stream_pending())
+                .filter(|&n| n > 0)
+                .map(Ready::Irq),
         }
     }
 }
@@ -274,6 +282,7 @@ pub fn receive_any(members: &[Member], timeout_ms: u64) -> Result<(usize, Ready)
         *q = match m {
             Member::Endpoint(e) => &e.receivers,
             Member::Irq(l) => l.waiters(),
+            Member::Ps2 => crate::console_input::stream_waiters(),
         };
     }
     let queues = &queues[..members.len()];
@@ -282,7 +291,7 @@ pub fn receive_any(members: &[Member], timeout_ms: u64) -> Result<(usize, Ready)
         has_endpoints
             && members.iter().all(|m| match m {
                 Member::Endpoint(e) => e.drained_and_closed(),
-                Member::Irq(_) => true,
+                Member::Irq(_) | Member::Ps2 => true,
             })
     };
     loop {
