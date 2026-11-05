@@ -882,15 +882,15 @@ fn irq_wait(h: Handle, timeout_ms: u64) -> Result<u64, Error> {
 }
 
 fn mmio_map(h: Handle) -> Result<u64, Error> {
-    let (phys, len, cacheable, source_id, dma) = with_handles(|t| {
+    let (phys, len, caching, source_id, dma) = with_handles(|t| {
         let o = lookup(t, h, Rights::READ.union(Rights::WRITE))?;
         match o.kind {
-            ObjectKind::Mmio(ref r) => Ok((r.phys, r.len, r.cacheable, r.source_id, None)),
+            ObjectKind::Mmio(ref r) => Ok((r.phys, r.len, r.caching, r.source_id, None)),
             // The mapping holds the buffer (ADR 0038).
             ObjectKind::Dma(ref d) => Ok((
                 d.region.phys,
                 d.region.len,
-                d.region.cacheable,
+                d.region.caching,
                 None,
                 Some(o.clone()),
             )),
@@ -904,7 +904,7 @@ fn mmio_map(h: Handle) -> Result<u64, Error> {
         virt,
         created,
         screen,
-    } = process::map_foreign(phys, len, cacheable, dma)?;
+    } = process::map_foreign(phys, len, caching, dma)?;
     // IOMMU (Phase 33): mapping a device assigns it to the process's
     // domain; mapping a foreign DMA buffer makes it visible to its devices.
     if let Some(pid) = process::current_pid() {

@@ -1285,7 +1285,7 @@ pub struct Mapped {
 pub fn map_foreign(
     phys: u64,
     len: u64,
-    cacheable: bool,
+    caching: crate::hw::Caching,
     dma: Option<crate::object::ObjectRef>,
 ) -> Result<Mapped, aricode_abi::Error> {
     use aricode_x86_paging::{CACHE_DISABLE, WRITE_THROUGH};
@@ -1317,9 +1317,11 @@ pub fn map_foreign(
     // end of user space.
     let virt = p.mmio_ranges.alloc(span).ok_or(aricode_abi::Error::Limit)?;
     let mut flags = USER | WRITABLE | NO_EXECUTE;
-    if !cacheable {
-        flags |= CACHE_DISABLE | WRITE_THROUGH;
-    }
+    flags |= match caching {
+        crate::hw::Caching::WriteBack => 0,
+        crate::hw::Caching::Uncached => CACHE_DISABLE | WRITE_THROUGH,
+        crate::hw::Caching::WriteCombining => aricode_x86_paging::pat::WRITE_COMBINING,
+    };
     let Some(m) = p.mapper.as_mut() else {
         p.mmio_ranges.free(virt, span);
         return Err(aricode_abi::Error::Fault);

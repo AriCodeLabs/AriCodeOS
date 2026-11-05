@@ -31,6 +31,38 @@ pub const ACCESSED: u64 = 1 << 5;
 pub const HUGE: u64 = 1 << 7;
 pub const GLOBAL: u64 = 1 << 8;
 pub const NO_EXECUTE: u64 = 1 << 63;
+
+/// The page attribute table the kernel programs on every CPU (ADR 0078,
+/// stage 0): the power-on table with entry 1, reached by a 4 KiB page with
+/// only `WRITE_THROUGH` set, made write-combining (for the framebuffer).
+/// No page used entry 1 before: write-through was always paired with
+/// `CACHE_DISABLE` (entry 3, uncached). Memory types from the Intel SDM,
+/// vol. 3, "PAT memory types".
+pub mod pat {
+    pub const UC: u64 = 0x00;
+    pub const WC: u64 = 0x01;
+    pub const WT: u64 = 0x04;
+    pub const WB: u64 = 0x06;
+    pub const UC_MINUS: u64 = 0x07;
+
+    /// Entries 0 to 7.
+    pub const TABLE: [u64; 8] = [WB, WC, UC_MINUS, UC, WB, WT, UC_MINUS, UC];
+
+    /// The value of `IA32_PAT` for `TABLE`.
+    pub const VALUE: u64 = {
+        let mut v = 0;
+        let mut i = 0;
+        while i < 8 {
+            v |= TABLE[i] << (8 * i);
+            i += 1;
+        }
+        v
+    };
+
+    /// The leaf flags that select write-combining.
+    pub const WRITE_COMBINING: u64 = super::WRITE_THROUGH;
+}
+
 const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
 /// Flags a caller may request for a leaf. Everything else is discarded.
@@ -756,5 +788,21 @@ mod tests {
         // Identity + 4 GiB physical map, 16-page kernel: 1 + 2*(1+4) + 2 + 1 + 8
         assert_eq!(pool_size_for(4 << 30, 2, 16), 22);
         assert!(pool_size_for(1 << 40, 1, 16) >= 1024 + 4);
+    }
+
+    #[test]
+    fn pat_changes_only_entry_1_to_write_combining() {
+        // The power-on value (SDM: 0007040600070406h).
+        let power_on: u64 = 0x0007_0406_0007_0406;
+        assert_eq!(pat::VALUE & 0xFF00, pat::WC << 8);
+        assert_eq!(pat::VALUE & !0xFF00, power_on & !0xFF00);
+        // Entry index: PAT bit 7 (clear), PCD bit 4, PWT bit 3.
+        let index = |flags: u64| ((flags >> 3) & 1) | ((flags >> 4) & 1) << 1;
+        assert_eq!(pat::TABLE[index(pat::WRITE_COMBINING) as usize], pat::WC);
+        assert_eq!(
+            pat::TABLE[index(CACHE_DISABLE | WRITE_THROUGH) as usize],
+            pat::UC
+        );
+        assert_eq!(pat::TABLE[index(0) as usize], pat::WB);
     }
 }

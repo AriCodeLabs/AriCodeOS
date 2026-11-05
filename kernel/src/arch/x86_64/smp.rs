@@ -306,6 +306,7 @@ extern "C" fn ap_entry(idx: usize) -> ! {
     gdt::init_for(cpu);
     idt::load();
     syscall::init();
+    super::pat::init();
     cpu::activate(cpu);
     // CR0/CR4 came from the BSP; XCR0 is per CPU (ADR 0065).
     super::fpu::init_cpu();

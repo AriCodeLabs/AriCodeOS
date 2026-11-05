@@ -613,7 +613,7 @@ fn claim_locked(index: usize, ecam: &Ecam, d: &mut PciDevice) -> Result<Claimed,
             KernelObject::new(ObjectKind::Mmio(crate::hw::Region {
                 phys: b.address,
                 len: b.size,
-                cacheable: false,
+                caching: crate::hw::Caching::Uncached,
                 source_id,
                 claim: None,
             })),
@@ -715,7 +715,7 @@ fn claim_locked(index: usize, ecam: &Ecam, d: &mut PciDevice) -> Result<Claimed,
     let cfg = KernelObject::new(ObjectKind::Mmio(crate::hw::Region {
         phys: cfg_phys,
         len: 4096,
-        cacheable: false,
+        caching: crate::hw::Caching::Uncached,
         source_id,
         claim: Some(ClaimToken {
             index,

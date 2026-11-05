@@ -457,7 +457,7 @@ fn run_init(arg: u64, fb: boot_protocol::FramebufferInfo) {
     let framebuffer = object::KernelObject::new(object::ObjectKind::Mmio(hw::Region {
         phys: fb.address,
         len: fb.size,
-        cacheable: false,
+        caching: hw::Caching::WriteCombining,
         source_id: None,
         claim: None,
     }));
