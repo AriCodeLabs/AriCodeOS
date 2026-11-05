@@ -1,0 +1,19 @@
+# `video=` that is not WxH: it is ignored, and both the loader's log and
+# `diag` say so (a refusal is never silent).
+name = "gui.video_malformed"
+description = "A video= that is not WxH is refused, logged and reported by diag"
+level = "full"
+areas = ["gui", "boot"]
+cmdline = "qemu_exit gui shell video=big"
+install = ["examples/gui_demo"]
+stdin = ["sleep 1000", "diag", "shutdown"]
+timeout_secs = 60
+
+[expect]
+exit = 33
+serial_contains = [
+    "video: video= is not WxH; ignored",
+    "the firmware's mode; no usable EDID from the firmware; video= is not WxH",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "video: setting"]

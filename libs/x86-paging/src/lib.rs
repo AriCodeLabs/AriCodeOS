@@ -300,6 +300,39 @@ impl<A: FrameAlloc, M: PhysMap> Mapper<A, M> {
         Ok(())
     }
 
+    /// Maps physical `[0, limit)` at `base` with 2 MiB pages, and `range`
+    /// (`start`, `len`) with `flags | range_flags` even past `limit`. The 2
+    /// MiB windows around `range` use 4 KiB pages, so what shares a window
+    /// with it keeps `flags`, and no page has two memory types.
+    pub fn map_linear(
+        &mut self,
+        base: u64,
+        limit: u64,
+        flags: u64,
+        range: (u64, u64),
+        range_flags: u64,
+    ) -> Result<(), MapError> {
+        let (start, len) = range;
+        if len == 0 {
+            return self.map_range_2m(base, 0, limit, flags);
+        }
+        let end = start.checked_add(len).ok_or(MapError::Unaligned)?;
+        let window_start = start & !(HUGE_2M - 1);
+        let window_end = end.next_multiple_of(HUGE_2M);
+        self.map_range_2m(base, 0, window_start.min(limit), flags)?;
+        let mut page = window_start;
+        while page < window_end {
+            let in_range = page + PAGE_SIZE > start && page < end;
+            let leaf = if in_range { flags | range_flags } else { flags };
+            self.map_4k(base + page, page, leaf)?;
+            page += PAGE_SIZE;
+        }
+        if window_end < limit {
+            self.map_range_2m(base + window_end, window_end, limit - window_end, flags)?;
+        }
+        Ok(())
+    }
+
     /// Maps `[virt, virt+len)` -> `[phys, phys+len)` with 4 KiB pages.
     pub fn map_range_4k(
         &mut self,
@@ -788,6 +821,58 @@ mod tests {
         // Identity + 4 GiB physical map, 16-page kernel: 1 + 2*(1+4) + 2 + 1 + 8
         assert_eq!(pool_size_for(4 << 30, 2, 16), 22);
         assert!(pool_size_for(1 << 40, 1, 16) >= 1024 + 4);
+    }
+
+    #[test]
+    fn map_linear_gives_the_range_its_own_flags() {
+        const MIB: u64 = 1 << 20;
+        let base = 0xFFFF_8000_0000_0000;
+        let limit = 16 * MIB;
+        // Not aligned to anything: from 5 MiB + 1 byte, 3 MiB long.
+        let (start, len) = (5 * MIB + 1, 3 * MIB);
+        let mut m = mapper(32);
+        m.map_linear(base, limit, WRITABLE, (start, len), WRITE_THROUGH)
+            .unwrap();
+        let has_range_flags = |m: &Mapper<_, _>, phys: u64| {
+            let (to, flags) = m.translate(base + phys).unwrap();
+            assert_eq!(to, phys);
+            flags & WRITE_THROUGH != 0
+        };
+        // Around the range, in its windows: other pages keep the plain flags.
+        assert!(!has_range_flags(&m, 4 * MIB), "window start");
+        assert!(!has_range_flags(&m, 5 * MIB - PAGE_SIZE), "the page before");
+        assert!(
+            has_range_flags(&m, 5 * MIB),
+            "the page holding its first byte"
+        );
+        assert!(
+            has_range_flags(&m, 8 * MIB),
+            "the page holding its last byte"
+        );
+        assert!(!has_range_flags(&m, 8 * MIB + PAGE_SIZE), "the page after");
+        // Outside its windows.
+        assert!(!has_range_flags(&m, 0));
+        assert!(!has_range_flags(&m, 15 * MIB));
+        assert_eq!(m.translate(base + limit), None);
+    }
+
+    #[test]
+    fn map_linear_reaches_a_range_past_the_limit() {
+        const MIB: u64 = 1 << 20;
+        let base = 0xFFFF_8000_0000_0000;
+        let mut m = mapper(32);
+        m.map_linear(base, 4 * MIB, WRITABLE, (64 * MIB, MIB), WRITE_THROUGH)
+            .unwrap();
+        assert_eq!(m.translate(base + 2 * MIB).map(|t| t.0), Some(2 * MIB));
+        assert_eq!(m.translate(base + 8 * MIB), None, "nothing in between");
+        let (to, flags) = m.translate(base + 64 * MIB).unwrap();
+        assert_eq!(to, 64 * MIB);
+        assert_ne!(flags & WRITE_THROUGH, 0);
+        // No range: the plain map.
+        let mut m = mapper(32);
+        m.map_linear(base, 4 * MIB, WRITABLE, (0, 0), WRITE_THROUGH)
+            .unwrap();
+        assert_eq!(m.translate(base + 2 * MIB).map(|t| t.0), Some(2 * MIB));
     }
 
     #[test]

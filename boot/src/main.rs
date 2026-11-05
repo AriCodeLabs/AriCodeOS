@@ -107,10 +107,13 @@ fn run(
     seed: seed::Carried,
 ) -> Result<core::convert::Infallible, &'static str> {
     // 1. GOP framebuffer (optional: without GOP we continue with serial only).
-    let requested = CmdLine::from_bytes(cmdline_bytes)
-        .get(keys::VIDEO)
-        .and_then(aricode_display::parse_size);
-    let (framebuffer, video) = framebuffer_info(requested);
+    let asked = CmdLine::from_bytes(cmdline_bytes).get(keys::VIDEO);
+    let requested = asked.and_then(aricode_display::parse_size);
+    let (framebuffer, mut video) = framebuffer_info(requested);
+    if asked.is_some() && requested.is_none() {
+        warn!("video: video= is not WxH; ignored");
+        video.bad_request = 1;
+    }
     if framebuffer.address != 0 {
         info!(
             "GOP: {}x{} stride {} {:?} @ {:#x}",
@@ -463,9 +466,7 @@ struct EdidActive {
     edid: *const u8,
 }
 
-/// The largest screen the compositor can draw on: its back buffer is one
-/// DMA buffer (`aricode_abi::DMA_MAX_LEN`).
-const SCREEN_MAX_BYTES: u64 = 8 * 1024 * 1024;
+const SCREEN_MAX_BYTES: u64 = BootInfo::SCREEN_MAX_BYTES;
 
 /// The panel's preferred resolution: the active EDID, else the discovered
 /// one, on the GOP's handle.
@@ -540,13 +541,23 @@ fn choose_mode(
         requested_height: rh,
         preferred_width: pw,
         preferred_height: ph,
+        bad_request: 0,
+        _reserved: 0,
         modes: [VideoMode::default(); VideoReport::MODES],
     };
     match preferred {
         Some((w, h)) => info!("video: the panel prefers {w}x{h} (EDID)"),
-        None => info!("video: no EDID from the firmware"),
+        None => info!("video: no usable EDID from the firmware"),
     }
-    let Some(now) = modes.iter().position(|(m, _)| *m.info() == current) else {
+    // Not the whole `ModeInfo`: UEFI leaves its other fields undefined for
+    // RGB and BGR, and they need not match between two reads.
+    let is_current = |m: &gop::Mode| {
+        let info = m.info();
+        info.resolution() == current.resolution()
+            && info.stride() == current.stride()
+            && info.pixel_format() == current.pixel_format()
+    };
+    let Some(now) = modes.iter().position(|(m, _)| is_current(m)) else {
         warn!("video: the firmware's mode is not in its own list; kept");
         mark_modes(&mut report, &list, None);
         return report;
@@ -584,13 +595,14 @@ fn choose_mode(
 }
 
 /// Copies the first offered modes into `report`, flagged usable and chosen.
+/// A chosen mode past the last slot takes that slot, so it is always listed.
 fn mark_modes(report: &mut VideoReport, list: &[aricode_display::Mode], chosen: Option<usize>) {
-    for (i, (slot, m)) in report.modes.iter_mut().zip(list).enumerate() {
+    let copy = |slot: &mut VideoMode, m: &aricode_display::Mode, is_chosen: bool| {
         let mut flags = 0;
         if m.usable(SCREEN_MAX_BYTES) {
             flags |= VideoMode::USABLE;
         }
-        if chosen == Some(i) {
+        if is_chosen {
             flags |= VideoMode::CHOSEN;
         }
         *slot = VideoMode {
@@ -599,6 +611,12 @@ fn mark_modes(report: &mut VideoReport, list: &[aricode_display::Mode], chosen: 
             flags,
             _reserved: 0,
         };
+    };
+    for (i, (slot, m)) in report.modes.iter_mut().zip(list).enumerate() {
+        copy(slot, m, chosen == Some(i));
+    }
+    if let Some(i) = chosen.filter(|&i| i >= VideoReport::MODES) {
+        copy(&mut report.modes[VideoReport::MODES - 1], &list[i], true);
     }
 }
 

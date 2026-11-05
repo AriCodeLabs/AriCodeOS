@@ -27,12 +27,16 @@ pub struct Mode {
 
 impl Mode {
     fn bytes(&self) -> u64 {
-        self.stride as u64 * self.height as u64 * 4
+        (self.stride as u64 * self.height as u64).saturating_mul(4)
     }
 
     /// Whether the system can draw on this mode.
     pub fn usable(&self, max_bytes: u64) -> bool {
-        self.direct && self.bytes() <= max_bytes
+        self.direct
+            && self.width > 0
+            && self.height > 0
+            && self.stride >= self.width
+            && self.bytes() <= max_bytes
     }
 }
 
@@ -67,7 +71,8 @@ pub fn parse_size(text: &str) -> Option<(u32, u32)> {
 /// The preferred resolution of an EDID block: the active size of its first
 /// detailed timing descriptor. `None` for a block that is too short, lacks
 /// the header, fails its checksum, or whose first descriptor is not a
-/// timing (pixel clock 0).
+/// timing (pixel clock 0) or is interlaced (no panel is; its height would
+/// be half the screen's).
 pub fn edid_preferred(edid: &[u8]) -> Option<(u32, u32)> {
     const HEADER: [u8; 8] = [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00];
     let base = edid.get(..128)?;
@@ -76,6 +81,9 @@ pub fn edid_preferred(edid: &[u8]) -> Option<(u32, u32)> {
     }
     let d = &base[54..72];
     if d[0] == 0 && d[1] == 0 {
+        return None;
+    }
+    if d[17] & 0x80 != 0 {
         return None;
     }
     let width = d[2] as u32 | ((d[4] as u32 & 0xF0) << 4);
@@ -189,6 +197,47 @@ mod tests {
         );
         // No EDID: the firmware's mode (QEMU stays at its 1280x800).
         assert_eq!(choose(&modes, 1, None, None, MAX), (1, Source::Firmware));
+    }
+
+    #[test]
+    fn an_interlaced_first_timing_is_not_a_panel_size() {
+        let mut e = edid(1920, 540);
+        assert_eq!(edid_preferred(&e), Some((1920, 540)));
+        e[54 + 17] |= 0x80;
+        let sum = e[..127].iter().fold(0u8, |s, &b| s.wrapping_add(b));
+        e[127] = 0u8.wrapping_sub(sum);
+        assert_eq!(edid_preferred(&e), None);
+    }
+
+    #[test]
+    fn absurd_modes_from_the_firmware_are_not_usable() {
+        let max = 8 << 20;
+        assert!(mode(800, 600).usable(max));
+        for broken in [
+            Mode {
+                width: 0,
+                ..mode(800, 600)
+            },
+            Mode {
+                height: 0,
+                ..mode(800, 600)
+            },
+            Mode {
+                stride: 799,
+                ..mode(800, 600)
+            },
+            Mode {
+                stride: 0,
+                ..mode(800, 600)
+            },
+            Mode {
+                stride: u32::MAX,
+                height: u32::MAX,
+                ..mode(800, 600)
+            },
+        ] {
+            assert!(!broken.usable(max), "{broken:?}");
+        }
     }
 
     #[test]

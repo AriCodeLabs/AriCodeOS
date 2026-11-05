@@ -767,9 +767,13 @@ fn screen() {
         print(b"; the panel prefers ");
         size(d.preferred);
     } else {
-        print(b"; no EDID from the firmware");
+        print(b"; no usable EDID from the firmware");
     }
-    if d.requested.0 != 0 && d.source != DisplaySource::Requested {
+    if d.bad_request {
+        print(b"; video= is not WxH");
+    }
+    // After a failed set or an unlisted mode, nothing was looked up.
+    if d.requested.0 != 0 && matches!(d.source, DisplaySource::Edid | DisplaySource::Firmware) {
         print(b"; video=");
         size(d.requested);
         print(b" is not offered");

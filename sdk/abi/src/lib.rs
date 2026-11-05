@@ -875,6 +875,8 @@ pub mod sysinfo {
         /// Modes the firmware offered; the first `listed` are in `modes`.
         pub offered: u32,
         pub listed: u8,
+        /// `video=` was given but is not `WxH`.
+        pub bad_request: bool,
         /// The size asked for with `video=`, 0x0 if none.
         pub requested: (u32, u32),
         /// The panel's preferred size, 0x0 if the firmware gave no EDID.
@@ -890,6 +892,7 @@ pub mod sysinfo {
             let mut b = [0u8; Self::LEN];
             b[0] = self.source as u8;
             b[1] = self.listed;
+            b[2] = self.bad_request as u8;
             b[4..8].copy_from_slice(&self.offered.to_le_bytes());
             b[8..12].copy_from_slice(&self.requested.0.to_le_bytes());
             b[12..16].copy_from_slice(&self.requested.1.to_le_bytes());
@@ -911,6 +914,7 @@ pub mod sysinfo {
             let mut d = Self {
                 source: DisplaySource::from_u32(b[0] as u32),
                 listed: b[1].min(Self::MODES as u8),
+                bad_request: b[2] != 0,
                 offered: word(4),
                 requested: (word(8), word(12)),
                 preferred: (word(16), word(20)),
@@ -1405,6 +1409,7 @@ mod tests {
             source: DisplaySource::Edid,
             offered: 21,
             listed: 2,
+            bad_request: true,
             requested: (0, 0),
             preferred: (1366, 768),
             modes: [DisplayMode::default(); Display::MODES],

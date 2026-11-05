@@ -384,8 +384,6 @@ fn msi_enable(cfg_virt: u64, cap: u8, on: bool) {
     }
 }
 
-/// MMIO region of a device (physical, uncached) or a DMA buffer (contiguous
-/// RAM, cached).
 /// How the CPU may cache a mapped region.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Caching {
@@ -398,6 +396,7 @@ pub enum Caching {
     WriteCombining,
 }
 
+/// MMIO region of a device (physical) or a DMA buffer (contiguous RAM).
 pub struct Region {
     pub phys: u64,
     pub len: u64,

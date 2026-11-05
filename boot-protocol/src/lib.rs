@@ -137,6 +137,9 @@ pub struct VideoReport {
     /// no EDID.
     pub preferred_width: u32,
     pub preferred_height: u32,
+    /// 1 if `video=` was given but is not `WxH`.
+    pub bad_request: u32,
+    pub _reserved: u32,
     pub modes: [VideoMode; VideoReport::MODES],
 }
 
@@ -220,13 +223,22 @@ impl BootInfo {
     /// that knows the field (an older one hands a shorter `BootInfo`).
     pub const CARRIED_SEED_END: usize = core::mem::offset_of!(BootInfo, _reserved);
 
+    /// The largest screen the system draws on: the compositor's back buffer
+    /// is one DMA buffer (the kernel checks this against `DMA_MAX_LEN`).
+    pub const SCREEN_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
     /// Smallest `size` that covers `video`.
     pub const VIDEO_END: usize =
         core::mem::offset_of!(BootInfo, video) + core::mem::size_of::<VideoReport>();
 
     /// The loader's video report, or `None` from a loader that predates it.
     pub fn video(&self) -> Option<VideoReport> {
-        (self.size as usize >= Self::VIDEO_END).then_some(self.video)
+        // Not `then_some`: past `size`, the field must not even be read.
+        if self.size as usize >= Self::VIDEO_END {
+            Some(self.video)
+        } else {
+            None
+        }
     }
 
     /// Command line as `&str` (empty if missing or not UTF-8).
@@ -443,8 +455,8 @@ impl FramebufferInfo {
                         return 0;
                     }
                     let shift = mask.trailing_zeros();
-                    let bits = (mask >> shift).count_ones().min(8);
-                    ((v as u32) >> (8 - bits)) << shift
+                    let bits = (mask >> shift).count_ones().min(16);
+                    (((v as u32) << bits) >> 8) << shift
                 };
                 place(r, self.red_mask) | place(g, self.green_mask) | place(b, self.blue_mask)
             }

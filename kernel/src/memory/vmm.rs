@@ -16,7 +16,7 @@ use super::pmm;
 use crate::sync::IrqLock;
 use aricode_pmm::{Frame, FRAME_SIZE};
 use aricode_x86_paging::{
-    FrameAlloc, MapError, Mapper, OffsetMap, GLOBAL, HUGE_2M, NO_EXECUTE, PAGE_SIZE, WRITABLE,
+    FrameAlloc, MapError, Mapper, OffsetMap, GLOBAL, NO_EXECUTE, PAGE_SIZE, WRITABLE,
 };
 use boot_protocol::{BootInfo, MemoryRegionKind, KERNEL_VIRT_BASE};
 use log::{debug, info};
@@ -68,22 +68,17 @@ pub fn init(info: &BootInfo) -> u64 {
         .expect("vmm: no frames for the higher half");
 
     // Linear physical map.
-    m.map_range_2m(offset, 0, limit, WRITABLE | NO_EXECUTE | GLOBAL)
-        .expect("vmm: physical map");
+    // The framebuffer has the memory type of the compositor's mapping: the
+    // SDM forbids aliasing write-combining with a cacheable type.
     let fb = &info.framebuffer;
-    if fb.address != 0 {
-        let start = (fb.address & !(HUGE_2M - 1)).max(limit);
-        let end = (fb.address + fb.size).next_multiple_of(HUGE_2M);
-        if start < end {
-            m.map_range_2m(
-                offset + start,
-                start,
-                end - start,
-                WRITABLE | NO_EXECUTE | GLOBAL,
-            )
-            .expect("vmm: framebuffer");
-        }
-    }
+    m.map_linear(
+        offset,
+        limit,
+        WRITABLE | NO_EXECUTE | GLOBAL,
+        (fb.address, if fb.address != 0 { fb.size } else { 0 }),
+        crate::arch::x86_64::pat::write_combining_flags(),
+    )
+    .expect("vmm: physical map");
 
     // Kernel image per section (W^X).
     // SAFETY: symbols defined by kernel.ld; only their address is taken.

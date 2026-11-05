@@ -332,7 +332,7 @@ fn invlpg(virt: u64) {
 }
 
 /// Flushes this CPU's whole TLB, global entries included.
-fn flush_all_local() {
+pub(super) fn flush_all_local() {
     const PGE: u64 = 1 << 7;
     let cr4 = read_cr(4);
     // SAFETY: toggling PGE (or reloading CR3) only invalidates the TLB.

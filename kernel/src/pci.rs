@@ -613,7 +613,13 @@ fn claim_locked(index: usize, ecam: &Ecam, d: &mut PciDevice) -> Result<Claimed,
             KernelObject::new(ObjectKind::Mmio(crate::hw::Region {
                 phys: b.address,
                 len: b.size,
-                caching: crate::hw::Caching::Uncached,
+                // The BAR holding the framebuffer has the screen's memory
+                // type, as every other mapping of it (ADR 0078, stage 0).
+                caching: if crate::framebuffer::overlaps(b.address, b.size) {
+                    crate::hw::Caching::WriteCombining
+                } else {
+                    crate::hw::Caching::Uncached
+                },
                 source_id,
                 claim: None,
             })),

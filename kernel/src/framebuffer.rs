@@ -4,7 +4,9 @@
 
 use crate::sync::IrqLock;
 use aricode_fb_console::{Rgb, Surface};
-use boot_protocol::{FramebufferInfo, PixelFormat, VideoMode, VideoReport};
+use boot_protocol::{BootInfo, FramebufferInfo, PixelFormat, VideoMode, VideoReport};
+
+const _: () = assert!(BootInfo::SCREEN_MAX_BYTES <= aricode_abi::DMA_MAX_LEN);
 
 static INFO: IrqLock<Option<FramebufferInfo>> = IrqLock::new(None);
 static VIDEO: IrqLock<Option<VideoReport>> = IrqLock::new(None);
@@ -69,6 +71,7 @@ pub fn abi_display() -> Option<aricode_abi::sysinfo::Display> {
         source: DisplaySource::from_u32(v.source),
         offered: v.offered,
         listed: listed as u8,
+        bad_request: v.bad_request != 0,
         requested: (v.requested_width, v.requested_height),
         preferred: (v.preferred_width, v.preferred_height),
         modes: [DisplayMode::default(); Display::MODES],

@@ -18,7 +18,7 @@ exit = 33
 serial_contains = [
     "video: 1024x768 (requested,",
     "compositor: screen 1024x768",
-    "screen  1024x768, asked for with video=; no EDID from the firmware",
+    "screen  1024x768, asked for with video=; no usable EDID from the firmware",
     " 1024x768* ",
     "ARICODEOS_SHUTDOWN",
 ]
