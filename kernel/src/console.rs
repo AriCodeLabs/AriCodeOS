@@ -58,11 +58,18 @@ pub fn init_framebuffer(info: boot_protocol::FramebufferInfo) -> bool {
     }
 }
 
-/// The screen changed size during boot (ADR 0079): the console starts over on
-/// it, if it had the screen. What it showed stays on serial.
+/// The screen changed size during boot, or went blank trying (ADR 0079): the
+/// console starts over on it, if it had the screen, painted in steps (incident
+/// 0031). What it showed stays on serial.
 pub fn screen_resized(info: boot_protocol::FramebufferInfo) {
-    if FB.lock().is_attached() {
-        init_framebuffer(info);
+    let base = crate::memory::phys::phys_to_virt(info.address);
+    let Some(surface) = MmioSurface::new(info, base) else {
+        return;
+    };
+    let mut guard = wait_fb();
+    if guard.is_attached() {
+        guard.resize(surface);
+        paint_in_steps(guard);
     }
 }
 

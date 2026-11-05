@@ -882,6 +882,9 @@ pub mod sysinfo {
             12 => "the firmware's GTT does not map the whole screen",
             13 => "the pipe stopped counting frames",
             14 => "a register did not take its value",
+            15 => "its watermarks are set for a smaller screen",
+            16 => "the display could not keep up at that size",
+            17 => "compression or a sprite is on",
             _ => return None,
         })
     }

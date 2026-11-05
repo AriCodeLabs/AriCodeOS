@@ -328,8 +328,11 @@ impl<A: FrameAlloc, M: PhysMap> Mapper<A, M> {
             } else {
                 for page in (window..window + HUGE_2M).step_by(PAGE_SIZE as usize) {
                     let in_range = page + PAGE_SIZE > start && page < end;
-                    let leaf = if in_range { flags | range_flags } else { flags };
-                    self.map_4k(base + page, page, leaf)?;
+                    if in_range {
+                        self.map_4k(base + page, page, flags | range_flags)?;
+                    } else if page < limit {
+                        self.map_4k(base + page, page, flags)?;
+                    }
                 }
             }
             window += HUGE_2M;
@@ -885,6 +888,7 @@ mod tests {
             .unwrap();
         assert_eq!(m.translate(base + 2 * MIB).map(|t| t.0), Some(2 * MIB));
         assert_eq!(m.translate(base + 8 * MIB), None, "nothing in between");
+        assert_eq!(m.translate(base + 65 * MIB), None, "nor past the range");
         let (to, flags) = m.translate(base + 64 * MIB).unwrap();
         assert_eq!(to, 64 * MIB);
         assert_ne!(flags & WRITE_THROUGH, 0);

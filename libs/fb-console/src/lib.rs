@@ -219,6 +219,22 @@ impl<S: Surface> Console<S> {
         self.clear();
     }
 
+    /// The screen changed size: the console starts over on `surface`, with
+    /// its text gone and nothing painted yet, so the caller can paint it
+    /// in steps with [`redraw`](Self::redraw).
+    pub fn resize(&mut self, surface: S) {
+        let cols = (surface.width() / GLYPH_WIDTH).max(1);
+        let rows = (surface.height() / GLYPH_HEIGHT).max(1);
+        self.cols = cols;
+        self.rows = rows.min(MAX_CELLS / cols);
+        self.surface = Some(surface);
+        self.cells[..self.cols * self.rows].fill(b' ');
+        self.cursor_col = 0;
+        self.cursor_row = 0;
+        self.cursor_drawn = None;
+        self.invalidate();
+    }
+
     pub fn is_attached(&self) -> bool {
         self.surface.is_some()
     }

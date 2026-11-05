@@ -767,7 +767,7 @@ fn screen() {
         size(d.preferred);
     } else if !matches!(
         d.source,
-        DisplaySource::Unknown | DisplaySource::OnRunningPipe
+        DisplaySource::Unknown | DisplaySource::OnRunningPipe | DisplaySource::Kept
     ) {
         print(b"; no usable EDID from the firmware");
     }

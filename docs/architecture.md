@@ -652,6 +652,12 @@ latter briefly to add the region.
   (`prepare_for_process` + `start_thread`): with `log=trace` the slow output
   let the thread run before its process existed.
 
+## Display (ADR 0078, 0079)
+
+- `framebuffer::use_panel_size` maps BAR 0 of Intel's integrated graphics
+  uncached at `0xFFFF_D700_0000_0000` (kernel only), once during boot, and gives
+  the screen the panel's own size where the firmware did not offer it.
+
 ## PCIe (Phase 17)
 
 - `pci::init` takes the first MCFG entry, maps its ECAM uncached at

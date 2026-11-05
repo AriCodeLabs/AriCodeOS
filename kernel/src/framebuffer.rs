@@ -60,7 +60,7 @@ fn plan_panel_size(
     if !aricode_intel_display::SUPPORTED.contains(&d.device) {
         return Err(Refusal::NotThisFamily);
     }
-    let (bar0, aperture) = (d.bar0, d.aperture);
+    let (bar0, aperture) = d.bars.ok_or(Refusal::BadBars)?;
     if bar0.1 != BAR0_SIZE
         || info.address < aperture.0
         || info.address + info.size > aperture.0 + aperture.1
@@ -118,7 +118,11 @@ pub fn use_panel_size(asked: bool) {
         }
         // SAFETY: a fence has no operands and touches no state.
         unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
-        aricode_intel_display::apply(&mut Bar0, &plan)?;
+        if let Err(why) = aricode_intel_display::apply(&mut Bar0, &plan) {
+            // The pipe is back as it was, but the screen is blank.
+            crate::console::screen_resized(info);
+            return Err(why);
+        }
         Ok(Some(plan))
     });
     let mut report = report.unwrap_or_default();
@@ -133,6 +137,9 @@ pub fn use_panel_size(asked: bool) {
             };
             *INFO.lock() = Some(new);
             report.source = boot_protocol::video_source::ON_RUNNING_PIPE;
+            for mode in &mut report.modes {
+                mode.flags &= !VideoMode::CHOSEN;
+            }
             *VIDEO.lock() = Some(report);
             crate::console::screen_resized(new);
             log::info!(

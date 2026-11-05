@@ -309,13 +309,14 @@ pub fn init(lie: Lie) {
 /// What `framebuffer::use_panel_size` needs of Intel's integrated graphics.
 pub struct IntelDisplay {
     pub device: u16,
-    /// Address and size, as `check_devices` measured and passed them.
-    pub bar0: (u64, u64),
-    pub aperture: (u64, u64),
+    /// BAR 0 and the aperture (BAR 2), address and size, as `check_devices`
+    /// measured and passed them; `None` if one was refused or memory decoding
+    /// is off.
+    pub bars: Option<((u64, u64), (u64, u64))>,
 }
 
 /// The display controller at 00:02.0, where Intel's integrated graphics
-/// always is, with memory decoding on and both its BARs checked.
+/// always is.
 pub fn intel_display() -> Option<IntelDisplay> {
     const VENDOR_INTEL: u16 = 0x8086;
     let ecam_guard = ECAM.lock();
@@ -324,11 +325,7 @@ pub fn intel_display() -> Option<IntelDisplay> {
     let d = devs
         .iter()
         .find(|d| d.address.bus == 0 && d.address.device == 2 && d.address.function == 0)?;
-    if d.header.vendor != VENDOR_INTEL
-        || d.header.class != 0x03
-        || d.header.subclass != 0
-        || read_u16(ecam, d.address, 0x04) & COMMAND_MEMORY == 0
-    {
+    if d.header.vendor != VENDOR_INTEL || d.header.class != 0x03 || d.header.subclass != 0 {
         return None;
     }
     let bar = |index| {
@@ -339,8 +336,9 @@ pub fn intel_display() -> Option<IntelDisplay> {
     };
     Some(IntelDisplay {
         device: d.header.device,
-        bar0: bar(0)?,
-        aperture: bar(2)?,
+        bars: (read_u16(ecam, d.address, 0x04) & COMMAND_MEMORY != 0)
+            .then(|| Some((bar(0)?, bar(2)?)))
+            .flatten(),
     })
 }
 
