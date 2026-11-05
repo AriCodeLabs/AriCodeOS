@@ -299,6 +299,13 @@ The EDID reads correctly; the GOP lists two 4:3 modes on a 16:9 panel. The
 owner chose a driver built from Intel's manuals over any BIOS change, because
 a BIOS setting helps one machine: ADR 0079, to come.
 
+### The DMA quota
+
+The quota bounds live buffers now: a buffer's charge goes back with its frames,
+without a lock, whoever held it last. A closed buffer whose frames a mapping
+keeps stays charged. `memory.dma_lifetime` checks it: 32 allocations and frees
+within a quota of two pages.
+
 ### Audit
 
 An independent read-only review found no high findings. All of these are

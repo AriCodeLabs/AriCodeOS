@@ -59,10 +59,13 @@ pub struct Process {
     mapper: Option<Mapper<vmm::PmmFrames, OffsetMap>>,
     pub entry: u64,
     pub status: Option<ExitStatus>,
-    /// Limit of DMA memory (bytes) the process can allocate in total;
+    /// Limit of DMA memory (bytes) the process's live buffers can take;
     /// 0 = no limit. Set by its creator (`spawn_limits`).
     pub dma_quota: u64,
-    pub dma_used: u64,
+    /// Bytes of the buffers it allocated whose frames are still in use, by
+    /// whoever holds them now (ADR 0078, stage 0): each buffer gives its
+    /// share back with its frames.
+    pub dma_used: alloc::sync::Arc<core::sync::atomic::AtomicU64>,
     /// Console output waiting for a complete line (Phase 32): with several
     /// CPUs, two processes printing a line in several pieces would
     /// interleave; the kernel emits each line whole.
@@ -357,7 +360,7 @@ fn spawn_full(
             entry: elf.entry,
             status: None,
             dma_quota,
-            dma_used: 0,
+            dma_used: alloc::sync::Arc::new(core::sync::atomic::AtomicU64::new(0)),
             console_line: Vec::new(),
             reaped: false,
             main_tid: tid,
@@ -970,7 +973,7 @@ pub fn dma_lifetime_selftest() {
     assert_eq!(wait(pid), ExitStatus::Killed(KILLED_BY_REQUEST));
 
     // 3. A process with a 4 KiB quota cannot keep a 16 KiB buffer mapped.
-    let dma = crate::hw::dma_alloc(LEN).expect("DMA buffer");
+    let dma = crate::hw::dma_alloc(LEN, None).expect("DMA buffer");
     let pid = spawn_with_handles_and_arg(
         "dma_holder",
         crate::user::programs::by_name("dma_holder").expect("dma_holder in the initrd"),
@@ -1011,11 +1014,10 @@ pub fn dma_lifetime_selftest() {
         scheduler::sleep_ms(10);
         waited_ms += 10;
     }
-    let used = PROCESSES.lock().get(&pid).map(|p| p.dma_used);
     assert_eq!(
-        (wait(pid), used),
-        (ExitStatus::Exited(0), Some(PAGE_SIZE)),
-        "dma lifetime: failed allocations must give their quota charge back (exit status, DMA charged)"
+        wait(pid),
+        ExitStatus::Exited(0),
+        "dma lifetime: the quota must bound live buffers, and failed allocations and freed buffers give their charge back"
     );
     info!(
         "dma lifetime selftest ok ({} frames kept by a mapping after the last handle, freed on reap and on mmio_unmap; mapping beyond the quota refused; failed allocations refunded)",
@@ -1031,7 +1033,7 @@ fn dma_holder_with_mapping(len: u64, arg: u64) -> (Pid, u64) {
     use crate::object::ObjectKind;
     use aricode_handles::Rights;
 
-    let dma = crate::hw::dma_alloc(len).expect("DMA buffer");
+    let dma = crate::hw::dma_alloc(len, None).expect("DMA buffer");
     let phys = match &dma.kind {
         ObjectKind::Dma(d) => d.region.phys,
         _ => unreachable!(),
@@ -1090,34 +1092,23 @@ fn exited(pid: Pid) -> bool {
         .is_none_or(|p| p.status.is_some())
 }
 
-/// Charges `len` bytes of DMA to the current process's quota; `false` if it
-/// would exceed it. The quota is cumulative: a buffer the process got stays
-/// charged after it is freed; an allocation that fails is refunded
-/// (`refund_dma`).
-pub fn charge_dma(len: u64) -> bool {
-    let Some(pid) = current_pid() else {
-        return true;
-    };
+/// Charges `len` bytes of DMA to the current process's quota; `Err` if its
+/// live buffers would exceed it. The charge goes back when it is dropped: with
+/// the buffer's frames once a buffer holds it, and at once if the allocation
+/// fails (incident 0047).
+pub fn charge_dma(len: u64) -> Result<crate::hw::DmaCharge, ()> {
+    use core::sync::atomic::Ordering;
+    let pid = current_pid().ok_or(())?;
     let mut procs = PROCESSES.lock();
-    let Some(p) = procs.get_mut(&pid) else {
-        return true;
-    };
-    if p.dma_quota != 0 && p.dma_used.saturating_add(len) > p.dma_quota {
-        return false;
-    }
-    p.dma_used += len;
-    true
-}
-
-/// Gives back a `charge_dma` of `len` bytes whose allocation failed after
-/// it was charged (incident 0047).
-pub fn refund_dma(len: u64) {
-    let Some(pid) = current_pid() else {
-        return;
-    };
-    if let Some(p) = PROCESSES.lock().get_mut(&pid) {
-        p.dma_used = p.dma_used.saturating_sub(len);
-    }
+    let p = procs.get_mut(&pid).ok_or(())?;
+    let quota = p.dma_quota;
+    p.dma_used
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+            let new = used.saturating_add(len);
+            (quota == 0 || new <= quota).then_some(new)
+        })
+        .map_err(|_| ())?;
+    Ok(crate::hw::DmaCharge::new(p.dma_used.clone(), len))
 }
 
 /// Snapshot of the process table for `system_info`.

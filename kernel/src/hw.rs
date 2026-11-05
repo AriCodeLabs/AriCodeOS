@@ -409,10 +409,33 @@ pub struct Region {
     pub claim: Option<crate::pci::ClaimToken>,
 }
 
+/// What a DMA buffer costs its allocator's quota: given back when the buffer's
+/// frames are, wherever that happens and without a lock, since the last
+/// reference may go with locks held or after the process has gone.
+pub struct DmaCharge {
+    used: alloc::sync::Arc<core::sync::atomic::AtomicU64>,
+    bytes: u64,
+}
+
+impl DmaCharge {
+    pub fn new(used: alloc::sync::Arc<core::sync::atomic::AtomicU64>, bytes: u64) -> Self {
+        Self { used, bytes }
+    }
+}
+
+impl Drop for DmaCharge {
+    fn drop(&mut self) {
+        self.used
+            .fetch_sub(self.bytes, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// DMA buffer: contiguous frames that go back to the PMM when the object is dropped.
 pub struct DmaBuffer {
     pub region: Region,
     frames: usize,
+    /// Dropped after `drop` returned the frames. `None`: a kernel allocation.
+    _charge: Option<DmaCharge>,
 }
 
 impl Drop for DmaBuffer {
@@ -479,8 +502,9 @@ pub fn handle_device_irq(vector: u8) {
     }
 }
 
-/// Allocates a physically contiguous DMA buffer.
-pub fn dma_alloc(len: u64) -> Result<ObjectRef, &'static str> {
+/// Allocates a physically contiguous DMA buffer, which holds `charge` for as
+/// long as its frames live.
+pub fn dma_alloc(len: u64, charge: Option<DmaCharge>) -> Result<ObjectRef, &'static str> {
     if len == 0 || len > aricode_abi::DMA_MAX_LEN {
         return Err("hw: invalid DMA size");
     }
@@ -505,6 +529,7 @@ pub fn dma_alloc(len: u64) -> Result<ObjectRef, &'static str> {
             claim: None,
         },
         frames,
+        _charge: charge,
     })))
 }
 
