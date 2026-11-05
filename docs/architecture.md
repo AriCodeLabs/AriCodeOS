@@ -25,7 +25,7 @@ OVMF (UEFI)
        processes with the SPAWNER capability, ACPI + I/O APIC, ring 3 drivers
        with IRQ/MMIO/DMA capabilities, PCIe enumeration via ECAM, init claims
        the virtio-blk (BARs, MSI-X) and launches its ring 3 driver as an IPC
-       block service (GPT disk), fsd mounts AriFS v1 on it and serves
+       block service (GPT disk), fsd mounts AriFS (v2, or v1 until migrated) on it and serves
        files over IPC; with `shell` on the cmdline init launches arish, which reads
        the serial console and powers off or reboots via `system_power`; netd
        (virtio-net) gets an IP via DHCP and serves ping, UDP and DNS over IPC;
@@ -67,7 +67,7 @@ libs/input/          aricode-input: evdev events and US keyboard (no_std, host t
 libs/http/           aricode-http: GET, response parsing, Content-Length and chunked without alloc (no_std, host tests)
 libs/net/            aricode-net: Ethernet, ARP, IPv4, ICMP, UDP, TCP, DHCP client and DNS without alloc (no_std, host tests)
 libs/faults/         aricode-faults: bounded fault reporting, one kernel event per kind per second with the count (netd, fsd; no_std, host tests)
-libs/arifs/          aricode-arifs: AriFS v1, flat directory with a fixed-capacity file table, CRC32 and replacement journal over `BlockDevice` (no_std, host tests with power cuts)
+libs/arifs/          aricode-arifs: AriFS v2 (extents, copy-on-write replace, two-copy table) and v1 (kept until migrated) over `BlockDevice` (no_std, host tests with power cuts)
 libs/pkg/            aricode-pkg: signed application packages (manifest with name, version and hashes; Ed25519 signature; ELF; application manifest)
 libs/update-index/   aricode-update-index: update sources, signed index, rollback serials, version and downgrade rules (ADR 0029)
 sdk/proto/           aricode-proto: versioned IPC protocols of the services (block v1, file v1, net v1, input v1, window v1, launch v1) (no_std, host tests)
@@ -87,6 +87,7 @@ services/net-core/   ari-net-core: minimal IPv4 stack and NetServiceProtocol ser
 services/rtl-net/    ring 3 Realtek r8169 driver (RTL8169/8168/8101) on top of ari-net-core; no QEMU emulation
 services/compositor/ compositor: owns the framebuffer, windows, cursor and input routing in ring 3
 services/virtio-input/ inputd: virtio-input driver (one process per keyboard or mouse) and events over IPC in ring 3
+services/ps2-input/   ps2_input: decoder of the PS/2 keyboard and pointer bytes the kernel hands over while a process holds the screen (ADR 0075)
 services/arifs/      fsd: AriFS file service in ring 3 on top of the block service
 services/shell/      arish: interactive ring 3 shell (help, ps, mem, ls, cat, write, devices, services, uptime, cpus, diag, net, run, spawn, repeat, reboot, shutdown, exit; history with the arrow keys)
 boot/                ariboot: integrates the above with the `uefi` crate
@@ -179,11 +180,17 @@ and `page_tables_base/size` which tables it reclaims when activating its own.
   blinks while the console is idle (no writes since the previous
   blink); any write hides it before painting, so the
   cells never contain the cursor.
-- Layouts: `aricode_input::Layout` (`Us`, `Es`; the Spanish one with
-  `AltGr` for `@ # [ ] { } \ | ~` and without the non-ASCII keys). `kbd=es` on
-  the cmdline applies it to the kernel's PS/2 keyboard (scenario
-  `console.ps2_es`, with `shift+dot` combinations via QMP); the console
-  bridge and the compositor remain on US.
+- Layouts: `aricode_input::Layout` (`Us`, `Es`). The Spanish one is the
+  layout Linux types (ADR 0076, `libs/input/src/es.rs`, checked against the
+  host's xkeyboard-config by `tools/check-keymap.py`): four levels per key,
+  ñ, ç and the dead accents, which combine as Linux's `Compose` does. Keys
+  give UTF-8; the console and the windows show Latin-1 and € (the font's
+  cell codes), and anything else as `?`. `kbd=es` on
+  the cmdline applies it to every keyboard: the kernel's PS/2 one
+  (scenario `console.ps2_es`, with `shift+dot` combinations via QMP), the
+  console bridge's (init passes the layout in its `arg`,
+  `console.bridge_kbd_es`) and the compositor's, which reads the cmdline
+  itself (`gui.kbd_es`). Before 2026-11-04 the last two stayed on US.
 - Editing keys (arrows, home, end, delete) reach the console
   as a serial terminal's escape sequences (`ESC [ A`…, `ESC [ 3 ~`),
   whether they come from the kernel's PS/2 keyboard, the console bridge or the compositor:
@@ -750,7 +757,31 @@ latter briefly to add the region.
 
 ## File system (Phase 20)
 
-- AriFS v1 (`libs/arifs`, ADR 0014): LBA 0 superblock (magic `ARIFS`,
+- AriFS v2 (`libs/arifs::v2`, ADR 0072) is what new disks hold: up to
+  255 files of up to 16 MiB, each in up to four extents. The table is kept
+  in two copies of 32 sectors, each with a generation and a CRC over the
+  whole copy; every change is a commit that writes the whole table to the
+  copy not holding the current generation and flushes, and `open` takes the
+  valid copy with the higher generation. `replace` writes the new contents
+  to free sectors, flushes, and commits (data written once, two flushes);
+  `write` writes in place and grows files into free sectors, the growth
+  committed with the next commit, `flush` or descriptor close (one commit
+  per download, not per write); `delete` and
+  `rename` (over an existing name, in one commit) are commits too. Free
+  space is never stored: it is what the table does not cover. `open`
+  rejects a table that does not hold together (overlapping extents,
+  extents outside the data area, duplicate names) even under a valid CRC.
+  Host tests cut every write of replace, rename and migration, keeping any
+  subset of the unflushed writes.
+- Migration: a v1 volume becomes v2 in place without moving data (v1's
+  files are contiguous runs). The two table copies go to v1's journal data
+  area with a CRC-protected marker in v1's journal header, then the v2
+  superblock is written: the commit. init asks fsd for it (`ARG_MIGRATE`)
+  only when every slot holding a system declares `arifs = 2` in its
+  initrd's `features` file, so a rollback always finds a system that mounts
+  the disk; once the disk is v2 the updater refuses a system without it.
+  Until then fsd serves the v1 volume with v1's code (`aricode_arifs::Volume`).
+- AriFS v1 (`libs/arifs::v1`, ADR 0014): LBA 0 superblock (magic `ARIFS`,
   sectors, next free LBA, CRC32), LBA 1..4 table of 32 entries of
   64 bytes (name, starting LBA, capacity, size, per-entry CRC32), LBA
   5 replace journal header and 6..69 its data, data from LBA
@@ -779,7 +810,7 @@ latter briefly to add the region.
   (`sdk/proto::fs`): 64-byte requests and replies with `List`,
   `Open`, `Create`, `Read`, `Write`, `Close`, `Flush`, `Replace`
   (atomic replace of up to `MAX_IO`) and `ReplaceChunk`/`ReplaceCommit`
-  (chunks to the journal and commit: up to 32 KiB with the same guarantee; a
+  (chunks and commit: up to 16 MiB on v2, 32 KiB on a v1 volume, with the same guarantee; a
   single in-progress replace per service, `Busy` for the rest, released by
   the commit, an error or closing the descriptor; ADR 0018); data goes through the client's DMA
   buffer (up to 4 KiB per request), which fsd keeps mapped in a cache of 8
@@ -795,9 +826,11 @@ latter briefly to add the region.
   negotiated `flush`); `init.boot` requires the success message;
   `filesystem.replace_recovery` redoes on mount a replace cut after
   the commit and `filesystem.corrupt_detected` rejects a tampered table.
-- The test disk's raw area (LBA 4096 onwards, pattern
-  `ARIDISK\0`+LBA) lies beyond AriFS's maximum reach (70 + 32 × 64
-  sectors) so that `blk_client` and `fsd` do not step on each other.
+- The test disk's raw area (LBA 4096 to 6143, pattern `ARIDISK\0`+LBA)
+  lies outside any partition on a v2 disk, whose `ARI0` is last (81920
+  onwards); on the v1 variants it is the end of `ARI0`, beyond AriFS v1's
+  maximum reach (70 + 32 × 64 sectors), so `blk_client` and `fsd` never
+  step on each other.
 
 ## Shell and console input (Phase 21)
 
@@ -1086,6 +1119,9 @@ latter briefly to add the region.
   motion and click); without `device`, because QMP only accepts displays there and
   the virtio devices, registered after the i8042, are the
   active handlers. The result is logged as `[host] QMP: ...`.
+  `[[host_input_then]]` adds stages, each sent once the stage before it is
+  done and its own marker is seen (typing again after the screen changed
+  hands, ADR 0075, or after a window answered). Without virtio or USB input the events reach the i8042.
 - Several boots on the same disk (`[[boots]]`, stage 3): each
   boot has its own `cmdline`, its console lines, optionally
   `kill_on` (xtask kills QEMU on seeing that text: a power cut) and its
@@ -1101,7 +1137,55 @@ latter briefly to add the region.
   (serial only) and `run_init` hands init an `Mmio` object with the
   GOP framebuffer (`0x10009`, `READ|WRITE`); `system_info(FRAMEBUFFER)`
   returns width, height, stride, format, size and masks. Without `gui` the
-  capability exists but the kernel keeps using the screen.
+  capability exists and the kernel uses the screen until someone maps it
+  (ADR 0074 phase B): mapping any part of the framebuffer lends the screen
+  to the mapper (`console::screen_hold`, recorded under the process
+  table's lock with the mapping, then `screen_take` detaches the
+  console's surface). While any process maps it, the kernel console writes
+  to serial only and the PS/2 keyboard's characters are not given to the
+  console (decoded all the same, so no modifier sticks): a shell never
+  reads what was typed at a window. When the last mapping goes, unmapped
+  or with its process, `screen_release` queues the surface and the cursor
+  thread reattaches and repaints it, since a release can run with
+  interrupts off (a reap). The kernel says each change, with how many PS/2
+  characters were withheld. Ctrl+Alt+Backspace on the PS/2 keyboard while
+  the screen is held is the one key acted on: the interrupt handler notes
+  the tick, and the cursor thread stops every process still holding the
+  screen 2 s later (`request_kill` with that reason; ADR 0075 §4), so a
+  laptop always has a local way back to the console, even past a hung
+  compositor.
+- The PS/2 keyboard and touchpad in the desktop (ADR 0075): the kernel
+  stays the i8042's only owner. At boot it also brings up the aux port
+  (defaults, the IntelliMouse wheel sequence, reporting; IRQ12 on vector
+  0x42), with the devices set up by polling before either interrupt is
+  on. While a process holds the screen every i8042 byte goes, tagged with
+  its port, into the PS/2 stream (512 entries, `console_input::Stream`);
+  the stream is emptied when the screen is lent and when it comes back,
+  and a reset mark comes first then and after an overflow. Init gets the
+  stream as `INIT_PS2` (kind `PS2`, ABI 8) and hands a `READ|WAIT`
+  duplicate to `ps2_input`, which drains it (`ps2_read`, waiting in
+  `ipc_receive_any` like a line), decodes it with `ScancodeSet1` and
+  `Ps2Mouse` (releasing every key and button held, `KeysDown`, on a reset
+  mark) and serves InputServiceProtocol v1. The compositor gets it with
+  the other input services (up to five); the console bridge and
+  `input_client` never do: the console already has the PS/2 keyboard, and
+  its keys flow only while a process holds the screen. `ps2=console`
+  keeps the stream from init: the PS/2 keys are withheld, as before.
+- The desktop session (ADR 0074 phase B): `session = desktop` in AriFS,
+  with the `desktop` profile followed (`updater/profiles`), its
+  `launcher` installed, a display and a keyboard among the input services
+  (`input::KIND_KEYBOARD` in their `Info` replies; `ps2_input` counts),
+  and no `gui` on the
+  command line, makes init start the compositor before the console bridge
+  and launch `launcher` through the broker; the shell still runs on COM1
+  (and over SSH). init keeps only the send side of the compositor's
+  endpoint. When the launcher's process ends (`Running::ends_session`) or
+  the compositor's does (Ctrl+Alt+Backspace, `aricode_input::EscapeChord`),
+  init stops the launcher and its apps (`Running::from_launcher`) and the
+  compositor, the kernel gives the console its screen and PS/2 keyboard
+  back, and init starts the console bridge over the input services. Without `gui` and without the session, the graphical demos
+  are a test package (`examples/gui_demo`) the scenarios start from the
+  shell.
 - `aricode-gfx` allocates no memory: `Canvas` wraps `&mut [u32]` with
   a stride and clips everything (`fill_rect`, `blit`, `text`, `cursor`) to
   the canvas and to a clip rectangle (`Canvas::clipped`); `Desktop`
@@ -1213,18 +1297,22 @@ latter briefly to add the region.
   compositor and input endpoints only if requested, adds `HARDWARE` only when there are
   buffers to reserve and launches with the manifest's quota; it replies with the
   exit code or `Killed` when the program ends, without blocking
-  init: `launch` leaves the process in one of the `MAX_RUNNING` (4) slots and
-  `poll_launches` replies when it reaps it (ADR 0015). With no free slot the
-  launch gets `Limit`. With `Request::DETACH` (`sys::launch::spawn`,
+  init: `launch` leaves the process in a slot and `poll_launches` replies
+  when it reaps it (ADR 0015). The shell's launches have `MAX_RUNNING` (4)
+  slots; the desktop's launcher one of its own and its applications
+  `MAX_LAUNCHED` (6), so neither leaves the other without one (`Pool`,
+  the owner's choice in ADR 0074 phase C). With no free slot in its pool
+  the launch gets `Limit`. With `Request::DETACH` (`sys::launch::spawn`,
   `spawn` in the shell) the broker replies `Started` when it creates the process and
   nobody waits for its exit. If the program is not in the initrd, the broker
   looks for it installed in AriFS (`apps/NAME.aripkg`, ADR 0017): it copies the
-  package through fsd into a DMA staging buffer of `PACKAGE_MAX` (32 KiB,
-  what one AriFS replace writes, shared with the installer and the
-  updater since incident 0026; a larger file is refused naming both sizes)
-  reserved once, verifies it with `aricode-pkg` (Ed25519 signature of the package
-  manifest with the development key and SHA-256 of the ELF and of the
-  application manifest), applies the policy to the manifest and launches it with
+  package through fsd into a DMA staging buffer the size of the package,
+  freed once the launch ends (at most `PACKAGE_MAX`, 8 MiB since ADR 0072
+  phase B, the limit shared with the installer and the updater since
+  incident 0026; a larger file is refused naming both sizes), verifies it
+  with `aricode-pkg` (Ed25519 signature of the package manifest with the
+  key the build embeds, `aricode_crypto::trust`, and SHA-256 of the ELF and of the application manifest) and
+  its `requires` level (ADR 0074), applies the policy to the manifest and launches it with
   `process_spawn_from` (syscall 30: `MANAGE` on the `SPAWNER`, `READ`
   on the buffer, ELF offset and length; the kernel copies the
   segments through the physical map and the buffer is free for the next one).
@@ -1236,6 +1324,47 @@ latter briefly to add the region.
   creates the process): previously every nonexistent name consumed an entry in
   init's table. The shell receives the broker endpoint instead
   of the `SPAWNER`.
+- `launch` (ADR 0074) is a send handle to a second broker endpoint,
+  granted only to `launcher` (`Caps::TRUSTED_LAUNCH`) and only when it is
+  an installed package, verified against the release key. There
+  `Broker::serve_apps` serves only background launches of installed
+  applications, without a console, each with its own manifest: an initrd
+  program (installer, updater, shell), the launcher itself, a launch that
+  waits for the exit or carries a console, and service status requests are
+  refused and said. `Request::LIST` there asks for the `arg`-th
+  application the launcher may offer (an `Entry`): the broker lists
+  `apps/*.aripkg` again at index 0 and keeps those that verify piece by
+  piece (`verify_streaming`), run on this system, open a window and ask
+  for nothing an application may not have, saying why it leaves each
+  other out; the launch checks it all again. The real launcher is
+  `desktop/launcher` (a package of the desktop profile; the test package
+  `examples/test_launcher` has the same name). A program just opened takes
+  the focus (`aricode_gfx::new_window_takes_focus`).
+- `terminal` (ADR 0074 phase C) is a send handle to the broker's
+  `terminals` endpoint, granted only to an installed, signed `terminal`:
+  init serves it like sshd's session endpoint (`Sessions` with
+  `terminal`), interactive shells only, at most four. `desktop/terminal`
+  sends the shell's input and reads its output over two endpoint pairs, as
+  sshd does, and draws the text with `aricode-fb-console` in its window (the
+  grid in a static); it waits on its shell's output and on its window's
+  next event together (`Window::start_poll`, `window::poll_reply`).
+- `home` (ADR 0074 phase C, the owner's choice) is a directory session of
+  fsd on `home/`, the owner's folder, granted only to an installed, signed
+  `editor` or `files`; no application named `home` gets a private
+  directory, which would be that folder. `desktop/editor` edits up to
+  64 KiB of text there (`aricode_gfx::widgets::TextArea`) and saves with
+  an atomic replace; `desktop/files` lists, creates, renames (never over
+  an existing name: fsd's rename would replace it) and deletes, asking for
+  a second Delete.
+- `settings` (ADR 0074 phase C, the owner's choice) is a send handle to
+  the broker's `settings` endpoint (`aricode_proto::settings`, protocol 9),
+  granted only to an installed, signed `settings`: init answers the
+  session, the update sources and the network address as text and makes
+  the one change, the session, logged in the install history; the
+  application never holds a file. The shell, init, the installer and the
+  updater share `aricode_update_index::client` (feature `client`): the
+  adapter of fsd's client to `files::Files`, `save`, `log_history`, and
+  `session::desktop_readiness`.
 - fsd serves up to 15 *sessions* besides its main endpoint (ADR 0036):
   each `Bind` (only through the main endpoint) creates an endpoint bound
   to a prefix, each `Share` (ADR 0016) one bound to a single file in read
@@ -1310,7 +1439,7 @@ latter briefly to add the region.
     - nesting of at most 1024 blocks.
   - The module has no way to name anything the runner has not imported
     for it.
-- AriFS files grow to 32 KiB capacity to hold modules.
+- AriFS files grow to hold modules: up to 32 KiB on a volume still in v1, and on v2 as far as one replace writes, 16 MiB (ADR 0072).
 
 ## Cryptography (Phase 31)
 
@@ -1580,8 +1709,9 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
 ## Real hardware (Phase 34, preparation)
 
 - `console_input` also reads the i8042 PS/2 keyboard: initialization
-  (ports disabled, configuration with IRQ1 and translation, self-test,
-  port 1, `0xF4`), IRQ1 on vector 0x41 and decoding with
+  (ports disabled, interrupts off, translation, self-test, port 1, `0xF4`
+  polled, the aux port since ADR 0075, then the interrupts on), IRQ1 on
+  vector 0x41 and decoding with
   `aricode_input::ScancodeSet1` + `Keyboard` into the same ring as COM1. It is the
   console of a laptop without serial; real keyboards stay in ring 3.
   Without a controller (status 0xFF) it reports and carries on.
@@ -1843,8 +1973,30 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
 - Shell: `update`, `update add|remove|sources|apply [--allow-downgrade]`,
   `upgrade [--allow-downgrade]` (installer `LIST` before the updater,
   installer `STAGED` after it).
+- Profiles (ADR 0074):
+  - The index may carry `profile = NAME APP...`, naming only apps of the
+    same index (`MAX_PROFILES` 4, `MAX_PROFILE_APPS` 8).
+  - The owner's list is `updater/profiles` (`aricode_update_index::
+    profiles`): one line per profile, its name and the apps the updater
+    staged for it. It is edited by `update profile add|remove NAME` and
+    listed by `update profiles`.
+  - `update` plans, and `upgrade` stages, the apps a followed profile names
+    and the machine lacks (`MAX_STAGED` 8). Neither does so on AriFS v1, or
+    without a sound `[installed]` list.
+  - Removing a profile deletes the apps recorded for it that no other
+    followed profile names. What the other profiles name comes from the
+    slot-bound, re-verified stored indexes (`stored::verified_all`).
+  - A package's `requires = N` is checked against `aricode_ab::APPS_LEVEL`
+    by the updater before staging, by the installer before installing and
+    by the broker before launching.
+  - The installer empties the stage files it consumed.
+  - A package refused for its level is remembered in `updater/refused`,
+    keyed by its SHA-256, so it is not planned or downloaded again while
+    the system cannot run it.
+  - Scenarios: `apps.profile`, `apps.profile_v1`, `apps.requires_newer`.
 - xtask: `publish-update [--version N | --no-system] [--app DIR:VERSION]
-  [--no-legacy-manifest] [--signing-key DIR]` (atomic, legacy
+  [--profile NAME:APP,APP --all-machines-0.18] [--no-legacy-manifest]
+  [--signing-key DIR]` (atomic, legacy
   `manifest.txt` for the transition release), `usb-image --update-source
   URL --signing-key DIR`, scenario table `[host_update]`.
 - Scenarios: `update.sources`, `update.migrate_legacy_url`,

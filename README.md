@@ -16,7 +16,7 @@ Design decisions are recorded as ADRs in
 [docs/decisions/](docs/decisions/) and the branch flow (git flow) in
 [docs/WORKFLOW.md](docs/WORKFLOW.md).
 
-**Status:** 0.17.0 (2026-11-02). All 35 roadmap phases (0 to 34) are
+**Status:** 0.18.0 (2026-11-05). All 35 roadmap phases (0 to 34) are
 implemented and tested in QEMU, as are stages 1 to 4 of the post-roadmap
 sequence (observable recovery, a useful session, limits and updates,
 external applications) and the part of stage 5 that needs no hardware
@@ -43,6 +43,7 @@ the evidence is recorded in `docs/hardware.md`.
 | IPv4 networking: DHCP, ARP, ICMP, UDP, TCP, DNS, HTTP client | prototype, validated in QEMU | `network.*`; no TLS, no DHCP renewal |
 | `arish` shell over the serial console, a PS/2 keyboard or USB/virtio keyboards (console bridge) | validated in QEMU | `shell.*`, `console.*` |
 | GUI: compositor, windows, input | prototype, validated in QEMU | `gui.*` |
+| Optional desktop (profile `desktop`): launcher, terminal, editor, file manager, settings; PS/2 keyboard and touchpad | validated in QEMU | `usb.desktop_*`, `apps.*_rules`, `gui.ps2_*` |
 | WASM: wasmi with fuel, profile v2 (stable features but SIMD, see the profile) and a per-module manifest | validated in QEMU | `wasm.*`, `docs/wasm-profile.md`, ADR 0071; not WASI |
 | In-house cryptography, RNG, signed images, A/B with rollback | validated in QEMU | `crypto.*`, `update.*`; not Secure Boot |
 | VT-d IOMMU with one domain per driver | validated in QEMU | `iommu.*` |
@@ -149,7 +150,7 @@ shell on your terminal (quit with Ctrl-A X):
 
 ```bash
 cargo xtask usb-image
-docker build -t aricodeos -f tools/docker/try/Dockerfile --build-arg VERSION=0.17.0 .
+docker build -t aricodeos -f tools/docker/try/Dockerfile --build-arg VERSION=0.18.0 .
 docker run --rm -it aricodeos
 ```
 
@@ -172,7 +173,7 @@ cargo xtask build          # builds AriBoot and AriKernel (release)
 cargo xtask image          # assembles build/esp/ (BOOTX64.EFI, aricodeos/kernel.elf, aricodeos/initrd.img)
 cargo xtask run            # boots in QEMU + OVMF, serial on the terminal (quit: Ctrl-A X)
 cargo xtask run --cmdline shell   # boots with the interactive shell (arish) on the serial console
-cargo xtask run --cmdline gui     # compositor and two demo windows on the QEMU display
+cargo xtask run --cmdline "gui shell"   # the compositor on the QEMU display, with the shell on the serial console
 cargo xtask run --cpus 4   # boots with four processors (SMP)
 cargo xtask run --usb-hid  # adds an xHCI controller with a USB keyboard and mouse
 cargo xtask test           # unit + smoke (nominal boot in QEMU)

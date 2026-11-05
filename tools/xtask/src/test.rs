@@ -203,8 +203,16 @@ const ELAPSED_FILE: &str = "elapsed";
 /// no scenario starts cargo and the build output stays in one place.
 fn prebuild_packages(selected: &[&Scenario]) -> Result {
     for s in selected {
-        let mut wanted: Vec<(String, u32, bool)> =
-            s.install.iter().map(|d| (d.clone(), 1, false)).collect();
+        let mut wanted: Vec<(String, u32, bool)> = s
+            .install
+            .iter()
+            .map(|spec| {
+                let corrupt = spec.strip_suffix(":corrupt");
+                let dir = corrupt.unwrap_or(spec);
+                let dir = dir.split_once(":requires=").map_or(dir, |(d, _)| d);
+                (dir.to_string(), 1, corrupt.is_some())
+            })
+            .collect();
         for spec in &s.packages {
             let mut parts = spec.split(':');
             if let (Some(dir), Some(Ok(version))) = (parts.next(), parts.next().map(str::parse)) {
@@ -265,34 +273,84 @@ pub fn run_scenario(
     let disk_variant = image::DiskVariant::parse(&s.disk)
         .ok_or_else(|| format!("{}: unknown disk '{}'", s.name, s.disk))?;
     let mut installed: Vec<(String, Vec<u8>)> = Vec::new();
-    for dir in &s.install {
-        installed.push(
-            build::build_external(std::path::Path::new(dir), 1, build::PACKAGES_RELEASE, false)?
-                .installed(),
-        );
+    for spec in &s.install {
+        let corrupt = spec.strip_suffix(":corrupt");
+        let base = corrupt.unwrap_or(spec);
+        let (dir, requires) = match base.split_once(":requires=") {
+            None => (base, 0),
+            Some((dir, level)) => match level.parse::<u32>() {
+                Ok(level) if level > 0 && corrupt.is_none() => (dir, level),
+                _ => {
+                    return Err(format!(
+                        "{}: install '{spec}': DIR[:requires=N] or DIR:corrupt",
+                        s.name
+                    ))
+                }
+            },
+        };
+        let mut app = build::build_external(
+            std::path::Path::new(dir),
+            1,
+            build::PACKAGES_RELEASE,
+            corrupt.is_some(),
+        )?;
+        if requires > 0 {
+            app = app.resigned(0, requires)?;
+        }
+        installed.push(app.installed());
+    }
+    if !s.stick_profiles.is_empty() {
+        if disk_variant != image::DiskVariant::UsbImage {
+            return Err(format!(
+                "{}: stick_profiles needs disk = \"usb-image\" (a stick with AriFS v2)",
+                s.name
+            ));
+        }
+        let profiles = s
+            .stick_profiles
+            .iter()
+            .map(|p| crate::profile_spec(p))
+            .collect::<Result<Vec<_>>>()?;
+        let names: Vec<String> = installed
+            .iter()
+            .filter_map(|(path, _)| {
+                path.strip_prefix("apps/")?
+                    .strip_suffix(aricode_pkg::EXTENSION)
+                    .map(String::from)
+            })
+            .collect();
+        installed.extend(image::stick_profile_files(&names, &profiles)?);
     }
     for spec in &s.packages {
         let mut parts = spec.split(':');
         let (Some(dir), Some(version)) = (parts.next(), parts.next()) else {
             return Err(format!(
-                "{}: package '{spec}': DIR:VERSION[:corrupt]",
+                "{}: package '{spec}': DIR:VERSION[:corrupt|:large|:huge|:requires=N]",
                 s.name
             ));
         };
         let version: u32 = version
             .parse()
             .map_err(|_| format!("{}: package '{spec}': invalid version", s.name))?;
-        let corrupt = match parts.next() {
-            None => false,
-            Some("corrupt") => true,
-            Some(other) => return Err(format!("{}: package '{spec}': unknown '{other}'", s.name)),
+        let (corrupt, extra, requires) = match parts.next() {
+            None => (false, 0, 0),
+            Some("corrupt") => (true, 0, 0),
+            Some("large") => (false, build::LARGE_PADDING, 0),
+            Some("huge") => (false, build::HUGE_PADDING, 0),
+            Some(other) => match other.strip_prefix("requires=").map(str::parse::<u32>) {
+                Some(Ok(level)) if level > 0 => (false, 0, level),
+                _ => return Err(format!("{}: package '{spec}': unknown '{other}'", s.name)),
+            },
         };
-        let app = build::build_external(
+        let mut app = build::build_external(
             std::path::Path::new(dir),
             version,
             build::PACKAGES_RELEASE,
             corrupt,
         )?;
+        if extra > 0 || requires > 0 {
+            app = app.resigned(extra, requires)?;
+        }
         installed.push((
             format!(
                 "pkgs/{}-{}{}",
@@ -388,10 +446,18 @@ pub fn run_scenario(
                     .iter()
                     .map(|spec| crate::app_spec(spec).map_err(|e| format!("{}: {e}", s.name)))
                     .collect::<Result<_>>()?,
+                profiles: u
+                    .profiles
+                    .iter()
+                    .map(|spec| crate::profile_spec(spec).map_err(|e| format!("{}: {e}", s.name)))
+                    .collect::<Result<_>>()?,
                 legacy_manifest: false,
                 tamper_index: u.tamper_index,
                 tamper_image: u.tamper_image,
                 large_image: u.large_image,
+                large_apps: u.large_apps,
+                huge_apps: u.huge_apps,
+                apps_require: u.apps_require,
                 ..image::Publication::default()
             };
             let dir = workdir.join("update");
@@ -542,14 +608,21 @@ pub fn run_scenario(
             marker: &h.marker,
             payload: &h.payload,
         });
-        let input_probe = s.host_input.as_ref().map(|h| qemu::InputProbe {
-            marker: &h.marker,
-            keys: &h.keys,
-            mouse_rel: h.mouse_rel,
-            click: h.click.as_deref(),
-            key_delay_ms: h.key_delay_ms,
-            echo_prompt: h.echo_prompt.as_deref(),
-        });
+        let input_probe = s
+            .host_input
+            .iter()
+            .chain(&s.host_input_then)
+            .map(|h| qemu::InputProbe {
+                marker: &h.marker,
+                keys: &h.keys,
+                mouse_rel: h.mouse_rel,
+                mouse_steps: h.mouse_steps,
+                wait_ms: h.wait_ms,
+                click: h.click.as_deref(),
+                key_delay_ms: h.key_delay_ms,
+                echo_prompt: h.echo_prompt.as_deref(),
+            })
+            .collect();
         let hotplug = s.host_hotplug.as_ref().map(|h| qemu::Hotplug {
             marker: &h.marker,
             delay: Duration::from_millis(h.delay_ms),
@@ -591,12 +664,13 @@ pub fn run_scenario(
                 hid: s.usb_hid,
                 hid_msi: s.usb_hid_msi,
                 hid_msi_and_msix: s.usb_hid_msi_and_msix,
-                hid_only_input: s.usb_hid_only_input,
+                hid_only_input: s.usb_hid_only_input || s.no_virtio_input,
                 legacy_controller: s.usb_legacy_controller,
                 storage: s.usb_storage,
                 ehci_hid: s.usb_ehci_hid,
                 ehci_storage: s.usb_ehci_storage,
                 ehci_companion_kbd: s.usb_ehci_companion_kbd,
+                no_i8042: s.no_ps2,
             },
             nic: !s.no_nic,
             flr_device: s.flr_device,
@@ -653,6 +727,12 @@ pub fn run_scenario(
         for needle in &expect.serial_absent {
             if cap.serial.contains(needle) {
                 problems.push(format!("{prefix}unexpected '{needle}'"));
+            }
+        }
+        for needle in &expect.serial_once {
+            match cap.serial.matches(needle.as_str()).count() {
+                1 => {}
+                n => problems.push(format!("{prefix}'{needle}' seen {n} times, expected once")),
             }
         }
         if s.host_ssh.as_ref().is_some_and(|h| h.old_host_key) {

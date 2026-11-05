@@ -21,7 +21,7 @@ never touched**; AriCodeOS boots from and writes only to its own USB stick.
 
 ```bash
 cargo xtask usb-image                       # build/aricodeos-usb.img, cmdline "shell"
-cargo xtask usb-image --cmdline "shell kbd=es"   # Spanish keyboard (`:` with Shift+period, `@` with AltGr)
+cargo xtask usb-image --cmdline "shell kbd=es"   # Spanish keyboard, as Linux types it: ñ, accents (dead keys), AltGr (ADR 0076)
 cargo xtask usb-image --cmdline "shell log=debug"
 lsblk                                       # identify the USB stick (e.g. /dev/sdX), NEVER the internal disk
 sudo dd if=build/aricodeos-usb.img of=/dev/sdX bs=4M conv=fsync status=progress
@@ -151,12 +151,14 @@ it from the ARI0 partition:
 ari> diag diag.txt
 ari> shutdown
 # on the host, with the USB stick attached as /dev/sdX
-sudo dd if=/dev/sdX of=build/usb-dump.img bs=1M count=70 status=none
+sudo dd if=/dev/sdX of=build/usb-dump.img bs=1M count=166 status=none
 cargo xtask fs-cat build/usb-dump.img            # lists the files in ARI0
 cargo xtask fs-cat build/usb-dump.img diag.txt   # uptime, memory, CPUs, entropy, processes, services, PCI and events
 ```
 
-The 70 MiB cover the ARI0 partition of the USB image (LBA 133120 to 139263).
+The 166 MiB cover the ARI0 partition of the USB image, last since ADR 0072
+(LBA 208896 to 339967). A stick written before it has ARI0 at LBA 133120
+to 139263, and 70 MiB are enough; `fs-cat` reads either version of AriFS.
 
 ### Entropy: does the laptop have `rdrand`?
 
@@ -221,7 +223,7 @@ system) or regenerate the image with `--cmdline`:
 | Black screen or unresponsive devices after "iommu:" | `iommu=off` |
 | Too much output | `log=warn`; too little: `log=debug` |
 | No keyboard | check that the firmware exposes the i8042 (some disable it with "USB legacy"); the `console: PS/2 keyboard` trace must appear |
-| Shift+period types `>` instead of `:` | The keyboard is Spanish and the console uses the US layout: `kbd=es` on the cmdline (`cargo xtask usb-image --cmdline "shell kbd=es"`). Only affects the kernel's PS/2 keyboard; USB and virtio stay on US |
+| Shift+period types `>` instead of `:` | The keyboard is Spanish and the console uses the US layout: `kbd=es` on the cmdline (`cargo xtask usb-image --cmdline "shell kbd=es"`). It applies to the PS/2, USB and virtio keyboards, at the console and in the desktop. Accents are dead keys, as on Linux: ´ then a gives á, ´ then a space gives ' |
 | "usb-input: no BAR 0 or no IRQ among the capabilities" | The function has neither MSI nor MSI-X (the `pci: … claimed (…)` trace says so); INTx is not supported |
 | "usb-input: xHCI initialization failed: …" | The step that failed: capabilities, DMA memory (the buffer is sized with the scratchpads the controller requests), reset or start |
 | "usb-input: no USB storage" with the USB stick plugged in | The USB stick is not on the xHCI: check the `Intel ports routed to xHCI` trace; if it is missing or the port is not switchable, the stick hangs off an EHCI and `usb-ehci: port 1.N: USB storage ...` should appear instead (see "EHCI ports" below) |

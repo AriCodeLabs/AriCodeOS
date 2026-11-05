@@ -13,7 +13,7 @@ serial_contains = [
     "pci: 00:02.0 1af4:1042 class 01.00 storage",
     "claimed (MSI-X entry 0)",
     "virtio-blk: device ready",
-    "virtio-blk: capacity 98304 sectors",
+    "virtio-blk: capacity 147456 sectors",
     "virtio-blk: GPT with 5 partition(s)",
     "virtio-blk: serving requests",
     "AriInit: block service ok",

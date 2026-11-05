@@ -13,7 +13,7 @@ timeout_secs = 90
 exit = 33
 serial_contains = [
     "hang_service: started, with no intention of answering",
-    "'hang_service' killed: stopped by the supervisor",
+    "'hang_service' killed: stopped at another process's request",
     "AriInit: service hang_service never became ready; restart in",
     "AriInit: service hang_service never became ready; restart budget exhausted: system degraded",
     "AriInit: hang_service: 0 process(es) alive after exhausting the budget",

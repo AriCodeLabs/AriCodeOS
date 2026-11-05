@@ -1,0 +1,374 @@
+# ADR 0072: AriFS v2, copy-on-write replace and a larger partition
+
+- **Date:** 2026-11-03
+- **Status:** Accepted (B + P2). The owner, 2026-11-03: "AriFS es nuestro
+  y se puede mejorar, pues mejorémoslo con todo lo mejor que veas". It
+  changes the on-disk format, the disk layout and what an older system
+  can read (incident 0026, "Open"). P1, growing `ARI0` on first boot, is
+  left for a later change: rewriting the GPT on a running machine is a
+  separate risk with its own tests.
+
+## Context
+
+An installed app is a signed package at `apps/NAME.aripkg` (ADR 0017),
+installed by one atomic `replace` (ADR 0018). AriFS v1 (ADR 0014) bounds
+that, and everything else it stores:
+
+| Limit | AriFS v1 |
+|---|---|
+| Files | 32, in one flat table |
+| File capacity | 64 sectors (32 KiB), fixed at creation |
+| Atomic replace | 32 KiB: the data is journalled first, in a journal of one file's capacity |
+| Delete, rename | none |
+| Partition `ARI0` | 3 MiB (6110 sectors on the test disk, 6144 on the stick) |
+
+What would have to fit, measured on 0.17.0 (stripped release binaries):
+
+| Program | Bytes |
+|---|---|
+| `updater` (HTTPS) | 1,069,680 |
+| `shell` | 1,036,880 |
+| `wasm_runner` | 901,704 |
+| `sshd` | 275,024 |
+| `hello_ext` (the external example) | 14,280 |
+
+Any app that uses TLS or WebAssembly is near 1 MiB. Neither the format nor
+the partition can hold one, and an atomic replace needs room for the old
+and the new copy at once. Today's use is small: the reference laptop holds
+12 files, the largest 4 KiB (`bench/medidas`), and no app.
+
+## What established designs do, and what went wrong
+
+Each design's mechanism and documented failures, with sources, are in the
+study behind this ADR (summarised; links in "Sources").
+
+| Design | Commit point | Data written | Flushes | Space reserved | Failures that matter here |
+|---|---|---|---|---|---|
+| AriFS v1 | journal header | 2× | 4 | the journal = the size limit | the limit itself |
+| ext4, `data=journal` | jbd2 commit | 2× | 2+ | a transaction is a fraction of the journal | large files are never atomic; applications use temp + rename |
+| ext4, `data=ordered` + rename | jbd2 commit | 1× | 2+ | N free | 2009: renames committed before delayed data, empty files after a crash; `auto_da_alloc` is a heuristic that misses cases |
+| btrfs, ZFS (copy on write) | superblock, uberblock ring | 1× | 2+ | N free | RAID5/6 write hole (in-place parity under CoW); btrfs log-tree replay bugs; ZFS 2.2 silent zeroed blocks from dirty tracking |
+| littlefs | metadata-pair commit with CRC | 1× | per sync | N free | allocator scans O(n²) slow large volumes |
+| F2FS atomic write | node write | 1× | 1–2 | N free | atomicity silently dropped under GC pressure |
+| FAT, TFAT | none; TFAT: FAT copy | not atomic | several | second FAT | interrupted writes corrupt the volume |
+| dpkg, temp + fsync + rename | rename | 1× | 2+ | N free | per-file fsync made installs slow; Pillai et al.: 60 crash bugs in 11 applications |
+| SQLite rollback journal / WAL | journal delete / WAL frame | 2× | 2+ / 1+ | journal / WAL | assumes a sector write may tear |
+
+Reusable code: no crates.io file system gives an atomic replace on a block
+device in no_std:
+- `fatfs` and `embedded-sdmmc`: FAT, no atomicity;
+- `ekv` and `sequential-storage`: power-fail safe, but key-value stores
+  for NOR flash with unstable formats;
+- `littlefs2`: wraps the C library (not built here);
+- `littlefs-rust`: a new port, 0.1.0, not yet validated on hardware.
+
+So AriFS stays this system's, improved with what these designs learned:
+
+1. The commit point is one explicit write, after a flush, checksummed
+   and sequenced; mount picks the newest valid copy (ZFS's uberblock ring,
+   littlefs's metadata pairs).
+2. Nothing the committed state references is written in place (the btrfs
+   write hole).
+3. No heuristics about ordering: the flushes are the contract (ext4 2009).
+4. Every write of every operation is cut in a host test (as v1 does), and a
+   failed flush fails the operation (PostgreSQL's fsyncgate).
+
+## Options
+
+### Format
+
+- **A. A larger data journal.** v1's mechanism with a journal of the
+  largest file (say 16 MiB) and variable-size files.
+  - Data written twice, four flushes.
+  - The journal reserves the largest file whether used or not.
+  - Simplest change of code; the size limit stays, only higher.
+- **B. Copy-on-write replace (recommended).** A replace writes the new
+  contents to free sectors, flushes, then commits a new generation of the
+  table; the old sectors become free only after that commit.
+  - Data written once, two flushes.
+  - Needs as much free space as the new file, only during the replace.
+  - The cost is an allocator; it keeps no state on disk (below), so it
+    has nothing to corrupt.
+- **C. Adopt a crate:** none fits (above).
+- **D. Split packages into 32 KiB files:** pushes the file system's job
+  onto every client and does not help data or WebAssembly modules. Rejected.
+
+Writes to replace a 1 MiB file (2048 sectors), from the designs (to be
+measured on the branch, see Tests):
+
+| | Sector writes | Flushes | Reserved |
+|---|---|---|---|
+| v1 (if it allowed 1 MiB) | about 4100 | 4 | 1 MiB journal |
+| A | about 4100 | 4 | the largest file |
+| B | about 2080 | 2 | none (1 MiB free during it) |
+
+### Layout
+
+- **P1. Grow `ARI0` to the end of the medium on first boot** (systemd-repart:
+  only grows the last partition, never moves one). Needs AriBoot or a
+  trusted service to rewrite both GPT headers safely.
+- **P2. A larger fixed `ARI0`, last on the disk (recommended now).** New
+  images put `ARI0` after `ARIBOOT` with 64 MiB. The USB image grows from
+  104 to 165 MiB (xz compresses the empty space). Being last, P1 can be
+  added later without moving anything. `init` finds `ARI0` by name, so
+  the order changes nothing else.
+
+## Proposed decision (B + P2)
+
+1. **AriFS v2 format.**
+   - Superblock (LBA 0): magic `ARIFS\0\0\3`, version, sectors, where
+     the two table copies are, CRC.
+   - Two copies of the table, 32 sectors (16 KiB) each: a header
+     (generation number, CRC over the whole copy) and 255 entries of 64
+     bytes.
+   - A commit writes the whole new table to the copy not holding the
+     current generation, then flushes. `open` takes the valid copy with
+     the higher generation. A torn commit leaves the older copy valid,
+     which is the state before the operation.
+   - Every commit flushes, so the copy a commit overwrites is never the
+     only durable one, and sectors an operation frees are never the old
+     generation's while it may still be the one `open` finds.
+   - An entry: name (32 bytes, as v1), size, and up to 4 extents (start,
+     length in sectors).
+   - No free-space map: free space is what no entry of the table in memory
+     covers. That table is the committed one at `open`, plus growth not
+     yet committed and a replace in progress, so a sector any copy on disk
+     may use is never handed out. A crash before a commit leaves the new
+     sectors unreferenced, which is free.
+   - Largest file 16 MiB (`MAX_REPLACE`, `PACKAGE_MAX`); the IPC protocol
+     of ADR 0018 is unchanged (chunks, commit, one replace at a time, the
+     2-second abandonment). Chunks arrive without the total length, so a
+     replace starts in the largest free run and grows there, taking
+     another run only when it is full.
+   - `write` writes in place inside the file's extents. Growth (the size
+     and the extents it takes) stays in the table in memory until the next
+     commit, a `flush`, or the close of a descriptor of that file; that
+     commit flushes the data before its commit point, so the size never
+     covers unwritten sectors. Until 2026-11-03 each growing write was a
+     commit of its own.
+   - New: `delete`, and `rename` (both one commit), so the installer can
+     remove an app.
+2. **Migration in place, without copying data.** v1 files are already
+   contiguous extents, valid in v2.
+   - fsd finishes any pending v1 replace.
+   - It writes the two v2 table copies into v1's journal data area (64
+     sectors, exactly two copies, unused once the journal is clear),
+     flushes, and writes the v2
+     superblock. That single sector is the commit: before it the disk is
+     v1, after it v2.
+   - A migrated disk keeps its 3 MiB; the 64 MiB needs a new stick (or P1
+     later).
+3. **Rollback stays safe.** An older system must never meet a v2 disk:
+   it would not mount `ARI0`, and would lose its keys and its updater
+   state.
+   - What a system reads is in its initrd, a `features` file
+     (`arifs = 2`): the signed manifest cannot carry it, since every
+     AriBoot already on an ESP refuses unknown manifest keys, and an image
+     without the file reads only v1 (ext4's feature flags, in a place old
+     loaders never parse).
+   - Migration is asked for only when both slots hold a system that reads
+     v2 (or the other slot is empty).
+     After the first update to a v2 system the other slot still holds the
+     old one, so the disk stays v1, and fsd keeps operating it with v1's
+     code; it migrates after the next update.
+   - Once the disk is v2, the updater refuses to install, even with
+     `--allow-downgrade`, a system whose initrd does not declare
+     `arifs = 2`, and says why (ext4's incompatible feature flags, without leaving an
+     unbootable state).
+4. **Layout P2** in `usb-image` and the test disk; the update image and
+   slots are unchanged.
+
+## Tests (for the implementation branch)
+
+- Host: power cuts at every write of replace, delete, rename and
+  migration, including a torn table copy; flush errors; allocator
+  fragmentation with 4 extents; the 256-entry and 16 MiB limits.
+- QEMU: `apps.update` with a 1 MiB package; migration of a v1 disk; an
+  update from a v1-only system leaving the disk v1; refusal of a downgrade
+  below the v2 reader; `perf` with `replace_1_MiB` against v1's
+  `replace_4_KiB` cost per byte.
+- The laptop: an update of its stick from 0.17 keeping `authorized_keys`
+  and the host key.
+
+## Consequences
+
+- Incident 0026 closes; apps and WebAssembly modules up to 16 MiB.
+- Two releases before every machine is migrated (decision 3).
+- More code in fsd's trusted path: an allocator and a two-copy table.
+  An independent audit is required.
+
+## Sources
+
+- ext4 journal: https://docs.kernel.org/filesystems/ext4/journal.html;
+  the 2009 discussion: https://lwn.net/Articles/323106/;
+  `auto_da_alloc` misses: https://bugzilla.kernel.org/show_bug.cgi?id=15910
+- btrfs status (RAID56 unstable): https://btrfs.readthedocs.io/en/latest/Status.html;
+  ZFS silent corruption: https://github.com/openzfs/zfs/issues/15526
+- littlefs design: https://github.com/littlefs-project/littlefs/blob/master/DESIGN.md
+- F2FS atomic writes: https://lists.openwall.net/linux-kernel/2018/07/15/4
+- TFAT: https://learn.microsoft.com/en-us/previous-versions/windows/embedded/aa911939(v=msdn.10)
+- dpkg fsync cost: https://bugs.launchpad.net/ubuntu/+source/dpkg/+bug/570805;
+  Pillai et al., OSDI 2014: https://research.cs.wisc.edu/adsl/Publications/alice-osdi14.html;
+  fsyncgate: https://lwn.net/Articles/752063/
+- SQLite: https://www.sqlite.org/atomiccommit.html, https://www.sqlite.org/psow.html
+- systemd-repart: https://man.archlinux.org/man/systemd-repart.8
+
+## Implementation, phase A (2026-11-03)
+
+- `libs/arifs`: `v1` (the previous code, unchanged but for the migration
+  marker it clears), `v2`, and `Volume`, which serves either. v2's table
+  is on the heap: 255 entries do not fit a frame of fsd's 16 KiB budget.
+- Protocol: `Delete`, `Rename` (`Unsupported` on a v1 volume, said before
+  any lookup), `MAX_REPLACE` = 16 MiB, and `ARG_MIGRATE` in fsd's launch
+  argument: init decides before fsd starts, so no client ever sees a
+  migration half done, and no file operation can ask for one.
+- `libs/ab`: `FEATURES_FILE` and `Image::features`, read piece by piece
+  with `aricode_initrd::locate`. init reads both slots; the updater checks
+  `UPDATE` before an install and the inactive slot before a rollback.
+- Disks: `ARI0` last on the test disk (8 MiB) and the stick (64 MiB; the
+  image grows to 166 MiB). The test disk's raw area stays at LBA 4096,
+  outside any partition. `arifs-v1`, `arifs-v1-old-slot` and
+  `fs-pending-replace` keep v1 in v1's place; `update-before-features`
+  holds a pre-0072 system in `UPDATE`.
+- Tests: 40 host tests of `libs/arifs` (every write of replace, rename
+  over and migration cut, with any subset of the unflushed writes kept;
+  a torn table copy; a torn migration superblock; forged tables);
+  `libs/ab` reads features; QEMU `filesystem.migrate_v1`,
+  `filesystem.v1_old_slot`, `update.refuses_v1_only_system`, and
+  `fs_client` renames over and deletes on every selftest boot.
+
+### Audit (2026-11-03)
+
+An independent audit found no high finding; the commit protocol, the
+allocator, the resync and the migration's order held. What it found, and
+what was done:
+
+- **M1. The ESP's system.** AriBoot boots the ESP's kernel and initrd
+  when the active slot does not verify, and nothing updates the ESP: every
+  stick written before this ADR keeps a v1-only system there. init now
+  reads the ESP's initrd too (`aricode_fat` reads FAT32 sector by sector)
+  and migrates only if it declares `arifs = 2`; an ESP without a system has
+  nothing to fall back to. So an existing stick stays v1 (its `ARI0` has
+  3 MiB anyway); a stick written from 0.18 on is v2 from the start.
+  `usb.image_before_0072`.
+- **L1. A crafted torn commit.** CRC32 is linear and applications choose
+  names, so a mix of new and stale body sectors under a new header could be
+  made to verify. The body is now flushed before the header, a single
+  sector, is written: until it lands the copy has its older generation,
+  which `open` does not prefer. A replace costs three flushes (v1: four).
+- **L2.** A replace refused for space gives back what it took.
+- **L3.** init counts any slot whose header is valid but whose features
+  cannot be read as v1, as the updater does.
+- **L4, L6.** `ARG_MIGRATE` goes with fsd's first launch only: a
+  relaunch, after a failed migration or any exit, serves what the disk
+  holds, and the disk never migrates later than the decision at boot.
+- **L5.** Empty `ReplaceChunk`s are refused and a chunked replace may stay
+  open two minutes in all.
+- **I1.** fsd refuses sectors past the disk less its backup GPT.
+- **I2.** Geometry sums are checked.
+- **I3.** A rename revokes the descriptors other owners hold on the file.
+- **I4.** fsd's remount comment says v2 never asks for one.
+- **I5.** Host tests keep eight subsets of the unflushed writes (with
+  only the first, only the last, all but the first, all but the last), and
+  a new one cuts every write of a replace that takes the sectors the
+  previous replace freed. Residuals: the updater's rollback refusal has no
+  scenario of its own (it shares `refuse_if_arifs_too_old` with the
+  install refusal, which has one); the pre-0072 systems of the tests are
+  the current build without `features`, not a real 0.17 container (the
+  test keys could not verify a release image); on the v1 test disks the
+  raw pattern lies in what becomes free space after a migration (tests
+  only).
+
+## Implementation, phase B (2026-11-03)
+
+Packages are handled in pieces, so `PACKAGE_MAX` is 8 MiB, eight times the
+largest program of 0.17:
+
+- `aricode_pkg::verify_streaming`: the checks of `verify`, reading
+  through a callback (headers, the two small manifests, and the program
+  hashed 4 KiB at a time); the same packages accepted and refused.
+- Installer: a package is verified piece by piece and copied 4 KiB at a
+  time into a chunked replace of `apps/NAME.aripkg`, committed at the end;
+  a staged package's whole SHA-256 is checked first, as before, and again
+  over the bytes copied, so what is committed is what the updater listed.
+  Its version check verifies the installed package the same way. Its heap
+  holds a 4 KiB buffer, not two packages.
+- Updater: an app package downloads straight into a chunked replace of
+  its stage file, hashed on the way, committed only with the size and
+  SHA-256 of the signed index, then verified piece by piece.
+- Broker: the package it launches is loaded into a DMA buffer of its own
+  size, freed when the launch ends (the kernel copies the program when it
+  creates the process), instead of one buffer of `PACKAGE_MAX` kept for
+  ever.
+- Between verifying a source and copying it, the file could change: whoever
+  can write `pkgs/` or the updater's directory can write `apps/` directly,
+  and the broker verifies every package in full at each launch, so the gap
+  opens nothing.
+- Test disk: 72 MiB, `ARI0` 32 MiB (a package of `PACKAGE_MAX` and its
+  replace fit). `large` packages (1 MiB after the ELF, which the loader
+  ignores) in `apps.large_package` (installed, replaced, launched: 1,062,888
+  bytes) and `apps.upgrade_network_large`.
+
+### Audit of phase B (2026-11-03)
+
+No high finding. What it found, and what was done:
+
+- **M1. A file taken for absent.** The installer learned a package's size
+  from the listing, and fsd lists by index: a client creating or deleting
+  files between two requests shifts the indices, so an installed package
+  could be missed, taken for "not installed", and an older signed package
+  in `pkgs/` installed over it. `files::size_of` now asks `open` whether
+  the file exists; a file that opens but the listing misses twice is an
+  error (`Busy`), never absent.
+- **M2. The replace slot held across the network.** The updater streamed
+  downloads into fsd's one chunked replace, so a slow server kept every
+  other replace on the system `Busy` for up to two minutes. It now empties
+  the stage file and downloads into it with plain writes; the file is
+  scratch, listed only with the index's size and SHA-256, and the
+  installer hashes it again before its own atomic replace. A v1 volume's
+  limit has its own message (`upd-pkg-v1-limit`).
+- **L1.** A mismatch found while copying, and the v1 limit, are refusals
+  with their codes (as when found before the copy); a source gone since its
+  verification is skipped.
+- **L2.** `PACKAGE_MAX` is asserted within the kernel's `DMA_MAX_LEN`, and
+  a failed allocation is said.
+- **L4.** `read_exact`'s offsets are checked.
+- **I1.** `verify_streaming`'s comment says what it bounds; tests cover a
+  read failing inside the program and the package manifest's bound.
+- **I2.** Packages from `pkgs/` are hashed after their verification and
+  the copy is committed only if it hashes the same.
+- Residuals, fixed on 2026-11-03 (the owner: no known defect is left when
+  the fix is in our hands):
+  - **Growing writes commit once.** A write that grows a file changes the
+    table in memory only (`pending`). The next commit, `flush`, or the
+    close of a descriptor (`commit_growth`, called by fsd) writes it,
+    after the data, because each commit flushes before its commit point.
+    A cut before that loses the growth only, like any unflushed write. A
+    download is one commit instead of one per piece, and host tests cut
+    every write of it.
+  - **The 8 MiB limit is tested end to end** by `apps.huge_package` and
+    `apps.upgrade_network_huge`, with packages within 32 KiB of
+    `PACKAGE_MAX`.
+  - **The v1 download limit** has `apps.upgrade_v1_limit`.
+  - **The close commit has a scenario:** `filesystem.close_commits_growth`
+    cuts the power right after a file is written and closed without a
+    flush, and the file is whole on the next boot.
+  - **Audit of the change (no high findings), fixed:**
+    - M1: growth is tracked per file, and a close commits only that file's
+      growth, so one file's close never fails on another's. An error on
+      close is documented: the descriptor is closed and the growth is not
+      durable yet.
+    - M2: fsd commits the growth of a client that dies, as a close, and
+      the shell flushes before `reboot` and `shutdown`.
+    - L1: module and ADR texts.
+    - L2: `flush` resyncs after a failed commit.
+    - L3: per-file tracking, as in M1.
+    - L4: tests for a failed growth commit, growth into just-freed
+      sectors beside other commits under cuts, and writes that do not
+      grow.
+  - **A package changing during the installer's copy** has
+    `apps.copy_mismatch`. The test-only key `fsd_mutate=NAME@N` makes fsd
+    flip the file's last byte on its N-th open, as a concurrent writer
+    would. The installer refuses the copy and commits nothing.
+
+Incident 0026 is closed.

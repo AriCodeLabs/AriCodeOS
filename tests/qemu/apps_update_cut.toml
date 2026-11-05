@@ -24,7 +24,7 @@ stdin = ["run hello_ext 7", "run installer", "run hello_ext 8", "shutdown"]
 [boots.expect]
 exit = 33
 serial_contains = [
-    "fsd: AriFS mounted",
+    "fsd: AriFS v2 mounted",
     ": hello from outside the tree (arg 7)",
     "run: hello_ext exited with 0",
     "run: installer exited with 0",

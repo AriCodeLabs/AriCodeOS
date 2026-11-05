@@ -4,13 +4,15 @@
 //! user-space keyboards (virtio-input, USB HID) to the kernel console input
 //! ring, so the shell reads from them just like from COM1 or the PS/2
 //! keyboard. Handles: 0x10004 = console input (`MANAGE`), 0x10005.. =
-//! endpoints of the input services (`arg` = how many).
+//! endpoints of the input services. `arg`: how many (bits 0..7) and the
+//! keyboard layout of `kbd=` (`Layout::code`, bits 8..15), the same the
+//! kernel gives its PS/2 keyboard.
 #![no_std]
 #![no_main]
 
-use aricode_input::{Keyboard, EV_KEY};
+use aricode_input::{KeyBytes, Keyboard, Layout, EV_KEY};
 use aricode_proto::input::{Event, Reply, Status, MAX_EVENTS, MAX_READ_MS};
-use aricode_rt::sys::input::{InputClient, InputError};
+use aricode_rt::sys::input::{DriverInstance, InputClient, InputError};
 use aricode_rt::sys::{self, abi, Handle};
 
 const CONSOLE_IN: Handle = Handle(0x0001_0004);
@@ -46,8 +48,9 @@ fn dropped(i: usize) {
     sys::print(b" is gone; dropping it\n");
 }
 
-fn main(count: u64) -> u64 {
-    let count = (count as usize).min(MAX_INPUTS);
+fn main(arg: u64) -> u64 {
+    let count = ((arg & 0xFF) as usize).min(MAX_INPUTS);
+    let layout = Layout::from_code((arg >> 8) & 0xFF);
     if count == 0 {
         say(b"no input devices");
         return 1;
@@ -68,10 +71,15 @@ fn main(count: u64) -> u64 {
     let mut backoff = [false; MAX_INPUTS];
     // One keyboard state per device: shift and lock state belong to it.
     let mut keyboards = [Keyboard::new(); MAX_INPUTS];
+    for k in &mut keyboards {
+        k.set_layout(layout);
+    }
+    // Which run of each driver its replies come from.
+    let mut instances = [DriverInstance::new(); MAX_INPUTS];
     let mut buf = Buffers {
         events: [Event::default(); MAX_EVENTS],
         times: [0; MAX_EVENTS],
-        text: [0; MAX_EVENTS * 4],
+        text: [0; MAX_EVENTS * KeyBytes::MAX],
     };
     let mut msg = [0u8; Reply::LEN];
     let mut none = [Handle(0); abi::IPC_MAX_HANDLES];
@@ -136,6 +144,7 @@ fn main(count: u64) -> u64 {
             match finish(
                 &mut pending[i],
                 &mut keyboards[i],
+                &mut instances[i],
                 &msg[..len],
                 &none[..nh],
                 &mut buf,
@@ -161,6 +170,7 @@ fn main(count: u64) -> u64 {
                     match finish(
                         &mut pending[i],
                         &mut keyboards[i],
+                        &mut instances[i],
                         &msg[..len],
                         &none[..nh],
                         &mut buf,
@@ -176,6 +186,8 @@ fn main(count: u64) -> u64 {
                     let _ = sys::handle_close(reply);
                     pending[i] = None;
                     lost = true;
+                    // Its driver died: the releases of keys held are lost.
+                    keyboards[i].release_modifiers();
                 }
                 Err(_) => {}
             }
@@ -192,12 +204,18 @@ fn main(count: u64) -> u64 {
 fn finish(
     pending: &mut Option<Handle>,
     keyboard: &mut Keyboard,
+    instance: &mut DriverInstance,
     msg: &[u8],
     handles: &[Handle],
     buf: &mut Buffers,
 ) -> Result<bool, sys::Error> {
     if let Some(reply) = pending.take() {
         let _ = sys::handle_close(reply);
+    }
+    // Relaunched since its last reply: the keys it held were never
+    // released (audit of the file manager, M2).
+    if instance.changed(msg) {
+        keyboard.release_modifiers();
     }
     deliver(keyboard, msg, handles, buf)
 }
@@ -206,8 +224,9 @@ fn finish(
 struct Buffers {
     events: [Event; MAX_EVENTS],
     times: [u64; MAX_EVENTS],
-    // Up to 4 bytes per key (escape sequences for the arrow keys).
-    text: [u8; MAX_EVENTS * 4],
+    // Up to `KeyBytes::MAX` bytes per key (two characters of UTF-8, or the
+    // escape sequence of an arrow key).
+    text: [u8; MAX_EVENTS * KeyBytes::MAX],
 }
 
 /// Handles one read reply of a device: closes any handles it carried and

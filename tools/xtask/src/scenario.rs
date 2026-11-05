@@ -107,6 +107,9 @@ pub struct HostUpdate {
     /// App packages offered: `DIR:VERSION`.
     #[serde(default)]
     pub apps: Vec<String>,
+    /// Profiles offered (ADR 0074): `NAME:APP,APP...`, by package name.
+    #[serde(default)]
+    pub profiles: Vec<String>,
     /// The index is altered after signing (the updater must refuse it).
     #[serde(default)]
     pub tamper_index: bool,
@@ -123,6 +126,18 @@ pub struct HostUpdate {
     /// only a download into `UPDATE` holds it.
     #[serde(default)]
     pub large_image: bool,
+    /// The apps are published as `large` packages (1 MiB more after the
+    /// ELF): the updater stages them piece by piece (ADR 0072, phase B).
+    #[serde(default)]
+    pub large_apps: bool,
+    /// The apps are published as `huge` packages, within 32 KiB of
+    /// `PACKAGE_MAX` (8 MiB): the limit itself, downloaded and installed.
+    #[serde(default)]
+    pub huge_apps: bool,
+    /// The apps' `requires` (ADR 0074): the application interface level
+    /// they need; 0 (the default) writes none.
+    #[serde(default)]
+    pub apps_require: u32,
     /// The machine already holds a verified copy of this source's index
     /// with a higher serial (the published one must be refused as stale).
     #[serde(default)]
@@ -212,7 +227,15 @@ pub struct HostInput {
     #[serde(default)]
     pub keys: Vec<String>,
     pub mouse_rel: Option<(i32, i32)>,
+    /// A stroke after `mouse_rel`: `[count, dx, dy, every_ms]` moves the
+    /// mouse by (dx, dy) `count` times, one move every `every_ms`, as a
+    /// finger on a touchpad does (incident 0058: about 100 moves a second).
+    pub mouse_steps: Option<(u32, i32, i32, u64)>,
     pub click: Option<String>,
+    /// A pause after the marker, before anything is sent (ms): a stage
+    /// that must come a while after the one before it (ADR 0077).
+    #[serde(default)]
+    pub wait_ms: u64,
     /// Minimum pause after each key event (ms). QEMU's usb-kbd queues at
     /// most 16 scancodes (`QUEUE_LENGTH`, hw/input/hid.c) and drops whole
     /// events beyond that, while the guest drains it only at the interrupt
@@ -313,6 +336,10 @@ pub struct Expect {
     /// previous one's first match from there on).
     #[serde(default)]
     pub serial_order: Vec<String>,
+    /// Texts that must appear exactly once (something done once and not
+    /// repeated).
+    #[serde(default)]
+    pub serial_once: Vec<String>,
     /// The runner had to kill QEMU on seeing `kill_on` (power cut).
     #[serde(default)]
     pub killed: bool,
@@ -326,6 +353,7 @@ impl Expect {
             && self.serial_contains.is_empty()
             && self.serial_absent.is_empty()
             && self.serial_order.is_empty()
+            && self.serial_once.is_empty()
             && !self.killed
             && self.seed_store.is_none()
     }
@@ -398,6 +426,11 @@ pub struct Scenario {
     /// QMP input injection on seeing `marker`: keys (QEMU qcode names) on
     /// the virtio keyboard, relative motion and a click on the mouse.
     pub host_input: Option<HostInput>,
+    /// More stages of QMP input (`[[host_input_then]]`), each sent once the
+    /// stage before it is done and its own marker is seen (typing again
+    /// after the screen changed hands).
+    #[serde(default)]
+    pub host_input_then: Vec<HostInput>,
     /// A device plugged in over QMP (`device_add`) `delay_ms` after the
     /// guest prints `marker`: hot-plug detection.
     pub host_hotplug: Option<HostHotplug>,
@@ -454,6 +487,15 @@ pub struct Scenario {
     /// QMP input reaches them whatever the guest starts.
     #[serde(default)]
     pub usb_hid_only_input: bool,
+    /// No virtio keyboard and mouse, and no USB HID unless asked: QMP input
+    /// reaches the i8042, the PS/2 keyboard and mouse the kernel reads
+    /// (ADR 0074 phase B, ADR 0075).
+    #[serde(default)]
+    pub no_virtio_input: bool,
+    /// No i8042 either (`i8042=off`): a machine without a PS/2 keyboard or
+    /// mouse (ADR 0075).
+    #[serde(default)]
+    pub no_ps2: bool,
     /// The `usb_hid` xHCI offers MSI only (no MSI-X), like 2012 Intel
     /// controllers: the kernel must program the MSI capability.
     #[serde(default)]
@@ -503,13 +545,23 @@ pub struct Scenario {
     /// External applications (directories with `Cargo.toml` and
     /// `NAME.manifest`, relative to the root) that xtask builds, packs as
     /// version 1 and installs into the test disk's AriFS as
-    /// `apps/NAME.aripkg` (ADR 0017).
+    /// `apps/NAME.aripkg` (ADR 0017); `DIR:requires=N` packs it needing
+    /// application interface N (ADR 0074), `DIR:corrupt` with a tampered
+    /// signature.
     #[serde(default)]
     pub install: Vec<String>,
-    /// Pending packages in the test disk's `pkgs/`: `DIR:VERSION` or
-    /// `DIR:VERSION:corrupt` (tampered signature), for the installer (ADR 0018).
+    /// Pending packages in the test disk's `pkgs/`: `DIR:VERSION`,
+    /// `DIR:VERSION:corrupt` (tampered signature), for the installer (ADR
+    /// 0018), `DIR:VERSION:large` (1 MiB more after the ELF, ADR 0072) or
+    /// `DIR:VERSION:huge` (within 32 KiB of `PACKAGE_MAX`) or
+    /// `DIR:VERSION:requires=N` (needs application interface N, ADR 0074).
     #[serde(default)]
     pub packages: Vec<String>,
+    /// With `disk = "usb-image"`: profiles the stick follows, `NAME:APP,APP`
+    /// with apps among `install`, as `usb-image --profile` writes them (ADR
+    /// 0074).
+    #[serde(default)]
+    pub stick_profiles: Vec<String>,
     /// Packages already staged by the updater: `DIR:VERSION`, or
     /// `DIR:VERSION:wrong-hash` (the staged list's SHA-256 does not match
     /// the stage file), for `run installer 2` (ADR 0029).
@@ -548,6 +600,7 @@ impl Expect {
             serial_contains: all(&self.serial_contains),
             serial_absent: all(&self.serial_absent),
             serial_order: all(&self.serial_order),
+            serial_once: all(&self.serial_once),
             killed: self.killed,
             seed_store: self.seed_store,
         }
@@ -558,6 +611,7 @@ impl Expect {
             .iter()
             .chain(&self.serial_absent)
             .chain(&self.serial_order)
+            .chain(&self.serial_once)
     }
 }
 
@@ -639,9 +693,15 @@ pub fn load_from(dir: &Path) -> Result<Vec<Scenario>> {
             }
             s.check_placeholders()
                 .map_err(|e| format!("{}: {e}", path.display()))?;
-            if let Some(h) = &s.host_input {
+            for h in s.host_input.iter().chain(&s.host_input_then) {
                 h.check_queue()
                     .map_err(|e| format!("{}: {e}", path.display()))?;
+            }
+            if !s.host_input_then.is_empty() && s.host_input.is_none() {
+                return Err(format!(
+                    "{}: [host_input_then] follows [host_input]: set both",
+                    path.display()
+                ));
             }
             if let Some(h) = &s.host_hotplug {
                 h.check().map_err(|e| format!("{}: {e}", path.display()))?;

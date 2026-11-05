@@ -87,7 +87,44 @@ same manifest, and a package that does not verify is not launched. From
 inside the system, `run installer` installs or updates the packages left in
 `pkgs/` (ADR 0018): it verifies each one, installs only versions newer than
 the installed one, and does so with a single atomic `replace`. A package
-cannot exceed 32 KiB (the AriFS journal).
+may be up to 8 MiB (`aricode_pkg::PACKAGE_MAX`, ADR 0072): the installer
+and the updater handle it in pieces, and the broker loads only the one it
+launches. On a disk still in AriFS v1 (a stick written before 0.18) a
+package holds 32 KiB.
+
+A package may declare the lowest application interface it runs on with a
+`requires = N` line in its signed manifest (ADR 0074; `cargo xtask
+app-pack DIR --requires N`). The system offers `aricode_ab::APPS_LEVEL`.
+The updater does not stage a package that needs more, the installer
+refuses it and the broker does not launch it, each saying which level it
+needs. A package without the line runs everywhere, and systems before
+0.18 refuse one that has it.
+
+Apps can also arrive as a profile (ADR 0074): a source's signed index may
+group apps under a name (`publish-update --profile desktop:a,b`). The owner
+follows a profile with `update profile add NAME`, after which `update` and
+`upgrade` install every app the profile names and keep them up to date with
+the system. `update profile remove NAME` deletes the apps that no other
+followed profile names and the profile installed itself; an app you
+installed by other means stays.
+
+The `desktop` profile also chooses what the machine boots into (`session`
+in the shell; following the profile writes `session = desktop`). At boot
+init starts the compositor and the profile's `launcher` (`desktop/launcher`),
+which lists the installed apps that open a window (`sys::launch::installed`)
+and starts them through the broker with the capability `launch`, up to six
+at once. The profile's `terminal` (`desktop/terminal`) shows a session shell
+in a window, and its `editor` (`desktop/editor`) edits the text files of the
+owner's folder `home/` (`cat home/notes.txt` in the shell), and its `files`
+(`desktop/files`) lists, creates, renames and deletes them. Its `settings`
+(`desktop/settings`) shows the system, the network and the update sources,
+and chooses what the machine boots into, through init. Keyboards send
+Ctrl with a letter as its control character (Ctrl+S is `0x13`), as a
+terminal does. Shared widgets (keys, buttons, lists, text fields) are in
+`aricode_gfx::widgets`. When the
+launcher exits, or on Ctrl+Alt+Backspace on any keyboard, the desktop ends
+and the text console gets the screen and the keyboards back. A stick can come with a profile: `cargo xtask
+usb-image --app DIR:VER... --profile desktop:launcher,...`.
 
 ## What a program receives
 
@@ -106,7 +143,7 @@ received.
 | process | `sys::process_spawn_with(spawner, name, arg, handles)`, `sys::process_wait`, `sys::process_kill` (`MANAGE` on the process; afterwards `process_wait` returns `Killed`), `sys::process_exit`; needs a `SPAWNER` handle with `MANAGE` (init has it; the shell gets one for `run`) |
 | ipc | `sys::endpoint_create`, `sys::endpoint_create_pair` and `sys::endpoint_close` (ADR 0030), `sys::ipc_send`, `sys::ipc_receive` (256 bytes and up to 4 handles per message, with a deadline), `sys::ipc_receive_any` (the first of up to 16 endpoints with a message, with its index; ADR 0020), `sys::wait_any` (the same set plus up to 4 interrupt lines: a message or a line's interrupts, ADR 0044); large data goes through shared DMA buffers |
 | service loop | `sys::wait` (ADR 0044): a single-threaded service ends each bounded round with `end_of_round(members, now, work_left, next, ...)`, one wait on its endpoints and interrupt lines (`Members`) until its next deadline (`Deadline`); no wait when the round left work or the deadline is due (`timeout`); a message that ends the wait is the caller's to serve |
-| filesystem | `sys::fs::FsClient` over the `fsd` endpoint and a `HARDWARE` capability for its buffer: `list`, `open`, `create`, `read`, `write` (in place, durable after `flush`), `replace` (all-or-nothing and durable, up to 32 KiB: in chunks to the journal above 4 KiB), `flush`, `close` (ADR 0014, 0018); `descriptors` reports the table per owner, and `bind`/`share`/`attach` (init and the broker only) create the per-client sessions whose descriptors die with their process (ADR 0036) |
+| filesystem | `sys::fs::FsClient` over the `fsd` endpoint and a `HARDWARE` capability for its buffer: `list`, `open`, `create`, `read`, `write` (durable after `flush`; a write that grows the file is committed at the next `flush`, at `close` or with the next change, ADR 0072), `replace` (all-or-nothing and durable, up to 16 MiB on AriFS v2 and 32 KiB on a volume still in v1: in chunks above 4 KiB), `delete` and `rename` (AriFS v2: `Unsupported` on v1; a rename over an existing name replaces it in the same commit), `flush`, `close` (ADR 0014, 0018, 0072); `descriptors` reports the table per owner, and `bind`/`share`/`attach` (init and the broker only) create the per-client sessions whose descriptors die with their process (ADR 0036) |
 | network | `sys::net::NetClient`: `info`, `link` (physical link state, even before DHCP), `ping`, UDP (`udp_bind/send/recv`), TCP (`tcp_connect/listen/accept/send/recv/close`), `resolve`; `sockets` reports the tables per owner, and `sys::net::attach` (init and the broker only) creates the per-client session whose sockets die with their process (ADR 0037); `sys::http::get` on top (per-operation timeout plus a `Budget` for the whole download, ADR 0033) |
 | window | `sys::window::Window::create(compositor, hardware, w, h, title)`, `canvas()` (an `aricode-gfx` canvas), `present`, `poll` (`Key`, `Click`, `Focus`), `close` |
 | input | `sys::input::InputClient` over an `inputd`: evdev events with timestamps (`read`, or `start_read` + `read_reply` to wait on several devices at once with `ipc_receive_any`; a read waits at most `MAX_READ_MS`, 10 s); `aricode-input::Keyboard` translates them. Drivers keep their events in `sys::input::EventQueue`, which delivers them to the one waiting read and keeps them until a reply carrying them was delivered |
@@ -121,15 +158,15 @@ from the shell or `sys::launch::run(broker, name, arg)`
 (`sys::launch::run_with_console(broker, name, arg, console)` gives it the
 send side of an endpoint as its console, ADR 0047); `spawn` and
 `sys::launch::spawn` launch it in the background without waiting for its
-exit. The broker allows 4 running programs at a time and answers `Limit` to
-the fifth (ADR 0015). The broker reads `NAME.manifest` from the initrd
+exit. The broker allows the shell 4 running programs at a time and answers
+`Limit` to the fifth (ADR 0015); the desktop's launcher has its own 6. The broker reads `NAME.manifest` from the initrd
 (`apps/<app>/NAME.manifest`, packed by xtask; a test program the shell
 launches with capabilities, such as `tcp_hog` or `sock_leaker`, keeps its manifest in
 `user/testprogs/manifests/`):
 
 ```text
 name = hello_app
-caps = system, fs      # system | fs | net | window | block (updater only) | install (installer only)
+caps = system, fs      # system | fs | net | window | block (updater only) | install (installer only) | launch (launcher only) | terminal (terminal only) | home (editor and files only) | settings (settings only)
 memory = 128K          # DMA buffer quota (K or M, at most 8M)
 read_files = hola.txt  # up to 4 AriFS files in read-only mode (ADR 0016)
 ```
@@ -138,7 +175,7 @@ Handles arrive in this fixed order, only the requested ones: `SYSTEM`
 (read), the fsd private directory, one endpoint per `read_files` entry (in
 order; from it the program can only list, open and read that file, and
 everything else answers `Denied`), the network endpoint, a compositor
-session (its windows are its alone, ADR 0052), the block endpoint, the fsd main namespace (`install`) and, if any capability needs buffers (`fs`, `read_files`, `net`,
+session (its windows are its alone, ADR 0052), the block endpoint, the fsd main namespace (`install`), the broker's launch endpoint (`launch`, ADR 0074: only for an installed, signed `launcher`, which may start installed apps in the background, each with its own manifest, and nothing else), the terminal endpoint (`terminal`: only for an installed, signed `terminal`, where init grants it interactive session shells, at most four, each the owner's own) and, if any capability needs buffers (`fs`, `read_files`, `net`,
 `window`, `block`, `install`), `HARDWARE` at the end. With
 `sys::permissions::granted` the application recognises them by kind without
 depending on the position. Without a manifest only the console and `SYSTEM`

@@ -16,7 +16,7 @@ El documento maestro de arquitectura y roadmap es [AriCodeOS.md](AriCodeOS.md).
 Las decisiones de diseño se registran en [docs/decisions/](docs/decisions/) y el
 flujo de ramas (git flow) en [docs/WORKFLOW.md](docs/WORKFLOW.md).
 
-**Estado:** 0.17.0 (2026-11-02). Las 35 fases del roadmap (0 a 34) están
+**Estado:** 0.18.0 (2026-11-05). Las 35 fases del roadmap (0 a 34) están
 implementadas y probadas en QEMU, y las etapas 1 a 4 de la secuencia
 posterior al roadmap (recuperación observable, sesión útil, límites y
 actualización, aplicaciones externas) también, más la parte de la etapa 5
@@ -43,6 +43,7 @@ hardware`, que se ha ejercitado en el portátil y la evidencia está en
 | Red IPv4: DHCP, ARP, ICMP, UDP, TCP, DNS, cliente HTTP | prototipo, validado en QEMU | `network.*`; sin TLS ni renovación DHCP |
 | Shell `arish` por consola serie, teclado PS/2 o teclados USB/virtio (puente de consola) | validado en QEMU | `shell.*`, `console.*` |
 | GUI: compositor, ventanas, entrada | prototipo, validado en QEMU | `gui.*` |
+| Escritorio opcional (perfil `desktop`): lanzador, terminal, editor, gestor de archivos, ajustes; teclado y touchpad PS/2 | validado en QEMU | `usb.desktop_*`, `apps.*_rules`, `gui.ps2_*` |
 | WASM: wasmi con combustible, perfil v2 (lo estable salvo SIMD, ver el perfil) y manifiesto por módulo | validado en QEMU | `wasm.*`, `docs/wasm-profile.md`, ADR 0071; no es WASI |
 | Criptografía propia, RNG, imágenes firmadas, A/B con rollback | validado en QEMU | `crypto.*`, `update.*`; no es Secure Boot |
 | IOMMU VT-d con dominio por driver | validado en QEMU | `iommu.*` |
@@ -154,7 +155,7 @@ en tu terminal (se sale con Ctrl-A X):
 
 ```bash
 cargo xtask usb-image
-docker build -t aricodeos -f tools/docker/try/Dockerfile --build-arg VERSION=0.17.0 .
+docker build -t aricodeos -f tools/docker/try/Dockerfile --build-arg VERSION=0.18.0 .
 docker run --rm -it aricodeos
 ```
 
@@ -177,7 +178,7 @@ cargo xtask build          # compila AriBoot y AriKernel (release)
 cargo xtask image          # monta build/esp/ (BOOTX64.EFI, aricodeos/kernel.elf, aricodeos/initrd.img)
 cargo xtask run            # arranca en QEMU + OVMF, serie en la terminal (salir: Ctrl-A X)
 cargo xtask run --cmdline shell   # arranca con el shell interactivo (arish) en la consola serie
-cargo xtask run --cmdline gui     # compositor y dos ventanas de prueba en la pantalla de QEMU
+cargo xtask run --cmdline "gui shell"   # el compositor en la pantalla de QEMU, con el shell en la consola serie
 cargo xtask run --cpus 4   # arranca con cuatro procesadores (SMP)
 cargo xtask run --usb-hid  # añade un xHCI con teclado y raton USB
 cargo xtask test           # unit + smoke (arranque nominal en QEMU)

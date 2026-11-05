@@ -1,0 +1,5 @@
+# Denied (ADR 0074): asks for the settings endpoint without being the
+# settings app.
+name = fake_settings
+caps = settings
+memory = 64K

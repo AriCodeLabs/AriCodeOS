@@ -1,0 +1,26 @@
+# AriFS v2 commits the growth of a file when its descriptor closes (ADR
+# 0072): hello_app creates its private 'notas', writes it with a plain
+# write, closes it without a flush and says so; the power is cut right
+# then. On the next boot the file holds what was written.
+name = "filesystem.close_commits_growth"
+description = "a file written and closed without flush survives a power cut right after the close"
+level = "full"
+areas = ["filesystem", "apps"]
+timeout_secs = 120
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["run hello_app 1"]
+kill_on = "hello_app: private file 'notas' written and read"
+[boots.expect]
+killed = true
+serial_contains = ["hello_app: private file 'notas' written and read"]
+serial_absent = ["KERNEL PANIC"]
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["cat hello_app/notas", "shutdown"]
+[boots.expect]
+exit = 33
+serial_contains = ["fsd: AriFS v2 mounted", "privado", "ARICODEOS_SHUTDOWN"]
+serial_absent = ["KERNEL PANIC", "cat: not found"]

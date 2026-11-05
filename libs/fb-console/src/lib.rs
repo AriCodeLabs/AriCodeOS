@@ -27,7 +27,28 @@
 
 pub mod font;
 
-use font::{FIRST_CHAR, GLYPHS, GLYPH_HEIGHT, GLYPH_WIDTH, LAST_CHAR};
+use font::{GLYPHS, GLYPH_HEIGHT, GLYPH_WIDTH};
+
+/// The cell code that shows `ch` (ADR 0076): printable ASCII and Latin-1
+/// are their own value, the euro sign is [`font::EURO`]; `None` for what
+/// the font cannot show (controls, other scripts).
+pub const fn cell_code(ch: char) -> Option<u8> {
+    match ch {
+        ' '..='~' | '\u{A0}'..='\u{FF}' => Some(ch as u8),
+        '€' => Some(font::EURO),
+        _ => None,
+    }
+}
+
+/// The glyph of a cell code.
+pub fn glyph(code: u8) -> &'static [u8; GLYPH_HEIGHT] {
+    &GLYPHS[code as usize]
+}
+
+/// The glyph that shows `ch`, or `?`'s.
+pub fn char_glyph(ch: char) -> &'static [u8; GLYPH_HEIGHT] {
+    glyph(cell_code(ch).unwrap_or(b'?'))
+}
 
 /// RGB color, 8 bits per channel; the `Surface` encodes it to its format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +81,72 @@ pub trait Surface {
         for yy in y..(y + rows).min(self.height()) {
             for x in 0..self.width() {
                 self.put(x, yy, color);
+            }
+        }
+    }
+}
+
+/// Text that arrives in pieces (a shell's output over IPC, ADR 0074 phase
+/// C): a character cut between two pieces is kept until the next one ends
+/// it, so it is never shown as two `?`. Bytes that are not UTF-8 become
+/// `?`.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Utf8Stream {
+    carry: [u8; 4],
+    len: usize,
+}
+
+impl Utf8Stream {
+    pub const fn new() -> Self {
+        Self {
+            carry: [0; 4],
+            len: 0,
+        }
+    }
+
+    /// Feeds one piece; `out` gets the text it completes, in order.
+    pub fn feed(&mut self, mut bytes: &[u8], mut out: impl FnMut(&str)) {
+        // First the character the last piece cut.
+        while self.len > 0 {
+            let Some((&b, rest)) = bytes.split_first() else {
+                return;
+            };
+            // A byte that cannot continue the character ends it as a `?`
+            // and is read again as the start of what follows.
+            if !(0x80..=0xBF).contains(&b) {
+                out("?");
+                self.len = 0;
+                break;
+            }
+            self.carry[self.len] = b;
+            self.len += 1;
+            bytes = rest;
+            match core::str::from_utf8(&self.carry[..self.len]) {
+                Ok(text) => {
+                    out(text);
+                    self.len = 0;
+                }
+                Err(e) if e.error_len().is_none() && self.len < 4 => {}
+                Err(_) => {
+                    out("?");
+                    self.len = 0;
+                }
+            }
+        }
+        let mut chunks = bytes.utf8_chunks().peekable();
+        while let Some(chunk) = chunks.next() {
+            out(chunk.valid());
+            let bad = chunk.invalid();
+            if bad.is_empty() {
+                continue;
+            }
+            // A character cut at the very end waits for the next piece.
+            let at_end = chunks.peek().is_none();
+            if at_end && core::str::from_utf8(bad).is_err_and(|e| e.error_len().is_none()) {
+                self.carry[..bad.len()].copy_from_slice(bad);
+                self.len = bad.len();
+            } else {
+                out("?");
             }
         }
     }
@@ -335,12 +422,7 @@ impl<S: Surface> Console<S> {
                 }
             }
             _ => {
-                let b = if ch.is_ascii() && (ch as u8) >= FIRST_CHAR && (ch as u8) <= LAST_CHAR {
-                    ch as u8
-                } else {
-                    b'?'
-                };
-                self.put_char(b);
+                self.put_char(cell_code(ch).unwrap_or(b'?'));
             }
         }
     }
@@ -407,7 +489,7 @@ impl<S: Surface> Console<S> {
         let Some(surface) = self.surface.as_mut() else {
             return;
         };
-        let glyph = &GLYPHS[(b - FIRST_CHAR) as usize];
+        let glyph = glyph(b);
         surface.glyph(
             col * GLYPH_WIDTH,
             row * GLYPH_HEIGHT,
@@ -441,6 +523,31 @@ impl<S: Surface> core::fmt::Write for Console<S> {
 mod tests {
     extern crate std;
     use super::*;
+
+    #[test]
+    fn utf8_stream_keeps_cut_characters() {
+        extern crate std;
+        use std::string::String;
+        let mut text = String::new();
+        let mut s = Utf8Stream::new();
+        let all = "añ€😀b".as_bytes();
+        // Every split of every piece size.
+        for cut in 1..all.len() {
+            text.clear();
+            s.feed(&all[..cut], |t| text.push_str(t));
+            s.feed(&all[cut..], |t| text.push_str(t));
+            assert_eq!(text, "añ€😀b", "cut at {cut}");
+        }
+        text.clear();
+        for b in all {
+            s.feed(core::slice::from_ref(b), |t| text.push_str(t));
+        }
+        assert_eq!(text, "añ€😀b", "byte by byte");
+        text.clear();
+        s.feed(b"x\xffy\xe2", |t| text.push_str(t));
+        s.feed(b"z", |t| text.push_str(t));
+        assert_eq!(text, "x?y?z", "bad bytes, and a cut that never ends");
+    }
     use core::fmt::Write;
     use std::vec;
     use std::vec::Vec;
@@ -498,7 +605,7 @@ mod tests {
                 if c.cursor_drawn == Some((col, row)) {
                     continue;
                 }
-                let glyph = &GLYPHS[(c.cell(col, row) - FIRST_CHAR) as usize];
+                let glyph = glyph(c.cell(col, row));
                 for (dy, bits) in glyph.iter().enumerate() {
                     for dx in 0..GLYPH_WIDTH {
                         let on = bits & (0x80 >> dx) != 0;
@@ -526,7 +633,7 @@ mod tests {
         let mut c = C::new(Mem::new(64, 32));
         c.write_char('|');
         // Terminus '|': central column lit in the middle rows.
-        let glyph = &GLYPHS[(b'|' - FIRST_CHAR) as usize];
+        let glyph = glyph(b'|');
         let mut lit = 0;
         for (dy, bits) in glyph.iter().enumerate() {
             for dx in 0..8 {
@@ -567,7 +674,7 @@ mod tests {
         assert_eq!(c.cell(0, 3), b' ');
         assert_eq!(c.cursor(), (0, 3));
         // What is painted matches the cells: row 0 shows 'L'.
-        let glyph = &GLYPHS[(b'L' - FIRST_CHAR) as usize];
+        let glyph = glyph(b'L');
         let (dx, dy) = (1, 8);
         let expect = if glyph[dy] & (0x80 >> dx) != 0 {
             C::DEFAULT_FG
@@ -613,7 +720,7 @@ mod tests {
         // The first blink after writing only notes that the console was
         // active; the next one, now idle, paints.
         c.blink();
-        let bottom = &GLYPHS[(b'_' - FIRST_CHAR) as usize];
+        let bottom = glyph(b'_');
         let (dy, dx) = bottom
             .iter()
             .enumerate()
@@ -643,7 +750,7 @@ mod tests {
         write!(c, "b").unwrap();
         assert_eq!(c.cursor_drawn, None);
         assert_eq!(c.cell(1, 0), b'b');
-        let glyph_b = &GLYPHS[(b'b' - FIRST_CHAR) as usize];
+        let glyph_b = glyph(b'b');
         let on = glyph_b[dy] & (0x80 >> dx) != 0;
         assert_eq!(
             c.surface().unwrap().at(x, y),
@@ -656,11 +763,17 @@ mod tests {
     }
 
     #[test]
-    fn non_ascii_becomes_question_mark() {
-        let mut c = C::new(Mem::new(64, 32));
-        write!(c, "ñ\u{1F600}").unwrap();
-        assert_eq!(c.cell(0, 0), b'?');
-        assert_eq!(c.cell(1, 0), b'?');
+    fn latin1_and_euro_shown_others_become_question_mark() {
+        let mut c = C::new(Mem::new(96, 32));
+        write!(c, "ñ€¿\u{1F600}\u{85}").unwrap();
+        assert_eq!(c.cell(0, 0), 0xF1, "ñ is its Latin-1 code");
+        assert_eq!(c.cell(1, 0), font::EURO);
+        assert_eq!(c.cell(2, 0), 0xBF);
+        assert_eq!(c.cell(3, 0), b'?', "outside the font");
+        assert_eq!(c.cell(4, 0), b'?', "a C1 control is not shown");
+        assert_screen_matches_cells(&c);
+        assert_ne!(glyph(0xF1), glyph(b'n'), "ñ has a glyph of its own");
+        assert_eq!(glyph(0x81), glyph(b'?'), "codes that show nothing");
     }
 
     /// A detached console keeps its text and draws nothing; reattaching

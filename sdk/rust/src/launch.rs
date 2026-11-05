@@ -5,7 +5,7 @@
 
 use crate::{rpc, Error, Handle, TIMEOUT_INFINITE};
 pub use aricode_proto::launch::Status;
-use aricode_proto::launch::{Reply, Request};
+use aricode_proto::launch::{Entry, Reply, Request};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchError {
@@ -79,3 +79,39 @@ pub fn spawn(broker: Handle, name: &str, arg: u64) -> Result<(), LaunchError> {
         s => Err(LaunchError::Status(s)),
     }
 }
+
+/// The `index`-th installed application the launcher may offer (ADR 0074
+/// phase C): `Ok(None)` past the last one. Only on the endpoint of the
+/// `launch` capability; the broker answers from a list it makes again at
+/// index 0, so a launcher reads it from 0 up each time.
+pub fn installed(
+    apps: Handle,
+    index: u64,
+    name: &mut [u8; 32],
+) -> Result<Option<usize>, LaunchError> {
+    let mut msg = [0u8; Entry::LEN];
+    // The list is made at index 0: every installed package verified.
+    let len = rpc::call(
+        apps,
+        &Request::list(index).encode(),
+        &[],
+        rpc::GRACE_MS,
+        LIST_MS,
+        &mut msg,
+    )
+    .map_err(LaunchError::Ipc)?;
+    let entry = Entry::decode(&msg[..len]).ok_or(LaunchError::Ipc(Error::Invalid))?;
+    match entry.status {
+        Status::Ok => {
+            let n = entry.name_len as usize;
+            name[..n].copy_from_slice(&entry.name[..n]);
+            Ok(Some(n))
+        }
+        Status::NotFound => Ok(None),
+        s => Err(LaunchError::Status(s)),
+    }
+}
+
+/// How long `installed` waits for its answer: the first one verifies every
+/// installed package.
+const LIST_MS: u64 = 30_000;

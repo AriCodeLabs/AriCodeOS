@@ -45,18 +45,25 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use aricode_ab::{
-    schedule, BootState, Booted, Image, ImageError, Manifest, Slot, PART_STATE, PART_UPDATE,
+    schedule, BootState, Booted, Image, ImageError, Manifest, Slot, APPS_LEVEL, PART_STATE,
+    PART_UPDATE,
 };
-use aricode_crypto::sha256::{sha256, Sha256};
+use aricode_crypto::sha256::Sha256;
 use aricode_rt::sys::block::{find_partition, BlockClient};
 use aricode_rt::sys::fs::{FsClient, FsError};
 use aricode_rt::sys::net::NetClient;
 use aricode_rt::sys::{self, Handle};
-use aricode_update_index::files::{self, Files, ReadError};
+// The updater's private directory as `files::Files`.
+use aricode_update_index::client::FsFiles as Private;
+use aricode_update_index::files::{self, ReadError};
 use aricode_update_index::lists::{self, PlanItem, StagedEntry};
 use aricode_update_index::{
     self as upd, best_app, best_system, check_fresh, compare, compare_system, decide_system,
-    stored, updater_arg, Change, Channel, Index, Keys, Migration, Refusal, Sources, StableFloor,
+    profiles::profile_apps,
+    refused::{Refused, RefusedList},
+    stored,
+    stored::SlotProblem,
+    updater_arg, Change, Channel, Index, Keys, Migration, Profiles, Refusal, Sources, StableFloor,
     SystemChange, SystemDecision, SystemId, SystemRules,
 };
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -77,6 +84,8 @@ const RUN_DEADLINE_MS: u64 = 10 * 60 * 1000;
 /// Largest package: an installed package is replaced in one go (the AriFS
 /// journal, ADR 0018), the limit the whole system shares (incident 0026).
 const MAX_PACKAGE: usize = aricode_pkg::PACKAGE_MAX;
+/// Bytes per chunk of a staged download: the file client's buffer.
+const PIECE: usize = aricode_proto::fs::MAX_IO as usize;
 /// Largest exchange file with the installer (`state`).
 const MAX_STATE: usize = 16 * 1024;
 /// Largest `index.sig` (128 hex digits and a newline, with room).
@@ -140,6 +149,12 @@ mod code {
     pub const BUILD_CONFLICT: u64 = 57;
     /// The stable floor in `state` is damaged (audit of ADR 0045, M1).
     pub const FLOOR: u64 = 58;
+    /// The followed profiles (`profiles`, ADR 0074) could not be read, or
+    /// held invalid lines.
+    pub const PROFILES_FILE: u64 = 59;
+    /// The refused package list (`refused`, ADR 0074) could not be read or
+    /// written, or held invalid lines.
+    pub const REFUSED_FILE: u64 = 60;
     /// The active slot's image could not be read or verified: said with
     /// the reason, so "installed version unknown" is never unexplained
     /// (incident 0021).
@@ -147,6 +162,9 @@ mod code {
     /// The boot state in `ARIBOOT` was damaged (ADR 0060): rebuilt from
     /// what AriBoot booted, and nothing installed in that run.
     pub const STATE_DAMAGED: u64 = 60;
+    /// The system would not mount ARI0: it reads AriFS v1 only and ARI0
+    /// is v2 (ADR 0072).
+    pub const ARIFS_TOO_OLD: u64 = 56;
 }
 
 /// Everything printed, kept in `last.log` as the record of the last run
@@ -194,40 +212,6 @@ fn remaining_ms() -> u64 {
 }
 
 // ---------------------------------------------------------------- files
-
-/// The updater's private directory as `files::Files`: only an explicit
-/// `NotFound` from the service means a file is absent; a lost reply, a
-/// timeout or any other status is an error (incident 0008).
-struct Private<'a>(&'a mut FsClient);
-
-impl Files for Private<'_> {
-    type Fd = u32;
-    type Error = FsError;
-
-    fn open(&mut self, name: &str) -> Result<Option<u32>, FsError> {
-        match self.0.open(name) {
-            Ok(fd) => Ok(Some(fd)),
-            Err(FsError::Status(aricode_proto::fs::Status::NotFound)) => Ok(None),
-            Err(e) => Err(e),
-        }
-    }
-
-    fn read(&mut self, fd: &u32, offset: u32, out: &mut [u8]) -> Result<usize, FsError> {
-        self.0.read(*fd, offset, out)
-    }
-
-    fn close(&mut self, fd: u32) {
-        let _ = self.0.close(fd);
-    }
-
-    fn list(
-        &mut self,
-        index: u32,
-        name_out: &mut [u8; files::NAME_LEN],
-    ) -> Result<Option<(usize, u64)>, FsError> {
-        self.0.list(index, name_out)
-    }
-}
 
 type Read<T> = Result<Option<T>, ReadError<FsError>>;
 
@@ -350,6 +334,113 @@ fn load_sources(fs: &mut FsClient) -> Result<Sources, u64> {
     }
     Ok(sources)
 }
+
+/// The profiles the owner follows (ADR 0074); none when the file is
+/// missing. An unreadable file is a fault and follows none this run.
+fn load_profiles(fs: &mut FsClient) -> Profiles {
+    match read_text(fs, upd::PROFILES_FILE, 1024) {
+        Ok(text) => {
+            let (profiles, rejected) = Profiles::parse(text.as_deref().unwrap_or(""));
+            if rejected > 0 {
+                fault(
+                    code::PROFILES_FILE,
+                    "upd-profiles-damaged",
+                    &format!("{rejected} invalid line(s) in the profile list ignored"),
+                );
+            }
+            profiles
+        }
+        Err(_) => {
+            fault(
+                code::PROFILES_FILE,
+                "upd-profiles-read",
+                "cannot read the profile list: no profile followed this run",
+            );
+            Profiles::default()
+        }
+    }
+}
+
+/// The apps the followed profiles install and `installed` lacks, each
+/// once, with the profile that asks for it, in profile order (ADR 0074).
+fn missing_profile_apps<'a>(
+    indexes: &[Index<'a>],
+    profiles: &Profiles,
+    installed: &[(String, u32)],
+) -> Vec<(&'a str, String)> {
+    let mut missing: Vec<(&'a str, String)> = Vec::new();
+    for profile in profiles.names() {
+        for app in profile_apps(indexes, profile).unwrap_or_default() {
+            if !installed.iter().any(|(n, _)| n == app) && !missing.iter().any(|(a, _)| *a == app) {
+                missing.push((app, String::from(profile)));
+            }
+        }
+    }
+    missing
+}
+
+/// Packages refused before for needing a newer application interface
+/// (ADR 0074); none when the file is missing or cannot be read (each such
+/// package is then downloaded and refused again, never installed).
+fn load_refused(fs: &mut FsClient) -> RefusedList {
+    match read_text(fs, upd::REFUSED_FILE, 8192) {
+        Ok(text) => {
+            let (list, rejected) = RefusedList::parse(text.as_deref().unwrap_or(""));
+            if rejected > 0 {
+                fault(
+                    code::REFUSED_FILE,
+                    "upd-refused-damaged",
+                    &format!("{rejected} invalid line(s) in the refused package list ignored"),
+                );
+            }
+            list
+        }
+        Err(_) => {
+            fault(
+                code::REFUSED_FILE,
+                "upd-refused-read",
+                "cannot read the refused package list",
+            );
+            RefusedList::default()
+        }
+    }
+}
+
+/// Why `a` is not planned: the level its package needs, known from an
+/// earlier download.
+fn held_back(a: &upd::AppEntry, refused: &RefusedList) -> String {
+    format!(
+        "it needs application interface {} and this system offers {APPS_LEVEL} (known from an earlier download): held back until it does",
+        refused.holds_back(a, APPS_LEVEL).unwrap_or(0)
+    )
+}
+
+/// Whether profile apps may be planned or staged now (ADR 0074): only with
+/// an installed list that is present and undamaged, or a missing app could
+/// be one the list failed to name, and only on AriFS v2. A volume still in
+/// v1 cannot hold them (32 files, 32 KiB each); fsd answers `Delete` with
+/// `Unsupported` there before looking the name up (ADR 0072), which is
+/// how the volume's version is told from here. Says why not.
+fn profiles_possible(fs: &mut FsClient, state: &str) -> bool {
+    let exact = lists::section(state, lists::INSTALLED)
+        .is_some_and(|text| lists::parse_installed(&text).1 == 0);
+    if !exact {
+        say!("profiles not followed this run: the installed app list is missing or damaged");
+        return false;
+    }
+    if matches!(
+        fs.delete(PROBE_FILE),
+        Err(FsError::Status(aricode_proto::fs::Status::Unsupported))
+    ) {
+        say!("profiles not followed: ARI0 is still AriFS v1 (a stick written from 0.18 on is v2)");
+        return false;
+    }
+    true
+}
+
+/// A name never created in the updater's directory: deleting it only
+/// tells AriFS v1 (`Unsupported`) from v2 (`NotFound`).
+const PROBE_FILE: &str = "arifs-version-probe";
 
 /// The exchange file with the installer (`state`); empty when missing. A
 /// read error or an oversized file is a fault, and then the file is
@@ -477,6 +568,73 @@ fn image_error(e: &ImageError) -> &'static str {
 
 /// The A/B layout of the boot disk and the `UPDATE` partition.
 /// Only opened when a system image is involved (audit 1, M5).
+/// Reads a slot's container through the block client, a chunk of sectors
+/// at a time, keeping the last chunk.
+struct ContainerReader {
+    first: u64,
+    sectors: u64,
+    cached: Option<u64>,
+}
+
+impl ContainerReader {
+    /// The container of the slot image whose header is at `first`.
+    fn new(first: u64, len: usize) -> Self {
+        Self {
+            first,
+            sectors: len.div_ceil(SECTOR) as u64,
+            cached: None,
+        }
+    }
+
+    fn read(&mut self, blk: &mut BlockClient, offset: usize, buf: &mut [u8]) -> Result<(), ()> {
+        let mut done = 0;
+        while done < buf.len() {
+            let pos = offset + done;
+            let chunk = (pos / SECTOR) as u64 / CHUNK as u64 * CHUNK as u64;
+            if self.cached != Some(chunk) {
+                let n = (self.sectors - chunk).min(CHUNK as u64) as u16;
+                blk.read(self.first + 1 + chunk, n).map_err(|_| ())?;
+                self.cached = Some(chunk);
+            }
+            let at = pos - chunk as usize * SECTOR;
+            let n = (CHUNK as usize * SECTOR - at).min(buf.len() - done);
+            buf[done..done + n].copy_from_slice(&blk.buffer()[at..at + n]);
+            done += n;
+        }
+        Ok(())
+    }
+}
+
+/// ARI0 read-only, for AriFS's version check.
+struct PartitionReader<'a> {
+    blk: &'a mut BlockClient,
+    first: u64,
+}
+
+impl aricode_arifs::BlockDevice for PartitionReader<'_> {
+    fn read_sector(
+        &mut self,
+        lba: u64,
+        buf: &mut [u8; aricode_arifs::SECTOR],
+    ) -> Result<(), aricode_arifs::FsError> {
+        self.blk
+            .read(self.first + lba, 1)
+            .map_err(|_| aricode_arifs::FsError::Io)?;
+        buf.copy_from_slice(&self.blk.buffer()[..aricode_arifs::SECTOR]);
+        Ok(())
+    }
+    fn write_sector(
+        &mut self,
+        _: u64,
+        _: &[u8; aricode_arifs::SECTOR],
+    ) -> Result<(), aricode_arifs::FsError> {
+        Err(aricode_arifs::FsError::Io)
+    }
+    fn flush(&mut self) -> Result<(), aricode_arifs::FsError> {
+        Err(aricode_arifs::FsError::Io)
+    }
+}
+
 struct Disk {
     blk: BlockClient,
     update: (u64, u64),
@@ -701,28 +859,53 @@ impl Disk {
         len: usize,
         keys: &Keys,
     ) -> Result<Manifest, ImageError> {
+        let mut reader = ContainerReader::new(first, len);
         let blk = &mut self.blk;
-        let sectors = len.div_ceil(SECTOR) as u64;
-        // The chunk of container sectors now in the client's buffer.
-        let mut cached: Option<u64> = None;
-        let read = |offset: usize, buf: &mut [u8]| {
-            let mut done = 0;
-            while done < buf.len() {
-                let pos = offset + done;
-                let chunk = (pos / SECTOR) as u64 / CHUNK as u64 * CHUNK as u64;
-                if cached != Some(chunk) {
-                    let n = (sectors - chunk).min(CHUNK as u64) as u16;
-                    blk.read(first + 1 + chunk, n).map_err(|_| ())?;
-                    cached = Some(chunk);
-                }
-                let at = pos - chunk as usize * SECTOR;
-                let n = (CHUNK as usize * SECTOR - at).min(buf.len() - done);
-                buf[done..done + n].copy_from_slice(&blk.buffer()[at..at + n]);
-                done += n;
+        Image::verify_streaming(len, |o, b| reader.read(blk, o, b), keys).map(|v| v.manifest)
+    }
+
+    /// Refuses a system that would not mount ARI0 (ADR 0072): when ARI0 is
+    /// AriFS v2, the image in `part` must declare `arifs = 2` in its
+    /// initrd, or it would boot without its keys and its updater state.
+    /// Not even `--allow-downgrade` lifts it. `what` names the install.
+    fn refuse_if_arifs_too_old(&mut self, part: (u64, u64), what: &str) -> Result<(), u64> {
+        if !self.arifs_is_v2() {
+            return Ok(());
+        }
+        let readable = self.blk.read(part.0, 1).is_ok();
+        let len = Image::container_len(&self.blk.buffer()[..SECTOR]).ok();
+        let features = match (readable, len) {
+            (true, Some(len)) => {
+                let mut reader = ContainerReader::new(part.0, len as usize);
+                let blk = &mut self.blk;
+                Image::features(len as usize, |o, b| reader.read(blk, o, b)).ok()
             }
-            Ok(())
+            _ => None,
         };
-        Image::verify_streaming(len, read, keys).map(|v| v.manifest)
+        match features {
+            Some(f) if f.arifs >= 2 => Ok(()),
+            _ => Err(fault(
+                code::ARIFS_TOO_OLD,
+                "upd-arifs-too-old",
+                &format!(
+                    "{what}: refused: that system reads only AriFS v1 and ARI0 is AriFS v2; it would boot without its files (ADR 0072)"
+                ),
+            )),
+        }
+    }
+
+    /// Whether ARI0 is AriFS v2 (or a migration to it that `open`
+    /// completes). An unreadable answer counts as v2: the refusal is the
+    /// safe side.
+    fn arifs_is_v2(&mut self) -> bool {
+        let Some((first, _)) = find_partition(&mut self.blk, "ARI0") else {
+            return false;
+        };
+        let mut dev = PartitionReader {
+            blk: &mut self.blk,
+            first,
+        };
+        aricode_arifs::v2::AriFs::is_v2(&mut dev).unwrap_or(true)
     }
 
     /// Verifies the slot image of `part` (header + container) with `keys`
@@ -861,6 +1044,7 @@ impl Disk {
         keys: &Keys,
         indexed: Option<(&[u8; SECTOR], &[u8; 32])>,
     ) -> Result<(), u64> {
+        self.refuse_if_arifs_too_old(self.update, "system")?;
         let sectors = self.begin_install(total)?;
         let mut hash = indexed.map(|(header, _)| {
             let mut h = Sha256::new();
@@ -1360,6 +1544,9 @@ fn rollback(fs: Option<&mut FsClient>, keys: &Keys) -> u64 {
         "slot {} holds system {previous}, verified",
         disk.target.name()
     );
+    if let Err(code) = disk.refuse_if_arifs_too_old(target, "rollback") {
+        return code;
+    }
     // What the rollback does, named (audit of ADR 0045, L3): it may leave
     // the channel or go back to an older release or build. The slot holds
     // the system before the last install, or, after an install the loader
@@ -1508,17 +1695,6 @@ fn fetch_into(
         Ok(200) => Ok(()),
         Ok(status) => Err(FetchError::Status(status)),
         Err(e) => Err(FetchError::Other(http_error(e))),
-    }
-}
-
-/// `fetch` of exactly `out.len()` bytes (what the index announced).
-fn fetch_exact(net: &mut NetClient, url: &str, out: &mut [u8]) -> Result<(), FetchError> {
-    let want = out.len();
-    match fetch(net, url, out)? {
-        n if n == want => Ok(()),
-        n => Err(FetchError::Other(format!(
-            "{n} bytes received, the index announced {want}"
-        ))),
     }
 }
 
@@ -1748,32 +1924,31 @@ fn verified_stored(
         if source.channel != channel {
             continue;
         }
-        let (n, url) = (slot + 1, source.url.as_str());
-        let Some(s) = files.get(slot).and_then(|b| stored::decode(b)) else {
-            fault(
-                code::INDEX_MISSING,
-                "upd-no-verified-index",
-                &format!("source {n}: no verified index yet; run update"),
-            );
-            continue;
-        };
-        if s.source != url {
-            fault(
-                code::INDEX_MISSING,
-                "upd-list-changed",
-                &format!("source {n}: the list changed since the last update; run update"),
-            );
-            continue;
+        let n = slot + 1;
+        match stored::verified_slot(&files, slot, source, keys) {
+            Ok(_) => list.push((slot, files[slot].clone())),
+            Err(SlotProblem::Missing) => {
+                fault(
+                    code::INDEX_MISSING,
+                    "upd-no-verified-index",
+                    &format!("source {n}: no verified index yet; run update"),
+                );
+            }
+            Err(SlotProblem::ListChanged) => {
+                fault(
+                    code::INDEX_MISSING,
+                    "upd-list-changed",
+                    &format!("source {n}: the list changed since the last update; run update"),
+                );
+            }
+            Err(SlotProblem::Refused) => {
+                fault(
+                    code::INDEX_REFUSED,
+                    "upd-stored-refused",
+                    &format!("source {n}: stored index fails verification; ignored"),
+                );
+            }
         }
-        if upd::verify_channel(s.index, s.signature, keys, channel).is_err() {
-            fault(
-                code::INDEX_REFUSED,
-                "upd-stored-refused",
-                &format!("source {n}: stored index fails verification; ignored"),
-            );
-            continue;
-        }
-        list.push((slot, files[slot].clone()));
     }
     list
 }
@@ -1918,8 +2093,22 @@ fn report(fs: &mut FsClient, sources: &Sources, keys: &Keys, channel: Channel) -
             Vec::new()
         }
     };
+    let refused = match channel {
+        Channel::Stable => load_refused(fs),
+        Channel::Dev => RefusedList::default(),
+    };
     for (name, version) in &apps {
         match best_app(&indexes, name) {
+            Some((i, a))
+                if *version != a.version && refused.holds_back(a, APPS_LEVEL).is_some() =>
+            {
+                say!(
+                    "app {name}: installed {version}, source {} offers {}: {}",
+                    slots[i] + 1,
+                    a.version,
+                    held_back(a, &refused)
+                );
+            }
             Some((i, a)) => {
                 let change = compare(Some(*version), a.version);
                 available += usize::from(change == Change::Upgrade);
@@ -1936,7 +2125,46 @@ fn report(fs: &mut FsClient, sources: &Sources, keys: &Keys, channel: Channel) -
             None => say!("app {name}: installed {version}, no source offers it"),
         }
     }
-    let mut listed: Vec<&str> = Vec::new();
+    // Profiles (ADR 0074): what a followed profile installs and this
+    // machine lacks is planned like an upgrade.
+    let profiles = match (&state, channel) {
+        (Ok(state), Channel::Stable) => {
+            let followed = load_profiles(fs);
+            if !followed.is_empty() && profiles_possible(fs, state) {
+                followed
+            } else {
+                Profiles::default()
+            }
+        }
+        _ => Profiles::default(),
+    };
+    for name in profiles.names() {
+        if profile_apps(&indexes, name).is_none() {
+            say!("profile {name}: no source offers it");
+        }
+    }
+    let missing = missing_profile_apps(&indexes, &profiles, &apps);
+    for (app, profile) in &missing {
+        if let Some((i, a)) = best_app(&indexes, app) {
+            if refused.holds_back(a, APPS_LEVEL).is_some() {
+                say!(
+                    "app {app}: not installed, source {} offers {} for profile {profile}: {}",
+                    slots[i] + 1,
+                    a.version,
+                    held_back(a, &refused)
+                );
+                continue;
+            }
+            available += 1;
+            plan.push(PlanItem::App(a.name, a.version));
+            say!(
+                "app {app}: not installed, source {} offers {} for profile {profile}: upgrade installs it",
+                slots[i] + 1,
+                a.version
+            );
+        }
+    }
+    let mut listed: Vec<&str> = missing.iter().map(|(a, _)| *a).collect();
     for index in indexes.iter().filter(|_| state.is_ok()) {
         for a in &index.apps {
             if !apps.iter().any(|(n, _)| n == a.name) && !listed.contains(&a.name) {
@@ -2132,6 +2360,7 @@ fn stage_app<'e>(
     entry: &upd::AppEntry<'e>,
     file: &'static str,
     pk: &[u8; 32],
+    refused: &mut RefusedList,
 ) -> Result<StagedEntry<'e>, u64> {
     let size = entry.size as usize;
     if size > MAX_PACKAGE {
@@ -2145,9 +2374,25 @@ fn stage_app<'e>(
         ));
     }
     say!("downloading {} ({size} bytes)", entry.file);
-    let mut bytes = alloc::vec![0u8; size];
-    if let Err(e) = fetch_exact(net, &format!("{url}{}", entry.file), &mut bytes) {
-        return Err(download_fault(
+    // Straight into the stage file, hashed on the way, never held whole
+    // (ADR 0072, phase B). Plain writes, not a chunked replace: fsd has one
+    // replace at a time, and a download waits on the network (audit of
+    // phase B, M2). The stage file is scratch: it is listed in `[staged]`
+    // only with the size and SHA-256 the signed index gives, and the
+    // installer hashes it again before its own atomic replace.
+    let stage_fault = || {
+        fault(
+            code::FILE_WRITE,
+            "upd-pkg-stage",
+            &format!("cannot write {}/{file}", upd::UPDATER_DIR),
+        )
+    };
+    let Ok(fd) = fs.open(file).or_else(|_| fs.create(file)) else {
+        return Err(stage_fault());
+    };
+    let staged = download_to_stage(fs, fd, net, &format!("{url}{}", entry.file), size);
+    let committed = match staged {
+        Err(Staging::Download(e)) => Err(download_fault(
             code::DOWNLOAD,
             "upd-pkg-download",
             format!(
@@ -2155,21 +2400,31 @@ fn stage_app<'e>(
                 entry.name,
                 withdrawn(&e, entry.file, Channel::Stable)
             ),
-        ));
-    }
-    if sha256(&bytes) != entry.sha256 {
-        return Err(fault(
+        )),
+        Err(Staging::Write) => Err(stage_fault()),
+        Err(Staging::V1Limit) => Err(fault(
+            code::FILE_WRITE,
+            "upd-pkg-v1-limit",
+            &format!(
+                "app {}: {size} bytes do not fit {}/{file}: ARI0 is still AriFS v1, whose files hold 32768 (a stick written from 0.18 on is v2); skipped",
+                entry.name,
+                upd::UPDATER_DIR
+            ),
+        )),
+        Ok(hash) if hash != entry.sha256 => Err(fault(
             code::DOWNLOAD_MISMATCH,
             "upd-pkg-sha256",
             &format!(
                 "app {}: SHA-256 does not match the signed index; skipped",
                 entry.name
             ),
-        ));
-    }
-    match aricode_pkg::verify(&bytes, pk) {
-        Ok(v) if v.manifest.name_str() == entry.name && v.manifest.version == entry.version => {}
-        Ok(_) => {
+        )),
+        Ok(_) => Ok(()),
+    };
+    let _ = fs.close(fd);
+    committed?;
+    match verify_staged(fs, file, size, pk) {
+        Ok(v) if v.manifest.name_str() != entry.name || v.manifest.version != entry.version => {
             return Err(fault(
                 code::PACKAGE_REFUSED,
                 "upd-pkg-mismatch",
@@ -2179,6 +2434,29 @@ fn stage_app<'e>(
                 ),
             ))
         }
+        // ADR 0074: the system this run may have installed only runs after
+        // the reboot, so the app waits for the next `upgrade` on it.
+        Ok(v) if !v.manifest.runs_on(APPS_LEVEL) => {
+            // Remembered, so neither `update` nor `upgrade` fetches these
+            // bytes again while this system cannot run them.
+            refused.record(Refused {
+                name: String::from(entry.name),
+                version: entry.version,
+                sha256: entry.sha256,
+                requires: v.manifest.requires,
+            });
+            return Err(fault(
+                code::PACKAGE_REFUSED,
+                "upd-pkg-requires",
+                &format!(
+                    "app {}: needs application interface {} and this system offers {}: upgrade the system, reboot and run upgrade again; skipped",
+                    entry.name,
+                    v.manifest.requires,
+                    APPS_LEVEL
+                ),
+            ));
+        }
+        Ok(_) => {}
         Err(_) => {
             return Err(fault(
                 code::PACKAGE_REFUSED,
@@ -2189,13 +2467,6 @@ fn stage_app<'e>(
                 ),
             ))
         }
-    }
-    if !write_file(fs, file, &bytes) {
-        return Err(fault(
-            code::FILE_WRITE,
-            "upd-pkg-stage",
-            &format!("cannot write {file}"),
-        ));
     }
     say!(
         "app {} version {} verified and staged as {}/{file}",
@@ -2209,6 +2480,119 @@ fn stage_app<'e>(
         version: entry.version,
         sha256: entry.sha256,
     })
+}
+
+/// Why a download into the stage file stopped.
+enum Staging {
+    Download(FetchError),
+    Write,
+    /// The volume is still AriFS v1, whose files hold 32 KiB.
+    V1Limit,
+}
+
+/// Empties the open file `fd` (a replace of nothing, at once) and downloads
+/// `url`, exactly `size` bytes, into it with plain writes, flushed; returns
+/// the bytes' SHA-256.
+fn download_to_stage(
+    fs: &mut FsClient,
+    fd: u32,
+    net: &mut NetClient,
+    url: &str,
+    size: usize,
+) -> Result<[u8; 32], Staging> {
+    if fs.replace(fd, &[]).is_err() {
+        return Err(Staging::Write);
+    }
+    let mut h = Sha256::new();
+    let mut piece: Vec<u8> = Vec::with_capacity(PIECE);
+    let (mut written, mut got) = (0usize, 0usize);
+    let (mut too_long, mut write_failed) = (false, None);
+    let mut sink = |chunk: &[u8]| {
+        if got + chunk.len() > size {
+            too_long = true;
+            return false;
+        }
+        got += chunk.len();
+        h.update(chunk);
+        let mut rest = chunk;
+        while !rest.is_empty() {
+            let n = (PIECE - piece.len()).min(rest.len());
+            piece.extend_from_slice(&rest[..n]);
+            rest = &rest[n..];
+            if piece.len() == PIECE {
+                if let Err(e) = write_all(fs, fd, written, &piece) {
+                    write_failed = Some(e);
+                    return false;
+                }
+                written += PIECE;
+                piece.clear();
+            }
+        }
+        true
+    };
+    let fetched = fetch_into(net, url, &mut sink);
+    if let Some(e) = write_failed {
+        return Err(e);
+    }
+    if too_long {
+        return Err(Staging::Download(FetchError::Other(format!(
+            "more than the {size} bytes the index announced"
+        ))));
+    }
+    fetched.map_err(Staging::Download)?;
+    if got != size {
+        return Err(Staging::Download(FetchError::Other(format!(
+            "{got} bytes received, the index announced {size}"
+        ))));
+    }
+    if !piece.is_empty() {
+        write_all(fs, fd, written, &piece)?;
+    }
+    fs.flush().map_err(|_| Staging::Write)?;
+    Ok(h.finish())
+}
+
+/// Writes `data` at `offset` of `fd`, in requests of the client's buffer.
+fn write_all(fs: &mut FsClient, fd: u32, offset: usize, data: &[u8]) -> Result<(), Staging> {
+    let mut done = 0;
+    while done < data.len() {
+        match fs.write(fd, (offset + done) as u32, &data[done..]) {
+            Ok(n) if n > 0 => done += n,
+            Err(FsError::Status(aricode_proto::fs::Status::OutOfRange)) => {
+                return Err(Staging::V1Limit)
+            }
+            _ => return Err(Staging::Write),
+        }
+    }
+    Ok(())
+}
+
+/// Verifies the package staged in `file` (`size` bytes) piece by piece.
+fn verify_staged(
+    fs: &mut FsClient,
+    file: &str,
+    size: usize,
+    pk: &[u8; 32],
+) -> Result<aricode_pkg::StreamVerified, aricode_pkg::PkgError> {
+    let Ok(fd) = fs.open(file) else {
+        return Err(aricode_pkg::PkgError::Unreadable);
+    };
+    let verified = aricode_pkg::verify_streaming(
+        size,
+        |offset, buf| {
+            let mut done = 0;
+            while done < buf.len() {
+                match fs.read(fd, (offset + done) as u32, &mut buf[done..]) {
+                    Ok(n) if n > 0 => done += n,
+                    _ => return Err(()),
+                }
+            }
+            Ok(())
+        },
+        pk,
+    );
+    let _ = fs.close(fd);
+    verified
 }
 
 /// The command that refreshes `channel`'s sources.
@@ -2356,7 +2740,7 @@ fn upgrade(
         Channel::Dev => Vec::new(),
     };
     let mut app_jobs = Vec::new();
-    for (name, version) in installed_list {
+    for (name, version) in installed_list.clone() {
         let Some((i, entry)) = best_app(&indexes, &name) else {
             continue;
         };
@@ -2390,6 +2774,42 @@ fn upgrade(
             break;
         }
         app_jobs.push((i, entry));
+    }
+    // Apps of followed profiles not installed yet (ADR 0074), as `update`
+    // planned them: only what the owner was shown.
+    let mut profiles = match channel {
+        Channel::Stable => load_profiles(fs),
+        Channel::Dev => Profiles::default(),
+    };
+    let mut for_profile: Vec<(&str, String)> = Vec::new();
+    let missing = match !profiles.is_empty() && profiles_possible(fs, &state) {
+        true => missing_profile_apps(&indexes, &profiles, &installed_list),
+        false => Vec::new(),
+    };
+    for (app, profile) in missing {
+        let Some((i, entry)) = best_app(&indexes, app) else {
+            continue;
+        };
+        if !plan
+            .items
+            .contains(&PlanItem::App(entry.name, entry.version))
+        {
+            result = not_reported(&format!("app {app} {}", entry.version));
+            continue;
+        }
+        if app_jobs.len() == upd::MAX_STAGED {
+            say!(
+                "app {app}: more installs than stage slots ({}): run upgrade again",
+                upd::MAX_STAGED
+            );
+            break;
+        }
+        say!(
+            "app {app}: installing version {} for profile {profile}",
+            entry.version
+        );
+        app_jobs.push((i, entry));
+        for_profile.push((app, profile));
     }
     // 2. Reserve every AriFS entry the installs will need (the history
     //    after a system install, one stage file per package) before the
@@ -2425,14 +2845,51 @@ fn upgrade(
         }
     }
     let mut staged: Vec<StagedEntry> = Vec::new();
+    let mut refused = load_refused(fs);
+    let refused_before = refused.clone();
+    refused.prune(APPS_LEVEL);
     for (k, (i, entry)) in app_jobs.into_iter().enumerate() {
         let Some(file) = upd::staged_package_file(k) else {
             break;
         };
-        match stage_app(fs, net, urls[slots[i]], entry, file, &keys.stable) {
+        match stage_app(
+            fs,
+            net,
+            urls[slots[i]],
+            entry,
+            file,
+            &keys.stable,
+            &mut refused,
+        ) {
             Ok(e) => staged.push(e),
             Err(code) => result = code,
         }
+    }
+    if refused != refused_before && !write_file(fs, upd::REFUSED_FILE, refused.to_text().as_bytes())
+    {
+        result = fault(
+            code::REFUSED_FILE,
+            "upd-refused-write",
+            "cannot record the refused packages: the next upgrade downloads them again",
+        );
+    }
+    // What leaving a profile may delete (ADR 0074): the apps staged for
+    // it, recorded before the installer runs. A record without the app
+    // (its install failed) deletes nothing; an app without a record (the
+    // write failed) is never deleted with the profile, the safe side.
+    let mut recorded = false;
+    for (app, profile) in &for_profile {
+        if staged.iter().any(|e| e.name == *app) {
+            profiles.record(profile, app);
+            recorded = true;
+        }
+    }
+    if recorded && !write_file(fs, upd::PROFILES_FILE, profiles.to_text().as_bytes()) {
+        result = fault(
+            code::PROFILES_FILE,
+            "upd-profiles-write",
+            "cannot record the apps installed for profiles: leaving a profile will not delete them",
+        );
     }
     if !write_state_section(fs, &state, lists::STAGED, &lists::encode_staged(&staged)) {
         return fault(

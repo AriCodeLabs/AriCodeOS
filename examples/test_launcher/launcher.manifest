@@ -1,0 +1,4 @@
+# Test launcher: a window, and the broker's launch endpoint (ADR 0074).
+name = launcher
+caps = window, launch
+memory = 1M

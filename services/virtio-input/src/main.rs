@@ -20,6 +20,14 @@ const CFG_SUBSEL: u64 = 1;
 const CFG_SIZE: u64 = 2;
 const CFG_PAYLOAD: u64 = 8;
 const CFG_ID_NAME: u8 = 0x01;
+/// Event bitmaps (virtio 1.2, 5.8.5): `subsel` is the event type.
+const CFG_EV_BITS: u8 = 0x11;
+const EV_KEY: u8 = 1;
+const EV_REL: u8 = 2;
+/// `KEY_A` (30) in the `EV_KEY` bitmap: a device that has it is a
+/// keyboard; a mouse's `EV_KEY` holds only its buttons.
+const KEY_A_BYTE: u64 = 30 / 8;
+const KEY_A_BIT: u8 = 1 << (30 % 8);
 
 const SLOTS: u16 = 64;
 /// Exit code when the end-of-round wait fails for a reason other than the
@@ -41,6 +49,8 @@ struct Device {
     buffers: DmaRegion,
     name: [u8; MAX_NAME],
     name_len: usize,
+    /// `input::KIND_*` bits, from the device's event bitmaps.
+    kinds: u8,
 }
 
 impl Device {
@@ -61,6 +71,20 @@ impl Device {
         while name_len > 0 && matches!(name[name_len - 1], 0 | b' ') {
             name_len -= 1;
         }
+        // What it is (ADR 0074 phase B): a keyboard has letter keys, a
+        // pointer relative axes.
+        let mut kinds = 0;
+        transport.device_cfg.w8(CFG_SELECT, CFG_EV_BITS);
+        transport.device_cfg.w8(CFG_SUBSEL, EV_KEY);
+        if transport.device_cfg.r8(CFG_SIZE) as u64 > KEY_A_BYTE
+            && transport.device_cfg.r8(CFG_PAYLOAD + KEY_A_BYTE) & KEY_A_BIT != 0
+        {
+            kinds |= aricode_proto::input::KIND_KEYBOARD;
+        }
+        transport.device_cfg.w8(CFG_SUBSEL, EV_REL);
+        if transport.device_cfg.r8(CFG_SIZE) > 0 {
+            kinds |= aricode_proto::input::KIND_POINTER;
+        }
         transport.device_cfg.w8(CFG_SELECT, 0);
         let mut eventq = transport.setup_queue(0, SLOTS).map_err(|e| e.code())?;
         let buffers = DmaRegion::alloc(4096).map_err(|_| 30u64)?;
@@ -78,6 +102,7 @@ impl Device {
             buffers,
             name,
             name_len,
+            kinds,
         })
     }
 
@@ -161,7 +186,8 @@ impl Driver {
             Some(Request { op: Op::Info, .. }) => {
                 let reply = Reply::status(Status::Ok)
                     .with_name(self.dev.name_str())
-                    .unwrap_or(Reply::status(Status::Ok));
+                    .unwrap_or(Reply::status(Status::Ok))
+                    .with_kinds(self.dev.kinds);
                 answer(reply_to, reply);
             }
             Some(Request {

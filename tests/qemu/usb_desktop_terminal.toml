@@ -1,0 +1,50 @@
+# The desktop's terminal (ADR 0074 phase C). The launcher offers it, and
+# Enter opens it: the broker grants it the terminal endpoint, since it is
+# an installed, signed `terminal`, and init a session shell of its own, as
+# for SSH. Its window takes the focus; keys typed there reach the shell
+# and its text (banner, prompt, echo) comes back into the window: `exit`
+# ends the shell and closes the terminal, which says how much text it
+# showed. (The echo is in the window, not on serial, so the keys are only
+# paced: a few, within QEMU's queue.)
+name = "usb.desktop_terminal"
+description = "the desktop terminal runs the owner's shell in a window"
+level = "full"
+areas = ["usb", "apps", "gui", "shell"]
+cmdline = "qemu_exit shell"
+selftest = false
+disk = "usb-image"
+install = ["desktop/launcher", "desktop/terminal"]
+stick_profiles = ["desktop:launcher,terminal"]
+stdin = ["sleep 15000", "shutdown"]
+timeout_secs = 120
+
+[host_input]
+marker = "launcher: ready"
+keys = ["ret"]
+
+[[host_input_then]]
+marker = "terminal: shell started"
+keys = ["e", "x", "i", "t", "ret"]
+key_delay_ms = 100
+
+[expect]
+exit = 33
+serial_contains = [
+    "launcher: offers terminal",
+    "AriInit: launch terminal from AriFS (apps/terminal.aripkg version 1",
+    "with manifest [window terminal]",
+    "terminal: shell started",
+    "terminal: the shell ended; closing (",
+    "bytes of the shell's text shown)",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_order = [
+    "terminal: shell started",
+    "terminal: the shell ended; closing (",
+]
+serial_absent = [
+    "KERNEL PANIC",
+    "USER STACK OVERFLOW",
+    "terminal shell refused",
+    "closing (0 bytes",
+]

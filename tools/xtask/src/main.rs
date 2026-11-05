@@ -6,7 +6,7 @@
 //! cargo xtask build [--debug]                 builds AriBoot and AriKernel
 //! cargo xtask image [--debug]                 build + assembles build/esp/
 //! cargo xtask run   [--debug] [--cmdline S] [--cpus N] [--usb-image] [--usb-hid]   image + interactive QEMU
-//! cargo xtask usb-image [--cmdline S] [--authorized-key KEY.pub] [--public-source] [--update-source URL] [--dev-source URL] [--signing-key DIR]  GPT image for a USB stick at build/aricodeos-usb.img
+//! cargo xtask usb-image [--cmdline S] [--authorized-key KEY.pub] [--public-source] [--update-source URL] [--dev-source URL] [--app DIR:VER]... [--profile NAME:APP,APP]... [--signing-key DIR]  GPT image for a USB stick at build/aricodeos-usb.img (apps installed, profiles followed: ADR 0074)
 //!                                             (--public-source: the project's GitHub releases, ADR 0048)
 //!                                             (--dev-source: the machine opts in to the development channel, ADR 0045)
 //! cargo xtask publish-update [--version N | --no-system] [--app DIR:VERSION]... [--no-legacy-manifest] [--signing-key DIR]
@@ -78,7 +78,7 @@ const DEBUG: (&str, Opt) = ("--debug", Opt::Flag);
 const CPUS: (&str, Opt) = ("--cpus", Opt::Value);
 const CMDLINE: (&str, Opt) = ("--cmdline", Opt::Value);
 const SIGNING_KEY: (&str, Opt) = ("--signing-key", Opt::Value);
-const PUBLISH: [(&str, Opt); 7] = [
+const PUBLISH: [(&str, Opt); 9] = [
     DEBUG,
     ("--channel", Opt::Value),
     SIGNING_KEY,
@@ -86,8 +86,10 @@ const PUBLISH: [(&str, Opt); 7] = [
     ("--no-system", Opt::Flag),
     ("--app", Opt::Repeated),
     ("--no-legacy-manifest", Opt::Flag),
+    ("--profile", Opt::Repeated),
+    ("--all-machines-0.18", Opt::Flag),
 ];
-const SERVE: [(&str, Opt); 8] = [
+const SERVE: [(&str, Opt); 10] = [
     PUBLISH[0],
     PUBLISH[1],
     PUBLISH[2],
@@ -95,6 +97,8 @@ const SERVE: [(&str, Opt); 8] = [
     PUBLISH[4],
     PUBLISH[5],
     PUBLISH[6],
+    PUBLISH[7],
+    PUBLISH[8],
     ("--port", Opt::Value),
 ];
 
@@ -122,6 +126,8 @@ fn spec(cmd: &str) -> Option<Spec> {
                 ("--public-source", Opt::Flag),
                 ("--update-source", Opt::Value),
                 ("--dev-source", Opt::Value),
+                ("--app", Opt::Repeated),
+                ("--profile", Opt::Repeated),
                 SIGNING_KEY,
             ],
             0,
@@ -140,7 +146,10 @@ fn spec(cmd: &str) -> Option<Spec> {
         ),
         "perf" => (&[DEBUG, CPUS, ("--update-baseline", Opt::Flag)], 0),
         "check" | "stack-check" | "notices" => (&[], 0),
-        "app-pack" => (&[DEBUG, ("--version", Opt::Value)], 1),
+        "app-pack" => (
+            &[DEBUG, ("--version", Opt::Value), ("--requires", Opt::Value)],
+            1,
+        ),
         "fs-cat" | "sign" => (&[], 2),
         "keygen" => (&[], 1),
         "verify" => (&[], 3),
@@ -285,14 +294,20 @@ fn main() -> ExitCode {
             let dir = image::publish_update_to(&image::update_dir_for(p.channel), release, &p)?;
             qemu::serve_update(&dir, port)
         }),
-        "usb-image" => signing_key(&cli).and_then(|()| image::build_usb_image(
-            release,
-            cli.value("--cmdline").unwrap_or("shell"),
-            cli.value("--authorized-key").map(Path::new),
-            cli.flag("--public-source"),
-            cli.value("--update-source"),
-            cli.value("--dev-source"),
-        ))
+        "usb-image" => signing_key(&cli)
+            .and_then(|()| stick_apps(&cli))
+            .and_then(|(apps, profiles)| {
+                image::build_usb_image(
+                    release,
+                    cli.value("--cmdline").unwrap_or("shell"),
+                    cli.value("--authorized-key").map(Path::new),
+                    cli.flag("--public-source"),
+                    cli.value("--update-source"),
+                    cli.value("--dev-source"),
+                    &apps,
+                    &profiles,
+                )
+            })
             .map(|p| {
                 println!(
                     "[xtask] write with: sudo dd if={} of=/dev/sdX bs=4M conv=fsync status=progress (see docs/hardware.md)",
@@ -305,10 +320,13 @@ fn main() -> ExitCode {
         "stack-check" => stack::check(),
         "notices" => notices::write().map(|p| println!("[xtask] third-party notices in {}", p.display())),
         "app-pack" => match cli.positional(1) {
-            Some(dir) => cli
-                .number("--version", 1)
-                .and_then(|version| build::app_pack(Path::new(dir), version, release)),
-            None => Err(String::from("usage: xtask app-pack DIR [--version N]")),
+            Some(dir) => cli.number("--version", 1).and_then(|version| {
+                let requires = cli.number("--requires", 0)?;
+                build::app_pack(Path::new(dir), version, requires, release)
+            }),
+            None => Err(String::from(
+                "usage: xtask app-pack DIR [--version N] [--requires LEVEL]",
+            )),
         },
         "fs-cat" => match cli.positional(1) {
             Some(disk) => fscat::run(Path::new(disk), cli.positional(2)),
@@ -362,6 +380,61 @@ pub fn app_spec(spec: &str) -> Result<(String, u32)> {
     Ok((dir.to_string(), version))
 }
 
+/// `--profile NAME:APP,APP` (repeated), only with `--all-machines-0.18`:
+/// an updater before 0.18 refuses an index with a line it does not know,
+/// and with it the system image that would have updated it (audit of ADR
+/// 0074 phase A, M4), so the publisher states that no such machine
+/// follows this source.
+fn profiles_flags(cli: &Cli) -> Result<Vec<(String, Vec<String>)>> {
+    let profiles = cli
+        .values("--profile")
+        .into_iter()
+        .map(profile_spec)
+        .collect::<Result<Vec<_>>>()?;
+    if !profiles.is_empty() && !cli.flag("--all-machines-0.18") {
+        return Err(String::from(
+            "--profile: updaters before 0.18 refuse an index with profiles, and with it the system image that would update them (ADR 0074); publish profiles only once every machine following this source runs 0.18 or later, and say so with --all-machines-0.18",
+        ));
+    }
+    Ok(profiles)
+}
+
+/// An external app directory and the version to pack it as.
+type AppSpec = (String, u32);
+/// A profile and the app names it installs.
+type ProfileSpec = (String, Vec<String>);
+
+/// `usb-image --app DIR:VERSION` and `--profile NAME:APP,APP` (both
+/// repeated, ADR 0074): the apps the stick comes with, and the profiles it
+/// follows with them. The stick's own system reads AriFS v2, so profiles
+/// need no `--all-machines-0.18`.
+fn stick_apps(cli: &Cli) -> Result<(Vec<AppSpec>, Vec<ProfileSpec>)> {
+    let apps = cli
+        .values("--app")
+        .into_iter()
+        .map(app_spec)
+        .collect::<Result<Vec<_>>>()?;
+    let profiles = cli
+        .values("--profile")
+        .into_iter()
+        .map(profile_spec)
+        .collect::<Result<Vec<_>>>()?;
+    Ok((apps, profiles))
+}
+
+/// `NAME:APP,APP...`: a profile of the index (ADR 0074) and the apps it
+/// installs, by package name.
+pub fn profile_spec(spec: &str) -> Result<(String, Vec<String>)> {
+    let (name, apps) = spec
+        .split_once(':')
+        .ok_or_else(|| format!("'{spec}': expected NAME:APP,APP..."))?;
+    let apps: Vec<String> = apps.split(',').map(String::from).collect();
+    if name.is_empty() || apps.iter().any(String::is_empty) {
+        return Err(format!("'{spec}': expected NAME:APP,APP..."));
+    }
+    Ok((name.to_string(), apps))
+}
+
 /// `--channel stable|dev` (default stable), the key that signs it, and
 /// what it publishes (ADR 0045).
 fn publication(cli: &Cli) -> Result<image::Publication> {
@@ -377,7 +450,14 @@ fn publication(cli: &Cli) -> Result<image::Publication> {
         aricode_ab::Channel::Dev => {
             // The build number is the source's own (one above the last
             // published), never typed: no hand-picked versions.
-            for flag in ["--version", "--no-system", "--app", "--no-legacy-manifest"] {
+            for flag in [
+                "--version",
+                "--no-system",
+                "--app",
+                "--no-legacy-manifest",
+                "--profile",
+                "--all-machines-0.18",
+            ] {
                 if cli.flag(flag) {
                     return Err(format!(
                         "--channel dev: {flag} does not apply (a development source offers one system image, numbered automatically)"
@@ -407,6 +487,7 @@ fn channel_flags(cli: &Cli) -> Result<image::Publication> {
             .into_iter()
             .map(app_spec)
             .collect::<Result<_>>()?,
+        profiles: profiles_flags(cli)?,
         legacy_manifest: !cli.flag("--no-legacy-manifest"),
         ..image::Publication::default()
     })
@@ -424,6 +505,27 @@ mod tests {
     fn parse(cmd: &str, args: &[&str]) -> Result<Cli> {
         let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
         Cli::parse(&spec(cmd).expect("known command"), &args)
+    }
+
+    #[test]
+    fn profiles_need_the_publisher_to_say_every_machine_runs_0_18() {
+        let cli = parse("publish-update", &["--profile", "desktop:a,b"]).unwrap();
+        let e = profiles_flags(&cli).unwrap_err();
+        assert!(e.contains("--all-machines-0.18"), "{e}");
+        let cli = parse(
+            "publish-update",
+            &["--profile", "desktop:a,b", "--all-machines-0.18"],
+        )
+        .unwrap();
+        assert_eq!(
+            profiles_flags(&cli).unwrap(),
+            [(
+                String::from("desktop"),
+                vec![String::from("a"), String::from("b")]
+            )]
+        );
+        assert!(profile_spec("desktop").is_err());
+        assert!(profile_spec("desktop:a,,b").is_err());
     }
 
     #[test]

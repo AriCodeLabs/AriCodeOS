@@ -1,0 +1,27 @@
+# Profiles need AriFS v2 (ADR 0074): on a disk still in v1 (32 files of
+# 32 KiB, kept so by a slot whose system reads only v1) a followed profile
+# is neither planned nor installed, and the updater says why.
+name = "apps.profile_v1"
+description = "profiles on AriFS v1: not followed, and said"
+level = "full"
+areas = ["apps", "update", "filesystem"]
+disk = "arifs-v1-old-slot"
+timeout_secs = 120
+
+[host_update]
+apps = ["examples/hello_more:1"]
+profiles = ["desktop:hello_more"]
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["update profile add desktop", "update", "upgrade", "shutdown"]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "fsd: AriFS v1 mounted",
+    "update: profile desktop followed",
+    "updater: profiles not followed: ARI0 is still AriFS v1 (a stick written from 0.18 on is v2)",
+    "updater: app hello_more: version 1 available (not installed)",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "for profile desktop", "installed (apps/"]

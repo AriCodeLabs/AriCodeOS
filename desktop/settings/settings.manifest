@@ -1,0 +1,6 @@
+# The desktop's settings (ADR 0074): a window, the system's information,
+# and what init tells it and changes for it (the session). Its 720x400
+# window takes most of 2 MiB.
+name = settings
+caps = system, window, settings
+memory = 2M

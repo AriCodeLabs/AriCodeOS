@@ -1,0 +1,5 @@
+# Denied (ADR 0074): a private directory named home would be the owner's
+# folder.
+name = home
+caps = fs
+memory = 64K

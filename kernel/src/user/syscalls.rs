@@ -104,6 +104,7 @@ pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
         nr::SYSTEM_INFO => system_info(h, frame.rsi, frame.rdx, frame.r10),
         nr::SYSTEM_POWER => system_power(h, frame.rsi),
         nr::INITRD_READ => initrd_read(h, frame.rsi, frame.rdx, frame.r10, frame.r8),
+        nr::PS2_READ => ps2_read(h, frame.rsi, frame.rdx),
         n => {
             warn!("unknown syscall {n} from rip={:#x}", frame.user_rip);
             Err(Error::NoSys)
@@ -114,8 +115,8 @@ pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
     crate::ipc::settle_closed();
     // A termination requested by another process runs here, with the
     // syscall already complete and no locks held (audit 6ee19fb, finding 4).
-    if process::current_kill_requested() {
-        process::kill_current(process::KILLED_BY_SUPERVISOR);
+    if let Some(why) = process::current_kill_reason() {
+        process::kill_current(why);
     }
     match result {
         Ok(v) => v as i64,
@@ -531,12 +532,12 @@ fn wait_member_of(h: Handle) -> Result<ObjectRef, Error> {
     // even if another thread of the process closes and reuses the handle.
     with_handles(|t| {
         let required = match lookup(t, h, Rights::NONE)?.kind {
-            ObjectKind::Irq(_) => Rights::WAIT,
+            ObjectKind::Irq(_) | ObjectKind::Ps2 => Rights::WAIT,
             _ => Rights::READ,
         };
         let obj = lookup(t, h, required)?;
         match obj.kind {
-            ObjectKind::Irq(_) | ObjectKind::Endpoint(_) => Ok(obj.clone()),
+            ObjectKind::Irq(_) | ObjectKind::Endpoint(_) | ObjectKind::Ps2 => Ok(obj.clone()),
             _ => Err(Error::Invalid),
         }
     })
@@ -574,12 +575,13 @@ fn ipc_receive_any(
         .map(|o| match &o.kind {
             ObjectKind::Endpoint(e) => Member::Endpoint(e),
             ObjectKind::Irq(l) => Member::Irq(l),
+            ObjectKind::Ps2 => Member::Ps2,
             _ => unreachable!(),
         })
         .collect();
     let irqs = members
         .iter()
-        .filter(|m| matches!(m, Member::Irq(_)))
+        .filter(|m| matches!(m, Member::Irq(_) | Member::Ps2))
         .count();
     if irqs > IPC_MAX_ANY_IRQS || members.len() - irqs > IPC_MAX_ANY {
         return Err(Error::Invalid);
@@ -745,7 +747,7 @@ fn spawn_from_bytes(
         // killed, and a supervisor would start another (audit 2026-10-25
         // C, L2): it does not run.
         warn!("process_spawn '{name}': no room for its handle; killing it");
-        process::request_kill(pid);
+        process::request_kill(pid, "stopped: its parent had no room for its handle");
     }
     handle
 }
@@ -812,7 +814,7 @@ fn process_kill(h: Handle) -> Result<u64, Error> {
         ObjectKind::Process(p) => Ok(p),
         _ => Err(Error::Invalid),
     })?;
-    if process::request_kill(pid) {
+    if process::request_kill(pid, process::KILLED_BY_REQUEST) {
         Ok(0)
     } else {
         Err(Error::BadHandle)
@@ -838,6 +840,29 @@ fn deadline_from(timeout_ms: u64) -> Option<u64> {
     } else {
         Some(crate::time::ticks() + timeout_ms.div_ceil(crate::time::MS_PER_TICK))
     }
+}
+
+/// `ps2_read` (ADR 0075): the PS/2 stream's queued entries, whole ones
+/// only, without waiting, for the one process that drains it. The
+/// destination is checked first; entries lost anyway (the buffer unmapped
+/// meanwhile by another thread) leave a reset mark for the next read.
+fn ps2_read(h: Handle, ptr: u64, len: u64) -> Result<u64, Error> {
+    with_handles(|t| match lookup(t, h, Rights::READ)?.kind {
+        ObjectKind::Ps2 => Ok(()),
+        _ => Err(Error::Invalid),
+    })?;
+    let len = len.min((aricode_abi::ps2::ENTRY * aricode_abi::ps2::CAPACITY) as u64);
+    process::check_user_writable(ptr, len)?;
+    let pid = process::current_pid().ok_or(Error::Fault)?.0;
+    let mut buf = alloc::vec![0u8; len as usize];
+    // Another process drains the stream: only one ever does.
+    let n = crate::console_input::stream_read(pid, &mut buf).ok_or(Error::Denied)?;
+    if let Err(e) = process::copy_to_user(ptr, &buf[..n]) {
+        // Taken and not delivered: the reader starts over from a mark.
+        crate::console_input::stream_lost();
+        return Err(e);
+    }
+    Ok(n as u64)
 }
 
 fn irq_wait(h: Handle, timeout_ms: u64) -> Result<u64, Error> {
@@ -875,7 +900,11 @@ fn mmio_map(h: Handle) -> Result<u64, Error> {
     // The buffer stays referenced here until the IOMMU has it, whatever
     // happens to the handle meanwhile (ADR 0038).
     let held = dma.clone();
-    let (virt, created) = process::map_foreign(phys, len, cacheable, dma)?;
+    let process::Mapped {
+        virt,
+        created,
+        screen,
+    } = process::map_foreign(phys, len, cacheable, dma)?;
     // IOMMU (Phase 33): mapping a device assigns it to the process's
     // domain; mapping a foreign DMA buffer makes it visible to its devices.
     if let Some(pid) = process::current_pid() {
@@ -903,6 +932,12 @@ fn mmio_map(h: Handle) -> Result<u64, Error> {
         }
     }
     drop(held);
+    // The screen's mapper holds it (`map_foreign` recorded it): the kernel
+    // console stops drawing until the last such mapping goes (ADR 0074
+    // phase B).
+    if screen {
+        crate::console::screen_take();
+    }
     Ok(virt)
 }
 

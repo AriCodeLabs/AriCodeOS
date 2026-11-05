@@ -1,0 +1,25 @@
+# The package limit itself (ADR 0072): pkgs/ holds hello_ext 1 padded to
+# within 32 KiB of PACKAGE_MAX (8 MiB). The installer verifies it piece by
+# piece and copies it into a chunked replace of apps/hello_ext.aripkg; the
+# broker loads it into a buffer of its size, verifies it and launches it.
+name = "apps.huge_package"
+description = "a package at the 8 MiB limit installed piece by piece and launched"
+level = "full"
+areas = ["apps", "filesystem", "shell"]
+packages = ["examples/hello_ext:1:huge"]
+cmdline = "qemu_exit shell"
+timeout_secs = 240
+stdin = ["run installer", "run hello_ext 8", "shutdown"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "installer: installing hello_ext version 1 (from pkgs/hello_ext-1.aripkg)",
+    "installer: hello_ext none -> 1 installed (apps/hello_ext.aripkg)",
+    "installer: 1 package(s) installed, 0 skipped",
+    "AriInit: launch hello_ext from AriFS (apps/hello_ext.aripkg version 1, 83",
+    "hello_ext v1: hello from outside the tree (arg 8)",
+    "run: hello_ext exited with 0",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "fails verification", "installer: error", "inst-", "no memory for package"]

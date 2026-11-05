@@ -1,0 +1,5 @@
+# The desktop's launcher (ADR 0074): a window, and the broker's launch
+# endpoint, which starts installed applications with their own manifests.
+name = launcher
+caps = window, launch
+memory = 1M

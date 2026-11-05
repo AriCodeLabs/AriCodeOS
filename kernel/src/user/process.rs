@@ -73,9 +73,10 @@ pub struct Process {
     reaped: bool,
     /// Main thread, to wake it if it has to be killed.
     main_tid: aricode_sched::Tid,
-    /// Pending `process_kill`: the thread terminates on returning to ring 0 or
-    /// on waking from a wait (audit 6ee19fb, finding 4).
-    kill_requested: bool,
+    /// Pending termination and why (`process_kill`, the kernel): the thread
+    /// terminates on returning to ring 0 or on waking from a wait (audit
+    /// 6ee19fb, finding 4).
+    kill_requested: Option<&'static str>,
     /// Zero-fill pages of its writable segments (`[start, end)` and their
     /// flags), backed on first touch instead of at load (performance audit
     /// 731c398, finding D): a runtime's 256 KiB heap arena costs only the
@@ -183,13 +184,14 @@ struct Foreign {
     in_domain: bool,
 }
 
-/// Reason given when a process is killed at another's request.
-pub const KILLED_BY_SUPERVISOR: &str = "stopped by the supervisor";
+/// Reason given when a process is killed at another's request
+/// (`process_kill`: its launcher or its supervisor).
+pub const KILLED_BY_REQUEST: &str = "stopped at another process's request";
 
 /// Requests termination of `pid` from another process: flags the request and
 /// wakes its thread so it sees it. `false` if the process does not exist or
 /// has already finished.
-pub fn request_kill(pid: Pid) -> bool {
+pub fn request_kill(pid: Pid, why: &'static str) -> bool {
     let tid = {
         let mut procs = PROCESSES.lock();
         let Some(p) = procs.get_mut(&pid) else {
@@ -198,7 +200,7 @@ pub fn request_kill(pid: Pid) -> bool {
         if p.status.is_some() {
             return true;
         }
-        p.kill_requested = true;
+        p.kill_requested = Some(why);
         p.main_tid
     };
     let _ = scheduler::wake(tid);
@@ -207,13 +209,17 @@ pub fn request_kill(pid: Pid) -> bool {
 
 /// The current thread's process has a pending termination.
 pub fn current_kill_requested() -> bool {
-    let Some(pid) = current_pid() else {
-        return false;
-    };
+    current_kill_reason().is_some()
+}
+
+/// Why the current thread's process is to terminate, if it is.
+pub fn current_kill_reason() -> Option<&'static str> {
+    let pid = current_pid()?;
     PROCESSES
         .lock()
         .get(&pid)
-        .is_some_and(|p| p.kill_requested && p.status.is_none())
+        .filter(|p| p.status.is_none())
+        .and_then(|p| p.kill_requested)
 }
 
 /// Size from which an incomplete line is emitted as is.
@@ -354,7 +360,7 @@ fn spawn_full(
             console_line: Vec::new(),
             reaped: false,
             main_tid: tid,
-            kill_requested: false,
+            kill_requested: None,
             on_demand,
             on_demand_backed: 0,
             events: aricode_faults::Budget::new(),
@@ -638,6 +644,17 @@ pub fn release_address_space(pid: u32) {
         }
         let n = free_address_space(m);
         log::debug!("user: address space of process {pid} freed ({n} frames)");
+        // A screen it held goes back to the console once its pages are
+        // gone (ADR 0074 phase B).
+        let screen = foreign
+            .iter()
+            .any(|f| f.dma.is_none() && crate::framebuffer::overlaps(f.phys, f.span));
+        if let Some(lent) = screen
+            .then(|| crate::console::screen_release(pid, None))
+            .flatten()
+        {
+            crate::console::screen_returned_said(pid, lent);
+        }
         for f in foreign {
             report_last_reference(pid, &f);
         }
@@ -900,8 +917,11 @@ pub fn dma_lifetime_selftest() {
             pid.0
         );
     }
-    assert!(request_kill(pid), "dma_holder must still exist");
-    assert_eq!(wait(pid), ExitStatus::Killed(KILLED_BY_SUPERVISOR));
+    assert!(
+        request_kill(pid, KILLED_BY_REQUEST),
+        "dma_holder must still exist"
+    );
+    assert_eq!(wait(pid), ExitStatus::Killed(KILLED_BY_REQUEST));
     assert!(
         frames_free(phys),
         "dma lifetime: the frames must return to the PMM once the server is reaped"
@@ -943,10 +963,10 @@ pub fn dma_lifetime_selftest() {
         "dma lifetime: the unmapped addresses are given back for reuse"
     );
     assert!(
-        request_kill(pid),
+        request_kill(pid, KILLED_BY_REQUEST),
         "dma_holder must still exist after unmapping"
     );
-    assert_eq!(wait(pid), ExitStatus::Killed(KILLED_BY_SUPERVISOR));
+    assert_eq!(wait(pid), ExitStatus::Killed(KILLED_BY_REQUEST));
 
     // 3. A process with a 4 KiB quota cannot keep a 16 KiB buffer mapped.
     let dma = crate::hw::dma_alloc(LEN).expect("DMA buffer");
@@ -1249,17 +1269,25 @@ pub fn with_current_handles<R>(f: impl FnOnce(&mut crate::object::Handles) -> R)
     procs.get_mut(&pid).map(|p| f(&mut p.handles))
 }
 
+/// What [`map_foreign`] did.
+pub struct Mapped {
+    pub virt: u64,
+    /// This call created the mapping (`false`: it already existed).
+    pub created: bool,
+    /// The new mapping covers the framebuffer and was recorded as a holder
+    /// of the screen (ADR 0074 phase B).
+    pub screen: bool,
+}
+
 /// Maps `[phys, phys+len)` into the current process as device memory
-/// (uncached) or a DMA buffer (cached). Returns the virtual address and
-/// whether this call created the mapping (`false`: it already existed). A
-/// DMA buffer's mapping keeps `dma` (the buffer) alive until it is
-/// unmapped (ADR 0038).
+/// (uncached) or a DMA buffer (cached). A DMA buffer's mapping keeps `dma`
+/// (the buffer) alive until it is unmapped (ADR 0038).
 pub fn map_foreign(
     phys: u64,
     len: u64,
     cacheable: bool,
     dma: Option<crate::object::ObjectRef>,
-) -> Result<(u64, bool), aricode_abi::Error> {
+) -> Result<Mapped, aricode_abi::Error> {
     use aricode_x86_paging::{CACHE_DISABLE, WRITE_THROUGH};
     let pid = current_pid().ok_or(aricode_abi::Error::Fault)?;
     let mut procs = PROCESSES.lock();
@@ -1272,7 +1300,11 @@ pub fn map_foreign(
     // mapped DMA buffer cannot be freed, so the same physical range is
     // still the same buffer.
     if let Some(f) = p.foreign.iter().find(|f| f.phys == start && f.span == span) {
-        return Ok((f.virt + offset, false));
+        return Ok(Mapped {
+            virt: f.virt + offset,
+            created: false,
+            screen: false,
+        });
     }
     // The buffers a process keeps mapped stay allocated on its account:
     // with a quota, no more than the quota (ADR 0038).
@@ -1303,6 +1335,12 @@ pub fn map_foreign(
     }
     // A lingering buffer mapped again: this mapping takes it over.
     let lingered = dma.is_some() && take_lingering(p, start);
+    // Recorded with the mapping, under this lock, so the console's holders
+    // always match the mappings (ADR 0074 phase B).
+    let screen = dma.is_none() && crate::framebuffer::overlaps(start, span);
+    if screen {
+        crate::console::screen_hold(pid.0, virt);
+    }
     p.foreign.push(Foreign {
         virt,
         phys: start,
@@ -1310,7 +1348,11 @@ pub fn map_foreign(
         dma,
         in_domain: lingered,
     });
-    Ok((virt + offset, true))
+    Ok(Mapped {
+        virt: virt + offset,
+        created: true,
+        screen,
+    })
 }
 
 /// Records an event the current process caused, within its rate
@@ -1423,7 +1465,7 @@ pub fn settle_lingering() {
 /// which may free it.
 pub fn unmap_foreign(virt: u64) -> Result<(), aricode_abi::Error> {
     let pid = current_pid().ok_or(aricode_abi::Error::Fault)?;
-    let (f, release) = {
+    let (f, release, screen_back) = {
         let mut procs = PROCESSES.lock();
         let p = procs.get_mut(&pid).ok_or(aricode_abi::Error::Fault)?;
         let start = virt & !(PAGE_SIZE - 1);
@@ -1437,6 +1479,11 @@ pub fn unmap_foreign(virt: u64) -> Result<(), aricode_abi::Error> {
         for page in (f.virt..f.virt + f.span).step_by(PAGE_SIZE as usize) {
             let _ = m.unmap_4k(page);
         }
+        let screen_back = if f.dma.is_none() && crate::framebuffer::overlaps(f.phys, f.span) {
+            crate::console::screen_release(pid.0, Some(f.virt))
+        } else {
+            None
+        };
         if f.dma.is_some() {
             p.dma_mapped -= f.span;
         }
@@ -1455,9 +1502,12 @@ pub fn unmap_foreign(virt: u64) -> Result<(), aricode_abi::Error> {
             }
             _ => false,
         };
-        (f, release)
+        (f, release, screen_back)
     };
     vmm::flush_own_user_range(f.virt, f.span);
+    if let Some(lent) = screen_back {
+        crate::console::screen_returned_said(pid.0, lent);
+    }
     if release {
         crate::iommu::unmap_region(pid.0, f.phys);
     }

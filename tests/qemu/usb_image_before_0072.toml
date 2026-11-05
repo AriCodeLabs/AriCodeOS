@@ -1,0 +1,24 @@
+# Audit of ADR 0072, M1: AriBoot boots the ESP's system when no slot
+# verifies, and nothing updates the ESP, so a stick written before ADR
+# 0072 keeps a system there that reads only AriFS v1. Its slots read v2,
+# but init reads the ESP's initrd too (FAT read sector by sector): no
+# `features`, so ARI0 stays v1 and fsd serves it with v1's code.
+name = "usb.image_before_0072"
+description = "a stick whose ESP system reads only AriFS v1 keeps ARI0 in v1"
+level = "full"
+areas = ["usb", "filesystem", "boot", "update"]
+cmdline = "qemu_exit"
+selftest = false
+disk = "usb-image-before-0072"
+timeout_secs = 90
+
+[expect]
+exit = 33
+serial_contains = [
+    "cmdline: qemu_exit boot_slot=A",
+    "AriInit: a slot or the ESP holds a system that reads only AriFS v1: ARI0 is not migrated",
+    "fsd: AriFS v1 mounted, 1 files",
+    "AriInit: boot services completed",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC", "booting from the ESP", "migrated to v2", "AriFS v2 mounted"]

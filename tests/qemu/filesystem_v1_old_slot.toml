@@ -1,0 +1,21 @@
+# ADR 0072, decision 3: slot B holds a system from before the migration
+# (no `features` file in its initrd). A rollback to it must find a disk it
+# mounts, so the disk stays AriFS v1 and fsd serves it with v1's code.
+name = "filesystem.v1_old_slot"
+description = "AriFS v1 kept when a slot holds a system that reads only v1"
+level = "full"
+areas = ["filesystem", "storage", "init"]
+cmdline = "qemu_exit"
+disk = "arifs-v1-old-slot"
+
+[expect]
+exit = 33
+serial_contains = [
+    "AriInit: a slot or the ESP holds a system that reads only AriFS v1: ARI0 is not migrated",
+    "fsd: AriFS v1 mounted, 4 files",
+    "fs_client: atomic replace and flush ok",
+    "fs_client: list, read, create and write over IPC ok",
+    "fs_client: rename and delete unsupported (AriFS v1)",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC", "migrated to v2", "AriFS v2 mounted"]

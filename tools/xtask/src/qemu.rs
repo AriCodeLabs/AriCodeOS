@@ -36,6 +36,9 @@ pub struct UsbOptions {
     /// An ICH9 EHCI with a UHCI companion and a full-speed keyboard: the
     /// EHCI driver must hand the port over (EHCI 4.2.2).
     pub ehci_companion_kbd: bool,
+    /// No i8042 (`i8042=off`): the machine has no PS/2 keyboard or mouse
+    /// (ADR 0075).
+    pub no_i8042: bool,
 }
 
 /// Processors of the machine.
@@ -123,7 +126,7 @@ fn base_command(
     q.current_dir(root());
     q.args([
         "-machine",
-        "q35",
+        if usb.no_i8042 { "q35,i8042=off" } else { "q35" },
         "-cpu",
         &cpu.model(),
         "-smp",
@@ -274,7 +277,11 @@ pub struct InputProbe<'a> {
     pub marker: &'a str,
     pub keys: &'a [String],
     pub mouse_rel: Option<(i32, i32)>,
+    /// `count` moves of (dx, dy), one every `every_ms` (`HostInput`).
+    pub mouse_steps: Option<(u32, i32, i32, u64)>,
     pub click: Option<&'a str>,
+    /// Pause after the marker before anything is sent (ms).
+    pub wait_ms: u64,
     /// Minimum pause after each key event (ms); none by default.
     pub key_delay_ms: u64,
     /// The guest prints this before reading each line and echoes every
@@ -344,15 +351,24 @@ impl Qmp {
     }
 }
 
+/// What a stage does with the mouse: a move, a stroke, then a click.
+struct Pointing {
+    rel: Option<(i32, i32)>,
+    steps: Option<(u32, i32, i32, u64)>,
+    click: Option<String>,
+}
+
 fn run_input_probe(
     path: &Path,
     keys: &[String],
-    mouse_rel: Option<(i32, i32)>,
-    click: Option<&str>,
+    pointing: &Pointing,
+    wait: Duration,
     key_delay: Duration,
     echo: Option<EchoWait>,
 ) -> String {
     use crate::typing::{self, Step};
+    let (mouse_rel, mouse_steps, click) = (pointing.rel, pointing.steps, pointing.click.as_deref());
+    std::thread::sleep(wait);
     let mut qmp = match Qmp::connect(path) {
         Ok(q) => q,
         Err(e) => return format!("[host] QMP: no connection ({e})"),
@@ -378,6 +394,17 @@ fn run_input_probe(
                     r#"{{"type":"rel","data":{{"axis":"y","value":{dy}}}}}"#
                 )],
             )?;
+        }
+        // Each move of a stroke is one QMP command: the mouse makes one
+        // packet of it, as a real one at its sampling rate.
+        if let Some((count, dx, dy, every_ms)) = mouse_steps {
+            let rel = |axis: &str, v: i32| {
+                format!(r#"{{"type":"rel","data":{{"axis":"{axis}","value":{v}}}}}"#)
+            };
+            for _ in 0..count {
+                step(&mut qmp, &[rel("x", dx), rel("y", dy)])?;
+                std::thread::sleep(Duration::from_millis(every_ms));
+            }
         }
         // A short pause between phases: the compositor orders by arrival time
         // and a real user does not click and type in the same millisecond.
@@ -1331,7 +1358,9 @@ pub struct Headless<'a> {
     pub probe: Option<TcpProbe<'a>>,
     pub ssh_probe: Option<SshProbe<'a>>,
     pub flood: Option<FloodProbe<'a>>,
-    pub input_probe: Option<InputProbe<'a>>,
+    /// QMP input in stages: each one waits for its marker, after the
+    /// stage before it is done.
+    pub input_probe: Vec<InputProbe<'a>>,
     pub hotplug: Option<Hotplug<'a>>,
     pub disk_variant: image::DiskVariant,
     pub disk_readonly: bool,
@@ -1340,7 +1369,8 @@ pub struct Headless<'a> {
     pub keep_disk: bool,
     /// Kills QEMU (power cut) on seeing this text in the serial output.
     pub kill_on: Option<&'a str>,
-    /// Files that go into the test disk's AriFS (installed packages).
+    /// Files that go into the test disk's AriFS (installed packages, and on
+    /// a USB image the files of its profiles).
     pub installed: &'a [(String, Vec<u8>)],
     pub cpus: u32,
     /// `-cpu qemu64,+rdrand` instead of `qemu64` (scenario `cpu_rdrand`).
@@ -1368,16 +1398,27 @@ pub fn run_headless(
 ) -> Result<Capture> {
     let input = &options.input;
     let probe = options.probe.as_ref();
-    let input_probe = options.input_probe.as_ref();
+    let input_probes = options.input_probe.as_slice();
     let disk_variant = options.disk_variant;
     let disk_readonly = options.disk_readonly;
     use std::io::Write;
     use std::sync::{Arc, Mutex};
     let vars = image::ovmf_vars_for(workdir)?;
     let disk = workdir.join("disk.img");
-    let esp_drive = if disk_variant == image::DiskVariant::UsbImage {
+    let usb = matches!(
+        disk_variant,
+        image::DiskVariant::UsbImage | image::DiskVariant::UsbImageBefore0072
+    );
+    let esp_drive = if usb {
         if !options.keep_disk {
-            image::write_usb_image(&disk, esp, &[], aricode_gpt::TEST_DISK_GUID)?;
+            let before_0072 = disk_variant == image::DiskVariant::UsbImageBefore0072;
+            image::write_usb_image_as(
+                &disk,
+                esp,
+                options.installed,
+                aricode_gpt::TEST_DISK_GUID,
+                before_0072,
+            )?;
         }
         None
     } else {
@@ -1448,7 +1489,9 @@ pub fn run_headless(
     let mut sent = 0;
     let mut probe_result: Option<String> = None;
     let mut probe_thread: Option<std::thread::JoinHandle<String>> = None;
-    let mut input_result: Option<String> = None;
+    let mut input_results: Vec<String> = Vec::new();
+    // Where in the capture the current input stage started.
+    let mut stage_from = 0usize;
     let mut hotplug_result: Option<String> = None;
     // When the hot-plug marker was first seen.
     let mut hotplug_seen: Option<Instant> = None;
@@ -1548,15 +1591,25 @@ pub fn run_headless(
                 hotplug_result = Some(run_hotplug(qmp.path(), h.driver, h.bus, h.id));
             }
         }
-        if let Some(p) = input_probe {
-            if input_thread.is_none()
-                && input_result.is_none()
-                && count_occurrences(&captured.lock().expect("capture"), p.marker.as_bytes()) > 0
-            {
+        if let Some(p) = input_probes.get(input_results.len()) {
+            // A stage looks for its marker only in what came after the
+            // stage before it started: text printed earlier, which may
+            // contain it, does not fire it early.
+            let fired = input_thread.is_none() && {
+                let capture = captured.lock().expect("capture");
+                let from = stage_from.min(capture.len());
+                count_occurrences(&capture[from..], p.marker.as_bytes()) > 0
+            };
+            if fired {
+                stage_from = captured.lock().expect("capture").len();
                 let path = qmp.path().to_path_buf();
                 let keys = p.keys.to_vec();
-                let rel = p.mouse_rel;
-                let click = p.click.map(String::from);
+                let pointing = Pointing {
+                    rel: p.mouse_rel,
+                    steps: p.mouse_steps,
+                    click: p.click.map(String::from),
+                };
+                let wait = Duration::from_millis(p.wait_ms);
                 let delay = Duration::from_millis(p.key_delay_ms);
                 let echo = p.echo_prompt.map(|prompt| EchoWait {
                     prompt: prompt.to_string(),
@@ -1565,11 +1618,15 @@ pub fn run_headless(
                     qemu_pid: child.id(),
                 });
                 input_thread = Some(std::thread::spawn(move || {
-                    run_input_probe(&path, &keys, rel, click.as_deref(), delay, echo)
+                    run_input_probe(&path, &keys, &pointing, wait, delay, echo)
                 }));
             }
             if input_thread.as_ref().is_some_and(|t| t.is_finished()) {
-                input_result = input_thread.take().and_then(|t| t.join().ok());
+                // A stage whose thread failed is said, and not sent again.
+                let r = input_thread.take().and_then(|t| t.join().ok());
+                input_results.push(r.unwrap_or_else(|| {
+                    format!("[host] QMP: the stage after '{}' failed", p.marker)
+                }));
             }
         }
         std::thread::sleep(Duration::from_millis(20));
@@ -1579,8 +1636,15 @@ pub fn run_headless(
     if let Some(t) = probe_thread.take() {
         probe_result = t.join().ok();
     }
-    if let Some(t) = input_thread.take() {
-        input_result = t.join().ok();
+    if let Some(r) = input_thread.take().and_then(|t| t.join().ok()) {
+        input_results.push(r);
+    }
+    // Stages whose marker never came are said too.
+    for p in input_probes.iter().skip(input_results.len()) {
+        input_results.push(format!(
+            "[host] QMP: marker '{}' never seen; nothing sent",
+            p.marker
+        ));
     }
     if let Some(t) = ssh_thread.take() {
         ssh_result = t.join().ok();
@@ -1612,15 +1676,15 @@ pub fn run_headless(
             )
         })
     });
-    for line in [
-        probe_result,
-        input_result,
-        ssh_result,
-        flood_result,
-        hotplug_result,
-    ]
-    .into_iter()
-    .flatten()
+    for line in [probe_result]
+        .into_iter()
+        .flatten()
+        .chain(input_results)
+        .chain(
+            [ssh_result, flood_result, hotplug_result]
+                .into_iter()
+                .flatten(),
+        )
     {
         bytes.extend_from_slice(format!("\n{line}\n").as_bytes());
     }

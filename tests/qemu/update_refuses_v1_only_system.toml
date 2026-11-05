@@ -1,0 +1,25 @@
+# ADR 0072, decision 3: once ARI0 is AriFS v2, a system that reads only v1
+# (no `features` file in its initrd) would boot without its keys and its
+# updater state. The updater refuses it even when the downgrade rule
+# allows it (a newer version here) and even with --allow-downgrade.
+name = "update.refuses_v1_only_system"
+description = "update apply refuses a system that reads only AriFS v1 on a v2 disk"
+level = "full"
+areas = ["update", "filesystem", "shell"]
+disk = "update-before-features"
+timeout_secs = 120
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["update apply", "update apply --allow-downgrade", "diag", "shutdown"]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "fsd: AriFS v2 mounted",
+    "updater: UPDATE image version 2 verified (",
+    "updater: system: refused: that system reads only AriFS v1 and ARI0 is AriFS v2; it would boot without its files (ADR 0072)",
+    "update: updater exited with 56",
+    ": upd-arifs-too-old (code 56)",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "installed into slot"]

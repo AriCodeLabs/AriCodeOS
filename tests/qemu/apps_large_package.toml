@@ -1,0 +1,29 @@
+# ADR 0072, phase B: packages of an app's real size. pkgs/ holds hello_ext
+# 1 and 2, each with 1 MiB after its ELF (the size of an app with TLS, far
+# over AriFS v1's 32 KiB). The installer verifies each piece by piece and
+# copies it into a chunked replace of apps/hello_ext.aripkg (1 is
+# installed, then 2 replaces it); the broker loads the 1 MiB package into
+# a buffer of its size, verifies it and launches version 2.
+name = "apps.large_package"
+description = "a 1 MiB package installed piece by piece, replaced, and launched"
+level = "full"
+areas = ["apps", "update", "filesystem", "shell"]
+packages = ["examples/hello_ext:1:large", "examples/hello_ext:2:large"]
+cmdline = "qemu_exit shell"
+timeout_secs = 180
+stdin = ["run installer", "run hello_ext 5", "ls", "shutdown"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "installer: installing hello_ext version 1 (from pkgs/hello_ext-1.aripkg)",
+    "installer: hello_ext none -> 1 installed (apps/hello_ext.aripkg)",
+    "installer: installing hello_ext version 2 (from pkgs/hello_ext-2.aripkg)",
+    "installer: hello_ext 1 -> 2 installed (apps/hello_ext.aripkg)",
+    "installer: 2 package(s) installed, 0 skipped",
+    "AriInit: launch hello_ext from AriFS (apps/hello_ext.aripkg version 2, 10",
+    "hello_ext v2: hello from outside the tree (arg 5)",
+    "run: hello_ext exited with 0",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "fails verification", "installer: error", "inst-v1-limit"]

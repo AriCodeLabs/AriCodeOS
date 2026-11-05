@@ -1,0 +1,37 @@
+# Ending the desktop with a terminal open (ADR 0074 phase C, audit of the
+# terminal, M2): Ctrl+Alt+Backspace makes the compositor leave, and init
+# stops the launcher and the terminal; the terminal's shell then ends by
+# itself on its closed input (never killed halfway through a command), so
+# no shell is left behind holding a session or a slot.
+name = "usb.desktop_terminal_end"
+description = "ending the desktop stops the terminal and its shell"
+level = "full"
+areas = ["usb", "apps", "gui", "shell"]
+cmdline = "qemu_exit shell"
+selftest = false
+disk = "usb-image"
+install = ["desktop/launcher", "desktop/terminal"]
+stick_profiles = ["desktop:launcher,terminal"]
+stdin = ["sleep 12000", "shutdown"]
+timeout_secs = 120
+
+[host_input]
+marker = "launcher: ready"
+keys = ["ret"]
+
+[[host_input_then]]
+marker = "terminal: shell started"
+keys = ["ctrl+alt+backspace"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "terminal: shell started",
+    "compositor: Ctrl+Alt+Backspace: the owner asked for the text console; leaving",
+    # Init or the launcher may see the compositor gone first.
+    "AriInit: the desktop ended (",
+    "'terminal' killed: stopped at another process's request",
+    "'shell' exited with code 0",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "'shell' killed"]

@@ -1,0 +1,28 @@
+# A package that changes while the installer copies it (ADR 0072, phase
+# B): hello_ext 1 is installed and pkgs/ holds version 2. With
+# `fsd_mutate`, fsd flips the package's last byte on its 4th open, the
+# installer's copy (1: its size, 2: its verification, 3: its hash, 4: the
+# copy), as a writer changing it meanwhile would. The installer finds the
+# copied bytes no longer hash as verified, refuses, and commits nothing:
+# version 1 stays installed and launches.
+name = "apps.copy_mismatch"
+description = "installer: a package changed during its copy is refused and the installed version stays"
+level = "full"
+areas = ["apps", "filesystem", "shell"]
+install = ["examples/hello_ext"]
+packages = ["examples/hello_ext:2"]
+cmdline = "qemu_exit shell fsd_mutate=pkgs/hello_ext-2.aripkg@4"
+timeout_secs = 120
+stdin = ["run installer", "run hello_ext 3", "shutdown"]
+
+[expect]
+exit = 33
+serial_order = [
+    "installer: installing hello_ext version 2 (from pkgs/hello_ext-2.aripkg)",
+    "fsd: test mutation: the file changed on this open (fsd_mutate)",
+    "installer: pkgs/hello_ext-2.aripkg changed while it was installed: refused",
+    "installer: 0 package(s) installed, 1 skipped",
+    "hello_ext v1: hello from outside the tree (arg 3)",
+]
+serial_contains = ["ARICODEOS_SHUTDOWN"]
+serial_absent = ["KERNEL PANIC", "installed (apps/", "test mutation failed"]

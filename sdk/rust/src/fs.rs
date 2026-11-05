@@ -113,6 +113,41 @@ impl FsClient {
         self.call(req, false).map(|r| r.value as u32)
     }
 
+    /// Deletes `name` (AriFS v2, ADR 0072): descriptors open on it stop
+    /// working; `Unsupported` on a volume still in v1.
+    pub fn delete(&self, name: &str) -> Result<(), FsError> {
+        let req = Request::new(Op::Delete)
+            .with_name(name)
+            .ok_or(FsError::Status(Status::Invalid))?;
+        self.call(req, false).map(|_| ())
+    }
+
+    /// Renames the file open as `fd` to `name`, deleting a file already
+    /// called so in the same commit (AriFS v2, ADR 0072); `Unsupported` on
+    /// a volume still in v1.
+    pub fn rename(&self, fd: u32, name: &str) -> Result<(), FsError> {
+        self.rename_with(fd, name, 0)
+    }
+
+    /// Like `rename`, but a file already called `name` is kept: `Exists`
+    /// then, decided by fsd in the same step.
+    pub fn rename_keeping(&self, fd: u32, name: &str) -> Result<(), FsError> {
+        self.rename_with(fd, name, aricode_proto::fs::RENAME_KEEP)
+    }
+
+    fn rename_with(&self, fd: u32, name: &str, len: u32) -> Result<(), FsError> {
+        let mut req = Request::new(Op::Rename)
+            .with_name(name)
+            .ok_or(FsError::Status(Status::Invalid))?;
+        req.fd = fd;
+        req.len = len;
+        self.call(req, false).map(|_| ())
+    }
+
+    /// Closes `fd`; on AriFS v2 it also commits what the client's writes
+    /// grew the file by (ADR 0072). The descriptor is closed even when this
+    /// returns an error: the error says that growth is not durable yet
+    /// (`flush` makes it so, or the service's next commit).
     pub fn close(&self, fd: u32) -> Result<(), FsError> {
         let mut req = Request::new(Op::Close);
         req.fd = fd;

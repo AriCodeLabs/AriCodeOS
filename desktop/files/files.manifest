@@ -1,0 +1,5 @@
+# The desktop's file manager (ADR 0074): a window, and the owner's folder
+# home/.
+name = files
+caps = window, home
+memory = 1M

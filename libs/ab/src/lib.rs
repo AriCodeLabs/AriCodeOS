@@ -572,6 +572,87 @@ pub struct StreamVerified {
     pub initrd: aricode_initrd::Span,
 }
 
+/// The file of a system's initrd that says what the system can read
+/// (ADR 0072). The signed manifest cannot say it: every AriBoot already on
+/// an ESP refuses unknown manifest keys.
+pub const FEATURES_FILE: &str = "features";
+
+/// What the systems built from this tree declare (xtask writes it).
+pub const FEATURES: &str = "arifs = 2\n";
+
+/// The application interface this tree's systems offer (ADR 0074), as
+/// Android's API level: a number that grows when what apps may rely on
+/// grows, apart from the release number (stable and development builds
+/// count releases differently). A package's `requires` names the lowest
+/// it runs on; the updater, the installer and the broker of the running
+/// system compare it with this one.
+pub const APPS_LEVEL: u32 = 1;
+
+/// Longest `features` file read.
+const FEATURES_MAX: usize = 256;
+
+/// What a system declares it can read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Features {
+    /// The newest AriFS version it mounts.
+    pub arifs: u8,
+}
+
+impl Features {
+    /// A system whose initrd has no `features` file: everything before
+    /// ADR 0072, which reads AriFS v1 only.
+    pub const BEFORE_FEATURES: Features = Features { arifs: 1 };
+
+    /// `key = value` lines; unknown keys are for later systems and are
+    /// skipped; an `arifs` that is not a number counts as v1 (the safe
+    /// reading: it keeps the disk v1).
+    pub fn parse(text: &str) -> Self {
+        let mut f = Self::BEFORE_FEATURES;
+        for line in text.lines() {
+            if let Some((k, v)) = line.split_once('=') {
+                if k.trim() == "arifs" {
+                    f.arifs = v.trim().parse().unwrap_or(1);
+                }
+            }
+        }
+        f
+    }
+}
+
+/// What the system whose initrd is `len` bytes, read through `read`,
+/// declares in its `features` file ([`Image::features`] for a slot's
+/// container; init reads the ESP's initrd with it, which AriBoot boots
+/// when no slot verifies).
+pub fn initrd_features(
+    len: usize,
+    mut read: impl FnMut(usize, &mut [u8]) -> Result<(), ()>,
+) -> Result<Features, ImageError> {
+    let unreadable = core::cell::Cell::new(false);
+    let mut fetch = |offset: usize, buf: &mut [u8]| {
+        read(offset, buf).map_err(|()| {
+            unreadable.set(true);
+            aricode_initrd::InitrdError::Truncated
+        })
+    };
+    let [file] = aricode_initrd::locate(len, &mut fetch, [FEATURES_FILE]).map_err(|_| {
+        if unreadable.get() {
+            ImageError::Unreadable
+        } else {
+            ImageError::BadContainer
+        }
+    })?;
+    let Some((offset, len)) = file else {
+        return Ok(Features::BEFORE_FEATURES);
+    };
+    if len > FEATURES_MAX {
+        return Err(ImageError::BadContainer);
+    }
+    let mut buf = [0u8; FEATURES_MAX];
+    fetch(offset, &mut buf[..len]).map_err(|_| ImageError::Unreadable)?;
+    let text = core::str::from_utf8(&buf[..len]).map_err(|_| ImageError::BadContainer)?;
+    Ok(Features::parse(text))
+}
+
 /// Largest manifest a verification reads: four times the canonical
 /// [`MANIFEST_MAX`]; the signature covers the whole manifest, so it is
 /// read whole.
@@ -601,6 +682,34 @@ impl Image {
             return Err(ImageError::BadHeader);
         }
         Ok(len)
+    }
+
+    /// What the system in a container of `container_len` bytes, read
+    /// through `read`, declares in its initrd's `features` file. Nothing is
+    /// verified: the caller decides what an unverified answer is worth
+    /// (init reads the slot it did not boot from, which only the updater
+    /// writes after verifying).
+    pub fn features(
+        container_len: usize,
+        mut read: impl FnMut(usize, &mut [u8]) -> Result<(), ()>,
+    ) -> Result<Features, ImageError> {
+        let unreadable = core::cell::Cell::new(false);
+        let mut fetch = |offset: usize, buf: &mut [u8]| {
+            read(offset, buf).map_err(|()| {
+                unreadable.set(true);
+                aricode_initrd::InitrdError::Truncated
+            })
+        };
+        let [initrd] =
+            aricode_initrd::locate(container_len, &mut fetch, ["initrd.img"]).map_err(|_| {
+                if unreadable.get() {
+                    ImageError::Unreadable
+                } else {
+                    ImageError::BadContainer
+                }
+            })?;
+        let (base, len) = initrd.ok_or(ImageError::MissingFile("initrd.img"))?;
+        initrd_features(len, |o, b| read(base + o, b))
     }
 
     /// Verifies a container with the release key only (a stable image).
@@ -870,6 +979,42 @@ mod tests {
             ("initrd.img", initrd),
         ])
         .unwrap()
+    }
+
+    #[test]
+    fn features_come_from_the_initrd_and_default_to_v1() {
+        let seed = [9u8; 32];
+        let features = |initrd: &[u8]| {
+            let c = build(&seed, 3, b"kernel", initrd);
+            Image::features(c.len(), |o, b| {
+                b.copy_from_slice(c.get(o..o + b.len()).ok_or(())?);
+                Ok(())
+            })
+        };
+        let with = |text: &[u8]| {
+            aricode_initrd::build(&[("init", &b"elf"[..]), (FEATURES_FILE, text)]).unwrap()
+        };
+        assert_eq!(
+            features(&with(FEATURES.as_bytes())),
+            Ok(Features { arifs: 2 })
+        );
+        // Images before ADR 0072 have no such file: they read v1.
+        let old = aricode_initrd::build(&[("init", &b"elf"[..])]).unwrap();
+        assert_eq!(features(&old), Ok(Features::BEFORE_FEATURES));
+        // Later keys are skipped; an unreadable number is the safe v1.
+        assert_eq!(
+            features(&with(b"later = 1\narifs = 3\n")),
+            Ok(Features { arifs: 3 })
+        );
+        assert_eq!(features(&with(b"arifs = two\n")), Ok(Features { arifs: 1 }));
+        assert_eq!(features(&with(&[b'a'; 300])), Err(ImageError::BadContainer));
+        assert_eq!(features(b"not an archive"), Err(ImageError::BadContainer));
+        // A read that fails is told apart.
+        let c = build(&seed, 3, b"kernel", &with(FEATURES.as_bytes()));
+        assert_eq!(
+            Image::features(c.len(), |_, _| Err(())),
+            Err(ImageError::Unreadable)
+        );
     }
 
     fn dev_manifest(version: u32, commit: &str, kernel: &[u8], initrd: &[u8]) -> Manifest {

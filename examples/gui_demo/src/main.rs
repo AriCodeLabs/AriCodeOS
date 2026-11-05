@@ -1,21 +1,21 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 // SPDX-License-Identifier: Apache-2.0
-//! Test graphical application (Phase 26): paints its window and listens for
-//! events. `arg` = 0 (Demo A) or 1 (Demo B, created 300 ms later so it ends
-//! up on top). Handles: 0x10004 = its compositor session (WRITE, ADR 0052),
-//! 0x10005 = HARDWARE. Demo B also checks that Demo A's window is out of its
-//! reach and leaves without closing its own: the compositor closes it when
-//! the session goes (gui.two_windows).
+//! Test graphical application (Phase 26), a test package since ADR 0074:
+//! paints its window and listens for events. `arg` = 0 (Demo A) or 1 (Demo
+//! B, created 300 ms later so it ends up on top), or 2 (Demo C, which never
+//! reads its events: the compositor closes its window for it at the second
+//! click on its close box, ADR 0077). The broker grants what
+//! its manifest asks for: its compositor session (WRITE, ADR 0052) and
+//! `HARDWARE` for the window's buffer. Demo B also checks that Demo A's
+//! window is out of its reach and leaves without closing its own: the
+//! compositor closes it when the session goes (gui.two_windows).
 #![no_std]
 #![no_main]
 
 use aricode_gfx::{rgb, Rect};
 use aricode_proto::window::{Op, Reply, Request, Status};
 use aricode_rt::sys::window::{Event, Window, WindowError};
-use aricode_rt::sys::{self, rpc, Handle};
-
-const COMPOSITOR: Handle = Handle(0x0001_0004);
-const HW: Handle = Handle(0x0001_0005);
+use aricode_rt::sys::{self, kind, permissions, rpc, Handle};
 
 fn num_i32(v: i32) {
     let mut b = [0u8; 20];
@@ -26,12 +26,12 @@ fn num_i32(v: i32) {
 }
 
 /// Sends `op` on window `id` through our session and returns the status.
-fn ask(op: Op, id: u32) -> Option<Status> {
+fn ask(session: Handle, op: Op, id: u32) -> Option<Status> {
     let mut req = Request::new(op);
     req.window = id;
     let mut msg = [0u8; Reply::LEN];
     let len = rpc::call(
-        COMPOSITOR,
+        session,
         &req.encode(),
         &[],
         rpc::GRACE_MS,
@@ -43,13 +43,27 @@ fn ask(op: Op, id: u32) -> Option<Status> {
 }
 
 fn main(index: u64) -> u64 {
+    let (mut session, mut hw) = (None, None);
+    permissions::granted(|h, _| {
+        if permissions::is(h, kind::ENDPOINT) {
+            session = Some(h);
+        } else if permissions::is(h, kind::HARDWARE) {
+            hw = Some(h);
+        }
+    });
+    let (Some(session), Some(hw)) = (session, hw) else {
+        sys::print(b"gui_demo: started without a compositor session\n");
+        return 6;
+    };
     let (name, title, color) = if index == 0 {
         (b"gui_demo A" as &[u8], "Demo A", rgb(0xc0, 0x40, 0x40))
+    } else if index == 2 {
+        (b"gui_demo C" as &[u8], "Demo C", rgb(0x40, 0xa0, 0x40))
     } else {
         sys::thread_sleep(300);
         (b"gui_demo B" as &[u8], "Demo B", rgb(0x40, 0x80, 0xc0))
     };
-    let mut win = match Window::create(COMPOSITOR, HW, 400, 300, title) {
+    let mut win = match Window::create(session, hw, 400, 300, title) {
         Ok(w) => w,
         Err(e) => {
             sys::print(name);
@@ -83,6 +97,15 @@ fn main(index: u64) -> u64 {
     }
     sys::print(name);
     sys::print(b": window presented\n");
+    if index == 2 {
+        // Hung, as far as the compositor can tell: no poll for 12 s.
+        sys::thread_sleep(12_000);
+        sys::print(match win.poll(10) {
+            Err(_) => b"gui_demo C: its window was closed for it\n" as &[u8],
+            Ok(_) => b"gui_demo C: its window is still open\n",
+        });
+        return 0;
+    }
     let mut got_key = false;
     let mut idle = 0;
     while !got_key && idle < 10 {
@@ -105,6 +128,16 @@ fn main(index: u64) -> u64 {
                 sys::print(b")\n");
                 idle = 0;
             }
+            Ok(Some(Event::Close)) => {
+                sys::print(name);
+                sys::print(b": asked to close; closing\n");
+                if win.close().is_err() {
+                    return 5;
+                }
+                sys::print(name);
+                sys::print(b": window closed\n");
+                return 0;
+            }
             Ok(Some(Event::Focus(f))) => {
                 sys::print(name);
                 sys::print(if f {
@@ -114,6 +147,7 @@ fn main(index: u64) -> u64 {
                 });
                 idle = 0;
             }
+            Ok(Some(_)) => {}
             Ok(None) => idle += 1,
             Err(_) => return 3,
         }
@@ -125,14 +159,14 @@ fn main(index: u64) -> u64 {
     if index == 1 {
         let foreign = (1..=2).find(|&id| id != win.id()).unwrap_or(1);
         for op in [Op::Poll, Op::Present, Op::Close] {
-            if ask(op, foreign) != Some(Status::BadWindow) {
+            if ask(session, op, foreign) != Some(Status::BadWindow) {
                 sys::print(b"gui_demo B: reached a window that is not its own\n");
                 return 4;
             }
         }
         // Sessions cannot make or end sessions.
-        if ask(Op::Attach, 0) != Some(Status::Invalid)
-            || ask(Op::Detach, foreign) != Some(Status::Invalid)
+        if ask(session, Op::Attach, 0) != Some(Status::Invalid)
+            || ask(session, Op::Detach, foreign) != Some(Status::Invalid)
         {
             sys::print(b"gui_demo B: its session made or ended a session\n");
             return 4;

@@ -85,6 +85,7 @@ pub const PACKAGES: &[(&str, Option<&str>)] = &[
     ("ari-virtio-blk", Some(USER_TARGET)),
     ("ari-virtio-net", Some(USER_TARGET)),
     ("ari-virtio-input", Some(USER_TARGET)),
+    ("ari-ps2-input", Some(USER_TARGET)),
     ("ari-usb-input", Some(USER_TARGET)),
     ("ari-usb-ehci", Some(USER_TARGET)),
     ("ari-console-bridge", Some(USER_TARGET)),
@@ -173,6 +174,7 @@ pub fn initrd_programs() -> Result<Vec<String>> {
         String::from("rtl_net"),
         String::from("sshd"),
         String::from("virtio_input"),
+        String::from("ps2_input"),
         String::from("usb_input"),
         String::from("usb_ehci"),
         String::from("console_bridge"),
@@ -250,6 +252,7 @@ pub const USER_PACKAGES: &[&str] = &[
     "ari-rtl-net",
     "ari-sshd",
     "ari-virtio-input",
+    "ari-ps2-input",
     "ari-usb-input",
     "ari-usb-ehci",
     "ari-console-bridge",
@@ -388,7 +391,46 @@ pub struct ExternalApp {
     pub package: Vec<u8>,
 }
 
+/// Bytes `large` packages carry after their program's ELF: with them the
+/// example is the size of an app with TLS (ADR 0072, phase B).
+pub const LARGE_PADDING: usize = 1024 * 1024;
+
+/// Bytes `huge` packages carry after their program's ELF: the package
+/// ends within 32 KiB of `PACKAGE_MAX`, the largest the system handles,
+/// so the limit itself is exercised end to end.
+pub const HUGE_PADDING: usize = aricode_pkg::PACKAGE_MAX - 32 * 1024;
+
 impl ExternalApp {
+    /// The same package, signed again, with `extra` zero bytes after the
+    /// program's ELF, which the loader ignores (a package far over AriFS
+    /// v1's 32 KiB that still launches, ADR 0072 phase B), and with
+    /// `requires` as its lowest application interface level (ADR 0074; 0
+    /// for none).
+    pub fn resigned(&self, extra: usize, requires: u32) -> Result<ExternalApp> {
+        let key = crate::keys::expected_public_key()?;
+        let v = aricode_pkg::verify(&self.package, &key)
+            .map_err(|e| format!("{}: {e:?}", self.name))?;
+        let mut program = v.program.to_vec();
+        program.resize(program.len() + extra, 0);
+        let seed = crate::keys::signing_seed()?;
+        let package = aricode_pkg::build(
+            &self.name,
+            self.version,
+            requires,
+            &program,
+            v.app_manifest,
+            &seed,
+            false,
+        )
+        .ok_or_else(|| format!("{}: invalid package name", self.name))?;
+        check_package_size(&self.name, package.len(), true)?;
+        Ok(ExternalApp {
+            name: self.name.clone(),
+            version: self.version,
+            package,
+        })
+    }
+
     /// File that goes to AriFS as an installed program.
     pub fn installed(&self) -> (String, Vec<u8>) {
         (
@@ -495,7 +537,7 @@ fn build_external_now(
     let manifest =
         std::fs::read(&manifest_path).map_err(|e| format!("{}: {e}", manifest_path.display()))?;
     let seed = crate::keys::signing_seed()?;
-    let package = aricode_pkg::build(&name, version, &elf, &manifest, &seed, corrupt)
+    let package = aricode_pkg::build(&name, version, 0, &elf, &manifest, &seed, corrupt)
         .ok_or_else(|| format!("{name}: invalid package name"))?;
     check_package_size(&name, package.len(), release)?;
     // Post-build check (re-audit, R1): a package meant to be valid must
@@ -530,8 +572,13 @@ fn check_package_size(name: &str, len: usize, release: bool) -> Result {
 }
 
 /// `cargo xtask app-pack DIR [--version N]`: produces `build/pkgs/NAME-N.aripkg`.
-pub fn app_pack(dir: &Path, version: u32, release: bool) -> Result {
-    let app = build_external(dir, version, release, false)?;
+/// `requires`: the lowest application interface level the package runs on
+/// (ADR 0074), 0 for none.
+pub fn app_pack(dir: &Path, version: u32, requires: u32, release: bool) -> Result {
+    let mut app = build_external(dir, version, release, false)?;
+    if requires > 0 {
+        app = app.resigned(0, requires)?;
+    }
     let out = crate::build_dir().join("pkgs");
     std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
     let file = out.join(format!(
@@ -718,6 +765,23 @@ const TRUSTED_CRYPTO_CFGS: &[&str] = &[
     "curve25519_dalek_backend=\"serial\"",
 ];
 
+/// The package crates outside the workspace: every folder of `desktop/`
+/// and `examples/` with a `Cargo.toml`, in name order.
+fn external_crates() -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    for parent in ["desktop", "examples"] {
+        let dir = root().join(parent);
+        for entry in std::fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))? {
+            let path = entry.map_err(|e| e.to_string())?.path();
+            if path.join("Cargo.toml").is_file() {
+                out.push(path);
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
 pub fn check() -> Result {
     let mut c = cargo();
     c.args(["fmt", "--all", "--", "--check"]);
@@ -732,6 +796,23 @@ pub fn check() -> Result {
         if let Some(t) = target {
             c.args(["--target", t]);
         }
+        c.args(["--", "-D", "warnings"]);
+        run(c)?;
+    }
+    // The packages outside the workspace (the desktop's, the test ones):
+    // formatted and linted too, as the shipped code is (audit of the
+    // settings, L6), built under `build/` and never inside their folders.
+    for dir in external_crates()? {
+        let manifest = dir.join("Cargo.toml");
+        let mut c = cargo();
+        c.arg("fmt").arg("--manifest-path").arg(&manifest);
+        c.args(["--", "--check"]);
+        run(c)?;
+        let name = dir.file_name().unwrap_or_default().to_string_lossy();
+        let mut c = user_cargo();
+        c.arg("clippy").arg("--manifest-path").arg(&manifest);
+        c.args(["--target", USER_TARGET, "--target-dir"]);
+        c.arg(crate::build_dir().join("external-check").join(&*name));
         c.args(["--", "-D", "warnings"]);
         run(c)?;
     }

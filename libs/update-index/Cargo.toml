@@ -12,3 +12,9 @@ path = "src/lib.rs"
 aricode-ab = { path = "../ab" }
 aricode-crypto = { path = "../crypto" }
 aricode-pkg = { path = "../pkg" }
+# The file client's side (`client`): user-space programs only.
+aricode-sys = { path = "../../sdk/rust", optional = true }
+aricode-proto = { path = "../../sdk/proto", optional = true }
+
+[features]
+client = ["dep:aricode-sys", "dep:aricode-proto"]

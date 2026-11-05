@@ -21,8 +21,9 @@
 extern crate alloc;
 
 use aricode_manifest::{Caps, Manifest};
+use aricode_proto::fs::ARG_MIGRATE;
 use aricode_proto::launch::{
-    Reply as LaunchReply, Request as LaunchRequest, Status as LaunchStatus,
+    Entry, Reply as LaunchReply, Request as LaunchRequest, Status as LaunchStatus,
 };
 use aricode_proto::status;
 use aricode_rt::sys::abi::driver_arg;
@@ -30,6 +31,9 @@ use aricode_rt::sys::block::{find_partition, BlockClient};
 use aricode_rt::sys::fs::{FsClient, FsError};
 use aricode_rt::sys::{self, rights, Error, Handle, TIMEOUT_INFINITE};
 use aricode_supervisor::{Action, Exit, Policy, Service, State};
+use aricode_update_index as update_index;
+use aricode_update_index::client::FsFiles;
+use aricode_update_index::session::{self, Session};
 
 const SPAWNER: Handle = Handle(0x0001_0004);
 const PCI_ROOT: Handle = Handle(0x0001_0005);
@@ -37,6 +41,8 @@ const HARDWARE: Handle = Handle(0x0001_0006);
 const SYSTEM: Handle = Handle(0x0001_0007);
 const CONSOLE_IN: Handle = Handle(0x0001_0008);
 const FRAMEBUFFER: Handle = Handle(0x0001_0009);
+/// The PS/2 stream, when the machine has an i8042 (ADR 0075).
+const PS2: Handle = Handle(sys::abi::handle::INIT_PS2);
 
 /// Bits of the service mask passed to the shell.
 const SERVICE_BLOCK: u64 = 1;
@@ -507,6 +513,99 @@ fn confirm_boot_slot(arg: u64, block_service: Handle) {
     }
 }
 
+/// Whether every slot that holds a system declares that it reads AriFS v2
+/// (ADR 0072): only then may fsd migrate a v1 volume, since a rollback to
+/// either slot finds a system that mounts it. A slot without a valid
+/// header holds no system to go back to; past the header, anything that
+/// does not show `arifs = 2` (unreadable, malformed) counts as v1, as the
+/// updater counts it (audit of ADR 0072, L3).
+fn slots_read_arifs_v2(blk: &mut BlockClient) -> bool {
+    use aricode_ab::Image;
+    for part in [aricode_ab::PART_SLOT_A, aricode_ab::PART_SLOT_B] {
+        let Some((first, last)) = find_partition(blk, part) else {
+            continue;
+        };
+        if blk.read(first, 1).is_err() {
+            return false;
+        }
+        let Ok(len) = Image::container_len(&blk.buffer()[..512]) else {
+            continue;
+        };
+        if len as u64 > (last - first) * 512 {
+            continue;
+        }
+        let features = Image::features(len as usize, |offset, buf| {
+            read_bytes(blk, first + 1, offset, buf)
+        });
+        if !features.is_ok_and(|f| f.arifs >= 2) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Whether the ESP's system, which AriBoot boots when no slot verifies,
+/// reads AriFS v2 (audit of ADR 0072, M1): every stick written before ADR
+/// 0072 keeps a v1-only system there, which nothing updates. A disk
+/// without an ESP partition, or an ESP without a system, has nothing to
+/// fall back to; anything else that does not show `arifs = 2` counts as v1.
+fn esp_reads_arifs_v2(blk: &mut BlockClient) -> bool {
+    use aricode_fat::{Fat32, FatError};
+    let Some((first, _)) = find_partition(blk, "ESP") else {
+        return true;
+    };
+    let Ok(mut fat) = Fat32::parse(EspSectors { blk, first }) else {
+        return false;
+    };
+    let mut initrd = match fat.open("aricodeos/initrd.img") {
+        Ok(f) => f,
+        Err(FatError::NotFound) => return true,
+        Err(_) => return false,
+    };
+    let len = initrd.size as usize;
+    aricode_ab::initrd_features(len, |offset, buf| {
+        fat.read_at(&mut initrd, offset as u32, buf).map_err(|_| ())
+    })
+    .is_ok_and(|f| f.arifs >= 2)
+}
+
+/// The ESP's sectors through the block client, for the FAT reader.
+struct EspSectors<'a> {
+    blk: &'a mut BlockClient,
+    first: u64,
+}
+
+impl aricode_fat::Sectors for EspSectors<'_> {
+    fn read_sector(
+        &mut self,
+        sector: u64,
+        buf: &mut [u8; 512],
+    ) -> Result<(), aricode_fat::FatError> {
+        self.blk
+            .read(self.first + sector, 1)
+            .map_err(|_| aricode_fat::FatError::Corrupt)?;
+        buf.copy_from_slice(&self.blk.buffer()[..512]);
+        Ok(())
+    }
+}
+
+/// Fills `buf` from byte `offset` of the area that starts at `base` (LBA),
+/// up to the block client's batch at a time.
+fn read_bytes(blk: &mut BlockClient, base: u64, offset: usize, buf: &mut [u8]) -> Result<(), ()> {
+    let mut done = 0;
+    while done < buf.len() {
+        let at = offset + done;
+        let in_sector = at % 512;
+        let sectors = (in_sector + buf.len() - done).div_ceil(512).min(16);
+        blk.read(base + (at / 512) as u64, sectors as u16)
+            .map_err(|_| ())?;
+        let n = (sectors * 512 - in_sector).min(buf.len() - done);
+        buf[done..done + n].copy_from_slice(&blk.buffer()[in_sector..in_sector + n]);
+        done += n;
+    }
+    Ok(())
+}
+
 /// On top of an already running block service: fsd on the ARI0 partition
 /// (found by GPT name: the test disk and the USB image place it at different
 /// LBAs). The read-only health checks always run: the block service answers
@@ -529,8 +628,14 @@ fn start_storage_stack(
     };
     let disk = BlockClient::new(service, HARDWARE, 16)
         .ok()
-        .and_then(|mut blk| Some((blk.capacity().ok()?, find_partition(&mut blk, "ARI0"))));
-    let Some((capacity, ari0)) = disk else {
+        .and_then(|mut blk| {
+            Some((
+                blk.capacity().ok()?,
+                find_partition(&mut blk, "ARI0"),
+                slots_read_arifs_v2(&mut blk) && esp_reads_arifs_v2(&mut blk),
+            ))
+        });
+    let Some((capacity, ari0, migrate)) = disk else {
         say(b"block service does not answer Info");
         return Err(11);
     };
@@ -543,12 +648,15 @@ fn start_storage_stack(
     sys::print(b" sectors, GPT read, ARI0 at LBA ");
     sys::print(aricode_rt::fmt_u64(ari0_lba, &mut buf));
     sys::print(b"\n");
+    if !migrate {
+        say(b"a slot or the ESP holds a system that reads only AriFS v1: ARI0 is not migrated");
+    }
     let launched = sup
         .register(
             "fsd",
             Kind::Fs {
                 block_service: service,
-                partition_lba: ari0_lba,
+                partition_lba: ari0_lba | if migrate { ARG_MIGRATE } else { 0 },
             },
             Probe::None,
             fs_ep,
@@ -577,7 +685,7 @@ fn start_storage_stack(
             sup,
             "blk_client",
             service,
-            ari0_lba + RAW_AREA_OFFSET,
+            RAW_AREA_LBA,
             b"block service ok",
             11,
         )?;
@@ -771,7 +879,17 @@ fn start_fsd(
         SYSTEM,
         rights::READ | rights::TRANSFER,
     )?);
-    let child = sys::process_spawn_with(SPAWNER, "fsd", partition_lba, sent.handles())?;
+    // A migration is asked for on fsd's first launch only: a relaunch
+    // (after a failed migration, or any exit) serves what the disk holds,
+    // and never migrates later than the decision taken at boot, when the
+    // updater may already have installed a system that reads only v1
+    // (audit of ADR 0072, L4 and L6).
+    let arg = if MIGRATE_ASKED.swap(true, core::sync::atomic::Ordering::Relaxed) {
+        partition_lba & !ARG_MIGRATE
+    } else {
+        partition_lba
+    };
+    let child = sys::process_spawn_with(SPAWNER, "fsd", arg, sent.handles())?;
     sent.take();
     Ok(child)
 }
@@ -808,14 +926,47 @@ enum Kind {
         net: Handle,
         sessions: Handle,
     },
+    /// The PS/2 input service (ADR 0075): its endpoint, the PS/2 stream and
+    /// `SYSTEM` (read) for its clock.
+    Ps2Input,
 }
 
-/// Input services that init hands out (compositor, broker, bridge).
+/// Input services that init hands out to the console bridge (and the
+/// desktop's compositor, which also gets the PS/2 one).
 const MAX_INPUTS: usize = 4;
 
+/// Input services the compositor gets: the console bridge's and the PS/2
+/// one, which never goes to the bridge (ADR 0075): its keys flow only while
+/// a process holds the screen, and the bridge would type them at the
+/// console the kernel keeps them from.
+const MAX_GUI_INPUTS: usize = MAX_INPUTS + 1;
+
+/// Launches `ps2_input` (ADR 0075) on `endpoint` (receive side) with a
+/// duplicate of the PS/2 stream to read and wait on (and move, which a
+/// spawn needs; the kernel lets only one process drain the stream).
+fn start_ps2_input(endpoint: Handle) -> Result<Handle, Error> {
+    let mut granted = Granted::new();
+    granted.push(sys::handle_duplicate(
+        endpoint,
+        rights::READ | rights::WRITE | rights::TRANSFER,
+    )?);
+    granted.push(sys::handle_duplicate(
+        PS2,
+        rights::READ | rights::WAIT | rights::TRANSFER,
+    )?);
+    granted.push(sys::handle_duplicate(
+        SYSTEM,
+        rights::READ | rights::TRANSFER,
+    )?);
+    let child = sys::process_spawn_with(SPAWNER, "ps2_input", 0, granted.handles())?;
+    granted.take();
+    Ok(child)
+}
+
 /// Launches the console bridge with the console input (`MANAGE`) and a
-/// duplicate (`WRITE`) of each input endpoint; `arg` = how many. If a
-/// duplicate fails, closes the ones already made.
+/// duplicate (`WRITE`) of each input endpoint; `arg` = how many, with the
+/// keyboard layout above them. If a duplicate fails, closes the ones
+/// already made.
 fn start_console_bridge(inputs: &[Handle]) -> Result<Handle, Error> {
     let mut handles = [Handle(0); MAX_INPUTS + 1];
     let mut made = 0;
@@ -826,10 +977,11 @@ fn start_console_bridge(inputs: &[Handle]) -> Result<Handle, Error> {
             handles[made] = sys::handle_duplicate(*ep, rights::WRITE | rights::TRANSFER)?;
             made += 1;
         }
+        let layout = KBD_LAYOUT.load(core::sync::atomic::Ordering::Relaxed);
         sys::process_spawn_with(
             SPAWNER,
             "console_bridge",
-            inputs.len() as u64,
+            inputs.len() as u64 | layout << 8,
             &handles[..made],
         )
     })();
@@ -1033,13 +1185,20 @@ impl Resident {
     }
 }
 
-const MAX_RESIDENTS: usize = 10;
+const MAX_RESIDENTS: usize = 12;
 
 /// Supervisor of resident services (stage 1 of the post-roadmap plan):
 /// states, generations, restart with increasing backoff and a budget, and
 /// queryable status (`status` v1) for the shell.
 /// `strict` on the command line (ADR 0028): nothing is restarted.
 static STRICT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// The keyboard layout of `kbd=` (`Layout::code`), for the console bridge:
+/// USB and virtio keyboards type at the console as the kernel's PS/2 one.
+static KBD_LAYOUT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// fsd was launched once: later launches never carry `ARG_MIGRATE`.
+static MIGRATE_ASKED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 fn strict() -> bool {
     STRICT.load(core::sync::atomic::Ordering::Relaxed)
@@ -1189,6 +1348,7 @@ impl Supervisor {
             }
             Kind::ConsoleBridge { inputs, count } => start_console_bridge(&inputs[..count]),
             Kind::Sshd { fs, net, sessions } => start_sshd(fs, net, sessions),
+            Kind::Ps2Input => start_ps2_input(r.endpoint),
         };
         let now = now_ms();
         let process = match spawned {
@@ -1595,10 +1755,11 @@ fn restart_storm(sup: &mut Supervisor, fs: &mut FsClient) -> Result<(), u64> {
     Ok(())
 }
 
-/// Offset of the raw area inside ARI0 that `blk_client` (`selftest` only)
-/// checks and writes: the test disk has it at LBA 4096 with ARI0 at 34,
-/// over virtio-blk or USB. The USB stick image has no raw-area pattern.
-const RAW_AREA_OFFSET: u64 = 4096 - 34;
+/// The raw area that `blk_client` (`selftest` only) checks and writes: the
+/// test disk has it at LBA 4096, over virtio-blk or USB, outside `ARI0`
+/// since that partition went last (ADR 0072). The USB stick image has no
+/// raw-area pattern.
+const RAW_AREA_LBA: u64 = 4096;
 
 /// Launches a client of a service with its endpoint (WRITE only) and a
 /// hardware capability for its DMA buffer.
@@ -1639,13 +1800,15 @@ fn run_block_client_supervised(
 /// Launches the shell with its own fsd session (WRITE), hardware for its
 /// buffer, the system object (READ|MANAGE), the console input, the PCI root
 /// read-only, the netd endpoint (WRITE) and the launch broker for `run`;
-/// `arg` = active services. Waits for it to exit.
+/// `arg` = active services. Waits for it to exit, ending the desktop
+/// session meanwhile if its launcher goes (ADR 0074).
 fn run_shell(
     net_service: Handle,
     services: u64,
     broker: &mut Broker,
     sup: &mut Supervisor,
     mut sessions: Option<&mut Sessions>,
+    desktop: &mut Option<Desktop>,
 ) -> Result<u64, Error> {
     let console_in = sys::handle_duplicate(CONSOLE_IN, rights::READ | rights::TRANSFER)?;
     let fs = broker.fs.as_ref().ok_or(Error::NotFound)?;
@@ -1662,10 +1825,34 @@ fn run_shell(
         }
         sup.poll();
         broker.serve_one(20, sup);
-        broker.poll_launches();
-        if let (Some(s), Some(fs)) = (sessions.as_deref_mut(), broker.fs.as_ref()) {
-            s.serve(fs, net_service, services, broker.endpoint);
+        broker.serve_apps();
+        broker.serve_settings();
+        // The session ends with its launcher or with its compositor (audit
+        // of phase B, M1): with the compositor gone and nothing done, the
+        // input services would have no reader. The compositor is looked at
+        // first, so the launches collected after it no longer ask it to
+        // end their windows.
+        let compositor_end = desktop
+            .as_ref()
+            .is_some_and(|d| !matches!(sys::process_wait(d.gui.process, 0), Err(Error::Timeout)));
+        if compositor_end {
+            broker.compositor = None;
         }
+        let launcher_end = broker.poll_launches();
+        let why = match (launcher_end, compositor_end) {
+            (Some(r), _) => Some(DesktopEnd::Launcher(r)),
+            (None, true) => Some(DesktopEnd::Compositor),
+            (None, false) => None,
+        };
+        if let Some(why) = why {
+            if let Some(d) = desktop.take() {
+                end_desktop(d, why, broker, sup);
+            }
+        }
+        if let (Some(s), Some(fs)) = (sessions.as_deref_mut(), broker.fs.as_ref()) {
+            let _ = s.serve(fs, net_service, services, broker.endpoint);
+        }
+        broker.serve_terminals(net_service, services);
     }
 }
 
@@ -1785,95 +1972,230 @@ fn spawn_shell(
     Ok(child)
 }
 
-/// Session shells for sshd (ADR 0025): requests arrive on `endpoint`;
-/// finished shells are reaped on every pass.
+/// Session shells for sshd (ADR 0025), or for the desktop's terminal (ADR
+/// 0074 phase C): requests arrive on `endpoint`; finished shells are
+/// reaped on every pass.
 struct Sessions {
     endpoint: Handle,
-    children: [Option<Handle>; MAX_SESSIONS],
+    children: [Option<Child>; MAX_SESSIONS],
+    /// The terminal's: interactive shells only, never sshd's `Exec`.
+    terminal: bool,
+    /// A request without its handles (three from sshd, four from a
+    /// terminal) was said once already.
+    said_malformed: bool,
 }
 
 const MAX_SESSIONS: usize = 4;
 
+/// Terminal shells whose programs `Broker::serve_terminals` stops, named
+/// by their launch endpoints.
+struct Shells {
+    /// The shell ended: its endpoint is closed after.
+    ended: [Option<Handle>; MAX_SESSIONS],
+    /// Its terminal went: the shell ends by itself once `run` returns.
+    orphaned: [Option<Handle>; MAX_SESSIONS],
+}
+
+/// A session shell init started.
+#[derive(Clone, Copy)]
+struct Child {
+    shell: Handle,
+    /// A terminal's shell: the receive side of an endpoint whose send side
+    /// only its terminal holds. Once it closes, the terminal is gone: what
+    /// the shell started is stopped, so a shell waiting in `run` returns,
+    /// and the shell ends by itself on its closed input, never halfway
+    /// through a command of its own (audit of the lifetime fix, H1).
+    terminal: Option<Handle>,
+    /// A terminal's shell: where it asks for launches (receive side), an
+    /// endpoint of its own, so what it started is known and stopped with
+    /// it.
+    launches: Option<Handle>,
+}
+
 impl Sessions {
-    fn serve(&mut self, fs: &FsClient, net: Handle, services: u64, broker: Handle) {
+    /// Reaps the shells that ended and serves at most one request. Returns
+    /// the launch endpoints of terminal shells whose programs must stop:
+    /// `ended` for shells gone (the endpoint is closed after), `orphaned`
+    /// for shells whose terminal went (audit of the terminal, M2).
+    fn serve(&mut self, fs: &FsClient, net: Handle, services: u64, broker: Handle) -> Shells {
         use aricode_proto::session::{self, Kind as SessionKind};
-        for c in self.children.iter_mut() {
-            if let Some(h) = *c {
-                if sys::process_wait(h, 0) != Err(Error::Timeout) {
-                    let _ = sys::handle_close(h);
-                    *c = None;
+        let mut out = Shells {
+            ended: [None; MAX_SESSIONS],
+            orphaned: [None; MAX_SESSIONS],
+        };
+        let mut probe = [0u8; 1];
+        for (i, c) in self.children.iter_mut().enumerate() {
+            let Some(child) = c.as_mut() else { continue };
+            if sys::process_wait(child.shell, 0) != Err(Error::Timeout) {
+                let _ = sys::handle_close(child.shell);
+                if let Some(t) = child.terminal {
+                    let _ = sys::handle_close(t);
+                }
+                out.ended[i] = child.launches;
+                *c = None;
+                continue;
+            }
+            // Its terminal is gone. No handle is taken from the probe (a
+            // buggy terminal sending some would fill init's table; audit
+            // of the lifetime fix, M1).
+            if let Some(t) = child.terminal {
+                if matches!(sys::ipc_receive(t, &mut probe, &mut [], 0), Err(e) if e.endpoint_gone())
+                {
+                    let _ = sys::handle_close(t);
+                    child.terminal = None;
+                    out.orphaned[i] = child.launches;
                 }
             }
         }
         let mut msg = [0u8; session::Request::LEN];
-        let mut handles = [Handle(0); 3];
+        let mut handles = [Handle(0); 4];
         let Ok((n, nh)) = sys::ipc_receive(self.endpoint, &mut msg, &mut handles, 0) else {
-            return;
+            return out;
         };
-        if nh < 3 {
+        // sshd sends three handles; a terminal a fourth, the side of the
+        // endpoint that tells init when it is gone.
+        let wanted = if self.terminal { 4 } else { 3 };
+        if nh != wanted {
             for h in &handles[..nh] {
                 let _ = sys::handle_close(*h);
             }
-            return;
+            if !core::mem::replace(&mut self.said_malformed, true) {
+                say(b"a session request came without its handles; dropped (said once)");
+            }
+            return out;
         }
-        let [reply_to, input, output] = handles;
+        let [reply_to, input, output, alive] = handles;
+        let alive = self.terminal.then_some(alive);
         let slot = self.children.iter().position(Option::is_none);
-        let spawned = match (session::Request::decode(&msg[..n]), slot) {
-            (Some(req), Some(slot)) => {
+        let request = session::Request::decode(&msg[..n])
+            .filter(|r| !self.terminal || r.kind == SessionKind::Shell);
+        // A terminal's shell launches on an endpoint of its own.
+        let launches = if self.terminal {
+            sys::endpoint_create_pair().ok()
+        } else {
+            None
+        };
+        let spawned = match (request, slot, self.terminal && launches.is_none()) {
+            (Some(req), Some(slot), false) => {
                 let quiet = if req.kind == SessionKind::Exec {
                     session::SHELL_QUIET
                 } else {
                     0
                 };
-                let arg = services | session::SHELL_SESSION | quiet;
+                let terminal = if self.terminal {
+                    session::SHELL_TERMINAL
+                } else {
+                    0
+                };
+                let arg = services | session::SHELL_SESSION | quiet | terminal;
+                let via = launches.map_or(broker, |(_, send)| send);
                 // `spawn_shell` closes `input` and `output` if it fails.
-                match spawn_shell(fs, net, broker, input, Some(output), arg) {
-                    Ok(child) => {
-                        self.children[slot] = Some(child);
+                let result = spawn_shell(fs, net, via, input, Some(output), arg);
+                // The shell got its own duplicate of the send side.
+                if let Some((_, send)) = launches {
+                    let _ = sys::handle_close(send);
+                }
+                match result {
+                    Ok(shell) => {
+                        self.children[slot] = Some(Child {
+                            shell,
+                            terminal: alive,
+                            launches: launches.map(|(receive, _)| receive),
+                        });
                         true
                     }
-                    Err(_) => false,
+                    Err(_) => {
+                        if let Some((receive, _)) = launches {
+                            let _ = sys::handle_close(receive);
+                        }
+                        false
+                    }
                 }
             }
             _ => {
                 let _ = sys::handle_close(input);
                 let _ = sys::handle_close(output);
+                if let Some((receive, send)) = launches {
+                    let _ = sys::handle_close(receive);
+                    let _ = sys::handle_close(send);
+                }
                 false
             }
         };
         if !spawned {
-            say(b"session shell refused (limit or invalid request)");
+            if let Some(a) = alive {
+                let _ = sys::handle_close(a);
+            }
+            say(if self.terminal {
+                b"terminal shell refused (limit or invalid request)"
+            } else {
+                b"session shell refused (limit or invalid request)"
+            });
         }
         let _ = sys::ipc_send(reply_to, &session::reply(spawned), &[], 0);
         let _ = sys::handle_close(reply_to);
+        out
     }
 }
 
 /// Capability broker (Phase 28): launches programs according to their
 /// manifest. An application receives, in this order, only what it asks for
-/// and is allowed: `SYSTEM` (read), a private directory in fsd, the network
+/// and is allowed: `SYSTEM` (read), a private directory in fsd, the owner's
+/// folder `home/` (`home`), the network
 /// endpoint, a compositor session, the block endpoint (trusted
-/// applications only), and finally `HARDWARE` if it needs buffers, bounded
-/// by the manifest's memory. The input services are never granted (ADR
-/// 0053).
+/// applications only), the main file namespace (`installer`), the launch
+/// endpoint (`launcher`, ADR 0074), the settings endpoint (`settings`), the
+/// terminal endpoint (`terminal`), and finally `HARDWARE` if it needs
+/// buffers, bounded by the manifest's memory. The input services are never
+/// granted (ADR 0053).
 struct Broker {
     endpoint: Handle,
+    /// Where `launch` holders ask (ADR 0074): an endpoint of its own, so a
+    /// request that arrives here is known to come from the launcher, and
+    /// only its narrower rule applies ([`Self::serve_apps`]).
+    apps: Handle,
     fs: Option<FsClient>,
     block: Option<Handle>,
     /// The network service's main endpoint, when a driver serves it.
     net: Option<Handle>,
     compositor: Option<Handle>,
     /// Launched programs that have not exited yet (ADR 0015): process and,
-    /// if someone waits for its exit, the endpoint to reply to.
-    running: [Option<Running>; MAX_RUNNING],
-    /// DMA staging buffer for packages installed in AriFS (ADR 0017):
-    /// handle and address, allocated the first time it is needed.
-    stage: Option<(Handle, u64)>,
+    /// if someone waits for its exit, the endpoint to reply to. The shell's
+    /// `run` and `spawn` take the first `MAX_RUNNING` slots, the desktop
+    /// session the rest (`Pool`).
+    running: [Option<Running>; MAX_RUNNING + DESKTOP_SLOTS],
+    /// The installed applications the launcher may offer, as last listed.
+    offered: Offered,
+    /// Where `terminal` holders ask for session shells (ADR 0074 phase C).
+    terminals: Sessions,
+    /// Where `settings` holders ask (ADR 0074 phase C).
+    settings: Handle,
+    /// DMA buffer of the package being launched (ADR 0017), the package's
+    /// size: freed once the launch ends, since the kernel copies the
+    /// program when it creates the process (ADR 0072, phase B).
+    stage: Option<Stage>,
 }
 
-/// Size of the staging buffer: the package limit every part of the system
-/// shares (incident 0026).
+/// The largest package the broker loads: the limit every part of the
+/// system shares (incident 0026).
 const STAGE_LEN: u64 = aricode_pkg::PACKAGE_MAX as u64;
+// The broker's buffer is one DMA buffer: the package limit must stay within
+// what the kernel gives one (audit of ADR 0072 phase B, L2).
+const _: () = assert!(STAGE_LEN <= sys::abi::DMA_MAX_LEN);
+
+/// A DMA buffer mapped in init, unmapped and released on drop.
+struct Stage {
+    dma: Handle,
+    virt: u64,
+    len: u64,
+}
+
+impl Drop for Stage {
+    fn drop(&mut self) {
+        let _ = sys::mmio_unmap(self.virt);
+        let _ = sys::handle_close(self.dma);
+    }
+}
 
 /// Where the launched program comes from.
 #[derive(Clone, Copy)]
@@ -1889,9 +2211,75 @@ enum Source {
     },
 }
 
-/// Programs the broker allows running at once; the next `run` or `spawn`
-/// gets `Limit`.
+/// Programs the shell may have running at once through the broker; the
+/// next `run` or `spawn` gets `Limit`.
 const MAX_RUNNING: usize = 4;
+
+/// Applications the desktop's launcher may have running at once, apart
+/// from the shell's (the owner, 2026-11-04, ADR 0074 phase C): with the
+/// launcher, seven of the compositor's eight sessions, so a graphical
+/// program started from the shell still finds one.
+const MAX_LAUNCHED: usize = 6;
+
+/// The desktop session's slots: the launcher and its applications.
+const DESKTOP_SLOTS: usize = 1 + MAX_LAUNCHED;
+
+/// Which slots a launch may take: neither the shell nor the desktop can
+/// leave the other without one.
+#[derive(Clone, Copy)]
+enum Pool {
+    /// The shell's `run` and `spawn`.
+    Shell,
+    /// The desktop session's launcher.
+    Launcher,
+    /// What the launcher starts.
+    Apps,
+}
+
+/// Installed applications the launcher may offer at most.
+const MAX_OFFERED: usize = 16;
+
+/// The installed applications the launcher may offer (ADR 0074 phase C):
+/// signed packages that verify, run on this system, open a window and ask
+/// for nothing an application may not have.
+struct Offered {
+    names: [[u8; aricode_proto::launch::MAX_NAME]; MAX_OFFERED],
+    lens: [u8; MAX_OFFERED],
+    count: usize,
+    /// When it was made (ms since boot), if it was.
+    made_ms: Option<u64>,
+}
+
+/// A list younger than this is answered again as it is: a launcher asking
+/// in a loop cannot keep init reading packages (audit of phase C, M1).
+const OFFERED_FRESH_MS: u64 = 5_000;
+
+impl Offered {
+    const fn new() -> Self {
+        Self {
+            names: [[0; aricode_proto::launch::MAX_NAME]; MAX_OFFERED],
+            lens: [0; MAX_OFFERED],
+            count: 0,
+            made_ms: None,
+        }
+    }
+
+    fn push(&mut self, name: &str) -> bool {
+        if self.count == MAX_OFFERED || name.len() > aricode_proto::launch::MAX_NAME {
+            return false;
+        }
+        self.names[self.count][..name.len()].copy_from_slice(name.as_bytes());
+        self.lens[self.count] = name.len() as u8;
+        self.count += 1;
+        true
+    }
+
+    fn get(&self, i: usize) -> Option<&str> {
+        (i < self.count)
+            .then(|| core::str::from_utf8(&self.names[i][..self.lens[i] as usize]).ok())
+            .flatten()
+    }
+}
 
 #[derive(Clone, Copy)]
 struct Running {
@@ -1899,6 +2287,14 @@ struct Running {
     reply_to: Option<Handle>,
     /// Its compositor session, ended when it exits (ADR 0052).
     window: Option<u32>,
+    /// The desktop session's launcher: its exit ends the session (ADR
+    /// 0074).
+    ends_session: bool,
+    /// Started by the launcher: stopped when the session ends.
+    from_launcher: bool,
+    /// Started by a desktop terminal's shell, named by that shell's launch
+    /// endpoint: stopped with it.
+    from_shell: Option<Handle>,
 }
 
 /// Immediate result of `launch`: an already decided reply, or a created
@@ -1941,13 +2337,74 @@ impl Broker {
     ) -> Result<Self, Error> {
         Ok(Self {
             endpoint: sys::endpoint_create()?,
+            apps: sys::endpoint_create()?,
             fs,
             block,
             net,
             compositor,
-            running: [None; MAX_RUNNING],
+            running: [None; MAX_RUNNING + DESKTOP_SLOTS],
+            offered: Offered::new(),
+            terminals: Sessions {
+                endpoint: sys::endpoint_create()?,
+                children: [None; MAX_SESSIONS],
+                terminal: true,
+                said_malformed: false,
+            },
+            settings: sys::endpoint_create()?,
             stage: None,
         })
+    }
+
+    /// A free slot of `pool`.
+    fn free_slot(&self, pool: Pool) -> Option<usize> {
+        let range = match pool {
+            Pool::Shell => 0..MAX_RUNNING,
+            Pool::Launcher => MAX_RUNNING..MAX_RUNNING + 1,
+            Pool::Apps => MAX_RUNNING + 1..MAX_RUNNING + DESKTOP_SLOTS,
+        };
+        range.into_iter().find(|&i| self.running[i].is_none())
+    }
+
+    /// Lists again the installed applications the launcher may offer:
+    /// `apps/NAME.aripkg` for each, never the launcher itself or a name an
+    /// initrd program has, and only those `offers` accepts. Says each one
+    /// left out and why, as a launch would.
+    fn refresh_offered(&mut self) {
+        let now = now_ms();
+        if self
+            .offered
+            .made_ms
+            .is_some_and(|t| now.saturating_sub(t) < OFFERED_FRESH_MS)
+        {
+            return;
+        }
+        self.offered = Offered::new();
+        self.offered.made_ms = Some(now);
+        let Some(fs) = self.fs.as_mut() else {
+            return;
+        };
+        let mut entry = [0u8; 32];
+        let mut i = 0;
+        while let Ok(Some((n, size))) = fs.list(i, &mut entry) {
+            i += 1;
+            let Some(name) = core::str::from_utf8(&entry[..n])
+                .ok()
+                .and_then(|e| e.strip_prefix("apps/"))
+                .and_then(|e| e.strip_suffix(aricode_pkg::EXTENSION))
+            else {
+                continue;
+            };
+            if name.is_empty() || Caps::TRUSTED_LAUNCH.contains(&name) || in_initrd(name) {
+                continue;
+            }
+            let mut copy = [0u8; 32];
+            copy[..name.len()].copy_from_slice(name.as_bytes());
+            let name = core::str::from_utf8(&copy[..name.len()]).unwrap_or("");
+            if offers(fs, name, size) && !self.offered.push(name) {
+                sys::print(b"AriInit: the launcher is offered the first 16 applications only\n");
+                break;
+            }
+        }
     }
 
     /// Installed package (`apps/NAME.aripkg`): copies it to the staging
@@ -1985,20 +2442,32 @@ impl Broker {
             sys::print(aricode_rt::fmt_u64(size, &mut b));
             sys::print(b" bytes; packages hold 1 to ");
             sys::print(aricode_rt::fmt_u64(STAGE_LEN, &mut b));
-            sys::print(b" (what AriFS installs)\n");
+            sys::print(b" (the system's package limit)\n");
             return Err(LaunchStatus::Failed);
         }
-        let virt = match self.stage {
-            Some((_, virt)) => virt,
-            None => {
-                let dma = sys::dma_alloc(HARDWARE, STAGE_LEN).map_err(|_| LaunchStatus::Failed)?;
-                let virt = sys::mmio_map(dma).map_err(|_| LaunchStatus::Failed)?;
-                self.stage = Some((dma, virt));
-                virt
+        let len = size.div_ceil(4096) * 4096;
+        let Ok(dma) = sys::dma_alloc(HARDWARE, len) else {
+            let mut b = [0u8; 20];
+            sys::print(b"AriInit: no memory for package ");
+            sys::print(pkg_path.as_bytes());
+            sys::print(b" (");
+            sys::print(aricode_rt::fmt_u64(len, &mut b));
+            sys::print(b" bytes of contiguous DMA)\n");
+            return Err(LaunchStatus::Failed);
+        };
+        let virt = match sys::mmio_map(dma) {
+            Ok(virt) => virt,
+            Err(_) => {
+                let _ = sys::handle_close(dma);
+                return Err(LaunchStatus::Failed);
             }
         };
-        // SAFETY: our own DMA buffer of STAGE_LEN bytes, mapped RW in init.
-        let stage = unsafe { core::slice::from_raw_parts_mut(virt as *mut u8, STAGE_LEN as usize) };
+        let fresh = Stage { dma, virt, len };
+        // SAFETY: our own DMA buffer of `len` bytes, mapped RW in init,
+        // alive while `self.stage` holds it.
+        let stage =
+            unsafe { core::slice::from_raw_parts_mut(fresh.virt as *mut u8, fresh.len as usize) };
+        self.stage = Some(fresh);
         let fd = fs.open(pkg_path).map_err(|_| LaunchStatus::NotFound)?;
         let total = size as usize;
         let mut done = 0usize;
@@ -2024,6 +2493,23 @@ impl Broker {
                 return Err(LaunchStatus::Denied);
             }
         };
+        // ADR 0074: a package for a newer application interface never runs
+        // here, whatever brought it (a rollback to an older system, a copy
+        // made by hand).
+        if !verified.manifest.runs_on(aricode_ab::APPS_LEVEL) {
+            let mut b = [0u8; 20];
+            sys::print(b"AriInit: denied, package ");
+            sys::print(pkg_path.as_bytes());
+            sys::print(b" needs application interface ");
+            sys::print(aricode_rt::fmt_u64(
+                verified.manifest.requires as u64,
+                &mut b,
+            ));
+            sys::print(b" and this system offers ");
+            sys::print(aricode_rt::fmt_u64(aricode_ab::APPS_LEVEL as u64, &mut b));
+            sys::print(b"\n");
+            return Err(LaunchStatus::Denied);
+        }
         let manifest = core::str::from_utf8(verified.app_manifest)
             .ok()
             .and_then(|t| Manifest::parse(t).ok())
@@ -2043,7 +2529,9 @@ impl Broker {
     }
 
     /// Replies for the programs that have exited and frees their slots.
-    fn poll_launches(&mut self) {
+    /// Returns how the desktop session's launcher ended, if it did.
+    fn poll_launches(&mut self) -> Option<LaunchReply> {
+        let mut session_end = None;
         for slot in self.running.iter_mut() {
             let Some(r) = *slot else { continue };
             let reply = match sys::process_wait(r.process, 0) {
@@ -2061,18 +2549,84 @@ impl Broker {
                 let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
                 let _ = sys::handle_close(reply_to);
             }
+            if r.ends_session {
+                session_end = Some(reply);
+            }
             *slot = None;
+        }
+        session_end
+    }
+
+    /// Stops the desktop session's launcher, every app it started and what
+    /// the terminals' shells ran (ADR 0074): their windows are gone with
+    /// the compositor, and the shells end on their closed input. Their
+    /// exits are collected by `poll_launches` as usual.
+    fn stop_desktop_apps(&mut self) {
+        for r in self.running.iter().flatten() {
+            if r.ends_session || r.from_launcher || r.from_shell.is_some() {
+                let _ = sys::process_kill(r.process);
+            }
+        }
+        // The terminals' shells are not killed: with their programs
+        // stopped above and their terminals gone, each reads its closed
+        // input and ends by itself, never halfway through a command of its
+        // own (audit of the lifetime fix, H1).
+    }
+
+    /// Starts the desktop session's launcher in the background with its
+    /// own manifest (ADR 0074); its exit ends the session
+    /// (`poll_launches`). `false`, said, when it does not start.
+    fn launch_session(&mut self) -> bool {
+        let Some(slot) = self.free_slot(Pool::Launcher) else {
+            say(b"the desktop's launcher did not start: running program limit reached");
+            return false;
+        };
+        match self.launch(session::LAUNCHER, 0, None, false) {
+            Launched::Reply(r) => {
+                let mut b = [0u8; 20];
+                sys::print(b"AriInit: the desktop's launcher did not start (launch status ");
+                sys::print(aricode_rt::fmt_u64(r.status as u64, &mut b));
+                sys::print(b")\n");
+                false
+            }
+            Launched::Process(process, window) => {
+                self.running[slot] = Some(Running {
+                    process,
+                    reply_to: None,
+                    window,
+                    ends_session: true,
+                    from_launcher: false,
+                    from_shell: None,
+                });
+                true
+            }
         }
     }
 
     /// Serves at most one request (waits up to `timeout_ms`).
     fn serve_one(&mut self, timeout_ms: u64, sup: &Supervisor) {
         let mut msg = [0u8; LaunchRequest::LEN];
-        let mut handles = [Handle(0); 2];
-        let Ok((n, nh)) = sys::ipc_receive(self.endpoint, &mut msg, &mut handles, timeout_ms)
+        let mut handles = [Handle(0); sys::abi::IPC_MAX_HANDLES];
+        // The main endpoint, and each terminal shell's own.
+        let mut eps = [self.endpoint; 1 + MAX_SESSIONS];
+        let mut n_eps = 1;
+        for child in self.terminals.children.iter().flatten() {
+            if let Some(l) = child.launches {
+                eps[n_eps] = l;
+                n_eps += 1;
+            }
+        }
+        let Ok((which, n, nh)) =
+            sys::ipc_receive_any(&eps[..n_eps], &mut msg, &mut handles, timeout_ms)
         else {
             return;
         };
+        let from_shell = (which > 0).then_some(eps[which]);
+        // A reply endpoint and, for a launch with a console, the console.
+        for h in handles.iter().take(nh).skip(2) {
+            let _ = sys::handle_close(*h);
+        }
+        let nh = nh.min(2);
         if nh == 0 {
             return;
         }
@@ -2102,18 +2656,22 @@ impl Broker {
             return refuse(LaunchStatus::Invalid);
         };
         // A console comes only with the flag that announces it, and never
-        // for a detached program, which may outlive the session.
-        if req.has_console() != console.is_some() || (req.has_console() && req.is_detached()) {
+        // for a detached program, which may outlive the session. A list is
+        // the launcher's, and unknown flags are nobody's.
+        if req.has_console() != console.is_some()
+            || (req.has_console() && req.is_detached())
+            || req.flags & !(LaunchRequest::DETACH | LaunchRequest::CONSOLE) != 0
+        {
             return refuse(LaunchStatus::Invalid);
         }
         // The slot is reserved before launching: no slot, no process.
-        let Some(slot) = self.running.iter().position(Option::is_none) else {
+        let Some(slot) = self.free_slot(Pool::Shell) else {
             sys::print(b"AriInit: ");
             sys::print(req.name_str().as_bytes());
             sys::print(b": running program limit reached\n");
             return refuse(LaunchStatus::Limit);
         };
-        match self.launch(req.name_str(), req.arg, console) {
+        match self.launch(req.name_str(), req.arg, console, false) {
             Launched::Reply(reply) => {
                 let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
                 let _ = sys::handle_close(reply_to);
@@ -2126,6 +2684,9 @@ impl Broker {
                     process,
                     reply_to: None,
                     window,
+                    ends_session: false,
+                    from_launcher: false,
+                    from_shell,
                 });
             }
             Launched::Process(process, window) => {
@@ -2133,6 +2694,196 @@ impl Broker {
                     process,
                     reply_to: Some(reply_to),
                     window,
+                    ends_session: false,
+                    from_launcher: false,
+                    from_shell,
+                });
+            }
+        }
+    }
+
+    /// Serves the terminals' session shells and stops what an ended
+    /// terminal shell started (audit of the terminal, M2): its programs
+    /// would otherwise run on with nobody to read them, holding a slot.
+    fn serve_terminals(&mut self, net: Handle, services: u64) {
+        let Some(fs) = self.fs.as_ref() else {
+            return;
+        };
+        let shells = self.terminals.serve(fs, net, services, self.endpoint);
+        for (tag, close) in shells
+            .ended
+            .iter()
+            .map(|t| (t, true))
+            .chain(shells.orphaned.iter().map(|t| (t, false)))
+        {
+            let Some(tag) = *tag else { continue };
+            self.stop_launches_of(tag);
+            if close {
+                let _ = sys::handle_close(tag);
+            }
+        }
+    }
+
+    /// Stops what the terminal shell of launch endpoint `tag` started.
+    fn stop_launches_of(&mut self, tag: Handle) {
+        for r in self.running.iter_mut().flatten() {
+            if r.from_shell == Some(tag) {
+                let _ = sys::process_kill(r.process);
+                // Stopped once; the handle's number may be reused.
+                r.from_shell = None;
+            }
+        }
+    }
+
+    /// Serves at most one request from a `settings` holder, without waiting
+    /// (ADR 0074 phase C, the owner's choice): the text of what it asks
+    /// for, and the one change it may make, the session. It never reaches
+    /// a file itself; a change is said on the console and logged in the
+    /// install history, as from the shell.
+    fn serve_settings(&mut self) {
+        use aricode_proto::settings::{Item, Op, Reply, Request, Status};
+        let mut msg = [0u8; Request::LEN];
+        let mut handles = [Handle(0); 2];
+        let Ok((n, nh)) = sys::ipc_receive(self.settings, &mut msg, &mut handles, 0) else {
+            return;
+        };
+        if nh == 0 {
+            return;
+        }
+        let reply_to = handles[0];
+        let refuse = |why: &[u8]| {
+            // Refusals are said, as the launcher's are (audit of the
+            // settings, L1).
+            sys::print(b"AriInit: refused, the settings sent ");
+            sys::print(why);
+            sys::print(b"\n");
+            let _ = sys::ipc_send(reply_to, &Reply::new(Status::Invalid, b"").encode(), &[], 0);
+            let _ = sys::handle_close(reply_to);
+        };
+        if nh == 2 {
+            let _ = sys::handle_close(handles[1]);
+            return refuse(b"a handle with its request");
+        }
+        let Some(req) = Request::decode(&msg[..n]) else {
+            return refuse(b"something other than a settings request");
+        };
+        if req.op == Op::SetSession && (req.item != Item::Session || req.value > 1) {
+            return refuse(b"a change other than the session's");
+        }
+        let mut text = alloc::string::String::new();
+        let net = self.net;
+        let status = match self.fs.as_mut() {
+            None => {
+                text.push_str("no file service");
+                Status::Failed
+            }
+            Some(fs) => match (req.op, req.item) {
+                (Op::Get, Item::Session) => session_text(fs, &mut text),
+                (Op::SetSession, _) if req.value == 0 => set_session(fs, Session::Shell, &mut text),
+                (Op::SetSession, _) => set_session(fs, Session::Desktop, &mut text),
+                (Op::Get, Item::UpdateSource) => sources_text(fs, &mut text),
+                (Op::Get, Item::Address) => match net {
+                    Some(net) => address_text(net, &mut text),
+                    None => {
+                        text.push_str("no network service");
+                        Status::Ok
+                    }
+                },
+            },
+        };
+        let reply = Reply::new(status, text.as_bytes());
+        let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
+        let _ = sys::handle_close(reply_to);
+    }
+
+    /// Serves at most one request from a `launch` holder, without waiting
+    /// (ADR 0074). The launcher starts installed applications in the
+    /// background, each with its own manifest, and nothing more: no initrd
+    /// program (the installer, the updater, the shell), not itself, no
+    /// console and no wait for an exit; service status is not served here.
+    fn serve_apps(&mut self) {
+        let mut msg = [0u8; LaunchRequest::LEN];
+        let mut handles = [Handle(0); 2];
+        let Ok((n, nh)) = sys::ipc_receive(self.apps, &mut msg, &mut handles, 0) else {
+            return;
+        };
+        if nh == 0 {
+            return;
+        }
+        let reply_to = handles[0];
+        if nh == 2 {
+            let _ = sys::handle_close(handles[1]);
+        }
+        let refuse = |status| reply(reply_to, LaunchReply::status(status));
+        let Some(req) = LaunchRequest::decode(&msg[..n]) else {
+            sys::print(b"AriInit: refused, the launcher sent something other than a launch\n");
+            return refuse(LaunchStatus::Invalid);
+        };
+        if req.is_list() {
+            if nh == 2 || req.flags != LaunchRequest::LIST {
+                let _ = sys::ipc_send(
+                    reply_to,
+                    &Entry::status(LaunchStatus::Invalid).encode(),
+                    &[],
+                    0,
+                );
+                let _ = sys::handle_close(reply_to);
+                return;
+            }
+            // The list is made again at its start (at most every 5 s), so
+            // a launcher that reads it from 0 sees what is installed now.
+            if req.arg == 0 {
+                self.refresh_offered();
+            }
+            let entry = usize::try_from(req.arg)
+                .ok()
+                .and_then(|i| self.offered.get(i))
+                .and_then(Entry::named)
+                .unwrap_or(Entry::status(LaunchStatus::NotFound));
+            let _ = sys::ipc_send(reply_to, &entry.encode(), &[], 0);
+            let _ = sys::handle_close(reply_to);
+            return;
+        }
+        let name = req.name_str();
+        if !req.is_detached() || req.has_console() || nh == 2 || req.flags != LaunchRequest::DETACH
+        {
+            sys::print(b"AriInit: refused, the launcher asked to start ");
+            sys::print(name.as_bytes());
+            sys::print(b" other than in the background without a console\n");
+            return refuse(LaunchStatus::Invalid);
+        }
+        if Caps::TRUSTED_LAUNCH.contains(&name) {
+            sys::print(b"AriInit: refused, the launcher asked to start itself\n");
+            return refuse(LaunchStatus::Denied);
+        }
+        if in_initrd(name) {
+            sys::print(
+                b"AriInit: refused, the launcher may start installed applications only, and ",
+            );
+            sys::print(name.as_bytes());
+            sys::print(b" is a system program\n");
+            return refuse(LaunchStatus::Denied);
+        }
+        let Some(slot) = self.free_slot(Pool::Apps) else {
+            sys::print(b"AriInit: ");
+            sys::print(name.as_bytes());
+            sys::print(b": the desktop's 6 application slots are full\n");
+            return refuse(LaunchStatus::Limit);
+        };
+        sys::print(b"AriInit: the launcher asks to start ");
+        sys::print(name.as_bytes());
+        sys::print(b"\n");
+        match self.launch(name, req.arg, None, true) {
+            Launched::Reply(r) => reply(reply_to, r),
+            Launched::Process(process, window) => {
+                reply(reply_to, LaunchReply::status(LaunchStatus::Started));
+                self.running[slot] = Some(Running {
+                    process,
+                    reply_to: None,
+                    window,
+                    ends_session: false,
+                    from_launcher: true,
+                    from_shell: None,
                 });
             }
         }
@@ -2143,7 +2894,29 @@ impl Broker {
     /// ADR 0017), applies the policy and launches the program; its exit is
     /// collected by `poll_launches`. `console`, if any, becomes the
     /// program's console (ADR 0047) and is closed if the launch fails.
-    fn launch(&mut self, name: &str, arg: u64, console: Option<Handle>) -> Launched {
+    /// [`Self::launch_staged`], then the package's buffer goes, whatever the
+    /// outcome.
+    /// Launches `name`; `for_launcher` when the desktop's launcher asked,
+    /// which may start only applications that open a window.
+    fn launch(
+        &mut self,
+        name: &str,
+        arg: u64,
+        console: Option<Handle>,
+        for_launcher: bool,
+    ) -> Launched {
+        let launched = self.launch_staged(name, arg, console, for_launcher);
+        self.stage = None;
+        launched
+    }
+
+    fn launch_staged(
+        &mut self,
+        name: &str,
+        arg: u64,
+        console: Option<Handle>,
+        for_launcher: bool,
+    ) -> Launched {
         // The prepared duplicates close themselves if any error path returns
         // before transferring them (`Granted::take` hands them to the
         // kernel). Previously, a denial after granting SYSTEM leaked one table
@@ -2158,13 +2931,7 @@ impl Broker {
         let Some(path) = join(name, ".manifest", &mut path) else {
             return Launched::Reply(LaunchReply::status(LaunchStatus::Invalid));
         };
-        // One byte is enough to know whether the program is in the initrd:
-        // TooBig if it exists, NotFound otherwise.
-        let mut probe = [0u8; 1];
-        let in_initrd = !matches!(
-            sys::initrd_read(SPAWNER, name, &mut probe),
-            Err(Error::NotFound)
-        );
+        let in_initrd = in_initrd(name);
         let mut text = [0u8; 1024];
         let (manifest, source) = if in_initrd {
             let manifest = match sys::initrd_read(SPAWNER, path, &mut text) {
@@ -2241,6 +3008,14 @@ impl Broker {
             sys::print(b"]");
         }
         sys::print(b"\n");
+        if for_launcher && !caps.contains(Caps::WINDOW) {
+            sys::print(
+                b"AriInit: denied, the launcher starts applications with a window only, and ",
+            );
+            sys::print(name.as_bytes());
+            sys::print(b" opens none\n");
+            return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
+        }
         if !denied.is_empty() {
             sys::print(b"AriInit: denied, requests system capabilities:");
             for c in denied.names() {
@@ -2249,6 +3024,24 @@ impl Broker {
             }
             sys::print(b"\n");
             return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
+        }
+        // `launch` and `terminal` go only to an installed package, which
+        // verified against the release key: never to an initrd program of
+        // that name (ADR 0074).
+        for (cap, what) in [
+            (Caps::LAUNCH, &b"launch"[..]),
+            (Caps::TERMINAL, b"terminal"),
+            (Caps::HOME, b"home"),
+            (Caps::SETTINGS, b"settings"),
+        ] {
+            if caps.contains(cap) && !matches!(source, Source::Installed { .. }) {
+                sys::print(b"AriInit: denied, ");
+                sys::print(what);
+                sys::print(b" is granted only to an installed, signed ");
+                sys::print(name.as_bytes());
+                sys::print(b"\n");
+                return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
+            }
         }
         let mut needs_hw = false;
         if caps.contains(Caps::SYSTEM) {
@@ -2261,7 +3054,24 @@ impl Broker {
             let Some(fs) = &self.fs else {
                 return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
             };
+            // Its private directory would be the owner's folder.
+            if name == Caps::HOME_DIR {
+                sys::print(b"AriInit: denied, no application named home gets a private directory: home/ is the owner's folder\n");
+                return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
+            }
             match fs.bind(name) {
+                Ok(h) => granted.push(h),
+                Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
+            }
+            needs_hw = true;
+        }
+        // The owner's folder (ADR 0074 phase C): a directory session on
+        // `home/`, as a private directory is on the application's own.
+        if caps.contains(Caps::HOME) {
+            let Some(fs) = &self.fs else {
+                return Launched::Reply(LaunchReply::status(LaunchStatus::Denied));
+            };
+            match fs.bind(Caps::HOME_DIR) {
                 Ok(h) => granted.push(h),
                 Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
             }
@@ -2344,6 +3154,25 @@ impl Broker {
             }
             needs_hw = true;
         }
+        // Send only: the launcher asks, the broker decides (`serve_apps`).
+        if caps.contains(Caps::LAUNCH) {
+            match sys::handle_duplicate(self.apps, rights::WRITE | rights::TRANSFER) {
+                Ok(h) => granted.push(h),
+                Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
+            }
+        }
+        if caps.contains(Caps::SETTINGS) {
+            match sys::handle_duplicate(self.settings, rights::WRITE | rights::TRANSFER) {
+                Ok(h) => granted.push(h),
+                Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
+            }
+        }
+        if caps.contains(Caps::TERMINAL) {
+            match sys::handle_duplicate(self.terminals.endpoint, rights::WRITE | rights::TRANSFER) {
+                Ok(h) => granted.push(h),
+                Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
+            }
+        }
         if needs_hw {
             match sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER) {
                 Ok(h) => granted.push(h),
@@ -2373,10 +3202,12 @@ impl Broker {
                 elf_len,
                 ..
             } => {
-                let (dma, _) = self.stage.expect("staging buffer allocated");
+                let Some(stage) = self.stage.as_ref() else {
+                    return Launched::Reply(LaunchReply::status(LaunchStatus::Failed));
+                };
                 sys::process_spawn_from(
                     SPAWNER,
-                    dma,
+                    stage.dma,
                     elf_offset,
                     elf_len,
                     name,
@@ -2450,6 +3281,252 @@ impl Drop for Granted {
     }
 }
 
+/// Whether `name` is an initrd program. One byte is enough to know: TooBig
+/// if it exists, NotFound otherwise.
+fn in_initrd(name: &str) -> bool {
+    let mut probe = [0u8; 1];
+    !matches!(
+        sys::initrd_read(SPAWNER, name, &mut probe),
+        Err(Error::NotFound)
+    )
+}
+
+/// What the machine boots into, as the shell's `session` says it.
+fn session_text(
+    fs: &mut FsClient,
+    text: &mut alloc::string::String,
+) -> aricode_proto::settings::Status {
+    use aricode_proto::settings::Status;
+    let mut buf = [0u8; 256];
+    match read_small(fs, session::FILE, &mut buf) {
+        Err(()) => {
+            text.push_str("the session file cannot be read");
+            return Status::Failed;
+        }
+        Ok(None) => text.push_str("shell (the text console)"),
+        Ok(Some(n)) => match core::str::from_utf8(&buf[..n])
+            .ok()
+            .and_then(Session::parse)
+        {
+            Some(Session::Shell) => text.push_str("shell (the text console)"),
+            Some(Session::Desktop) => {
+                text.push_str("desktop");
+                text.push_str(session::desktop_readiness(&mut FsFiles(fs)).note());
+            }
+            None => text.push_str("the session file is damaged: the text console"),
+        },
+    }
+    Status::Ok
+}
+
+/// Chooses the session from the next boot for the desktop's settings,
+/// said and logged as the shell's `session` does.
+fn set_session(
+    fs: &mut FsClient,
+    chosen: Session,
+    text: &mut alloc::string::String,
+) -> aricode_proto::settings::Status {
+    use aricode_proto::settings::Status;
+    // The session it already is changes nothing and logs nothing: the
+    // install history is not filled by idle clicks (audit of the settings,
+    // M2).
+    let mut buf = [0u8; 256];
+    let current = match read_small(fs, session::FILE, &mut buf) {
+        Ok(Some(n)) => core::str::from_utf8(&buf[..n])
+            .ok()
+            .and_then(Session::parse),
+        Ok(None) => Some(Session::Shell),
+        Err(()) => None,
+    };
+    if current == Some(chosen) {
+        text.push_str(match chosen {
+            Session::Shell => "already the text console",
+            Session::Desktop => "already the desktop",
+        });
+        if chosen == Session::Desktop {
+            text.push_str(session::desktop_readiness(&mut FsFiles(fs)).note());
+        }
+        return Status::Ok;
+    }
+    if update_index::client::save(fs, session::FILE, chosen.to_text().as_bytes()).is_err() {
+        text.push_str("the session file cannot be saved");
+        return Status::Failed;
+    }
+    let line = alloc::format!("session: {} (from the desktop's settings)", chosen.name());
+    // As the shell does (audit of the settings, L2).
+    match update_index::client::log_history(fs, &line) {
+        Ok(()) => {}
+        Err(update_index::client::HistoryError::Read) => {
+            say(b"the desktop's settings changed the session; the install history cannot be read: not rewritten");
+            let _ = sys::event_record(2, "init-history-read");
+        }
+        Err(update_index::client::HistoryError::Write) => {
+            say(b"the desktop's settings changed the session; the install history cannot be written");
+        }
+    }
+    sys::print(b"AriInit: the desktop's settings chose session = ");
+    sys::print(chosen.name().as_bytes());
+    sys::print(b"\n");
+    match chosen {
+        Session::Shell => text.push_str("the text console from the next boot"),
+        Session::Desktop => {
+            text.push_str("the desktop from the next boot");
+            text.push_str(session::desktop_readiness(&mut FsFiles(fs)).note());
+        }
+    }
+    Status::Ok
+}
+
+/// The update sources, as the shell's `update sources` lists them: the
+/// same reader and limit, a source list not yet migrated from the old
+/// `update_url`, and the lines refused (audit of the settings, L5).
+fn sources_text(
+    fs: &mut FsClient,
+    text: &mut alloc::string::String,
+) -> aricode_proto::settings::Status {
+    use aricode_proto::settings::Status;
+    use update_index::files::read_text;
+    let path = update_index::main_path(update_index::SOURCES_FILE);
+    let list = match read_text(&mut FsFiles(fs), &path, 2048) {
+        Err(_) => {
+            text.push_str("the source list cannot be read");
+            return Status::Failed;
+        }
+        Ok(list) => list,
+    };
+    let Some(list) = list else {
+        let legacy = update_index::main_path(update_index::LEGACY_URL_FILE);
+        match read_text(&mut FsFiles(fs), &legacy, 2048) {
+            Ok(Some(url)) => {
+                text.push_str(url.trim());
+                text.push_str(" (update_url, migrated by the next update)");
+            }
+            _ => text.push_str("none yet (update add URL in the shell)"),
+        }
+        return Status::Ok;
+    };
+    let (sources, refused) = update_index::Sources::parse(&list);
+    if sources.is_empty() {
+        text.push_str("none yet (update add URL in the shell)");
+    }
+    for (i, source) in sources.entries().enumerate() {
+        if i > 0 {
+            text.push_str(", ");
+        }
+        text.push_str(&source.url);
+        if source.channel == update_index::Channel::Dev {
+            text.push_str(" (dev)");
+        }
+    }
+    if refused > 0 {
+        text.push_str(&alloc::format!(" ({refused} line(s) refused)"));
+    }
+    Status::Ok
+}
+
+/// The network address, or why there is none yet.
+fn address_text(net: Handle, text: &mut alloc::string::String) -> aricode_proto::settings::Status {
+    use aricode_proto::net::{Info, Op, Reply, Request, Status as NetStatus};
+    let mut msg = [0u8; Reply::LEN];
+    let reply = sys::rpc::call(
+        net,
+        &Request::new(Op::Info).encode(),
+        &[],
+        NET_CALL_MS,
+        NET_CALL_MS,
+        &mut msg,
+    )
+    .ok()
+    .and_then(|n| Reply::decode(&msg[..n]));
+    match reply {
+        Some(r) if r.status == NetStatus::Ok => {
+            for (i, octet) in Info::decode(&r.data).address.iter().enumerate() {
+                if i > 0 {
+                    text.push('.');
+                }
+                text.push_str(&alloc::format!("{octet}"));
+            }
+        }
+        Some(r) if r.status == NetStatus::NoRoute => text.push_str("none yet (no DHCP answer)"),
+        _ => text.push_str("the network service does not answer"),
+    }
+    aricode_proto::settings::Status::Ok
+}
+
+/// Whether the launcher may offer the installed package `apps/NAME.aripkg`
+/// of `size` bytes: its signed manifest and its application manifest verify
+/// (`inspect_streaming`: a few KiB per package; the program is not hashed,
+/// the launch verifies the whole package), it runs on this system, is
+/// `name` in both manifests, opens a window and asks for nothing an
+/// application may not have. Says why when it does not.
+fn offers(fs: &mut FsClient, name: &str, size: u64) -> bool {
+    let left_out = |why: &[u8]| {
+        sys::print(b"AriInit: the launcher is not offered ");
+        sys::print(name.as_bytes());
+        sys::print(b": ");
+        sys::print(why);
+        sys::print(b"\n");
+        false
+    };
+    let mut path = [0u8; 48];
+    let mut full = [0u8; 48];
+    let Some(path) =
+        join("apps/", name, &mut path).and_then(|p| join(p, aricode_pkg::EXTENSION, &mut full))
+    else {
+        return false;
+    };
+    if size == 0 || size > STAGE_LEN {
+        return left_out(b"its package size is out of range");
+    }
+    let Ok(fd) = fs.open(path) else {
+        return left_out(b"its package cannot be opened");
+    };
+    let mut read = |offset: usize, buf: &mut [u8]| -> Result<(), ()> {
+        let mut done = 0;
+        while done < buf.len() {
+            let want = (buf.len() - done).min(4096);
+            match fs.read(fd, (offset + done) as u32, &mut buf[done..done + want]) {
+                Ok(n) if n > 0 => done += n,
+                _ => return Err(()),
+            }
+        }
+        Ok(())
+    };
+    let pubkey = aricode_crypto::trust::public_key();
+    let mut text = [0u8; 1024];
+    let verdict = match aricode_pkg::inspect_streaming(size as usize, &mut read, &pubkey, &mut text)
+    {
+        Err(_) => Err(&b"it fails verification (signature or manifest hash)"[..]),
+        Ok((m, _)) if !m.runs_on(aricode_ab::APPS_LEVEL) => {
+            Err(&b"it needs a newer application interface"[..])
+        }
+        Ok((m, _)) if m.name_str() != name => Err(&b"its package is named otherwise"[..]),
+        Ok((_, len)) => match core::str::from_utf8(&text[..len])
+            .ok()
+            .and_then(|t| Manifest::parse(t).ok())
+        {
+            None => Err(&b"its manifest cannot be read"[..]),
+            Some(m) if m.name_str() != name => Err(&b"its manifest is named otherwise"[..]),
+            Some(m) if !m.caps.contains(Caps::WINDOW) => Err(&b"it opens no window"[..]),
+            Some(m) if !m.caps.difference(Caps::allowed_for(name)).is_empty() => {
+                Err(&b"it asks for system capabilities"[..])
+            }
+            Some(_) => Ok(()),
+        },
+    };
+    let _ = fs.close(fd);
+    match verdict {
+        Ok(()) => true,
+        Err(why) => left_out(why),
+    }
+}
+
+/// Sends a launch reply and gives up the reply endpoint.
+fn reply(reply_to: Handle, reply: LaunchReply) {
+    let _ = sys::ipc_send(reply_to, &reply.encode(), &[], 0);
+    let _ = sys::handle_close(reply_to);
+}
+
 /// `a` + `b` into `buf`.
 fn join<'a>(a: &str, b: &str, buf: &'a mut [u8; 48]) -> Option<&'a str> {
     let total = a.len() + b.len();
@@ -2462,84 +3539,231 @@ fn join<'a>(a: &str, b: &str, buf: &'a mut [u8; 48]) -> Option<&'a str> {
 }
 
 /// Launches the compositor (own endpoint, framebuffer, SYSTEM, hardware for
-/// its back buffer and the input services) and two graphical applications
-/// sharing the screen; waits for the applications to exit.
-fn run_gui(inputs: &[Handle]) -> Result<Handle, u64> {
-    let service = sys::endpoint_create().map_err(|_| 1u64)?;
-    let mut handles = [Handle(0); 8];
-    handles[0] = sys::handle_duplicate(service, rights::READ | rights::WRITE | rights::TRANSFER)
-        .map_err(|_| 2u64)?;
-    handles[1] =
-        sys::handle_duplicate(FRAMEBUFFER, rights::READ | rights::WRITE | rights::TRANSFER)
-            .map_err(|_| 3u64)?;
-    handles[2] =
-        sys::handle_duplicate(SYSTEM, rights::READ | rights::TRANSFER).map_err(|_| 4u64)?;
-    handles[3] =
-        sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER).map_err(|_| 5u64)?;
-    let mut n = 4;
-    for ep in inputs.iter().take(4) {
-        handles[n] =
-            sys::handle_duplicate(*ep, rights::WRITE | rights::TRANSFER).map_err(|_| 6u64)?;
-        n += 1;
-    }
-    let _compositor =
-        sys::process_spawn_with(SPAWNER, "compositor", inputs.len() as u64, &handles[..n])
-            .map_err(|_| 7u64)?;
-    let mut apps = [None; 2];
-    let mut failed = None;
-    for (i, app) in apps.iter_mut().enumerate() {
-        match spawn_gui_app(service, i) {
-            Ok(launched) => *app = Some(launched),
-            Err(code) => {
-                failed = Some(code);
-                break;
-            }
+/// its back buffer and the input services) and returns its endpoint. The
+/// applications get their sessions from the broker (ADR 0052); the
+/// graphical demos are a test package since ADR 0074.
+fn run_gui(inputs: &[Handle]) -> Result<Gui, u64> {
+    // The compositor gets the receive side and init keeps only the send
+    // side (ADR 0030): once the compositor is gone, init's requests
+    // (`window::attach`/`detach`) answer `PeerClosed` at once instead of
+    // waiting on a queue nobody reads (found with the desktop session's
+    // Ctrl+Alt+Backspace, ADR 0074 phase B).
+    let (receive, service) = sys::endpoint_create_pair().map_err(|_| 1u64)?;
+    let mut handles = [Handle(0); 4 + MAX_GUI_INPUTS];
+    handles[0] = receive;
+    let mut made = 1;
+    let spawned = (|| {
+        let mut grant = |h: Result<Handle, Error>, code: u64| -> Result<(), u64> {
+            handles[made] = h.map_err(|_| code)?;
+            made += 1;
+            Ok(())
+        };
+        grant(
+            sys::handle_duplicate(FRAMEBUFFER, rights::READ | rights::WRITE | rights::TRANSFER),
+            3,
+        )?;
+        grant(
+            sys::handle_duplicate(SYSTEM, rights::READ | rights::TRANSFER),
+            4,
+        )?;
+        grant(
+            sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER),
+            5,
+        )?;
+        for ep in inputs.iter().take(MAX_GUI_INPUTS) {
+            grant(
+                sys::handle_duplicate(*ep, rights::WRITE | rights::TRANSFER),
+                6,
+            )?;
         }
-    }
-    // Every application launched is waited for and its session ended, even
-    // when a later one failed to start.
-    for (app, session) in apps.into_iter().flatten() {
-        let code = sys::process_wait(app, TIMEOUT_INFINITE);
-        let _ = sys::handle_close(app);
-        let _ = sys::window::detach(service, session);
-        failed = failed.or(match code {
-            Ok(0) => None,
-            Ok(code) => Some(100 + code),
-            Err(_) => Some(10),
-        });
-    }
-    match failed {
-        Some(code) => Err(code),
-        None => Ok(service),
+        let count = inputs.len().min(MAX_GUI_INPUTS) as u64;
+        sys::process_spawn_with(SPAWNER, "compositor", count, &handles[..made]).map_err(|_| 7u64)
+    })();
+    match spawned {
+        Ok(process) => Ok(Gui {
+            endpoint: service,
+            process,
+        }),
+        // The kernel takes the handles only when it creates the process.
+        Err(code) => {
+            for h in &handles[..made] {
+                let _ = sys::handle_close(*h);
+            }
+            let _ = sys::handle_close(service);
+            Err(code)
+        }
     }
 }
 
-/// Starts graphical demo `i` with a compositor session of its own (ADR
-/// 0052, send side only) and `HARDWARE`; returns it and the session's id.
-fn spawn_gui_app(service: Handle, i: usize) -> Result<(Handle, u32), u64> {
-    let (session, id) = sys::window::attach(service).map_err(|_| 8u64)?;
-    let narrowed = sys::handle_duplicate(session, rights::WRITE | rights::TRANSFER);
-    let _ = sys::handle_close(session);
-    let hw = sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER);
-    match (narrowed, hw) {
-        (Ok(ep), Ok(hw)) => match sys::process_spawn_with(SPAWNER, "gui_demo", i as u64, &[ep, hw])
-        {
-            Ok(app) => Ok((app, id)),
-            // The kernel takes the handles only when it creates the process.
-            Err(_) => {
-                let _ = sys::handle_close(ep);
-                let _ = sys::handle_close(hw);
-                let _ = sys::window::detach(service, id);
-                Err(9)
-            }
-        },
-        (ep, hw) => {
-            for h in [ep, hw].into_iter().flatten() {
-                let _ = sys::handle_close(h);
-            }
-            let _ = sys::window::detach(service, id);
-            Err(8)
+/// The compositor init started: its service endpoint and its process.
+struct Gui {
+    endpoint: Handle,
+    process: Handle,
+}
+
+/// The desktop session while it runs (ADR 0074): the compositor, and the
+/// input services it took, which go back to the console bridge when the
+/// session ends.
+struct Desktop {
+    gui: Gui,
+    inputs: [Handle; MAX_INPUTS],
+    count: usize,
+}
+
+/// Whether to boot into the desktop session (ADR 0074): `session` asks for
+/// it, the machine follows the `desktop` profile, its launcher is
+/// installed, and there are a display and a keyboard the compositor can
+/// read. Says why when the file asks for the desktop and
+/// it cannot start; never boots into a desktop that is not there.
+fn desktop_wanted(fs: &mut FsClient, inputs: &[Handle]) -> bool {
+    let mut text = [0u8; 256];
+    let chosen = match read_small(fs, session::FILE, &mut text) {
+        Ok(None) => return false,
+        Ok(Some(n)) => core::str::from_utf8(&text[..n])
+            .ok()
+            .and_then(Session::parse),
+        Err(()) => {
+            say(b"the session file cannot be read: the text console");
+            return false;
         }
+    };
+    match chosen {
+        Some(Session::Shell) => return false,
+        Some(Session::Desktop) => {}
+        None => {
+            say(b"the session file is damaged: the text console (session shell|desktop writes it again)");
+            return false;
+        }
+    }
+    use session::Readiness;
+    let why: &[u8] = match session::desktop_readiness(&mut FsFiles(fs)) {
+        Readiness::Ready => b"",
+        Readiness::NotFollowed => {
+            b"session = desktop, but this machine does not follow the desktop profile: the text console"
+        }
+        Readiness::ProfilesUnreadable => {
+            b"session = desktop, but the profile list cannot be read: the text console"
+        }
+        Readiness::NotInstalled => {
+            b"session = desktop, but the desktop's launcher is not installed yet (update, then upgrade): the text console"
+        }
+        Readiness::LauncherUnreadable => {
+            b"session = desktop, but whether the launcher is installed cannot be read: the text console"
+        }
+    };
+    if !why.is_empty() {
+        say(why);
+        return false;
+    }
+    // The compositor reads only the input services (the PS/2 keyboard
+    // among them since ADR 0075): without a keyboard there the desktop
+    // could not be typed at (audit of phase B, M2).
+    if !inputs
+        .iter()
+        .any(|&ep| input_kinds(ep) & aricode_proto::input::KIND_KEYBOARD != 0)
+    {
+        say(b"session = desktop, but there is no keyboard for it: the text console");
+        return false;
+    }
+    let mut fb = [0u8; sys::abi::sysinfo::Framebuffer::LEN];
+    if sys::system_info(SYSTEM, sys::abi::sysinfo::FRAMEBUFFER, &mut fb).is_err() {
+        say(b"session = desktop, but there is no display: the text console");
+        return false;
+    }
+    true
+}
+
+/// What an input service's devices are (`input::KIND_*`, from its `Info`
+/// reply); 0 when it does not answer.
+fn input_kinds(service: Handle) -> u8 {
+    use aricode_proto::input::{Op, Reply, Request};
+    let req = Request {
+        op: Op::Info,
+        timeout_ms: 0,
+    };
+    ask(service, &req.encode(), 500, &mut [0u8; Reply::LEN])
+        .and_then(Reply::decode)
+        .map_or(0, |r| r.kinds)
+}
+
+/// Why the desktop session ends.
+enum DesktopEnd {
+    /// Its launcher's process ended, as `poll_launches` reported it.
+    Launcher(LaunchReply),
+    /// The compositor ended: the owner typed Ctrl+Alt+Backspace, the kernel
+    /// stopped it for the same chord on the PS/2 keyboard, or it failed.
+    Compositor,
+}
+
+/// Ends the desktop session (ADR 0074): the launcher and the apps it
+/// started are stopped, the compositor goes, so the kernel gives the
+/// console back its screen and its PS/2 keyboard, and the console bridge
+/// feeds the shell from the input services again.
+fn end_desktop(desktop: Desktop, why: DesktopEnd, broker: &mut Broker, sup: &mut Supervisor) {
+    let mut b = [0u8; 20];
+    sys::print(b"AriInit: the desktop ended (");
+    match why {
+        DesktopEnd::Launcher(r) => {
+            sys::print(b"its launcher ");
+            match r.status {
+                LaunchStatus::Ok => {
+                    sys::print(b"exited with ");
+                    sys::print(aricode_rt::fmt_u64(r.value, &mut b));
+                }
+                LaunchStatus::Killed => sys::print(b"was killed"),
+                _ => sys::print(b"failed"),
+            }
+        }
+        DesktopEnd::Compositor => sys::print(b"the compositor ended"),
+    }
+    sys::print(b"): back to the text console\n");
+    broker.stop_desktop_apps();
+    broker.compositor = None;
+    let Desktop { gui, inputs, count } = desktop;
+    let _ = sys::process_kill(gui.process);
+    // A killed process's wait answers `Killed`: only a timeout means it is
+    // still there, and then it may still read the input services, which
+    // are not shared with a second reader (audit of phase B, L3).
+    let ended = !matches!(sys::process_wait(gui.process, 5000), Err(Error::Timeout));
+    let _ = sys::handle_close(gui.process);
+    let _ = sys::handle_close(gui.endpoint);
+    if !ended {
+        say(b"the compositor did not end within 5 s: its input services are not handed to the console bridge");
+    } else if count > 0 {
+        // With no input service there is nothing to bridge: the console
+        // reads COM1 and the PS/2 keyboard itself.
+        launch_console_bridge(sup, &inputs[..count]);
+    }
+}
+
+/// Registers and launches the console bridge over `inputs` under the
+/// supervisor (stage 2, ADR 0013): the user-space keyboards feed the shell
+/// console. Says what it did.
+fn launch_console_bridge(sup: &mut Supervisor, inputs: &[Handle]) {
+    let mut ins = [Handle(0); MAX_INPUTS];
+    let count = inputs.len().min(MAX_INPUTS);
+    ins[..count].copy_from_slice(&inputs[..count]);
+    let launched = sup
+        .register(
+            "console_bridge",
+            Kind::ConsoleBridge { inputs: ins, count },
+            Probe::None,
+            Handle(0),
+            true,
+            Policy::DRIVER,
+        )
+        .is_some_and(|i| sup.launch(i));
+    if launched {
+        // The announcement goes here and not in the bridge: init prints
+        // before the shell exists, so nothing interleaves with its first
+        // prompt. The input services buffer whatever is typed until the
+        // bridge reads it.
+        let mut b = [0u8; 20];
+        sys::print(b"AriInit: console bridge with ");
+        sys::print(aricode_rt::fmt_u64(count as u64, &mut b));
+        sys::print(b" input device(s)\nCONSOLE_BRIDGE_READY\n");
+    } else {
+        say(b"console bridge not started: the shell only reads COM1 and PS/2");
     }
 }
 
@@ -2555,6 +3779,12 @@ fn main(arg: u64) -> u64 {
             ""
         }
     });
+    if let Some(layout) = cmdline
+        .get(aricode_cmdline::keys::KBD)
+        .and_then(aricode_input::Layout::parse)
+    {
+        KBD_LAYOUT.store(layout.code(), core::sync::atomic::Ordering::Relaxed);
+    }
     if cmdline.has(aricode_cmdline::keys::STRICT) {
         STRICT.store(true, core::sync::atomic::Ordering::Relaxed);
         say(b"strict mode: a failing service is not restarted");
@@ -2844,6 +4074,39 @@ fn main(arg: u64) -> u64 {
             }
         }
     }
+    // The PS/2 keyboard and touchpad (ADR 0075): an input service for the
+    // compositor only, never for the console bridge or input_client.
+    let mut ps2_input = None;
+    if sys::object_kind(PS2) == Ok(sys::kind::PS2) {
+        let Ok(ep) = sys::endpoint_create() else {
+            return 21;
+        };
+        let slot = sup.register(
+            "ps2_input",
+            Kind::Ps2Input,
+            Probe::Input,
+            ep,
+            true,
+            Policy::DRIVER,
+        );
+        if slot.is_none() {
+            let _ = sys::handle_close(ep);
+        }
+        if slot.is_some_and(|i| sup.launch(i)) {
+            say(b"ps2_input ready (the PS/2 keyboard and pointer, for the screen's holder)");
+            ps2_input = Some(ep);
+        } else {
+            say(b"ps2_input never became ready; dropped");
+        }
+    }
+    let mut gui_eps = [Handle(0); MAX_GUI_INPUTS];
+    gui_eps[..inputs].copy_from_slice(&input_eps[..inputs]);
+    let mut gui_inputs = inputs;
+    if let Some(ep) = ps2_input {
+        gui_eps[gui_inputs] = ep;
+        gui_inputs += 1;
+    }
+    let gui_eps = &gui_eps[..gui_inputs];
     if inputs > 0 {
         services |= SERVICE_INPUT;
         // Every input service answered Info before it was published (its
@@ -2956,15 +4219,15 @@ fn main(arg: u64) -> u64 {
     if let Some(wait_ms) = net_wait_ms {
         report_network_address(net_service, wait_ms);
     }
-    // 10. Graphical interface: compositor with the framebuffer and the inputs,
-    //     and two applications drawing at the same time.
-    let mut compositor = None;
+    // 10. Graphical interface: the compositor with the framebuffer and the
+    //     inputs; applications ask the broker for their windows.
+    let mut gui = None;
     if arg & sys::abi::init_arg::GUI != 0 {
-        match run_gui(&input_eps[..inputs]) {
-            Ok(ep) => {
+        match run_gui(gui_eps) {
+            Ok(g) => {
                 services |= SERVICE_GUI;
-                compositor = Some(ep);
-                say(b"gui ok (2 applications)");
+                gui = Some(g);
+                say(b"gui ok (compositor started)");
             }
             Err(code) => {
                 sys::print(b"AriInit: gui failed with ");
@@ -3024,46 +4287,64 @@ fn main(arg: u64) -> u64 {
             say(b"no file service, not launching the shell");
             return 15;
         };
+        // The desktop session (ADR 0074), decided before the console
+        // bridge: the compositor takes the input services.
+        // With `gui` on the command line the compositor is the command
+        // line's, and stays: no desktop session is started on it.
+        let desktop_session = gui.is_none()
+            && fs_client
+                .as_mut()
+                .is_some_and(|fs| desktop_wanted(fs, gui_eps));
+        if desktop_session {
+            match run_gui(gui_eps) {
+                Ok(g) => {
+                    services |= SERVICE_GUI;
+                    gui = Some(g);
+                    say(b"desktop session: compositor started");
+                }
+                Err(code) => {
+                    sys::print(b"AriInit: the desktop's compositor did not start (code ");
+                    sys::print(aricode_rt::fmt_u64(code, &mut buf));
+                    sys::print(b"): the text console\n");
+                }
+            }
+        }
         let Ok(mut broker) = Broker::new(
             fs_client,
             block_service,
             (services & SERVICE_NET != 0).then_some(net_service),
-            compositor,
+            gui.as_ref().map(|g| g.endpoint),
         ) else {
             return 26;
         };
         // Stage 2 (ADR 0013): the user-space keyboards feed the shell console
         // as long as there is no compositor (with the GUI the events belong
         // to it, and each input service accepts a single reader).
-        if inputs > 0 && compositor.is_none() {
+        if inputs > 0 && gui.is_none() {
             if input_orphan_test {
                 orphan_reads(&input_eps[..inputs], &mut sup);
             }
+            launch_console_bridge(&mut sup, &input_eps[..inputs]);
+        }
+        let mut desktop = None;
+        if let Some(g) = gui.take().filter(|_| desktop_session) {
             let mut ins = [Handle(0); MAX_INPUTS];
             ins[..inputs].copy_from_slice(&input_eps[..inputs]);
-            let launched = sup
-                .register(
-                    "console_bridge",
-                    Kind::ConsoleBridge {
-                        inputs: ins,
-                        count: inputs,
-                    },
-                    Probe::None,
-                    Handle(0),
-                    true,
-                    Policy::DRIVER,
-                )
-                .is_some_and(|i| sup.launch(i));
-            if launched {
-                // The announcement goes here and not in the bridge: init
-                // prints before the shell exists, so nothing interleaves with
-                // its first prompt. The input services buffer whatever is
-                // typed until the bridge reads it.
-                sys::print(b"AriInit: console bridge with ");
-                sys::print(aricode_rt::fmt_u64(inputs as u64, &mut buf));
-                sys::print(b" input device(s)\nCONSOLE_BRIDGE_READY\n");
+            let d = Desktop {
+                gui: g,
+                inputs: ins,
+                count: inputs,
+            };
+            if broker.launch_session() {
+                say(b"desktop session: launcher started");
+                desktop = Some(d);
             } else {
-                say(b"console bridge not started: the shell only reads COM1 and PS/2");
+                end_desktop(
+                    d,
+                    DesktopEnd::Launcher(LaunchReply::status(LaunchStatus::Failed)),
+                    &mut broker,
+                    &mut sup,
+                );
             }
         }
         // SSH (ADR 0025): with a network service, sshd serves remote shells
@@ -3097,6 +4378,8 @@ fn main(arg: u64) -> u64 {
                     sessions = Some(Sessions {
                         endpoint,
                         children: [None; MAX_SESSIONS],
+                        terminal: false,
+                        said_malformed: false,
                     });
                 } else {
                     say(b"sshd did not start");
@@ -3109,6 +4392,7 @@ fn main(arg: u64) -> u64 {
             &mut broker,
             &mut sup,
             sessions.as_mut(),
+            &mut desktop,
         ) {
             Ok(code) => {
                 sys::print(b"AriInit: shell exited with ");

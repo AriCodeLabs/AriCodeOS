@@ -1,0 +1,50 @@
+# The `terminal` capability's rules (ADR 0074 phase C). The test package
+# `terminal` holds it: init refuses sshd's `Exec` on its endpoint, drops a
+# request without its handles (said once), grants four interactive shells
+# and refuses a fifth. A package that asks for `terminal` under another
+# name is denied by the broker and never runs. A terminal that dies on its
+# own while its shell waits in `run` takes the program with it, and the
+# shell then ends by itself on its closed input, never killed halfway
+# through a command (audit of the terminal, M2, and of its fix, H1). A
+# terminal shell that ends takes what it spawned with it.
+name = "apps.terminal_rules"
+description = "terminal: interactive shells only, four at most, and only for the package named terminal"
+level = "full"
+areas = ["apps", "shell", "init"]
+cmdline = "qemu_exit shell"
+install = ["examples/test_terminal", "examples/fake_terminal"]
+stdin = [
+    "run terminal",
+    "run fake_terminal",
+    "spawn terminal 1",
+    "sleep 4000",
+    "run terminal 2",
+    "shutdown",
+]
+timeout_secs = 90
+
+[expect]
+exit = 33
+serial_contains = [
+    "AriInit: launch terminal from AriFS (apps/terminal.aripkg version 1",
+    "with manifest [terminal]",
+    "terminal test: Exec: refused",
+    "AriInit: a session request came without its handles; dropped (said once)",
+    "AriInit: terminal shell refused (limit or invalid request)",
+    "terminal test: 4 of 5 shells granted",
+    "terminal test: init kept every rule",
+    "run: terminal exited with 0",
+    "AriInit: denied, requests system capabilities: terminal",
+    "terminal test: leaving its shell in run",
+    "terminal test: closing a shell that spawned cpu_hog",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "fake_terminal: started", "init broke a rule", "'shell' killed"]
+serial_order = [
+    "terminal test: leaving its shell in run",
+    "'cpu_hog' killed: stopped at another process's request",
+    "'shell' exited with code 0",
+    "terminal test: closing a shell that spawned cpu_hog",
+    "'shell' exited with code 0",
+    "'cpu_hog' killed: stopped at another process's request",
+]

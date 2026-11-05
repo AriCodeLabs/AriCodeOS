@@ -1,0 +1,4 @@
+# Asks for `terminal` without being the terminal: denied (ADR 0074).
+name = fake_terminal
+caps = terminal
+memory = 64K

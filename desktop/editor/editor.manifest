@@ -1,0 +1,5 @@
+# The desktop's editor (ADR 0074): a window, and the owner's folder home/.
+# Its window (640x448) and its file buffer take most of 2 MiB.
+name = editor
+caps = window, home
+memory = 2M

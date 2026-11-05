@@ -7,6 +7,11 @@
 
 #![no_std]
 
+use aricode_abi::ps2;
+
+pub mod es;
+pub mod term;
+
 pub const EV_SYN: u16 = 0;
 pub const EV_KEY: u16 = 1;
 pub const EV_REL: u16 = 2;
@@ -77,7 +82,8 @@ impl Event {
     }
 }
 
-/// Keyboard layout: US (ANSI QWERTY) or Spanish (ISO, with `AltGr`).
+/// Keyboard layout: US (ANSI QWERTY) or Spanish (ISO, with `AltGr` and
+/// dead keys, as Linux types it: [`es`]).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum Layout {
     #[default]
@@ -94,26 +100,42 @@ impl Layout {
             _ => None,
         }
     }
+
+    /// A small number for the layout, to pass it in a process's `arg`
+    /// (init to the console bridge).
+    pub const fn code(self) -> u64 {
+        match self {
+            Self::Us => 0,
+            Self::Es => 1,
+        }
+    }
+
+    /// The layout of `code`; US for an unknown one.
+    pub const fn from_code(code: u64) -> Self {
+        match code {
+            1 => Self::Es,
+            _ => Self::Us,
+        }
+    }
 }
 
-/// Keyboard: tracks shift state and `AltGr` and translates key presses
-/// according to the layout.
+/// Keyboard: tracks shift, Ctrl and `AltGr` and translates key presses
+/// according to the layout into UTF-8 (ADR 0076). Ctrl with a letter gives
+/// its control character (`0x01` for Ctrl+A), as a terminal sends it; with
+/// any other key, nothing. A dead key gives nothing until the next key:
+/// the accented letter, or the accent and that key when they do not
+/// combine (as the Linux console does).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Keyboard {
     shift: bool,
     caps: bool,
     altgr: bool,
+    /// Bits: left Ctrl, right Ctrl.
+    ctrl: u8,
     layout: Layout,
+    /// A dead key pressed, waiting for the next key.
+    dead: Option<es::Dead>,
 }
-
-/// Spanish keyboard (ISO): evdev codes 1..=86 (esc..`<`). Anything that is
-/// not ASCII (ñ, ç, accents, º, ¡, ¿, ·) produces nothing.
-const ES_PLAIN: &[u8; 87] =
-    b"\0\x1b1234567890'\0\x08\tqwertyuiop`+\n\0asdfghjkl\0\0\0\0\0zxcvbnm,.-\0*\0 \0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0<";
-const ES_SHIFTED: &[u8; 87] =
-    b"\0\x1b!\"\0$%&/()=?\0\x08\tQWERTYUIOP^*\n\0ASDFGHJKL\0\0\0\0\0ZXCVBNM;:_\0*\0 \0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0>";
-const ES_ALTGR: &[u8; 87] =
-    b"\0\0|@#~\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0[]\0\0\0\0\0\0\0\0\0\0\0\0{\\\0}\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
 
 /// Row of evdev codes 1..=57 (esc..space) without and with shift.
 const PLAIN: &[u8; 58] =
@@ -131,12 +153,24 @@ impl Keyboard {
             shift: false,
             caps: false,
             altgr: false,
+            ctrl: 0,
             layout,
+            dead: None,
         }
     }
 
     pub fn set_layout(&mut self, layout: Layout) {
         self.layout = layout;
+    }
+
+    /// Forgets Shift, Ctrl and AltGr held: a device whose releases were
+    /// lost (its driver restarted, its read dropped) does not leave every
+    /// letter shifted or a control character (audit of the editor, L1).
+    pub fn release_modifiers(&mut self) {
+        self.shift = false;
+        self.altgr = false;
+        self.ctrl = 0;
+        self.dead = None;
     }
 
     pub fn layout(&self) -> Layout {
@@ -164,6 +198,15 @@ impl Keyboard {
                 self.altgr = ev.value != 0;
                 return KeyBytes::NONE;
             }
+            KEY_LEFTCTRL | KEY_RIGHTCTRL => {
+                let bit = if ev.code == KEY_LEFTCTRL { 1 } else { 2 };
+                if ev.value == 0 {
+                    self.ctrl &= !bit;
+                } else {
+                    self.ctrl |= bit;
+                }
+                return KeyBytes::NONE;
+            }
             _ => {}
         }
         if ev.value != 1 {
@@ -182,59 +225,121 @@ impl Keyboard {
             _ => None,
         };
         if let Some(seq) = escape {
+            // An editing key ends a dead key unused.
+            self.dead = None;
             return KeyBytes::sequence(seq);
         }
         let i = ev.code as usize;
-        let (plain, shifted, altgr) = match self.layout {
-            Layout::Us if i < PLAIN.len() => (PLAIN[i], SHIFTED[i], 0),
-            Layout::Es if i < ES_PLAIN.len() => (ES_PLAIN[i], ES_SHIFTED[i], ES_ALTGR[i]),
-            _ => return KeyBytes::NONE,
+        let levels = match self.layout {
+            Layout::Us if i < PLAIN.len() => [
+                ascii(PLAIN[i]),
+                ascii(SHIFTED[i]),
+                es::Sym::None,
+                es::Sym::None,
+            ],
+            Layout::Es if i < es::KEYS.len() => es::KEYS[i],
+            // A key that types nothing ends a dead key unused (audit of
+            // ADR 0076, L6).
+            _ => {
+                self.dead = None;
+                return KeyBytes::NONE;
+            }
         };
-        if self.altgr {
-            return if altgr == 0 {
-                KeyBytes::NONE
-            } else {
-                KeyBytes::single(altgr)
+        if self.ctrl != 0 {
+            // Ctrl with a letter of the alphabet is its control character;
+            // anything else gives nothing and ends a dead key.
+            self.dead = None;
+            return match levels[0] {
+                es::Sym::Char(c) if c.is_ascii_lowercase() => KeyBytes::single(c as u8 & 0x1F),
+                _ => KeyBytes::NONE,
             };
         }
-        if plain == 0 {
-            return KeyBytes::NONE;
-        }
-        let letter = plain.is_ascii_lowercase();
+        // Caps Lock acts on a pair of levels that is a letter and its
+        // capital, as xkb's alphabetic key types do: a and A, ñ and Ñ, æ and
+        // Æ with AltGr; not º and ª (audit of ADR 0076, L5).
+        let base = usize::from(self.altgr) * 2;
+        let letter = es::is_case_pair(levels[base], levels[base + 1]);
         let upper = self.shift ^ (self.caps && letter);
-        let b = if upper { shifted } else { plain };
-        if b == 0 {
-            KeyBytes::NONE
-        } else {
-            KeyBytes::single(b)
+        let sym = levels[base + usize::from(upper)];
+        let ch = match sym {
+            es::Sym::None => {
+                self.dead = None;
+                return KeyBytes::NONE;
+            }
+            es::Sym::Dead(dead) => {
+                return match self.dead.replace(dead) {
+                    // The same dead key twice: the accent itself.
+                    Some(first) if first == dead => {
+                        self.dead = None;
+                        KeyBytes::chars(&[dead.alone()])
+                    }
+                    // Another dead key: the first one's accent, and this
+                    // one waits.
+                    Some(first) => KeyBytes::chars(&[first.alone()]),
+                    None => KeyBytes::NONE,
+                };
+            }
+            es::Sym::Char(ch) => ch,
+        };
+        match self.dead.take() {
+            None => KeyBytes::chars(&[ch]),
+            Some(dead) if ch == ' ' => KeyBytes::chars(&[dead.with_space()]),
+            Some(dead) => match dead.combine(ch) {
+                Some(accented) => KeyBytes::chars(&[accented]),
+                // Control keys (Enter, Tab, Backspace, Esc) end it unused.
+                None if ch.is_control() => KeyBytes::chars(&[ch]),
+                None => KeyBytes::chars(&[dead.alone(), ch]),
+            },
         }
     }
 }
 
-/// Bytes produced by a key press: nothing, one character or an escape
-/// sequence (up to 4 bytes).
+/// Bytes produced by a key press: nothing, a character or two in UTF-8
+/// (an accent that did not combine and the key after it) or an escape
+/// sequence; at most [`KeyBytes::MAX`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyBytes {
-    buf: [u8; 4],
+    buf: [u8; KeyBytes::MAX],
     len: u8,
 }
 
+/// A level of a US key: its ASCII character, or nothing.
+const fn ascii(b: u8) -> es::Sym {
+    if b == 0 {
+        es::Sym::None
+    } else {
+        es::Sym::Char(b as char)
+    }
+}
+
 impl KeyBytes {
+    /// Two characters of up to four bytes each in UTF-8.
+    pub const MAX: usize = 8;
+
     pub const NONE: Self = Self {
-        buf: [0; 4],
+        buf: [0; Self::MAX],
         len: 0,
     };
 
     const fn single(b: u8) -> Self {
-        Self {
-            buf: [b, 0, 0, 0],
-            len: 1,
+        let mut buf = [0; Self::MAX];
+        buf[0] = b;
+        Self { buf, len: 1 }
+    }
+
+    /// `chars` in UTF-8; at most two fit.
+    fn chars(chars: &[char]) -> Self {
+        let mut k = Self::NONE;
+        for ch in chars.iter().take(2) {
+            let n = ch.encode_utf8(&mut k.buf[k.len as usize..]).len();
+            k.len += n as u8;
         }
+        k
     }
 
     fn sequence(seq: &[u8]) -> Self {
-        let mut buf = [0u8; 4];
-        let len = seq.len().min(4);
+        let mut buf = [0u8; Self::MAX];
+        let len = seq.len().min(Self::MAX);
         buf[..len].copy_from_slice(&seq[..len]);
         Self {
             buf,
@@ -537,78 +642,333 @@ impl HidBootMouse {
         if report.len() < 3 {
             return 0;
         }
-        let mut n = 0;
-        let mut push = |ev: Event, n: &mut usize| {
-            if *n < out.len() {
-                out[*n] = ev;
-                *n += 1;
-            }
+        let wheel = if report.len() >= 4 {
+            report[3] as i8 as i32
+        } else {
+            0
         };
-        let buttons = report[0];
-        for (bit, code) in [BTN_LEFT, BTN_RIGHT, BTN_MIDDLE].iter().enumerate() {
-            let was = self.buttons & (1 << bit) != 0;
-            let is = buttons & (1 << bit) != 0;
-            if was != is {
-                push(
-                    Event {
-                        kind: EV_KEY,
-                        code: *code,
-                        value: is as u32,
-                    },
-                    &mut n,
-                );
+        pointer_events(
+            &mut self.buttons,
+            report[0],
+            report[1] as i8 as i32,
+            report[2] as i8 as i32,
+            wheel,
+            out,
+        )
+    }
+}
+
+/// The events of one pointer report: the changes of the three buttons
+/// against `held` (which follows them), the motion and the wheel, then
+/// `EV_SYN` if anything changed. Shared by the HID and PS/2 mice.
+fn pointer_events(
+    held: &mut u8,
+    buttons: u8,
+    dx: i32,
+    dy: i32,
+    wheel: i32,
+    out: &mut [Event; MAX_REPORT_EVENTS],
+) -> usize {
+    let mut n = 0;
+    let mut push = |kind: u16, code: u16, value: i32, n: &mut usize| {
+        if *n < out.len() {
+            out[*n] = Event {
+                kind,
+                code,
+                value: value as u32,
+            };
+            *n += 1;
+        }
+    };
+    for (bit, code) in [BTN_LEFT, BTN_RIGHT, BTN_MIDDLE].iter().enumerate() {
+        let was = *held & (1 << bit) != 0;
+        let is = buttons & (1 << bit) != 0;
+        if was != is {
+            push(EV_KEY, *code, is as i32, &mut n);
+        }
+    }
+    *held = buttons & 0x07;
+    if dx != 0 {
+        push(EV_REL, REL_X, dx, &mut n);
+    }
+    if dy != 0 {
+        push(EV_REL, REL_Y, dy, &mut n);
+    }
+    if wheel != 0 {
+        push(EV_REL, REL_WHEEL, wheel, &mut n);
+    }
+    if n > 0 {
+        push(EV_SYN, 0, 0, &mut n);
+    }
+    n
+}
+
+/// PS/2 mouse (ADR 0075): the aux port's 3-byte packets, or 4-byte ones
+/// once the IntelliMouse wheel was turned on. Byte 0 holds the buttons,
+/// the 9th bits of X and Y and their overflow bits; bit 3 is always set,
+/// which is how a decoder that lost a byte finds the next packet (as
+/// Linux's `psmouse` does). PS/2 Y and the wheel grow the other way from
+/// evdev's, so both are inverted.
+#[derive(Debug, Clone, Copy)]
+pub struct Ps2Mouse {
+    packet: [u8; 4],
+    have: usize,
+    len: usize,
+    buttons: u8,
+}
+
+impl Ps2Mouse {
+    /// A decoder for packets of 4 bytes with `wheel`, 3 without.
+    pub const fn new(wheel: bool) -> Self {
+        Self {
+            packet: [0; 4],
+            have: 0,
+            len: if wheel { 4 } else { 3 },
+            buttons: 0,
+        }
+    }
+
+    /// Forgets a packet half received (the stream was cut).
+    pub fn resync(&mut self) {
+        self.have = 0;
+    }
+
+    /// Processes one aux byte and writes the events of the packet it
+    /// completes into `out`; returns how many. A first byte without bit 3
+    /// is skipped: the decoder is out of step and waits for a packet start.
+    /// A packet with an overflow bit set reports its buttons only.
+    pub fn feed(&mut self, byte: u8, out: &mut [Event; MAX_REPORT_EVENTS]) -> usize {
+        if self.have == 0 && byte & 0x08 == 0 {
+            return 0;
+        }
+        self.packet[self.have] = byte;
+        self.have += 1;
+        if self.have < self.len {
+            return 0;
+        }
+        self.have = 0;
+        let [b0, b1, b2, b3] = self.packet;
+        let (mut dx, mut dy) = (0, 0);
+        if b0 & 0xC0 == 0 {
+            dx = b1 as i32 - if b0 & 0x10 != 0 { 256 } else { 0 };
+            dy = b2 as i32 - if b0 & 0x20 != 0 { 256 } else { 0 };
+        }
+        // The wheel is the low nibble of byte 3, as a signed 4-bit value.
+        let wheel = if self.len == 4 {
+            ((b3 << 4) as i8 >> 4) as i32
+        } else {
+            0
+        };
+        pointer_events(&mut self.buttons, b0 & 0x07, dx, -dy, -wheel, out)
+    }
+
+    /// The releases of the buttons held, so none stays down when the
+    /// stream is cut; returns how many events.
+    pub fn release_all(&mut self, out: &mut [Event; MAX_REPORT_EVENTS]) -> usize {
+        self.have = 0;
+        pointer_events(&mut self.buttons, 0, 0, 0, 0, out)
+    }
+}
+
+/// The keys a keyboard holds down, so a stream cut in the middle (a lost
+/// release, the end of a session) can be closed with their releases and no
+/// modifier stays stuck at the reader (ADR 0075).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct KeysDown {
+    bits: [u64; 4],
+}
+
+impl KeysDown {
+    pub const fn new() -> Self {
+        Self { bits: [0; 4] }
+    }
+
+    /// Follows one event (key codes from 256 up are not tracked).
+    pub fn follow(&mut self, ev: &Event) {
+        if ev.kind != EV_KEY || ev.code >= 256 {
+            return;
+        }
+        let (word, bit) = (ev.code as usize / 64, 1u64 << (ev.code % 64));
+        if ev.value == 0 {
+            self.bits[word] &= !bit;
+        } else {
+            self.bits[word] |= bit;
+        }
+    }
+
+    /// Calls `release` with a release of each key held, lowest code first,
+    /// and forgets them.
+    pub fn release_all(&mut self, mut release: impl FnMut(Event)) {
+        for (word, bits) in self.bits.iter_mut().enumerate() {
+            while *bits != 0 {
+                let bit = bits.trailing_zeros();
+                *bits &= !(1u64 << bit);
+                release(Event {
+                    kind: EV_KEY,
+                    code: (word * 64) as u16 + bit as u16,
+                    value: 0,
+                });
             }
         }
-        self.buttons = buttons;
-        let dx = report[1] as i8 as i32;
-        let dy = report[2] as i8 as i32;
-        if dx != 0 {
-            push(
-                Event {
-                    kind: EV_REL,
-                    code: REL_X,
-                    value: dx as u32,
-                },
-                &mut n,
-            );
+    }
+}
+
+/// The PS/2 stream's queue (ADR 0075), kept by the kernel under its lock:
+/// (tag, byte) entries (`aricode_abi::ps2`) for the one process that
+/// drains them. The last free entry is kept for a reset mark, so when the
+/// queue fills the mark goes in where the bytes start being lost: the
+/// reader releases every key after the entries before the loss, never
+/// before them (a press queued before a lost release would stay down).
+pub struct Ps2Queue {
+    buf: [[u8; ps2::ENTRY]; ps2::CAPACITY],
+    head: usize,
+    len: usize,
+    /// Bytes dropped because the queue was full, not taken yet.
+    dropped: u64,
+    /// Cut (emptied when the screen changed hands, or entries lost on
+    /// their way to the reader): the next read starts with a reset mark.
+    cut: bool,
+    /// The one process that drains the queue: the first to read it, until
+    /// it is gone.
+    reader: Option<u32>,
+}
+
+impl Default for Ps2Queue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Ps2Queue {
+    pub const fn new() -> Self {
+        Self {
+            buf: [[0; ps2::ENTRY]; ps2::CAPACITY],
+            head: 0,
+            len: 0,
+            dropped: 0,
+            cut: false,
+            reader: None,
         }
-        if dy != 0 {
-            push(
-                Event {
-                    kind: EV_REL,
-                    code: REL_Y,
-                    value: dy as u32,
-                },
-                &mut n,
-            );
+    }
+
+    fn append(&mut self, entry: [u8; ps2::ENTRY]) {
+        self.buf[(self.head + self.len) % ps2::CAPACITY] = entry;
+        self.len += 1;
+    }
+
+    /// Queues one byte from port `tag`; whether the reader has something
+    /// new (the byte, or the mark that took its place).
+    pub fn push(&mut self, tag: u8, byte: u8) -> bool {
+        if self.len + 1 < ps2::CAPACITY {
+            self.append([tag, byte]);
+            return true;
         }
-        if report.len() >= 4 && report[3] != 0 {
-            push(
-                Event {
-                    kind: EV_REL,
-                    code: REL_WHEEL,
-                    value: report[3] as i8 as i32 as u32,
-                },
-                &mut n,
-            );
+        self.dropped += 1;
+        if self.len + 1 == ps2::CAPACITY {
+            self.append([ps2::TAG_RESET, 0]);
+            return true;
         }
-        if n > 0 {
-            push(
-                Event {
-                    kind: EV_SYN,
-                    code: 0,
-                    value: 0,
-                },
-                &mut n,
-            );
+        false
+    }
+
+    /// Empties the queue; the next read starts with a reset mark.
+    pub fn cut(&mut self) {
+        self.head = 0;
+        self.len = 0;
+        self.cut = true;
+    }
+
+    /// Entries taken by `read` were not delivered: the reader starts over
+    /// from a reset mark.
+    pub fn lost(&mut self) {
+        self.cut = true;
+    }
+
+    /// The entries waiting, a reset mark owed counted as one.
+    pub fn pending(&self) -> usize {
+        self.len + self.cut as usize
+    }
+
+    /// Process `pid` is gone: if it drained the queue, another may now.
+    pub fn reader_gone(&mut self, pid: u32) {
+        if self.reader == Some(pid) {
+            self.reader = None;
         }
-        n
+    }
+
+    /// Copies whole entries into `out` for process `pid`: a reset mark
+    /// first if the queue was cut, then the oldest entries. Returns the
+    /// bytes written; `None` if another process drains the queue.
+    pub fn read(&mut self, pid: u32, out: &mut [u8]) -> Option<usize> {
+        match self.reader {
+            Some(reader) if reader != pid => return None,
+            _ => self.reader = Some(pid),
+        }
+        let mut n = 0;
+        if self.cut && out.len() >= ps2::ENTRY {
+            self.cut = false;
+            out[..ps2::ENTRY].copy_from_slice(&[ps2::TAG_RESET, 0]);
+            n = ps2::ENTRY;
+        }
+        while self.len > 0 && out.len() - n >= ps2::ENTRY {
+            out[n..n + ps2::ENTRY].copy_from_slice(&self.buf[self.head]);
+            self.head = (self.head + 1) % ps2::CAPACITY;
+            self.len -= 1;
+            n += ps2::ENTRY;
+        }
+        Some(n)
+    }
+
+    /// The bytes dropped since the last call.
+    pub fn take_dropped(&mut self) -> u64 {
+        core::mem::take(&mut self.dropped)
+    }
+}
+
+/// Ctrl+Alt+Backspace (ADR 0074 phase B): the owner's way back to the text
+/// console from a desktop, typed on any keyboard. The compositor leaves when
+/// it sees it on its keyboards; the kernel stops whoever holds the screen
+/// when it sees it on the PS/2 keyboard. Either Ctrl and either Alt count.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct EscapeChord {
+    /// Bits: left Ctrl, right Ctrl, left Alt, right Alt.
+    held: u8,
+}
+
+impl EscapeChord {
+    pub const fn new() -> Self {
+        Self { held: 0 }
+    }
+
+    /// Follows one event; `true` on the Backspace press made with a Ctrl
+    /// and an Alt held.
+    pub fn feed(&mut self, ev: Event) -> bool {
+        if ev.kind != EV_KEY {
+            return false;
+        }
+        let bit = match ev.code {
+            KEY_LEFTCTRL => 1,
+            KEY_RIGHTCTRL => 2,
+            KEY_LEFTALT => 4,
+            KEY_RIGHTALT => 8,
+            KEY_BACKSPACE => {
+                return ev.value == 1 && self.held & 3 != 0 && self.held & 12 != 0;
+            }
+            _ => return false,
+        };
+        if ev.value == 0 {
+            self.held &= !bit;
+        } else {
+            self.held |= bit;
+        }
+        false
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    extern crate std;
 
     fn key(code: u16, value: u32) -> Event {
         Event {
@@ -691,39 +1051,68 @@ mod tests {
     #[test]
     fn spanish_layout_shift_altgr_and_dead_keys() {
         let mut k = Keyboard::with_layout(Layout::Es);
+        let mut typed = |k: &mut Keyboard, code: u16| {
+            let out = k.feed(key(code, 1));
+            k.feed(key(code, 0));
+            std::string::String::from_utf8(out.as_slice().to_vec()).unwrap()
+        };
         assert_eq!(Layout::parse("es"), Some(Layout::Es));
         assert_eq!(Layout::parse("fr"), None);
         // `.` and, with shift, `:`; `7` and `/`; `-` and `_`; `<` and `>`.
-        assert_eq!(k.feed(key(KEY_DOT, 1)).as_slice(), b".");
+        assert_eq!(typed(&mut k, KEY_DOT), ".");
         k.feed(key(KEY_LEFTSHIFT, 1));
-        assert_eq!(k.feed(key(KEY_DOT, 1)).as_slice(), b":");
-        assert_eq!(k.feed(key(8, 1)).as_slice(), b"/");
-        assert_eq!(k.feed(key(KEY_SLASH, 1)).as_slice(), b"_");
-        assert_eq!(k.feed(key(KEY_102ND, 1)).as_slice(), b">");
-        assert_eq!(k.feed(key(3, 1)).as_slice(), b"\"");
-        assert!(k.feed(key(4, 1)).is_empty(), "shift+3 is · (not ASCII)");
+        assert_eq!(typed(&mut k, KEY_DOT), ":");
+        assert_eq!(typed(&mut k, 8), "/");
+        assert_eq!(typed(&mut k, KEY_SLASH), "_");
+        assert_eq!(typed(&mut k, KEY_102ND), ">");
+        assert_eq!(typed(&mut k, 3), "\"");
+        assert_eq!(typed(&mut k, 4), "·");
+        assert_eq!(typed(&mut k, KEY_SEMICOLON), "Ñ");
+        assert_eq!(typed(&mut k, KEY_EQUAL), "¿");
         k.feed(key(KEY_LEFTSHIFT, 0));
-        assert_eq!(k.feed(key(KEY_102ND, 1)).as_slice(), b"<");
-        assert_eq!(k.feed(key(KEY_SLASH, 1)).as_slice(), b"-");
-        assert_eq!(k.feed(key(KEY_MINUS, 1)).as_slice(), b"'");
-        // AltGr: @ # [ ] { } \ | ~.
+        assert_eq!(typed(&mut k, KEY_102ND), "<");
+        assert_eq!(typed(&mut k, KEY_SLASH), "-");
+        assert_eq!(typed(&mut k, KEY_MINUS), "'");
+        assert_eq!(typed(&mut k, KEY_SEMICOLON), "ñ");
+        assert_eq!(typed(&mut k, KEY_BACKSLASH), "ç");
+        assert_eq!(typed(&mut k, KEY_GRAVE), "º");
+        assert_eq!(typed(&mut k, KEY_EQUAL), "¡");
+        // AltGr, as Linux's `es`: @ # [ ] { } \\ | ~ € ¬, and { } on 7 and 0.
         k.feed(key(KEY_RIGHTALT, 1));
-        assert_eq!(k.feed(key(3, 1)).as_slice(), b"@");
-        assert_eq!(k.feed(key(4, 1)).as_slice(), b"#");
-        assert_eq!(k.feed(key(KEY_LEFTBRACE, 1)).as_slice(), b"[");
-        assert_eq!(k.feed(key(KEY_RIGHTBRACE, 1)).as_slice(), b"]");
-        assert_eq!(k.feed(key(KEY_APOSTROPHE, 1)).as_slice(), b"{");
-        assert_eq!(k.feed(key(KEY_BACKSLASH, 1)).as_slice(), b"}");
-        assert_eq!(k.feed(key(KEY_GRAVE, 1)).as_slice(), b"\\");
-        assert_eq!(k.feed(key(2, 1)).as_slice(), b"|");
-        assert_eq!(k.feed(key(5, 1)).as_slice(), b"~");
-        assert!(k.feed(key(30, 1)).is_empty(), "AltGr+a produces nothing");
+        for (code, out) in [
+            (3, "@"),
+            (4, "#"),
+            (KEY_LEFTBRACE, "["),
+            (KEY_RIGHTBRACE, "]"),
+            (KEY_APOSTROPHE, "{"),
+            (KEY_BACKSLASH, "}"),
+            (KEY_GRAVE, "\\"),
+            (2, "|"),
+            (5, "~"),
+            (18, "€"),
+            (7, "¬"),
+            (8, "{"),
+            (11, "}"),
+            (30, "æ"),
+        ] {
+            assert_eq!(typed(&mut k, code), out, "AltGr+{code}");
+        }
         k.feed(key(KEY_RIGHTALT, 0));
-        assert_eq!(k.feed(key(30, 1)).as_slice(), b"a");
-        // ñ, ç and the º key are not ASCII.
-        assert!(k.feed(key(KEY_SEMICOLON, 1)).is_empty());
-        assert!(k.feed(key(KEY_BACKSLASH, 1)).is_empty());
-        assert!(k.feed(key(KEY_GRAVE, 1)).is_empty());
+        assert_eq!(typed(&mut k, 30), "a");
+        // Caps Lock reaches ñ and ç, as letters, and æ with AltGr; not º.
+        typed(&mut k, KEY_CAPSLOCK);
+        assert_eq!(typed(&mut k, KEY_SEMICOLON), "Ñ");
+        assert_eq!(typed(&mut k, KEY_BACKSLASH), "Ç");
+        assert_eq!(typed(&mut k, KEY_GRAVE), "º");
+        k.feed(key(KEY_RIGHTALT, 1));
+        assert_eq!(typed(&mut k, 30), "Æ");
+        k.feed(key(KEY_RIGHTALT, 0));
+        typed(&mut k, KEY_CAPSLOCK);
+        // Ctrl with ñ gives nothing; with a letter, its control character.
+        k.feed(key(KEY_LEFTCTRL, 1));
+        assert_eq!(typed(&mut k, KEY_SEMICOLON), "");
+        assert_eq!(typed(&mut k, 30), "\x01");
+        k.feed(key(KEY_LEFTCTRL, 0));
         // The US keyboard does not change.
         let mut us = Keyboard::new();
         us.feed(key(KEY_LEFTSHIFT, 1));
@@ -731,6 +1120,81 @@ mod tests {
         us.set_layout(Layout::Es);
         assert_eq!(us.feed(key(KEY_DOT, 1)).as_slice(), b":");
     }
+
+    #[test]
+    fn spanish_dead_keys_combine_as_linux_does() {
+        let mut k = Keyboard::with_layout(Layout::Es);
+        let mut typed = |k: &mut Keyboard, codes: &[(u16, bool)]| {
+            let mut out = std::vec::Vec::new();
+            for &(code, shift) in codes {
+                if shift {
+                    k.feed(key(KEY_LEFTSHIFT, 1));
+                }
+                out.extend_from_slice(k.feed(key(code, 1)).as_slice());
+                k.feed(key(code, 0));
+                if shift {
+                    k.feed(key(KEY_LEFTSHIFT, 0));
+                }
+            }
+            std::string::String::from_utf8(out).unwrap()
+        };
+        let acute = (KEY_APOSTROPHE, false);
+        let diaeresis = (KEY_APOSTROPHE, true);
+        let grave = (KEY_LEFTBRACE, false);
+        let circumflex = (KEY_LEFTBRACE, true);
+        let (a, e, u, n, x) = (
+            (30, false),
+            (18, false),
+            (22, false),
+            (49, false),
+            (45, false),
+        );
+        let space = (KEY_SPACE, false);
+        // The dead key gives nothing until the next key.
+        assert_eq!(typed(&mut k, &[acute]), "");
+        assert_eq!(typed(&mut k, &[a]), "á");
+        assert_eq!(typed(&mut k, &[acute, (30, true)]), "Á");
+        assert_eq!(typed(&mut k, &[diaeresis, u]), "ü");
+        assert_eq!(typed(&mut k, &[grave, e]), "è");
+        assert_eq!(typed(&mut k, &[circumflex, e]), "ê");
+        // With a space, the `Compose` file's character; twice, the accent.
+        assert_eq!(typed(&mut k, &[acute, space]), "'");
+        assert_eq!(typed(&mut k, &[grave, space]), "`");
+        assert_eq!(typed(&mut k, &[circumflex, space]), "^");
+        assert_eq!(typed(&mut k, &[diaeresis, space]), "\"");
+        assert_eq!(typed(&mut k, &[acute, acute]), "´");
+        // With a key it does not combine with: the accent, then the key.
+        assert_eq!(typed(&mut k, &[acute, x]), "´x");
+        assert_eq!(typed(&mut k, &[acute, n]), "´n");
+        // Another dead key: the first one's accent, and the second waits.
+        assert_eq!(typed(&mut k, &[acute, grave, a]), "´à");
+        // AltGr+ñ is the dead tilde; AltGr+¡ the dead cedilla.
+        k.feed(key(KEY_RIGHTALT, 1));
+        assert_eq!(typed(&mut k, &[(KEY_SEMICOLON, false)]), "");
+        k.feed(key(KEY_RIGHTALT, 0));
+        assert_eq!(typed(&mut k, &[n]), "ñ");
+        k.feed(key(KEY_RIGHTALT, 1));
+        typed(&mut k, &[(KEY_EQUAL, false)]);
+        k.feed(key(KEY_RIGHTALT, 0));
+        assert_eq!(typed(&mut k, &[(46, false)]), "ç");
+        // Enter, an arrow or a lost release end it unused.
+        assert_eq!(typed(&mut k, &[acute, (KEY_ENTER, false)]), "\n");
+        assert_eq!(typed(&mut k, &[a]), "a");
+        typed(&mut k, &[acute]);
+        assert_eq!(k.feed(key(KEY_LEFT, 1)).as_slice(), b"\x1b[D");
+        assert_eq!(typed(&mut k, &[a]), "a");
+        typed(&mut k, &[acute]);
+        k.release_modifiers();
+        assert_eq!(typed(&mut k, &[a]), "a");
+        // So does a key that types nothing: F1 (59) or Page Down (109).
+        assert_eq!(typed(&mut k, &[acute, (59, false), a]), "a");
+        assert_eq!(typed(&mut k, &[acute, (109, false), a]), "a");
+        // The longest output fits: an accent and the euro sign.
+        typed(&mut k, &[acute]);
+        k.feed(key(KEY_RIGHTALT, 1));
+        assert_eq!(typed(&mut k, &[e]), "´€");
+    }
+
     #[test]
     fn scancode_set1_to_evdev_and_ascii() {
         let mut d = ScancodeSet1::new();
@@ -959,5 +1423,242 @@ mod tests {
         );
         assert_eq!(m.feed(&[0, 0, 0], &mut out), 0);
         assert_eq!(m.feed(&[0, 0], &mut out), 0);
+    }
+
+    #[test]
+    fn released_modifiers_type_plain_letters() {
+        let key = |code, value| Event {
+            kind: EV_KEY,
+            code,
+            value,
+        };
+        let mut k = Keyboard::new();
+        k.feed(key(KEY_LEFTCTRL, 1));
+        k.feed(key(KEY_LEFTSHIFT, 1));
+        k.release_modifiers();
+        assert_eq!(k.feed(key(31, 1)).as_slice(), b"s");
+    }
+
+    #[test]
+    fn ctrl_with_a_letter_gives_its_control_character() {
+        let key = |code, value| Event {
+            kind: EV_KEY,
+            code,
+            value,
+        };
+        const KEY_S: u16 = 31;
+        const KEY_U: u16 = 22;
+        const KEY_1: u16 = 2;
+        for layout in [Layout::Us, Layout::Es] {
+            let mut k = Keyboard::with_layout(layout);
+            assert!(k.feed(key(KEY_LEFTCTRL, 1)).is_empty());
+            assert_eq!(k.feed(key(KEY_S, 1)).as_slice(), &[0x13]);
+            assert!(k.feed(key(KEY_1, 1)).is_empty(), "not a letter");
+            assert!(k.feed(key(KEY_RIGHTCTRL, 1)).is_empty());
+            assert!(k.feed(key(KEY_LEFTCTRL, 0)).is_empty());
+            assert_eq!(k.feed(key(KEY_U, 1)).as_slice(), &[0x15], "the other Ctrl");
+            assert!(k.feed(key(KEY_RIGHTCTRL, 0)).is_empty());
+            assert_eq!(k.feed(key(KEY_S, 1)).as_slice(), b"s");
+        }
+    }
+
+    #[test]
+    fn escape_chord_needs_a_ctrl_and_an_alt_held() {
+        let mut c = EscapeChord::new();
+        assert!(!c.feed(key(KEY_BACKSPACE, 1)));
+        assert!(!c.feed(key(KEY_LEFTCTRL, 1)));
+        assert!(!c.feed(key(KEY_BACKSPACE, 1)), "Ctrl alone");
+        assert!(!c.feed(key(KEY_RIGHTALT, 1)));
+        assert!(!c.feed(key(KEY_BACKSPACE, 0)), "a release");
+        assert!(!c.feed(key(KEY_BACKSPACE, 2)), "a repeat");
+        assert!(c.feed(key(KEY_BACKSPACE, 1)));
+        assert!(!c.feed(key(KEY_LEFTCTRL, 0)));
+        assert!(!c.feed(key(KEY_BACKSPACE, 1)), "Ctrl released");
+        assert!(!c.feed(key(KEY_RIGHTCTRL, 1)));
+        assert!(c.feed(key(KEY_BACKSPACE, 1)), "the other Ctrl");
+        assert!(!c.feed(Event {
+            kind: 2,
+            code: KEY_BACKSPACE,
+            value: 1
+        }));
+    }
+
+    fn ev(kind: u16, code: u16, value: i32) -> Event {
+        Event {
+            kind,
+            code,
+            value: value as u32,
+        }
+    }
+
+    #[test]
+    fn ps2_mouse_packets_to_events() {
+        let mut m = Ps2Mouse::new(false);
+        let mut out = [Event::default(); MAX_REPORT_EVENTS];
+        // Left button, X +10, Y +5 (up in PS/2, so -5 in evdev).
+        assert_eq!(m.feed(0x09, &mut out), 0);
+        assert_eq!(m.feed(10, &mut out), 0);
+        let n = m.feed(5, &mut out);
+        assert_eq!(
+            &out[..n],
+            &[
+                ev(EV_KEY, BTN_LEFT, 1),
+                ev(EV_REL, REL_X, 10),
+                ev(EV_REL, REL_Y, -5),
+                ev(EV_SYN, 0, 0)
+            ]
+        );
+        // The 9th bits: X -3 (0x1FD), Y -200 (0x138) is down, +200 in evdev.
+        m.feed(0x08 | 0x10 | 0x20, &mut out);
+        m.feed(0xFD, &mut out);
+        let n = m.feed(0x38, &mut out);
+        assert_eq!(
+            &out[..n],
+            &[
+                ev(EV_KEY, BTN_LEFT, 0),
+                ev(EV_REL, REL_X, -3),
+                ev(EV_REL, REL_Y, 200),
+                ev(EV_SYN, 0, 0)
+            ]
+        );
+    }
+
+    #[test]
+    fn ps2_mouse_resyncs_and_drops_overflow() {
+        let mut m = Ps2Mouse::new(false);
+        let mut out = [Event::default(); MAX_REPORT_EVENTS];
+        // A stray byte without bit 3 is skipped until a packet starts.
+        assert_eq!(m.feed(0x05, &mut out), 0);
+        m.feed(0x08, &mut out);
+        m.feed(1, &mut out);
+        assert_eq!(m.feed(0, &mut out), 2, "X only, then EV_SYN");
+        // X overflow: the motion is dropped, the right button kept.
+        m.feed(0x08 | 0x40 | 0x02, &mut out);
+        m.feed(0xFF, &mut out);
+        let n = m.feed(0x10, &mut out);
+        assert_eq!(&out[..n], &[ev(EV_KEY, BTN_RIGHT, 1), ev(EV_SYN, 0, 0)]);
+        // A cut stream: the half packet is forgotten and the button released.
+        m.feed(0x08, &mut out);
+        let n = m.release_all(&mut out);
+        assert_eq!(&out[..n], &[ev(EV_KEY, BTN_RIGHT, 0), ev(EV_SYN, 0, 0)]);
+        m.feed(0x08 | 0x04, &mut out);
+        m.feed(0, &mut out);
+        let n = m.feed(0, &mut out);
+        assert_eq!(&out[..n], &[ev(EV_KEY, BTN_MIDDLE, 1), ev(EV_SYN, 0, 0)]);
+        assert_eq!(m.release_all(&mut out), 2);
+        assert_eq!(m.release_all(&mut out), 0, "nothing left held");
+    }
+
+    #[test]
+    fn ps2_mouse_wheel() {
+        let mut m = Ps2Mouse::new(true);
+        let mut out = [Event::default(); MAX_REPORT_EVENTS];
+        // Z +1 (towards the user) is a wheel step down: -1 in evdev.
+        for b in [0x08, 0, 0] {
+            assert_eq!(m.feed(b, &mut out), 0, "4-byte packets");
+        }
+        let n = m.feed(0x01, &mut out);
+        assert_eq!(&out[..n], &[ev(EV_REL, REL_WHEEL, -1), ev(EV_SYN, 0, 0)]);
+        // Z -2 is 0xE in the low nibble; the high bits (buttons 4 and 5)
+        // are not the wheel's.
+        for b in [0x08, 0, 0] {
+            m.feed(b, &mut out);
+        }
+        let n = m.feed(0x3E, &mut out);
+        assert_eq!(&out[..n], &[ev(EV_REL, REL_WHEEL, 2), ev(EV_SYN, 0, 0)]);
+        m.resync();
+        for b in [0x08, 4, 0] {
+            m.feed(b, &mut out);
+        }
+        assert_eq!(m.feed(0, &mut out), 2, "in step again after resync");
+    }
+
+    #[test]
+    fn keys_down_releases_what_is_held() {
+        let mut k = KeysDown::new();
+        for e in [
+            ev(EV_KEY, KEY_LEFTCTRL, 1),
+            ev(EV_KEY, KEY_SPACE, 1),
+            ev(EV_KEY, KEY_SPACE, 0),
+            ev(EV_KEY, KEY_RIGHTMETA, 1),
+            ev(EV_KEY, KEY_RIGHTMETA, 1),
+            ev(EV_REL, REL_X, 1),
+            ev(EV_KEY, BTN_LEFT, 1),
+        ] {
+            k.follow(&e);
+        }
+        let mut released = [Event::default(); 4];
+        let mut n = 0;
+        k.release_all(|e| {
+            released[n] = e;
+            n += 1;
+        });
+        assert_eq!(
+            released[..n],
+            [ev(EV_KEY, KEY_LEFTCTRL, 0), ev(EV_KEY, KEY_RIGHTMETA, 0)]
+        );
+        k.release_all(|_| panic!("nothing left held"));
+    }
+
+    fn entries(q: &mut Ps2Queue, pid: u32) -> ([[u8; 2]; 8], usize) {
+        let mut buf = [0u8; 16];
+        let n = q.read(pid, &mut buf).expect("the reader");
+        let mut out = [[0u8; 2]; 8];
+        for (o, e) in out.iter_mut().zip(buf[..n].as_chunks::<2>().0) {
+            *o = *e;
+        }
+        (out, n / 2)
+    }
+
+    #[test]
+    fn layout_codes_round_trip() {
+        for l in [Layout::Us, Layout::Es] {
+            assert_eq!(Layout::from_code(l.code()), l);
+        }
+        assert_eq!(Layout::from_code(9), Layout::Us);
+    }
+
+    #[test]
+    fn ps2_queue_marks_where_bytes_are_lost() {
+        let mut q = Ps2Queue::new();
+        for i in 0..ps2::CAPACITY - 1 {
+            assert!(q.push(ps2::TAG_KEYBOARD, i as u8));
+        }
+        // The last entry becomes the mark; bytes after it are dropped.
+        assert!(q.push(ps2::TAG_KEYBOARD, 0xAA), "the mark is new");
+        assert!(!q.push(ps2::TAG_AUX, 0xBB));
+        assert_eq!(q.pending(), ps2::CAPACITY);
+        assert_eq!(q.take_dropped(), 2);
+        let mut buf = [0u8; ps2::CAPACITY * ps2::ENTRY];
+        let n = q.read(7, &mut buf).unwrap();
+        assert_eq!(n, ps2::CAPACITY * ps2::ENTRY);
+        assert_eq!(&buf[n - 4..], &[ps2::TAG_KEYBOARD, 254, ps2::TAG_RESET, 0]);
+        // Room again: bytes queue normally, no mark owed.
+        assert!(q.push(ps2::TAG_AUX, 1));
+        let (e, n) = entries(&mut q, 7);
+        assert_eq!(&e[..n], &[[ps2::TAG_AUX, 1]]);
+    }
+
+    #[test]
+    fn ps2_queue_cut_and_one_reader() {
+        let mut q = Ps2Queue::new();
+        q.push(ps2::TAG_KEYBOARD, 0x1E);
+        q.cut();
+        assert_eq!(q.pending(), 1, "the mark owed");
+        q.push(ps2::TAG_KEYBOARD, 0x9E);
+        let (e, n) = entries(&mut q, 3);
+        assert_eq!(&e[..n], &[[ps2::TAG_RESET, 0], [ps2::TAG_KEYBOARD, 0x9E]]);
+        // Process 3 drains it: another is refused until 3 is gone.
+        assert!(q.read(4, &mut [0u8; 4]).is_none());
+        q.reader_gone(4);
+        assert!(q.read(4, &mut [0u8; 4]).is_none(), "4 never was the reader");
+        q.reader_gone(3);
+        q.lost();
+        let (e, n) = entries(&mut q, 4);
+        assert_eq!(&e[..n], &[[ps2::TAG_RESET, 0]]);
+        // A buffer too small for an entry takes nothing.
+        q.push(ps2::TAG_AUX, 9);
+        assert_eq!(q.read(4, &mut [0u8; 1]), Some(0));
+        assert_eq!(q.pending(), 1);
     }
 }

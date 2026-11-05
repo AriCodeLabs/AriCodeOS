@@ -9,7 +9,10 @@
 
 #![no_std]
 
-use aricode_fb_console::font::{FIRST_CHAR, GLYPHS, GLYPH_WIDTH, LAST_CHAR};
+use aricode_fb_console::char_glyph;
+use aricode_fb_console::font::GLYPH_WIDTH;
+
+pub mod widgets;
 
 /// Color `0x00RRGGBB`.
 pub type Color = u32;
@@ -129,6 +132,13 @@ impl<'a> Canvas<'a> {
     }
 
     /// Fills the clip rectangle.
+    /// One pixel, if inside the clip.
+    pub fn set(&mut self, x: i32, y: i32, color: Color) {
+        if self.clip.contains(x, y) {
+            self.pixels[y as usize * self.stride as usize + x as usize] = color;
+        }
+    }
+
     pub fn fill(&mut self, color: Color) {
         let c = self.clip;
         self.fill_rect(&c, color);
@@ -158,12 +168,10 @@ impl<'a> Canvas<'a> {
     /// Text with the console 8x16 font; `None` as background leaves the
     /// pixel unchanged.
     pub fn text(&mut self, x: i32, y: i32, s: &str, fg: Color, bg: Option<Color>) {
-        for (i, ch) in s.bytes().enumerate() {
-            let glyph = if (FIRST_CHAR..=LAST_CHAR).contains(&ch) {
-                &GLYPHS[(ch - FIRST_CHAR) as usize]
-            } else {
-                &GLYPHS[(b'?' - FIRST_CHAR) as usize]
-            };
+        // One cell per character (ADR 0076); what the font cannot show is
+        // `?`.
+        for (i, ch) in s.chars().enumerate() {
+            let glyph = char_glyph(ch);
             let gx = x + (i * GLYPH_WIDTH) as i32;
             let cell = Rect::new(gx, y, GLYPH_WIDTH as u32, glyph.len() as u32);
             if !cell.intersects(&self.clip) {
@@ -243,6 +251,14 @@ pub const DESKTOP_BG: Color = rgb(0x1e, 0x29, 0x3b);
 pub const TITLE_ACTIVE: Color = rgb(0x3b, 0x82, 0xf6);
 pub const TITLE_INACTIVE: Color = rgb(0x64, 0x74, 0x8b);
 pub const TITLE_TEXT: Color = rgb(0xff, 0xff, 0xff);
+/// The close box at the right of a title bar (ADR 0077).
+pub const CLOSE_BG: Color = rgb(0xdc, 0x26, 0x26);
+/// Side of the close box, inside the title bar.
+pub const CLOSE_SIDE: u32 = TITLE_H - 4;
+/// Title bar left beside the close box, at least.
+const CLOSE_MIN_TITLE: u32 = 40;
+/// What the title of a window whose program does not answer ends with.
+pub const HUNG_MARK: &str = " (not responding)";
 
 /// Desktop window: the client paints the content in its own
 /// buffer; only its geometry is kept here.
@@ -253,12 +269,31 @@ pub struct Window {
     pub content: Rect,
     pub title: [u8; 24],
     pub title_len: u8,
+    /// Its program did not take a request to close (ADR 0077): the title
+    /// says so, and the next click on the close box ends its session.
+    pub hung: bool,
 }
 
 impl Window {
     pub fn title_str(&self) -> &str {
         core::str::from_utf8(&self.title[..self.title_len as usize]).unwrap_or("?")
     }
+    /// The close box: a square at the right end of the title bar. A
+    /// window too narrow to keep some title beside it has none (audit of
+    /// ADR 0077, L7).
+    pub fn close_box(&self) -> Option<Rect> {
+        let f = self.frame();
+        if f.w < 2 * BORDER + CLOSE_SIDE + CLOSE_MIN_TITLE {
+            return None;
+        }
+        Some(Rect::new(
+            f.x + f.w as i32 - (BORDER + CLOSE_SIDE) as i32,
+            f.y + 2,
+            CLOSE_SIDE,
+            CLOSE_SIDE,
+        ))
+    }
+
     /// Full frame: border and title bar.
     pub fn frame(&self) -> Rect {
         Rect::new(
@@ -280,6 +315,29 @@ pub enum Hit {
         x: i32,
         y: i32,
     },
+    /// The close box of a window's title bar (ADR 0077).
+    Close {
+        id: u32,
+    },
+}
+
+/// How long after its session was made a program's first window may
+/// still take the focus: the time to verify and start a large package.
+pub const FOCUS_GRACE_MS: u64 = 5_000;
+
+/// Whether a new window takes the focus (ADR 0074 phase C): only the first
+/// window of a session made in the last `FOCUS_GRACE_MS` (the program the
+/// owner just opened), and only if no key was pressed since that session
+/// was made (the owner has moved on and is typing elsewhere). Otherwise a
+/// program could open a window whenever it liked and take the keys meant
+/// for another, a password typed in a terminal among them (audit of phase
+/// C, M2).
+pub fn new_window_takes_focus(
+    first_of_session: bool,
+    since_session_ms: u64,
+    key_since_session: bool,
+) -> bool {
+    first_of_session && since_session_ms <= FOCUS_GRACE_MS && !key_since_session
 }
 
 /// Desktop: up to `MAX_WINDOWS` windows in z-order (the last one on top),
@@ -333,6 +391,7 @@ impl Desktop {
             content: Rect::new(x, y, w, h),
             title: t,
             title_len: n as u8,
+            hung: false,
         });
         self.order[self.count] = slot as u8;
         self.count += 1;
@@ -353,6 +412,18 @@ impl Desktop {
             self.focus = None;
         }
         true
+    }
+
+    /// Marks `id` as a window whose program does not answer, or not.
+    pub fn set_hung(&mut self, id: u32, hung: bool) {
+        if let Some(w) = self.windows.iter_mut().flatten().find(|w| w.id == id) {
+            w.hung = hung;
+        }
+    }
+
+    /// The front window, if any.
+    pub fn front(&self) -> Option<u32> {
+        self.iter().last().map(|w| w.id)
     }
 
     pub fn get(&self, id: u32) -> Option<&Window> {
@@ -381,13 +452,17 @@ impl Desktop {
     /// Topmost window under `(x, y)` (frame included).
     pub fn hit(&self, x: i32, y: i32) -> Hit {
         for w in self.iter().collect_rev() {
-            if w.frame().contains(x, y) {
-                return Hit::Window {
-                    id: w.id,
-                    x: x - w.content.x,
-                    y: y - w.content.y,
-                };
+            if !w.frame().contains(x, y) {
+                continue;
             }
+            if w.close_box().is_some_and(|b| b.contains(x, y)) {
+                return Hit::Close { id: w.id };
+            }
+            return Hit::Window {
+                id: w.id,
+                x: x - w.content.x,
+                y: y - w.content.y,
+            };
         }
         Hit::Desktop
     }
@@ -465,8 +540,22 @@ impl Desktop {
                 TITLE_INACTIVE
             };
             out.fill_rect(&frame, title);
-            out.clipped(&frame)
-                .text(frame.x + 6, frame.y + 2, w.title_str(), TITLE_TEXT, None);
+            let close = w.close_box();
+            // The title stops short of the close box.
+            let mut bar = frame;
+            if let Some(b) = close {
+                bar.w = (b.x - frame.x - 2).max(0) as u32;
+            }
+            let mut titled = out.clipped(&bar);
+            titled.text(frame.x + 6, frame.y + 2, w.title_str(), TITLE_TEXT, None);
+            if w.hung {
+                let x = frame.x + 6 + (w.title_str().chars().count() * GLYPH_WIDTH) as i32;
+                titled.text(x, frame.y + 2, HUNG_MARK, TITLE_TEXT, None);
+            }
+            if let Some(b) = close {
+                out.fill_rect(&b, CLOSE_BG);
+                out.clipped(&b).text(b.x + 4, b.y, "×", TITLE_TEXT, None);
+            }
             out.fill_rect(&w.content, rgb(0, 0, 0));
             draw_content(w, &mut out.clipped(&w.content));
         }
@@ -671,6 +760,34 @@ impl<'a> Iterator for RevIter<'a> {
 mod tests {
     extern crate std;
     use super::*;
+
+    #[test]
+    fn set_is_clipped() {
+        let mut px = vec![0u32; 4 * 4];
+        let mut c = Canvas::new(&mut px, 4, 4, 4).unwrap();
+        c.set(1, 2, 7);
+        c.set(-1, 0, 9);
+        c.set(4, 0, 9);
+        let mut inner = c.clipped(&Rect::new(0, 0, 2, 2));
+        inner.set(3, 3, 9);
+        assert_eq!(c.get(1, 2), Some(7));
+        assert_eq!(px.iter().filter(|&&p| p == 9).count(), 0);
+    }
+
+    #[test]
+    fn only_a_just_opened_program_takes_the_focus() {
+        assert!(new_window_takes_focus(true, 0, false));
+        assert!(new_window_takes_focus(true, FOCUS_GRACE_MS, false));
+        assert!(!new_window_takes_focus(false, 10, false), "a second window");
+        assert!(
+            !new_window_takes_focus(true, FOCUS_GRACE_MS + 1, false),
+            "too late"
+        );
+        assert!(
+            !new_window_takes_focus(true, 10, true),
+            "the owner typed since"
+        );
+    }
     use std::vec;
     use std::vec::Vec;
 
@@ -766,6 +883,19 @@ mod tests {
                 y: -15
             }
         );
+        // The close box at the right end of A's title bar.
+        let close = d.get(a).unwrap().close_box().unwrap();
+        let frame = d.get(a).unwrap().frame();
+        assert_eq!(
+            close.x + close.w as i32,
+            frame.x + frame.w as i32 - BORDER as i32
+        );
+        assert_eq!(d.hit(close.x + 1, close.y + 1), Hit::Close { id: a });
+        assert_ne!(d.hit(close.x - 1, close.y + 1), Hit::Close { id: a });
+        // A window too narrow to keep a title beside the box has none.
+        let thin = d.create(20, 50, "t").unwrap();
+        assert!(d.get(thin).unwrap().close_box().is_none());
+        d.remove(thin);
         d.raise(a);
         assert_eq!(d.focus, Some(a));
         assert_eq!(
@@ -824,7 +954,7 @@ mod tests {
         );
         // B's title bar active, A's inactive; background outside.
         assert_eq!(
-            screen.get(wb.content.x + 90, wb.content.y - 5),
+            screen.get(wb.content.x + 70, wb.content.y - 5),
             Some(TITLE_ACTIVE)
         );
         assert_eq!(

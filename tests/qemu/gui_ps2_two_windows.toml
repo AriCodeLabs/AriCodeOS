@@ -1,0 +1,55 @@
+# The PS/2 keyboard and mouse in the compositor (ADR 0075): the machine has
+# no virtio or USB input, only the i8042. The kernel brings up its aux port
+# (QEMU's mouse answers the IntelliMouse wheel sequence) and, while the
+# compositor holds the screen, hands the i8042's bytes to ps2_input, which
+# decodes them for the compositor. As in gui.two_windows, the host moves
+# the PS/2 mouse over window B, clicks (focus) and types 'h' on the PS/2
+# keyboard: only B receives the key, and the shell never sees it.
+name = "gui.ps2_two_windows"
+description = "the PS/2 keyboard and mouse drive the compositor's windows through ps2_input"
+level = "full"
+areas = ["gui", "input", "console"]
+cmdline = "qemu_exit gui shell"
+no_virtio_input = true
+install = ["examples/gui_demo"]
+# Demo A waits 3 s without events after B is gone, then closes its window.
+stdin = ["spawn gui_demo 0", "run gui_demo 1", "sleep 5000", "shutdown"]
+timeout_secs = 120
+
+[host_input]
+marker = "compositor: desktop ready with 2 windows"
+mouse_rel = [-180, -20]
+click = "left"
+keys = ["h"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "console: PS/2 keyboard (GSI",
+    "console: PS/2 pointer with a wheel (GSI",
+    "console: while a process holds the screen, the PS/2 bytes go to its input service",
+    "ps2-input: keyboard and pointer (wheel); serving requests",
+    "AriInit: ps2_input ready (the PS/2 keyboard and pointer, for the screen's holder)",
+    "AriInit: gui ok (compositor started)",
+    "compositor: desktop ready with 2 windows",
+    "gui_demo A: focus gained",
+    "gui_demo A: focus lost",
+    "gui_demo B: focus gained",
+    "gui_demo B: click button 1 at (380,280)",
+    "gui_demo B: key 'h'",
+    "gui_demo A: no keys",
+    "[host] QMP: 6 input events sent",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = [
+    "KERNEL PANIC",
+    "USER STACK OVERFLOW",
+    "gui_demo A: key",
+    "unknown command: h",
+    "PS/2 byte(s) dropped",
+]
+# A new window takes the focus (ADR 0074 phase C): A has it until B opens.
+serial_order = [
+    "gui_demo A: focus gained",
+    "gui_demo A: focus lost",
+]

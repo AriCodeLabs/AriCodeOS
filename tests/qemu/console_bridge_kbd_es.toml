@@ -1,0 +1,25 @@
+# `kbd=es` applies to the user-space keyboards too: init passes the layout
+# to the console bridge, so shift+period on the virtio keyboard types `:`
+# at the shell, as on the kernel's PS/2 keyboard (console.ps2_es). Before,
+# the bridge stayed on US and typed `>`.
+name = "console.bridge_kbd_es"
+description = "the console bridge types with the kbd= layout: shift+period is ':' on a Spanish virtio keyboard"
+level = "full"
+areas = ["console", "input", "virtio"]
+cmdline = "qemu_exit shell kbd=es"
+timeout_secs = 60
+
+[host_input]
+marker = "CONSOLE_BRIDGE_READY"
+echo_prompt = "ari> "
+keys = ["shift+dot", "ret", "s", "h", "u", "t", "d", "o", "w", "n", "ret"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "AriInit: console bridge with 2 input device(s)",
+    "unknown command: :",
+    "ari> shutdown",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "unknown command: >"]

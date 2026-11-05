@@ -124,13 +124,32 @@ pub mod block {
 /// File data does not travel in the message (256 bytes): the client
 /// transfers a DMA buffer and the service reads from or writes to it.
 pub mod fs {
+    /// A name inside a directory session (an application's own, or the
+    /// owner's `home/`), as AriFS keeps it: 1 to `max` letters, digits,
+    /// `.`, `_` or `-`, and not `.` or `..`, which would only confuse.
+    pub fn valid_plain_name(name: &str, max: usize) -> bool {
+        !name.is_empty()
+            && name.len() <= max
+            && name != "."
+            && name != ".."
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    }
+
     pub const PROTOCOL: u8 = 2;
     pub const VERSION: u8 = 1;
     pub const MAX_NAME: usize = 32;
     /// Maximum per read/write request (client buffer).
     pub const MAX_IO: u32 = 4096;
-    /// Maximum size of an atomic replace (the AriFS journal, ADR 0018).
-    pub const MAX_REPLACE: u32 = 32 * 1024;
+    /// Maximum size of an atomic replace: AriFS v2's largest file (ADR
+    /// 0072). A volume still in v1 refuses more than its 32 KiB journal
+    /// with `OutOfRange`.
+    pub const MAX_REPLACE: u32 = 16 * 1024 * 1024;
+    /// Set in fsd's launch argument, beside the partition's LBA: migrate a
+    /// v1 volume to v2 at mount (ADR 0072). init sets it only when both
+    /// slots hold a system that reads v2.
+    pub const ARG_MIGRATE: u64 = 1 << 63;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Op {
@@ -144,7 +163,9 @@ pub mod fs {
         Read = 4,
         /// `fd`, `offset`, `len`; handles `[reply, buffer]`; `value` = bytes written.
         Write = 5,
-        /// `fd`.
+        /// `fd`. On AriFS v2 it also commits what writes grew that file
+        /// by (ADR 0072); the descriptor is closed even when the reply is
+        /// an error, which says that growth is not durable yet.
         Close = 6,
         /// Main endpoint only (the broker): creates an endpoint bound
         /// to the prefix `name/`; the reply transfers that endpoint (`WRITE`).
@@ -184,7 +205,21 @@ pub mod fs {
         /// `NotFound` past the last slot; `Denied` from a private
         /// directory or a shared file (ADR 0036).
         Descriptors = 14,
+        /// Name in the request: deletes the file (ADR 0072). Descriptors
+        /// open on it stop working (`BadFd`). `Unsupported` on a volume
+        /// still in v1.
+        Delete = 15,
+        /// `fd`, name in the request: renames the file; a file already
+        /// called so is deleted in the same commit, so an installer can
+        /// write `x.new` and rename it over `x` atomically (ADR 0072).
+        /// With `len` = [`RENAME_KEEP`] a file of that name is kept and the
+        /// rename answers `Exists` instead, checked in the same step (the
+        /// desktop's file manager). `Unsupported` on a volume still in v1.
+        Rename = 16,
     }
+
+    /// `Request::len` of a `Rename` that never replaces a file.
+    pub const RENAME_KEEP: u32 = 1;
 
     /// Descriptor table usage as `Op::Descriptors` reports it for one
     /// owner slot (ADR 0036): what that owner holds, what everybody holds,
@@ -291,6 +326,8 @@ pub mod fs {
                 12 => Op::ReplaceCommit,
                 13 => Op::Attach,
                 14 => Op::Descriptors,
+                15 => Op::Delete,
+                16 => Op::Rename,
                 _ => return None,
             };
             let mut name = [0u8; MAX_NAME];
@@ -323,6 +360,9 @@ pub mod fs {
         Denied = 9,
         /// Another chunked replace is in progress (ADR 0018).
         Busy = 10,
+        /// The volume's format does not have the operation (v1 has no
+        /// delete or rename, ADR 0072).
+        Unsupported = 11,
     }
 
     /// Reply (64 bytes): status, value and name (for `List`).
@@ -393,6 +433,7 @@ pub mod fs {
                 8 => Status::OutOfRange,
                 9 => Status::Denied,
                 10 => Status::Busy,
+                11 => Status::Unsupported,
                 _ => return None,
             };
             let mut name = [0u8; MAX_NAME];
@@ -933,9 +974,15 @@ pub mod input {
         pub value: u32,
     }
 
+    /// `Reply::kinds` bit: the service has a keyboard (ADR 0074 phase B).
+    pub const KIND_KEYBOARD: u8 = 1;
+    /// `Reply::kinds` bit: the service has a mouse or another pointer.
+    pub const KIND_POINTER: u8 = 2;
+
     /// Reply (104 bytes): status, number of events, events, the timestamp
     /// (ms since boot) at which the service received each one, and name. The
-    /// timestamps allow ordering events from several devices.
+    /// timestamps allow ordering events from several devices. An `Info`
+    /// reply also says what the service's devices are (`kinds`).
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Reply {
         pub status: Status,
@@ -944,6 +991,13 @@ pub mod input {
         pub times: [u64; MAX_EVENTS],
         pub name: [u8; MAX_NAME],
         pub name_len: u8,
+        /// `KIND_*` bits of an `Info` reply; 0 in the others.
+        pub kinds: u8,
+        /// Which run of the driver sent it (bytes 6..8, never 0 when set;
+        /// 0 from a driver that does not say): one that changes means the
+        /// driver was relaunched, and the releases of the keys it held
+        /// were lost (audit of the file manager, M2).
+        pub instance: u16,
     }
 
     impl Reply {
@@ -959,6 +1013,8 @@ pub mod input {
                 times: [0; MAX_EVENTS],
                 name: [0; MAX_NAME],
                 name_len: 0,
+                kinds: 0,
+                instance: 0,
             }
         }
 
@@ -982,6 +1038,16 @@ pub mod input {
             Some(self)
         }
 
+        pub fn with_kinds(mut self, kinds: u8) -> Self {
+            self.kinds = kinds;
+            self
+        }
+
+        pub fn with_instance(mut self, instance: u16) -> Self {
+            self.instance = instance;
+            self
+        }
+
         pub fn name_str(&self) -> &str {
             core::str::from_utf8(&self.name[..self.name_len as usize]).unwrap_or("?")
         }
@@ -993,6 +1059,8 @@ pub mod input {
             b[2] = self.status as u8;
             b[3] = self.count;
             b[4] = self.name_len;
+            b[5] = self.kinds;
+            b[6..8].copy_from_slice(&self.instance.to_le_bytes());
             for (i, e) in self.events.iter().enumerate() {
                 let o = 8 + 8 * i;
                 b[o..o + 2].copy_from_slice(&e.kind.to_le_bytes());
@@ -1041,6 +1109,8 @@ pub mod input {
                 times,
                 name,
                 name_len: b[4].min(MAX_NAME as u8),
+                kinds: b[5],
+                instance: u16::from_le_bytes([b[6], b[7]]),
             })
         }
     }
@@ -1171,8 +1241,10 @@ pub mod window {
         Timeout = 5,
     }
 
-    /// Event delivered to a window.
+    /// Event delivered to a window. More kinds may come: a program matches
+    /// the ones it knows (audit of ADR 0077, L8).
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[non_exhaustive]
     pub enum Event {
         /// Character already translated by the compositor.
         Key(u8),
@@ -1180,6 +1252,10 @@ pub mod window {
         Click { x: i32, y: i32, button: u8 },
         /// The window gained (`true`) or lost focus.
         Focus(bool),
+        /// The owner clicked the window's close box: the program closes it,
+        /// or asks first (unsaved changes). One that never takes this
+        /// event has its window closed for it at the next click (ADR 0077).
+        Close,
     }
 
     /// Reply (32 bytes): status, value and optional event.
@@ -1237,6 +1313,7 @@ pub mod window {
                     b[3] = 3;
                     b[16] = f as u8;
                 }
+                Some(Event::Close) => b[3] = 4,
             }
             b
         }
@@ -1263,6 +1340,7 @@ pub mod window {
                     button: b[24],
                 }),
                 3 => Some(Event::Focus(b[16] != 0)),
+                4 => Some(Event::Close),
                 _ => return None,
             };
             Some(Self {
@@ -1300,6 +1378,10 @@ pub mod launch {
         /// The request carries the program's console (the send side of an
         /// endpoint); never with `DETACH`.
         pub const CONSOLE: u8 = 2;
+        /// The launcher asks for the `arg`-th installed application it may
+        /// offer (ADR 0074 phase C); the reply is an [`Entry`]. The name is
+        /// empty.
+        pub const LIST: u8 = 4;
 
         /// `None` if the name does not fit.
         pub fn new(name: &str, arg: u64) -> Option<Self> {
@@ -1314,6 +1396,20 @@ pub mod launch {
                 name_len: name.len() as u8,
                 flags: 0,
             })
+        }
+
+        /// The request for the `index`-th installed application (`LIST`).
+        pub fn list(index: u64) -> Self {
+            Self {
+                arg: index,
+                name: [0; MAX_NAME],
+                name_len: 0,
+                flags: Self::LIST,
+            }
+        }
+
+        pub fn is_list(&self) -> bool {
+            self.flags & Self::LIST != 0
         }
 
         pub fn detached(mut self) -> Self {
@@ -1434,11 +1530,282 @@ pub mod launch {
             })
         }
     }
+    /// Reply to a `LIST` request (48 bytes): `Ok` with an installed
+    /// application's name, or `NotFound` past the last one.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Entry {
+        pub status: Status,
+        pub name: [u8; MAX_NAME],
+        pub name_len: u8,
+    }
+
+    impl Entry {
+        pub const LEN: usize = 48;
+
+        pub fn status(status: Status) -> Self {
+            Self {
+                status,
+                name: [0; MAX_NAME],
+                name_len: 0,
+            }
+        }
+
+        /// `None` if the name is empty or does not fit.
+        pub fn named(name: &str) -> Option<Self> {
+            if name.is_empty() || name.len() > MAX_NAME {
+                return None;
+            }
+            let mut e = Self::status(Status::Ok);
+            e.name[..name.len()].copy_from_slice(name.as_bytes());
+            e.name_len = name.len() as u8;
+            Some(e)
+        }
+
+        pub fn name_str(&self) -> &str {
+            core::str::from_utf8(&self.name[..self.name_len as usize]).unwrap_or("")
+        }
+
+        pub fn encode(&self) -> [u8; Self::LEN] {
+            let mut b = [0u8; Self::LEN];
+            b[0] = PROTOCOL;
+            b[1] = VERSION;
+            b[2] = self.status as u8;
+            b[3] = self.name_len;
+            b[16..48].copy_from_slice(&self.name);
+            b
+        }
+
+        pub fn decode(b: &[u8]) -> Option<Self> {
+            if b.len() < Self::LEN || b[0] != PROTOCOL || b[1] != VERSION {
+                return None;
+            }
+            let status = Reply::decode(&b[..Reply::LEN])?.status;
+            let name_len = b[3];
+            if name_len as usize > MAX_NAME {
+                return None;
+            }
+            let mut name = [0u8; MAX_NAME];
+            name.copy_from_slice(&b[16..48]);
+            Some(Self {
+                status,
+                name,
+                name_len,
+            })
+        }
+    }
+}
+
+/// The desktop's settings (ADR 0074 phase C, the owner's choice): what
+/// init answers its `settings` application, and the one change it makes.
+/// Never a file: init reads and writes what is asked, and logs a change in
+/// the install history as the shell does.
+pub mod settings {
+    pub const PROTOCOL: u8 = 9;
+    pub const VERSION: u8 = 1;
+    /// Bytes of text in a reply: a message of 248 bytes, within
+    /// `IPC_MAX_DATA`.
+    pub const MAX_TEXT: usize = 240;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Op {
+        /// The text of `item`.
+        Get = 1,
+        /// Chooses what the machine boots into from the next boot:
+        /// `value` 0 the text console, 1 the desktop.
+        SetSession = 2,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Item {
+        /// What the machine boots into, and what keeps a desktop from it.
+        Session = 1,
+        /// The update sources, as the shell lists them.
+        UpdateSource = 2,
+        /// The network address.
+        Address = 3,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Request {
+        pub op: Op,
+        pub item: Item,
+        pub value: u8,
+    }
+
+    impl Request {
+        pub const LEN: usize = 8;
+
+        pub fn encode(&self) -> [u8; Self::LEN] {
+            [
+                PROTOCOL,
+                VERSION,
+                self.op as u8,
+                self.item as u8,
+                self.value,
+                0,
+                0,
+                0,
+            ]
+        }
+
+        pub fn decode(b: &[u8]) -> Option<Self> {
+            if b.len() < Self::LEN || b[0] != PROTOCOL || b[1] != VERSION {
+                return None;
+            }
+            let op = match b[2] {
+                1 => Op::Get,
+                2 => Op::SetSession,
+                _ => return None,
+            };
+            let item = match b[3] {
+                1 => Item::Session,
+                2 => Item::UpdateSource,
+                3 => Item::Address,
+                _ => return None,
+            };
+            Some(Self {
+                op,
+                item,
+                value: b[4],
+            })
+        }
+    }
+
+    #[repr(u8)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Status {
+        Ok = 0,
+        Invalid = 1,
+        /// Init could not read or write what was asked; the text says why.
+        Failed = 2,
+    }
+
+    /// Reply: status and a line of text.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Reply {
+        pub status: Status,
+        pub text: [u8; MAX_TEXT],
+        pub len: u8,
+    }
+
+    impl Reply {
+        pub const LEN: usize = 8 + MAX_TEXT;
+
+        /// `text`, cut to `MAX_TEXT` bytes and then ending in `...` so a
+        /// cut never passes for the whole (audit of the settings, M1).
+        pub fn new(status: Status, text: &[u8]) -> Self {
+            let n = text.len().min(MAX_TEXT);
+            let mut t = [0u8; MAX_TEXT];
+            t[..n].copy_from_slice(&text[..n]);
+            if text.len() > MAX_TEXT {
+                t[MAX_TEXT - 3..].copy_from_slice(b"...");
+            }
+            Self {
+                status,
+                text: t,
+                len: n as u8,
+            }
+        }
+
+        pub fn text(&self) -> &[u8] {
+            &self.text[..self.len as usize]
+        }
+
+        pub fn encode(&self) -> [u8; Self::LEN] {
+            let mut b = [0u8; Self::LEN];
+            b[0] = PROTOCOL;
+            b[1] = VERSION;
+            b[2] = self.status as u8;
+            b[3] = self.len;
+            b[8..].copy_from_slice(&self.text);
+            b
+        }
+
+        pub fn decode(b: &[u8]) -> Option<Self> {
+            if b.len() < Self::LEN || b[0] != PROTOCOL || b[1] != VERSION {
+                return None;
+            }
+            let status = match b[2] {
+                0 => Status::Ok,
+                1 => Status::Invalid,
+                2 => Status::Failed,
+                _ => return None,
+            };
+            if b[3] as usize > MAX_TEXT {
+                return None;
+            }
+            let mut text = [0u8; MAX_TEXT];
+            text.copy_from_slice(&b[8..Self::LEN]);
+            Some(Self {
+                status,
+                text,
+                len: b[3],
+            })
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::block::*;
+
+    #[test]
+    fn settings_round_trip() {
+        use super::settings::*;
+        let req = Request {
+            op: Op::SetSession,
+            item: Item::Session,
+            value: 1,
+        };
+        assert_eq!(Request::decode(&req.encode()), Some(req));
+        assert_eq!(Request::decode(&[9, 1, 3, 1, 0, 0, 0, 0]), None);
+        assert_eq!(Request::decode(&[9, 1, 1, 7, 0, 0, 0, 0]), None);
+        let r = Reply::new(Status::Ok, b"session: desktop");
+        let d = Reply::decode(&r.encode()).unwrap();
+        assert_eq!(d.text(), b"session: desktop");
+        let long = Reply::new(Status::Failed, &[b'x'; 300]);
+        assert_eq!(long.text().len(), MAX_TEXT);
+        assert!(long.text().ends_with(b"x..."), "a cut is marked");
+        assert_eq!(
+            Reply::new(Status::Ok, &[b'y'; MAX_TEXT]).text(),
+            &[b'y'; MAX_TEXT][..]
+        );
+        const _: () = assert!(Reply::LEN <= 256, "within IPC_MAX_DATA");
+        let mut bad = r.encode();
+        bad[3] = MAX_TEXT as u8 + 1;
+        assert!(Reply::decode(&bad).is_none());
+    }
+
+    #[test]
+    fn plain_names() {
+        use super::fs::valid_plain_name as ok;
+        for good in ["notes.txt", "a", "x-1_y.md", ".config"] {
+            assert!(ok(good, 27), "{good}");
+        }
+        for bad in ["", ".", "..", "a b", "a/b", "ñ", "x*"] {
+            assert!(!ok(bad, 27), "{bad}");
+        }
+        assert!(!ok("abc", 2), "too long");
+    }
+
+    #[test]
+    fn launch_list_round_trip() {
+        use super::launch::{Entry, Request, Status};
+        let req = Request::decode(&Request::list(3).encode()).unwrap();
+        assert!(req.is_list() && !req.is_detached() && req.arg == 3);
+        assert_eq!(req.name_str(), "");
+        let e = Entry::decode(&Entry::named("editor").unwrap().encode()).unwrap();
+        assert_eq!((e.status, e.name_str()), (Status::Ok, "editor"));
+        let end = Entry::decode(&Entry::status(Status::NotFound).encode()).unwrap();
+        assert_eq!((end.status, end.name_str()), (Status::NotFound, ""));
+        assert!(Entry::named("").is_none());
+        let mut bad = Entry::named("x").unwrap().encode();
+        bad[3] = 40;
+        assert!(
+            Entry::decode(&bad).is_none(),
+            "a name longer than its field"
+        );
+    }
 
     #[test]
     fn launch_round_trip() {
@@ -1489,6 +1856,7 @@ mod tests {
                 button: 1,
             },
             Event::Focus(true),
+            Event::Close,
         ] {
             let reply = Reply::event(ev);
             assert_eq!(Reply::decode(&reply.encode()), Some(reply));
@@ -1530,6 +1898,14 @@ mod tests {
         assert_eq!(d, reply);
         assert_eq!(d.count, 2);
         assert_eq!(d.name_str(), "QEMU Virtio Keyboard");
+        assert_eq!((d.kinds, d.instance), (0, 0));
+        let stamped = Reply::status(Status::Timeout).with_instance(0xBEEF);
+        assert_eq!(Reply::decode(&stamped.encode()).unwrap().instance, 0xBEEF);
+        let info = Reply::status(Status::Ok).with_kinds(KIND_KEYBOARD | KIND_POINTER);
+        assert_eq!(
+            Reply::decode(&info.encode()).unwrap().kinds,
+            KIND_KEYBOARD | KIND_POINTER
+        );
         assert!(Reply::status(Status::Ok)
             .with_name(&"x".repeat(33))
             .is_none());
@@ -1685,7 +2061,7 @@ mod tests {
     #[test]
     fn fs_session_operations_and_descriptor_usage() {
         use super::fs::*;
-        for op in [Op::Attach, Op::Descriptors] {
+        for op in [Op::Attach, Op::Descriptors, Op::Delete, Op::Rename] {
             let mut r = Request::new(op);
             r.fd = 7;
             assert_eq!(Request::decode(&r.encode()), Some(r));
@@ -1759,6 +2135,9 @@ pub mod session {
     pub const SHELL_SESSION: u64 = 1 << 16;
     /// Shell argument bit: no banner, prompt or echo (single command).
     pub const SHELL_QUIET: u64 = 1 << 17;
+    /// Shell argument bit, with `SHELL_SESSION`: the session is a desktop
+    /// terminal's (ADR 0074 phase C), not an SSH one.
+    pub const SHELL_TERMINAL: u64 = 1 << 18;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Kind {

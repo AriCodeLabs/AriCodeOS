@@ -15,6 +15,8 @@ use aricode_proto::net::{Status as NetStatus, LINK_DOWN, LINK_UP};
 use aricode_rt::sys::net::{NetClient, NetError};
 use aricode_rt::sys::{self, abi, fs::FsClient, Handle, TIMEOUT_INFINITE};
 use aricode_rt::{fmt_hex, fmt_u64};
+use aricode_update_index::client::FsFiles;
+use aricode_update_index::session::{self, Session};
 use aricode_update_index::{self as update_index, installer_arg, updater_arg};
 
 const FSD: Handle = Handle(0x0001_0004);
@@ -62,6 +64,10 @@ fn capture_with<R>(f: impl FnOnce(&mut ([u8; CAPTURE_MAX], usize, bool)) -> R) -
 static MODE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
 const MODE_SESSION: u8 = 1;
 const MODE_QUIET: u8 = 2;
+
+/// Where the session came from, for the install history: a desktop
+/// terminal's or an SSH one.
+static FROM_TERMINAL: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 fn session() -> bool {
     MODE.load(core::sync::atomic::Ordering::Relaxed) != 0
@@ -200,7 +206,13 @@ impl Input {
         while self.start == self.end {
             let n = if session() {
                 let mut handles = [Handle(0); 1];
-                match sys::ipc_receive(CONSOLE_IN, &mut self.buf, &mut handles, TIMEOUT_INFINITE) {
+                let got =
+                    sys::ipc_receive(CONSOLE_IN, &mut self.buf, &mut handles, TIMEOUT_INFINITE);
+                // Input is bytes only: a handle sent along is not kept.
+                if let Ok((_, 1)) = got {
+                    let _ = sys::handle_close(handles[0]);
+                }
+                match got {
                     Ok((0, _)) | Err(_) => return None,
                     Ok((n, _)) => n,
                 }
@@ -257,7 +269,7 @@ fn trim(s: &[u8]) -> &[u8] {
 fn help() {
     print(
         b"commands:\n  help      this help\n  ps        processes\n  mem       physical memory\n  ls        AriFS files\n  cat NAME  show a file\n  write NAME TEXT  save TEXT to the file (creates it or replaces it entirely)\n  devices   PCI functions\n  services  boot services (--detail: supervisor state)\n  uptime    time since boot\n  sleep MS  wait MS milliseconds (at most 60000)\n  cpus      online processors and idle time per CPU\n  diag [NAME]  full report (uptime, mem, cpus, entropy, ps, stacks, services, net, devices); with NAME saves it to AriFS\n  net       network configuration\n  ping IP   ICMP echo (4 attempts)\n  dns NAME  resolve a name\n  http URL  GET and show the body (http:// or https://)\n  run PROG  run an initrd program and wait\n\
-  update [--channel stable|dev]  fetch and verify the signed index of every source of the channel (stable by default) and show what is new (installs nothing; ADR 0029, ADR 0045)\n  update add [--channel dev] URL|IP[:PORT]  register an update source (stable unless --channel dev)\n  update remove N|URL  unregister a source\n  update sources  list the sources\n  update apply [--allow-downgrade]  install the image in the UPDATE partition\n  update rollback  boot the system in the other slot next (no network; then `reboot`)\n  upgrade [--channel stable|dev] [--allow-downgrade]  install what the last `update` found (system into the inactive slot, then `reboot`; apps through the installer); only --channel moves the system to another channel\n  spawn PROG  launch it in the background (cannot be stopped)\n  repeat N CMD  repeat a command N times\n  reboot    reboot\n  shutdown  power off\n  exit      exit the shell\n",
+  update [--channel stable|dev]  fetch and verify the signed index of every source of the channel (stable by default) and show what is new (installs nothing; ADR 0029, ADR 0045)\n  update add [--channel dev] URL|IP[:PORT]  register an update source (stable unless --channel dev)\n  update remove N|URL  unregister a source\n  update sources  list the sources\n  update profile add|remove NAME  follow a profile of the sources (upgrade installs its apps) or stop following it (its apps are deleted; ADR 0074)\n  update profiles  list the followed profiles\n  session [shell|desktop]  show or choose what the machine boots into: the text console, or the desktop of the desktop profile once installed (ADR 0074)\n  update apply [--allow-downgrade]  install the image in the UPDATE partition\n  update rollback  boot the system in the other slot next (no network; then `reboot`)\n  upgrade [--channel stable|dev] [--allow-downgrade]  install what the last `update` found (system into the inactive slot, then `reboot`; apps through the installer); only --channel moves the system to another channel\n  spawn PROG  launch it in the background (cannot be stopped)\n  repeat N CMD  repeat a command N times\n  reboot    reboot\n  shutdown  power off\n  exit      exit the shell\n",
     );
 }
 
@@ -514,10 +526,7 @@ fn diag(fs: &mut FsClient, net_client: &NetClient, mask: u64, rest: &[u8]) {
 
 /// Creates the file `name`, or replaces it entirely, with `data`.
 fn save_file(fs: &mut FsClient, name: &str, data: &[u8]) -> Result<usize, ()> {
-    let fd = fs.open(name).or_else(|_| fs.create(name)).map_err(|_| ())?;
-    let r = fs.replace(fd, data).map_err(|_| ());
-    let _ = fs.close(fd);
-    r
+    update_index::client::save(fs, name, data).map_err(|_| ())
 }
 
 /// Recent kernel events (`sysinfo::EVENTS`): the last 32 (half the
@@ -1084,6 +1093,12 @@ fn update(fs: &mut FsClient, rest: &[u8]) {
             run_updater(updater_arg::ROLLBACK);
         }
         (b"sources", b"") => sources_list(fs),
+        (b"profiles", b"") => profiles_list(fs),
+        (b"profile", a) => match split(a) {
+            (b"add", name) if !name.is_empty() => profile_add(fs, name),
+            (b"remove", name) if !name.is_empty() => profile_remove(fs, name),
+            _ => update_usage(),
+        },
         (b"add", a) if !a.is_empty() => source_add(fs, a),
         (b"remove", a) if !a.is_empty() => source_remove(fs, a),
         _ => update_usage(),
@@ -1092,7 +1107,7 @@ fn update(fs: &mut FsClient, rest: &[u8]) {
 
 fn update_usage() {
     print(
-        b"usage: update [--channel stable|dev | add [--channel dev] URL|IP[:PORT] | remove N|URL | sources | apply [--allow-downgrade] | rollback]\n",
+        b"usage: update [--channel stable|dev | add [--channel dev] URL|IP[:PORT] | remove N|URL | sources | profile add|remove NAME | profiles | apply [--allow-downgrade] | rollback]\n",
     );
 }
 
@@ -1201,48 +1216,12 @@ fn run_updater(arg: u64) -> Option<u64> {
 }
 
 /// Reads a whole small file: `Ok(None)` if it does not exist.
-/// The main file space as `update_index::files::Files`: only an explicit
-/// `NotFound` means a file is absent; any other failure is an error, never
-/// mistaken for "missing" (incident 0008).
-struct MainFiles<'a>(&'a mut FsClient);
-
-impl update_index::files::Files for MainFiles<'_> {
-    type Fd = u32;
-    type Error = aricode_rt::sys::fs::FsError;
-
-    fn open(&mut self, name: &str) -> Result<Option<u32>, Self::Error> {
-        use aricode_proto::fs::Status;
-        use aricode_rt::sys::fs::FsError;
-        match self.0.open(name) {
-            Ok(fd) => Ok(Some(fd)),
-            Err(FsError::Status(Status::NotFound)) => Ok(None),
-            Err(e) => Err(e),
-        }
-    }
-
-    fn read(&mut self, fd: &u32, offset: u32, out: &mut [u8]) -> Result<usize, Self::Error> {
-        self.0.read(*fd, offset, out)
-    }
-
-    fn close(&mut self, fd: u32) {
-        let _ = self.0.close(fd);
-    }
-
-    fn list(
-        &mut self,
-        index: u32,
-        name_out: &mut [u8; update_index::files::NAME_LEN],
-    ) -> Result<Option<(usize, u64)>, Self::Error> {
-        self.0.list(index, name_out)
-    }
-}
-
 fn read_small(
     fs: &mut FsClient,
     name: &str,
     max: usize,
 ) -> Result<Option<alloc::vec::Vec<u8>>, ()> {
-    update_index::files::read_optional(&mut MainFiles(fs), name, max).map_err(|_| ())
+    update_index::files::read_optional(&mut FsFiles(fs), name, max).map_err(|_| ())
 }
 
 /// The source list, migrating `update_url` (ADR 0027) when there is no
@@ -1291,35 +1270,266 @@ fn save_sources(fs: &mut FsClient, sources: &update_index::Sources, event: &str)
         print(b"update: cannot save the source list\n");
         return false;
     }
-    let history_path = update_index::main_path(update_index::HISTORY_FILE);
+    log_history(fs, event);
+    true
+}
+
+/// Appends `event` to the install history, saying where the owner typed
+/// it.
+fn log_history(fs: &mut FsClient, event: &str) {
     let line = alloc::format!(
         "{event} (from {})",
-        if session() {
-            "an SSH session"
-        } else {
+        if !session() {
             "the console"
+        } else if FROM_TERMINAL.load(core::sync::atomic::Ordering::Relaxed) {
+            "a desktop terminal"
+        } else {
+            "an SSH session"
         }
     );
     // A history that cannot be read is not rewritten (incident 0008): the
     // source change is done and was said, but the older lines are never
     // replaced by this one.
-    let log = match update_index::history::appended(
-        &mut MainFiles(fs),
-        &history_path,
-        &line,
-        update_index::HISTORY_MAX,
-    ) {
-        Ok(log) => log,
-        Err(_) => {
+    match update_index::client::log_history(fs, &line) {
+        Ok(()) => {}
+        Err(update_index::client::HistoryError::Read) => {
             print(b"update: cannot read the install history: not rewritten\n");
             let _ = sys::event_record(2, "sh-history-read");
-            return true;
+        }
+        Err(update_index::client::HistoryError::Write) => {
+            print(b"update: cannot write the install history\n");
+        }
+    }
+}
+
+/// The followed profiles (ADR 0074); `None` (after saying why) if the
+/// list cannot be read.
+fn load_profiles(fs: &mut FsClient) -> Option<update_index::Profiles> {
+    let path = update_index::main_path(update_index::PROFILES_FILE);
+    let Ok(text) = read_small(fs, &path, 1024) else {
+        print(b"update: cannot read the profile list\n");
+        return None;
+    };
+    let text = text.map(|t| alloc::string::String::from_utf8_lossy(&t).into_owned());
+    let (profiles, rejected) = update_index::Profiles::parse(text.as_deref().unwrap_or(""));
+    if rejected > 0 {
+        print(b"update: ");
+        num(rejected as u64);
+        print(b" invalid line(s) in the profile list ignored\n");
+    }
+    Some(profiles)
+}
+
+fn save_profiles(fs: &mut FsClient, profiles: &update_index::Profiles, event: &str) -> bool {
+    let path = update_index::main_path(update_index::PROFILES_FILE);
+    if save_file(fs, &path, profiles.to_text().as_bytes()).is_err() {
+        print(b"update: cannot save the profile list\n");
+        return false;
+    }
+    log_history(fs, event);
+    true
+}
+
+fn profiles_list(fs: &mut FsClient) {
+    let Some(profiles) = load_profiles(fs) else {
+        return;
+    };
+    if profiles.is_empty() {
+        print(b"update: no profile followed (update profile add NAME)\n");
+        return;
+    }
+    print(b"update profiles:\n");
+    for name in profiles.names() {
+        print(b"  ");
+        print(name.as_bytes());
+        print(b"\n");
+    }
+}
+
+fn profile_error(e: update_index::ProfileError) {
+    use update_index::ProfileError as E;
+    print(match e {
+        E::Invalid => b"update: invalid profile name ([A-Za-z0-9_-], at most 20)\n".as_slice(),
+        E::Duplicate => b"update: profile already followed\n",
+        E::Full => b"update: profile list full (4 profiles); remove one first\n",
+        E::NotFound => b"update: no such profile (see update profiles)\n",
+    });
+}
+
+/// `update profile add NAME` (ADR 0074): follows it; `update` then plans
+/// what it installs and `upgrade` installs it.
+fn profile_add(fs: &mut FsClient, name: &[u8]) {
+    let Ok(name) = core::str::from_utf8(name) else {
+        return profile_error(update_index::ProfileError::Invalid);
+    };
+    let Some(mut profiles) = load_profiles(fs) else {
+        return;
+    };
+    if let Err(e) = profiles.add(name) {
+        return profile_error(e);
+    }
+    if save_profiles(fs, &profiles, &alloc::format!("profile followed: {name}")) {
+        print(b"update: profile ");
+        print(name.as_bytes());
+        print(b" followed (run update, then upgrade, to install it)\n");
+        // Following the desktop is asking for it (ADR 0074).
+        if name == session::DESKTOP_PROFILE {
+            save_session(fs, Session::Desktop);
+        }
+    }
+}
+
+/// `update profile remove NAME` (ADR 0074): stops following it and deletes
+/// the apps `upgrade` installed for it that no profile still followed
+/// names; an app another followed profile names moves to that profile.
+/// What the other profiles name comes from the verified indexes of the
+/// current stable sources, each from its own slot; when one cannot be
+/// used, or a followed profile is offered by none, nothing changes. The
+/// decision is made before the list is saved, so a refusal can be retried.
+fn profile_remove(fs: &mut FsClient, name: &[u8]) {
+    let Ok(name) = core::str::from_utf8(name) else {
+        return profile_error(update_index::ProfileError::NotFound);
+    };
+    let Some(mut profiles) = load_profiles(fs) else {
+        return;
+    };
+    let removed = match profiles.remove(name) {
+        Ok(p) => p,
+        Err(e) => return profile_error(e),
+    };
+    let delete = if profiles.is_empty() {
+        removed.installed.clone()
+    } else {
+        let Some(sources) = load_sources(fs) else {
+            return;
+        };
+        let path = update_index::main_path(update_index::INDEXES_FILE);
+        let max = update_index::MAX_SOURCES * (update_index::MAX_INDEX + 1024);
+        let slots = match read_small(fs, &path, max) {
+            Ok(bytes) => update_index::stored::decode_all(&bytes.unwrap_or_default()),
+            Err(()) => None,
+        };
+        let Some(slots) = slots else {
+            print(b"update: the stored indexes cannot be read: nothing changed (run update)\n");
+            return;
+        };
+        let keys = update_index::Keys::stable_only(aricode_crypto::trust::public_key());
+        let indexes = match update_index::stored::verified_all(
+            &slots,
+            &sources,
+            &keys,
+            update_index::Channel::Stable,
+        ) {
+            Ok(indexes) => indexes,
+            Err((n, problem)) => {
+                print(b"update: source ");
+                num(n as u64);
+                print(match problem {
+                    update_index::stored::SlotProblem::Missing => {
+                        b": no verified index yet".as_slice()
+                    }
+                    update_index::stored::SlotProblem::ListChanged => {
+                        b": the list changed since the last update"
+                    }
+                    update_index::stored::SlotProblem::Refused => {
+                        b": its stored index fails verification"
+                    }
+                });
+                print(b": nothing changed (run update)\n");
+                return;
+            }
+        };
+        match update_index::profiles::plan_removal(&indexes, &removed, &mut profiles) {
+            Ok(delete) => delete,
+            Err(unknown) => {
+                print(b"update: no source offers profile ");
+                print(unknown.as_bytes());
+                print(b", so what it keeps is not known: nothing changed (run update)\n");
+                return;
+            }
         }
     };
-    if save_file(fs, &history_path, &log).is_err() {
-        print(b"update: cannot write the install history\n");
+    if !save_profiles(fs, &profiles, &alloc::format!("profile removed: {name}")) {
+        return;
     }
-    true
+    print(b"update: profile ");
+    print(name.as_bytes());
+    print(b" removed\n");
+    if name == session::DESKTOP_PROFILE {
+        save_session(fs, Session::Shell);
+    }
+    for app in delete {
+        let Some(target) = update_index::installed_path(&app) else {
+            continue;
+        };
+        match fs.delete(&target) {
+            Ok(()) => {
+                print(b"update: deleted ");
+                print(target.as_bytes());
+                print(b"\n");
+                log_history(
+                    fs,
+                    &alloc::format!("app deleted with profile {name}: {app}"),
+                );
+            }
+            Err(aricode_rt::sys::fs::FsError::Status(aricode_proto::fs::Status::NotFound)) => {}
+            Err(_) => {
+                print(b"update: cannot delete ");
+                print(target.as_bytes());
+                print(b": it stays installed\n");
+                let _ = sys::event_record(3, "sh-profile-delete");
+            }
+        }
+    }
+}
+
+/// `session [shell|desktop]` (ADR 0074): what the machine boots into.
+/// The desktop starts only with the `desktop` profile followed and its
+/// launcher installed; the shell says what is missing.
+fn session_command(fs: &mut FsClient, arg: &[u8]) {
+    match arg {
+        b"" => match read_small(fs, session::FILE, 256) {
+            Err(()) => print(b"session: cannot read the session file\n"),
+            Ok(None) => print(b"session: shell (the text console)\n"),
+            Ok(Some(text)) => match core::str::from_utf8(&text).ok().and_then(Session::parse) {
+                Some(Session::Shell) => print(b"session: shell (the text console)\n"),
+                Some(Session::Desktop) => {
+                    print(b"session: desktop");
+                    desktop_missing(fs);
+                }
+                None => print(
+                    b"session: the session file is damaged, so the machine boots into the text console (session shell|desktop writes it again)\n",
+                ),
+            },
+        },
+        b"shell" => save_session(fs, Session::Shell),
+        b"desktop" => save_session(fs, Session::Desktop),
+        _ => print(b"usage: session [shell|desktop]\n"),
+    }
+}
+
+/// Writes `session` and logs it in the install history.
+fn save_session(fs: &mut FsClient, chosen: Session) {
+    if save_file(fs, session::FILE, chosen.to_text().as_bytes()).is_err() {
+        print(b"session: cannot save the session file\n");
+        return;
+    }
+    log_history(fs, &alloc::format!("session: {}", chosen.name()));
+    match chosen {
+        Session::Shell => print(b"session: the text console from the next boot\n"),
+        Session::Desktop => {
+            print(b"session: the desktop from the next boot");
+            desktop_missing(fs);
+        }
+    }
+}
+
+/// Ends a line about the desktop session with what keeps it from starting,
+/// if anything.
+fn desktop_missing(fs: &mut FsClient) {
+    let readiness = update_index::session::desktop_readiness(&mut FsFiles(fs));
+    print(readiness.note().as_bytes());
+    print(b"\n");
 }
 
 fn sources_list(fs: &mut FsClient) {
@@ -1561,11 +1771,13 @@ fn services(mask: u64, fs: &FsClient) {
     } else {
         b"absent\n"
     });
+    // Started at boot, and a desktop session may have ended since (ADR
+    // 0074): the shell only knows that it was started.
     print(b"graphics  compositor  ");
     print(if mask & SERVICE_GUI != 0 {
-        b"active\n"
+        b"started at boot\n"
     } else {
-        b"absent (start with `gui`)\n"
+        b"absent (start with `gui` or the desktop session)\n"
     });
 }
 
@@ -1685,8 +1897,12 @@ fn services_detail() {
 }
 
 fn main(mask: u64) -> u64 {
-    use aricode_proto::session::{SHELL_QUIET, SHELL_SESSION};
+    use aricode_proto::session::{SHELL_QUIET, SHELL_SESSION, SHELL_TERMINAL};
     if mask & SHELL_SESSION != 0 {
+        FROM_TERMINAL.store(
+            mask & SHELL_TERMINAL != 0,
+            core::sync::atomic::Ordering::Relaxed,
+        );
         let mode = if mask & SHELL_QUIET != 0 {
             MODE_QUIET
         } else {
@@ -1763,6 +1979,7 @@ fn execute(
         b"http" => http_get(fs, net_client, rest),
         b"run" => run(rest),
         b"update" => update(fs, rest),
+        b"session" => session_command(fs, rest),
         b"upgrade" => upgrade(rest),
         b"spawn" => spawn(rest),
         b"repeat" => {
@@ -1784,10 +2001,14 @@ fn execute(
                 }
             }
         }
+        // Writes not yet durable (growth on AriFS v2, in-place writes) are
+        // flushed before the power goes (audit of the deferred growth, M2).
         b"reboot" => {
+            let _ = fs.flush();
             aricode_rt::print_error(b"reboot", sys::system_power(SYSTEM, abi::power::REBOOT));
         }
         b"shutdown" => {
+            let _ = fs.flush();
             aricode_rt::print_error(b"shutdown", sys::system_power(SYSTEM, abi::power::SHUTDOWN));
         }
         b"exit" => return true,

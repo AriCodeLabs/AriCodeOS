@@ -1,0 +1,25 @@
+# The Spanish keyboard as Linux types it (ADR 0076) on the PS/2 console:
+# the host types ñ (the key right of L), the dead acute (right of ñ) and
+# e, then AltGr+e; the kernel receives "ñé€" in UTF-8, 7 bytes. Before,
+# none of the three gave anything. The 13 scancodes fit the i8042's
+# 16-byte queue, so the keys are only paced.
+name = "console.ps2_es_accents"
+description = "PS/2 keyboard with Spanish layout: ñ, a dead accent and AltGr+e arrive as UTF-8"
+level = "full"
+areas = ["console", "hardware", "input"]
+cmdline = "qemu_exit test=console_ps2 kbd=es"
+timeout_secs = 40
+
+[host_input]
+marker = "CONSOLE_PS2_READY"
+keys = ["semicolon", "apostrophe", "e", "alt_r+e", "ret"]
+key_delay_ms = 50
+
+[expect]
+exit = 33
+serial_contains = [
+    "layout es)",
+    "console: PS/2 line 'ñé€' (7 bytes, 13 scancodes)",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC", "nobody typed"]

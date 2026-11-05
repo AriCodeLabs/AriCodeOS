@@ -1,0 +1,4 @@
+# External application: prints a line and exits; asks for nothing else.
+name = hello_more
+caps = system
+memory = 64K

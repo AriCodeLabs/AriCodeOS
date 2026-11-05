@@ -1,0 +1,34 @@
+# ADR 0072, phase B: an app upgrade of an app's real size over the network.
+# The source offers hello_ext 2 as a 1 MiB package. The updater downloads
+# it straight into its stage file with plain writes (one table commit, at
+# the flush), hashing it on the way, lists it only with the size and
+# SHA-256 of the signed index, and verifies it piece by piece; the
+# installer checks its SHA-256 against the staged list, verifies it again
+# and copies it into apps/hello_ext.aripkg.
+name = "apps.upgrade_network_large"
+description = "upgrade: a 1 MiB app package downloaded, staged and installed piece by piece"
+level = "full"
+areas = ["apps", "update", "network", "shell"]
+install = ["examples/hello_ext"]
+timeout_secs = 180
+
+[host_update]
+apps = ["examples/hello_ext:2"]
+large_apps = true
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["update", "upgrade", "run hello_ext 2", "ls", "shutdown"]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "updater: app hello_ext: installed 1, source 1 offers 2: upgrade available",
+    "updater: downloading hello_ext-2.aripkg (10",
+    "updater: app hello_ext version 2 verified and staged as updater/pkg-1.aripkg",
+    "installer: installing hello_ext version 2 (from updater/pkg-1.aripkg)",
+    "installer: hello_ext 1 -> 2 installed (apps/hello_ext.aripkg)",
+    "AriInit: launch hello_ext from AriFS (apps/hello_ext.aripkg version 2, 10",
+    "hello_ext v2: hello from outside the tree (arg 2)",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "update: updater exited with", "update: installer exited", "upd-pkg", "inst-"]

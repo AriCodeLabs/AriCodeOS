@@ -89,12 +89,15 @@ it, no downgrades unless asked, and every install logged.
    image into the inactive slot through the Phase 30 path (the old header
    is zeroed and flushed first, the new header written last, then the slot
    is scheduled with three tries; `reboot to apply`), and app packages
-   staged in the updater's directory as `pkg-1.aripkg`..`pkg-4.aripkg`
+   staged in the updater's directory as `pkg-1.aripkg`..`pkg-8.aripkg`
+   (`pkg-4` before ADR 0074)
    with the `[staged]` section listing file, name, version and SHA-256. The shell
    then runs the installer with `STAGED`, which installs exactly those
    files after checking them against the list and their own signature, and
-   empties the list. `upgrade` only upgrades installed apps; new apps are
-   listed by `update` as available. The disk is only opened when a system
+   empties the list (and, since ADR 0074, the stage files it consumed).
+   `upgrade` upgrades installed apps, and installs a new app only for a
+   profile the owner follows (ADR 0074); other new apps are listed by
+   `update` as available. The disk is only opened when a system
    image is involved, so apps-only work needs no A/B partitions.
 
 5. **No downgrade by default.** An offered version older than the
@@ -280,7 +283,9 @@ a machine installed with `usb-image --dev-source`.
 - AriFS table (32 entries in all, re-audit R3): the updater's directory
   uses `sources`, `indexes` (every stored copy), `state` (installed, plan
   and staged sections), `last.log`, `history.log` and up to four stage
-  files, plus `update_url` on migrated machines. A first `update` creates
+  files, plus `update_url` on migrated machines. Since ADR 0074 there are
+  up to eight stage files, `profiles` and `refused`, on AriFS v2 only (255 entries):
+  profiles are not followed on a volume still in v1. A first `update` creates
   `state` (installer `LIST`), `indexes` and `last.log`; an `upgrade` adds
   `history.log` after a system install and one stage file per package:
   five free entries for the system and one app (`update.fs_nearly_full`;
@@ -299,7 +304,8 @@ a machine installed with `usb-image --dev-source`.
   serials are reset silently; "cannot be read" includes a lost reply or a
   timeout from the file service, which is never taken for a missing file
   (incident 0008).
-- Limits: four sources, four staged packages per `upgrade`, a 4 KiB index,
+- Limits: four sources, four staged packages per `upgrade` (eight since
+  ADR 0074), a 4 KiB index,
   sixteen apps per index, 32 KiB packages (`aricode_pkg::PACKAGE_MAX`,
   shared with the broker and xtask since incident 0026), app names of 20
   bytes, and system images up to the 12 MiB of the slot and `UPDATE`
@@ -311,4 +317,4 @@ a machine installed with `usb-image --dev-source`.
   expiry date needs a trusted clock); binding an index to the source that
   serves it (a validly signed index can be served by any registered
   source); installing apps that are not yet installed (`update install
-  NAME`); limiting the updater's raw `block` grant to its partitions.
+  NAME`; ADR 0074 installs them through profiles); limiting the updater's raw `block` grant to its partitions.

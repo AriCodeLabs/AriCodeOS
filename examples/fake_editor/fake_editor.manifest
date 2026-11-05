@@ -1,0 +1,4 @@
+# Denied (ADR 0074): asks for the owner's folder without being the editor or files.
+name = fake_editor
+caps = home
+memory = 64K

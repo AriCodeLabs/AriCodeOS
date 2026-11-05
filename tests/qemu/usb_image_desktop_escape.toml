@@ -1,0 +1,45 @@
+# The owner's way back to the text console (ADR 0074 phase B, audit H1 and
+# M1): on a stick that boots into the desktop, Ctrl+Alt+Backspace on the
+# desktop's keyboard makes the compositor leave. init sees it gone, stops
+# the launcher and the apps it started, and gives the console the screen,
+# the PS/2 keyboard and the input services back. No window sees the chord.
+name = "usb.image_desktop_escape"
+description = "Ctrl+Alt+Backspace ends the desktop and the console gets the screen and keyboards back"
+level = "full"
+areas = ["usb", "apps", "gui", "input"]
+cmdline = "qemu_exit shell"
+selftest = false
+disk = "usb-image"
+install = ["examples/hello_ext", "examples/gui_demo", "examples/test_launcher"]
+stick_profiles = ["desktop:launcher,gui_demo"]
+stdin = ["sleep 5000", "session", "shutdown"]
+timeout_secs = 120
+
+[host_input]
+marker = "launcher: window presented"
+keys = ["ctrl+alt+backspace"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "AriInit: desktop session: launcher started",
+    "compositor: Ctrl+Alt+Backspace: the owner asked for the text console; leaving",
+    "AriInit: the desktop ended (the compositor ended): back to the text console",
+    "'launcher' killed: stopped at another process's request",
+    "console: the screen is back from process",
+    "AriInit: console bridge with 2 input device(s)",
+    "session: desktop\r\n",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_order = [
+    "compositor: Ctrl+Alt+Backspace: the owner asked for the text console; leaving",
+    "AriInit: the desktop ended (the compositor ended): back to the text console",
+    "AriInit: console bridge with 2 input device(s)",
+]
+serial_absent = [
+    "KERNEL PANIC",
+    "USER STACK OVERFLOW",
+    "launcher: leaving",
+    "gui_demo A: key",
+    "the compositor did not end",
+]

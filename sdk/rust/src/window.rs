@@ -123,8 +123,37 @@ impl Window {
         }
     }
 
+    /// Starts a `poll` without waiting for its answer, for a program that
+    /// also waits on other endpoints (the terminal: its shell's output):
+    /// returns the endpoint the answer comes on (receive side), to wait on
+    /// with `ipc_receive_any` and read with [`poll_reply`]. The caller
+    /// closes it once answered.
+    pub fn start_poll(&self, timeout_ms: u32) -> Result<Handle, WindowError> {
+        let mut req = self.request(Op::Poll);
+        req.timeout_ms = timeout_ms;
+        let (reply, reply_to) = sys::endpoint_create_pair().map_err(WindowError::Ipc)?;
+        if let Err(e) = sys::ipc_send(self.service, &req.encode(), &[reply_to], rpc::GRACE_MS) {
+            // Not transferred: both still ours.
+            let _ = sys::handle_close(reply_to);
+            let _ = sys::handle_close(reply);
+            return Err(WindowError::Ipc(e));
+        }
+        Ok(reply)
+    }
+
     pub fn close(self) -> Result<(), WindowError> {
         self.call(self.request(Op::Close), false).map(|_| ())
+    }
+}
+
+/// The answer to [`Window::start_poll`]: the event, or `None` if its
+/// deadline expired.
+pub fn poll_reply(msg: &[u8]) -> Result<Option<Event>, WindowError> {
+    let reply = Reply::decode(msg).ok_or(WindowError::Ipc(Error::Invalid))?;
+    match reply.status {
+        Status::Ok => Ok(reply.event),
+        Status::Timeout => Ok(None),
+        s => Err(WindowError::Status(s)),
     }
 }
 
