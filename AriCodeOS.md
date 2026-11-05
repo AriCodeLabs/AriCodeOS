@@ -4126,7 +4126,7 @@ Still the owner's: agents outside the trusted base (ADR 0041) and apps over
 
 ## 94.18 AriCodeOS 0.18
 
-**Status: completed (2026-11-04), tag `v0.18.0`.** The version of the
+**Status: completed (2026-11-05), tag `v0.18.0`.** The version of the
 optional desktop (ADR 0074): a base system for every machine, and a
 desktop the owner installs afterwards.
 
@@ -4176,17 +4176,38 @@ desktop the owner installs afterwards.
   Ctrl with a letter sends its control character. Before, no keyboard
   did, so the shell's Ctrl-A, Ctrl-E and Ctrl-U worked only over serial
   and SSH.
+- **Found on the reference laptop** with the 0.18 stick, and fixed before
+  the release:
+  - **The pointer trailed the hand** (incident 0058). The compositor read
+    its four input devices in turn, each idle one waiting up to a timer
+    tick. It now waits on all of them at once, and records late input in
+    `diag` as `gui input late`. The owner: "it reacts well".
+  - **ñ, ç and the accents gave nothing** (ADR 0076). The Spanish keyboard
+    is now the one Linux types, all four levels and the dead accents,
+    checked key by key against xkeyboard-config. The text is UTF-8 in the
+    keyboard, the widgets, the shell's line editor and the console, whose
+    font now shows Latin-1 and €. File names stay ASCII.
+  - **No window could be closed** (ADR 0077). Title bars have a close box.
+    The program is asked, and the editor asks before it discards changes.
+    A program that does not answer is marked "(not responding)", and the
+    next click ends its session.
+  - Each change was audited, and every finding was fixed.
 - **Certificates:** the eMudhra intermediates compromised in October are
   refused (`DISTRUSTED`, rustls-webpki 0.103.16). Mozilla's roots
   regenerated from NSS 2e636d0 are the same 117. The public suffix
-  extract is current (list 2026-10-31).
+  extract is current (list 2026-10-31). `TIME_FLOOR` is 2026-11-05.
 - **Verified:** the full suite with 1 and with 4 CPUs, and `perf`.
 
 Still the owner's: agents outside the trusted base (ADR 0041), and the
-residuals said in ADR 0074 and 0075:
+residuals said in ADR 0074, 0075 and 0077:
 - a PS/2 pointer that resets itself is set up again only at the next boot;
 - under the largest load, the 15-session tables of fsd and the network
-  stack can fill, and a launch then fails visibly.
+  stack can fill, and a launch then fails visibly;
+- a program hung for good keeps its process until the desktop ends.
+
+Next, chosen by the owner on 2026-11-05: a desktop worth the name, with a
+toolkit of our own and a macOS-like style (typography, window style, space
+used to the pixel), after a study of the veterans (ADR 0078 to come).
 
 ---
 
