@@ -72,6 +72,7 @@ pub fn abi_display() -> Option<aricode_abi::sysinfo::Display> {
         offered: v.offered,
         listed: listed as u8,
         bad_request: v.bad_request != 0,
+        native_refused: v.native_refused.min(u8::MAX as u32) as u8,
         requested: (v.requested_width, v.requested_height),
         preferred: (v.preferred_width, v.preferred_height),
         modes: [DisplayMode::default(); Display::MODES],

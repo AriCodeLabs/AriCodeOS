@@ -1,0 +1,14 @@
+[package]
+name = "aricode-intel-display"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The panel's own size on Intel graphics whose firmware does not offer it (no_std)"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+
+[dev-dependencies]
+aricode-abi = { path = "../../sdk/abi" }

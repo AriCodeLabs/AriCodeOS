@@ -758,6 +758,8 @@ fn screen() {
         DisplaySource::Firmware => b", the firmware's mode",
         DisplaySource::SetFailed => b", the firmware's mode: setting a better one failed",
         DisplaySource::NotListed => b", the firmware's mode, missing from its own list",
+        DisplaySource::OnRunningPipe => b", the panel's own, set on the running pipe",
+        DisplaySource::Kept => b", the firmware's mode, kept by video=firmware",
         DisplaySource::Unknown => b", the loader did not say how\n",
     });
     if d.source == DisplaySource::Unknown {
@@ -768,6 +770,10 @@ fn screen() {
         size(d.preferred);
     } else {
         print(b"; no usable EDID from the firmware");
+    }
+    if let Some(why) = abi::sysinfo::display_refusal(d.native_refused) {
+        print(b"; not its own size: ");
+        print(why.as_bytes());
     }
     if d.bad_request {
         print(b"; video= is not WxH");

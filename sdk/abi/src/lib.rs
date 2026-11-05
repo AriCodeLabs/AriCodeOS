@@ -842,6 +842,11 @@ pub mod sysinfo {
         SetFailed = 4,
         /// The firmware's mode is missing from its own list; it was kept.
         NotListed = 5,
+        /// The panel's size, not offered by the firmware, set on the running
+        /// pipe (ADR 0079).
+        OnRunningPipe = 6,
+        /// `video=firmware` kept the firmware's mode.
+        Kept = 7,
     }
 
     impl DisplaySource {
@@ -852,9 +857,33 @@ pub mod sysinfo {
                 3 => Self::Firmware,
                 4 => Self::SetFailed,
                 5 => Self::NotListed,
+                6 => Self::OnRunningPipe,
+                7 => Self::Kept,
                 _ => Self::Unknown,
             }
         }
+    }
+
+    /// Why the panel's size could not be set on the running pipe (ADR 0079).
+    /// The numbers are those of `aricode_intel_display::Refusal`.
+    pub const fn display_refusal(code: u8) -> Option<&'static str> {
+        Some(match code {
+            1 => "no support for this graphics device",
+            2 => "its PCI addresses are not as needed",
+            3 => "the VGA plane is on",
+            4 => "not exactly one pipe is running",
+            5 => "the pipe is interlaced",
+            6 => "the pipe is not at the panel's size",
+            7 => "the pipe's source is not the firmware's mode",
+            8 => "no panel fitter fills the panel",
+            9 => "the plane does not show the framebuffer as described",
+            10 => "the panel's width is odd",
+            11 => "the screen would not fit",
+            12 => "the firmware's GTT does not map the whole screen",
+            13 => "the pipe stopped counting frames",
+            14 => "a register did not take its value",
+            _ => return None,
+        })
     }
 
     /// One mode the firmware offered, in [`Display`].
@@ -877,6 +906,9 @@ pub mod sysinfo {
         pub listed: u8,
         /// `video=` was given but is not `WxH`.
         pub bad_request: bool,
+        /// [`display_refusal`], 0 if the panel's size was not asked of the
+        /// hardware or it took it.
+        pub native_refused: u8,
         /// The size asked for with `video=`, 0x0 if none.
         pub requested: (u32, u32),
         /// The panel's preferred size, 0x0 if the firmware gave no EDID.
@@ -893,6 +925,7 @@ pub mod sysinfo {
             b[0] = self.source as u8;
             b[1] = self.listed;
             b[2] = self.bad_request as u8;
+            b[3] = self.native_refused;
             b[4..8].copy_from_slice(&self.offered.to_le_bytes());
             b[8..12].copy_from_slice(&self.requested.0.to_le_bytes());
             b[12..16].copy_from_slice(&self.requested.1.to_le_bytes());
@@ -915,6 +948,7 @@ pub mod sysinfo {
                 source: DisplaySource::from_u32(b[0] as u32),
                 listed: b[1].min(Self::MODES as u8),
                 bad_request: b[2] != 0,
+                native_refused: b[3],
                 offered: word(4),
                 requested: (word(8), word(12)),
                 preferred: (word(16), word(20)),
@@ -1410,6 +1444,7 @@ mod tests {
             offered: 21,
             listed: 2,
             bad_request: true,
+            native_refused: 8,
             requested: (0, 0),
             preferred: (1366, 768),
             modes: [DisplayMode::default(); Display::MODES],

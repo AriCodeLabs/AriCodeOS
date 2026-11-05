@@ -1,0 +1,21 @@
+# `video=firmware` keeps the firmware's mode and looks at nothing else: the
+# way back on a machine where the panel's size goes wrong (ADR 0079). Setting
+# the panel's size needs Intel graphics, which QEMU does not emulate: host
+# tests of libs/intel-display and the reference laptop cover it.
+name = "gui.video_firmware"
+description = "video=firmware keeps the firmware's mode and diag says so"
+level = "full"
+areas = ["gui", "boot"]
+cmdline = "qemu_exit gui shell video=firmware"
+install = ["examples/gui_demo"]
+stdin = ["sleep 1000", "diag", "shutdown"]
+timeout_secs = 60
+
+[expect]
+exit = 33
+serial_contains = [
+    "video: the firmware's mode, kept by video=firmware",
+    "the firmware's mode, kept by video=firmware",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "video: setting", "video= is not WxH"]

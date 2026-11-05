@@ -139,7 +139,9 @@ pub struct VideoReport {
     pub preferred_height: u32,
     /// 1 if `video=` was given but is not `WxH`.
     pub bad_request: u32,
-    pub _reserved: u32,
+    /// Why the panel's size could not be set on the running pipe (ADR 0079):
+    /// `aricode_abi::sysinfo::display_refusal`, 0 if that was not needed.
+    pub native_refused: u32,
     pub modes: [VideoMode; VideoReport::MODES],
 }
 
@@ -181,6 +183,11 @@ pub mod video_source {
     pub const SET_FAILED: u32 = 4;
     /// The firmware's mode is missing from its own list; it was kept.
     pub const NOT_LISTED: u32 = 5;
+    /// The panel's size, which the firmware does not offer, set on the pipe
+    /// the firmware left running (ADR 0079).
+    pub const ON_RUNNING_PIPE: u32 = 6;
+    /// `video=firmware`: the firmware's mode, nothing else looked at.
+    pub const KEPT: u32 = 7;
 }
 
 /// The carried seed's bytes in `BootInfo`: a `Debug` of `BootInfo` must
