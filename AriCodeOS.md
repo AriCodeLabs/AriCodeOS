@@ -4124,6 +4124,91 @@ A 0.16.0 machine updates through 0.16.1 (system 17) to 0.17.0 (system 18):
 Still the owner's: agents outside the trusted base (ADR 0041) and apps over
 32 KiB.
 
+## 94.18 AriCodeOS 0.18
+
+**Status: completed (2026-11-05), tag `v0.18.0`.** The version of the
+optional desktop (ADR 0074): a base system for every machine, and a
+desktop the owner installs afterwards.
+
+- **AriFS v2** (ADR 0072, incident 0026 closed):
+  - copy-on-write replace: an atomic replace of up to 16 MiB, no longer
+    bounded by a journal of one file's size;
+  - a table kept in two copies;
+  - delete and rename;
+  - `ARI0` last on new sticks, with 64 MiB (a migrated disk keeps its
+    3 MiB);
+  - an in-place migration from v1, once both slots read v2.
+
+  Packages go up to 8 MiB. Sticks written before 0.18 stay v1 (the ESP
+  rule). Growing `ARI0` on first boot is left for later.
+- **Signed driver packages** (ADR 0073): the design of the three trust
+  levels the owner chose (an offline vendor root, owner keys enrolled at
+  the physical console, revocation at the next boot). Its phases are not
+  built yet.
+- **Profiles** (ADR 0074 phase A): the signed index names profiles, and
+  `update profile add|remove NAME` follows one; `upgrade` installs its
+  apps, and a removal deletes only what the profile installed. A package
+  can say the application interface it `requires`. An index with profiles
+  needs `publish-update --all-machines-0.18`.
+- **The desktop session** (phase B):
+  - `session = desktop` boots into the compositor and the profile's
+    launcher; the kernel lends the screen to whoever maps it and gives the
+    console no keys meanwhile.
+  - Ctrl+Alt+Backspace on any keyboard ends the desktop.
+  - The `launch` capability is only for a signed launcher.
+  - `usb-image --app --profile` writes a stick that boots into the desktop.
+- **The PS/2 keyboard and touchpad in the desktop** (ADR 0075): the
+  kernel stays the i8042's only owner and hands its bytes, while the
+  screen is held, to the ring-3 `ps2_input`. A laptop needs no USB
+  keyboard. `ps2=console` keeps them for the console.
+- **The desktop's applications** (phase C), signed packages in `desktop/`:
+  - the launcher, with its own six slots (the owner's choice);
+  - a terminal, the owner's shell in a window;
+  - an editor and a file manager over the owner's folder `home/` (the
+    owner's choice);
+  - the settings, which ask init for what they show and the one change
+    they make (the owner's choice).
+
+  Each has a capability of its own, granted only to that signed package:
+  `launch`, `terminal`, `home` and `settings`. Each was audited, and every
+  finding was fixed.
+- **Keyboards:** `kbd=` applies to every keyboard, in the desktop too, and
+  Ctrl with a letter sends its control character. Before, no keyboard
+  did, so the shell's Ctrl-A, Ctrl-E and Ctrl-U worked only over serial
+  and SSH.
+- **Found on the reference laptop** with the 0.18 stick, and fixed before
+  the release:
+  - **The pointer trailed the hand** (incident 0058). The compositor read
+    its four input devices in turn, each idle one waiting up to a timer
+    tick. It now waits on all of them at once, and records late input in
+    `diag` as `gui input late`. The owner: "it reacts well".
+  - **ñ, ç and the accents gave nothing** (ADR 0076). The Spanish keyboard
+    is now the one Linux types, all four levels and the dead accents,
+    checked key by key against xkeyboard-config. The text is UTF-8 in the
+    keyboard, the widgets, the shell's line editor and the console, whose
+    font now shows Latin-1 and €. File names stay ASCII.
+  - **No window could be closed** (ADR 0077). Title bars have a close box.
+    The program is asked, and the editor asks before it discards changes.
+    A program that does not answer is marked "(not responding)", and the
+    next click ends its session.
+  - Each change was audited, and every finding was fixed.
+- **Certificates:** the eMudhra intermediates compromised in October are
+  refused (`DISTRUSTED`, rustls-webpki 0.103.16). Mozilla's roots
+  regenerated from NSS 2e636d0 are the same 117. The public suffix
+  extract is current (list 2026-10-31). `TIME_FLOOR` is 2026-11-05.
+- **Verified:** the full suite with 1 and with 4 CPUs, and `perf`.
+
+Still the owner's: agents outside the trusted base (ADR 0041), and the
+residuals said in ADR 0074, 0075 and 0077:
+- a PS/2 pointer that resets itself is set up again only at the next boot;
+- under the largest load, the 15-session tables of fsd and the network
+  stack can fill, and a launch then fails visibly;
+- a program hung for good keeps its process until the desktop ends.
+
+Next, chosen by the owner on 2026-11-05: a desktop worth the name, with a
+toolkit of our own and a macOS-like style (typography, window style, space
+used to the pixel), after a study of the veterans (ADR 0078 to come).
+
 ---
 
 # 95. Real hardware: the right moment

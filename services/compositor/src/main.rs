@@ -451,6 +451,11 @@ impl Compositor {
             sys::print(b" is not responding; its close box ends its program's session\n");
             return;
         }
+        // Said before it is handed over: on another CPU the program may
+        // answer, and print, before this line would (0.18 release suite).
+        sys::print(b"compositor: window ");
+        num(id as u64);
+        sys::print(b" asked to close\n");
         c.close_waiting = Some(now_ms);
         if let Some((reply_to, _)) = c.pending.take() {
             answer(reply_to, Reply::event(Event::Close));
@@ -458,9 +463,6 @@ impl Compositor {
             c.push(Event::Close);
         }
         self.set_focus(id);
-        sys::print(b"compositor: window ");
-        num(id as u64);
-        sys::print(b" asked to close\n");
     }
 
     /// After a window closed: the front one, if any, gets the focus, so
