@@ -137,6 +137,7 @@ version = "0.18.0"
 dependencies = [
  "aricode-build",
  "aricode-cmdline",
+ "aricode-faults",
  "aricode-gfx",
  "aricode-input",
  "aricode-proto",
@@ -443,6 +444,7 @@ dependencies = [
 name = "aricode-lineedit"
 version = "0.18.0"
 dependencies = [
+ "aricode-fb-console",
  "aricode-input",
 ]
 

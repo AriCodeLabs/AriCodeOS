@@ -180,7 +180,10 @@ impl Files {
             return None;
         }
         if !aricode_proto::fs::valid_plain_name(self.field.text(), NAME_MAX) {
-            self.set_status(true, &[b"a name has letters, digits, '.', '_' or '-' only"]);
+            self.set_status(
+                true,
+                &["names: a-z, 0-9, . _ - (no accents or ñ)".as_bytes()],
+            );
             self.focus = Focus::Name;
             return None;
         }
@@ -303,7 +306,7 @@ impl Files {
         RENAME.draw(&mut c, false);
         DELETE.draw(&mut c, self.armed.is_some());
         REFRESH.draw(&mut c, false);
-        let status = core::str::from_utf8(&self.status[..self.status_len]).unwrap_or("");
+        let status = widgets::utf8_prefix(&self.status[..self.status_len]);
         let color = if self.error {
             widgets::ERROR
         } else {
@@ -399,7 +402,13 @@ fn main(_arg: u64) -> u64 {
                     f.say_count();
                 }
             }
-            Event::Focus(_) => {}
+            // Nothing to save: it closes at once (ADR 0077).
+            Event::Close => {
+                say(&[b"closed"]);
+                let _ = win.close();
+                return 0;
+            }
+            _ => {}
         }
         f.draw(&mut win);
         let _ = win.present();

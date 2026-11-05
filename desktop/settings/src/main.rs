@@ -69,7 +69,7 @@ impl Line {
     }
 
     fn text(&self) -> &str {
-        core::str::from_utf8(&self.buf[..self.len]).unwrap_or("?")
+        widgets::utf8_prefix(&self.buf[..self.len])
     }
 }
 
@@ -242,13 +242,13 @@ impl Settings {
     }
 }
 
-/// `text` split where a row of `cols` ends, at the last space before it:
-/// the row and the rest.
+/// `text` split where a row of `cols` characters ends, at the last space
+/// before it: the row and the rest (a character is a cell, ADR 0076).
 fn wrap(text: &str, cols: usize) -> (&str, &str) {
-    if text.len() <= cols || !text.is_char_boundary(cols) {
+    let Some((end, _)) = text.char_indices().nth(cols) else {
         return (text, "");
-    }
-    let cut = text[..cols].rfind(' ').filter(|&i| i > 0).unwrap_or(cols);
+    };
+    let cut = text[..end].rfind(' ').filter(|&i| i > 0).unwrap_or(end);
     (&text[..cut], text[cut..].trim_start())
 }
 
@@ -319,7 +319,14 @@ fn main(_arg: u64) -> u64 {
                     s.refresh();
                 }
             }
-            Event::Focus(_) => {}
+            // Every change is applied when chosen: it closes at once (ADR
+            // 0077).
+            Event::Close => {
+                say(&[b"closed"]);
+                let _ = win.close();
+                return 0;
+            }
+            _ => {}
         }
         s.draw(&mut win);
         let _ = win.present();

@@ -1,0 +1,15 @@
+# Text beyond ASCII at the shell (ADR 0076): a line with ñ, accents and the
+# euro sign goes through the line editor (UTF-8 from the serial console),
+# `write` saves it and `cat` shows it back the same.
+name = "shell.utf8_text"
+description = "arish: a line with ñ, accents and € is edited, saved and shown back whole"
+level = "full"
+areas = ["shell", "input"]
+cmdline = "qemu_exit shell"
+timeout_secs = 60
+stdin = ["write notas año €5 ¿qué?", "cat notas", "shutdown"]
+
+[expect]
+exit = 33
+serial_order = ["ari> cat notas", "año €5 ¿qué?", "ARICODEOS_SHUTDOWN"]
+serial_absent = ["KERNEL PANIC", "unknown command"]

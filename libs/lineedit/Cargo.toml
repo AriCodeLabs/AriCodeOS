@@ -7,3 +7,4 @@ description = "Line editor for text consoles: cursor movement, insert and delete
 
 [dependencies]
 aricode-input = { path = "../input" }
+aricode-fb-console = { path = "../fb-console" }

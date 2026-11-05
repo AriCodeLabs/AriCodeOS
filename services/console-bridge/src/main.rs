@@ -10,7 +10,7 @@
 #![no_std]
 #![no_main]
 
-use aricode_input::{Keyboard, Layout, EV_KEY};
+use aricode_input::{KeyBytes, Keyboard, Layout, EV_KEY};
 use aricode_proto::input::{Event, Reply, Status, MAX_EVENTS, MAX_READ_MS};
 use aricode_rt::sys::input::{DriverInstance, InputClient, InputError};
 use aricode_rt::sys::{self, abi, Handle};
@@ -79,7 +79,7 @@ fn main(arg: u64) -> u64 {
     let mut buf = Buffers {
         events: [Event::default(); MAX_EVENTS],
         times: [0; MAX_EVENTS],
-        text: [0; MAX_EVENTS * 4],
+        text: [0; MAX_EVENTS * KeyBytes::MAX],
     };
     let mut msg = [0u8; Reply::LEN];
     let mut none = [Handle(0); abi::IPC_MAX_HANDLES];
@@ -224,8 +224,9 @@ fn finish(
 struct Buffers {
     events: [Event; MAX_EVENTS],
     times: [u64; MAX_EVENTS],
-    // Up to 4 bytes per key (escape sequences for the arrow keys).
-    text: [u8; MAX_EVENTS * 4],
+    // Up to `KeyBytes::MAX` bytes per key (two characters of UTF-8, or the
+    // escape sequence of an arrow key).
+    text: [u8; MAX_EVENTS * KeyBytes::MAX],
 }
 
 /// Handles one read reply of a device: closes any handles it carried and

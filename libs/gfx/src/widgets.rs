@@ -24,6 +24,20 @@ pub const FIELD_BG: Color = rgb(0xff, 0xff, 0xff);
 pub const EDGE: Color = rgb(0xcb, 0xd5, 0xe1);
 pub const ERROR: Color = rgb(0xb9, 0x1c, 0x1c);
 
+/// Characters of `s`, one cell each (ADR 0076): its bytes that are not
+/// UTF-8 continuation bytes.
+pub const fn char_count(s: &str) -> usize {
+    let b = s.as_bytes();
+    let (mut i, mut n) = (0, 0);
+    while i < b.len() {
+        if b[i] & 0xC0 != 0x80 {
+            n += 1;
+        }
+        i += 1;
+    }
+    n
+}
+
 /// Width in pixels of `chars` characters of the console font.
 pub const fn text_width(chars: usize) -> u32 {
     (chars * GLYPH_WIDTH) as u32
@@ -47,7 +61,7 @@ impl<'a> Button<'a> {
 
     /// A button `label` wide (plus margins) at `(x, y)`.
     pub const fn at(x: i32, y: i32, label: &'a str) -> Self {
-        let w = text_width(label.len()) + 2 * PAD as u32;
+        let w = text_width(char_count(label)) + 2 * PAD as u32;
         Self::new(Rect::new(x, y, w, ROW_H), label)
     }
 
@@ -65,7 +79,7 @@ impl<'a> Button<'a> {
         c.fill_rect(&self.rect, EDGE);
         let inner = inset(&self.rect, 1);
         c.fill_rect(&inner, bg);
-        let tx = self.rect.x + (self.rect.w as i32 - text_width(self.label.len()) as i32) / 2;
+        let tx = self.rect.x + (self.rect.w as i32 - text_width(char_count(self.label)) as i32) / 2;
         let ty = self.rect.y + (self.rect.h as i32 - LINE_H as i32) / 2;
         c.text(tx, ty, self.label, fg, None);
     }
@@ -180,9 +194,107 @@ impl List {
     }
 }
 
-/// A one-line text field of at most `N` printable ASCII characters,
-/// edited with the keys: one byte per character, so the caret and the
-/// cuts never fall inside a character (audit of phase C, M3).
+/// The text of `bytes` up to where they stop being UTF-8: a message cut
+/// to a buffer's size shows what fits, not nothing, when the cut falls
+/// inside a character (ADR 0076).
+pub fn utf8_prefix(bytes: &[u8]) -> &str {
+    match core::str::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(e) => core::str::from_utf8(&bytes[..e.valid_up_to()]).unwrap_or(""),
+    }
+}
+
+/// Where the character after the one at `pos` starts, within `len`: a lead
+/// byte takes as many continuation bytes as it announces and finds; any
+/// other byte (ASCII, a stray continuation byte, one that starts nothing)
+/// is a character of its own, shown as `?` when it is not text (audit of
+/// ADR 0076, M2).
+fn next_char(buf: &[u8], pos: usize, len: usize) -> usize {
+    let need = match buf[pos] {
+        0xC2..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        0xF0..=0xF4 => 4,
+        _ => 1,
+    };
+    let mut p = pos + 1;
+    while p < len && p - pos < need && buf[p] & 0xC0 == 0x80 {
+        p += 1;
+    }
+    p
+}
+
+/// Where the character before `pos` starts, by the same rule as
+/// `next_char`: the lead byte up to three bytes back whose character ends
+/// exactly at `pos`, or else the byte just before.
+fn prev_char(buf: &[u8], pos: usize) -> usize {
+    if pos == 0 {
+        return 0;
+    }
+    let mut p = pos - 1;
+    while p > 0 && pos - p < 4 && buf[p] & 0xC0 == 0x80 {
+        p -= 1;
+    }
+    if next_char(buf, p, pos) == pos {
+        p
+    } else {
+        pos - 1
+    }
+}
+
+/// The character that `buf[from..to]` holds, as it is shown: a tab as a
+/// space, anything that is not printable UTF-8 as `?` (ADR 0076).
+fn shown_char(unit: &[u8]) -> char {
+    match core::str::from_utf8(unit)
+        .ok()
+        .and_then(|s| s.chars().next())
+    {
+        Some('\t') => ' ',
+        Some(c) if !c.is_control() => c,
+        _ => '?',
+    }
+}
+
+/// Characters of `buf` from `from` to `to` (by `next_char`).
+fn count_chars(buf: &[u8], from: usize, to: usize) -> usize {
+    let (mut p, mut n) = (from, 0);
+    while p < to {
+        p = next_char(buf, p, to);
+        n += 1;
+    }
+    n
+}
+
+/// `n` characters on from `pos`, stopping at `end`.
+fn skip_chars(buf: &[u8], mut pos: usize, n: usize, end: usize) -> usize {
+    for _ in 0..n {
+        if pos >= end {
+            break;
+        }
+        pos = next_char(buf, pos, end);
+    }
+    pos
+}
+
+/// The characters of `buf[from..to]` as shown, at most `cols`, in UTF-8
+/// into `out`; returns the text.
+fn shown_text<'a>(buf: &[u8], from: usize, to: usize, cols: usize, out: &'a mut [u8]) -> &'a str {
+    let (mut p, mut n, mut len) = (from, 0, 0);
+    while p < to && n < cols {
+        let next = next_char(buf, p, to);
+        let ch = shown_char(&buf[p..next]);
+        if len + ch.len_utf8() > out.len() {
+            break;
+        }
+        len += ch.encode_utf8(&mut out[len..]).len();
+        p = next;
+        n += 1;
+    }
+    core::str::from_utf8(&out[..len]).unwrap_or("")
+}
+
+/// A one-line text field of at most `N` bytes of UTF-8, edited with the
+/// keys (ADR 0076). The caret and the cuts fall between characters, never
+/// inside one (audit of phase C, M3); controls never get in.
 #[derive(Debug, Clone, Copy)]
 pub struct TextField<const N: usize> {
     buf: [u8; N],
@@ -209,49 +321,55 @@ impl<const N: usize> TextField<N> {
         core::str::from_utf8(&self.buf[..self.len]).unwrap_or("")
     }
 
+    /// The caret, in bytes of the text.
     pub fn caret(&self) -> usize {
         self.caret
     }
 
-    /// Replaces the text (cut to `N` characters; anything but printable
-    /// ASCII becomes `?`) and puts the caret at its end.
+    /// Replaces the text (cut, between characters, to `N` bytes; a control
+    /// becomes `?`) and puts the caret at its end.
     pub fn set(&mut self, text: &str) {
-        let n = text.len().min(N);
-        for (d, &b) in self.buf[..n].iter_mut().zip(text.as_bytes()) {
-            *d = if (0x20..=0x7E).contains(&b) { b } else { b'?' };
+        self.len = 0;
+        for ch in text.chars() {
+            let ch = if ch.is_control() { '?' } else { ch };
+            if self.len + ch.len_utf8() > N {
+                break;
+            }
+            self.len += ch.encode_utf8(&mut self.buf[self.len..]).len();
         }
-        self.len = n;
-        self.caret = n;
+        self.caret = self.len;
     }
 
     pub fn clear(&mut self) {
         self.set("");
     }
 
-    /// Edits with `key`; whether it was the field's. A character beyond
-    /// `N`, or one that is not printable ASCII, is refused (still the
-    /// field's).
+    /// Edits with `key`; whether it was the field's. A character that does
+    /// not fit in `N` bytes is refused (still the field's).
     pub fn key(&mut self, key: Key) -> bool {
         match key {
             Key::Char(ch) => {
-                if self.len < N && (0x20..=0x7E).contains(&ch) {
-                    self.buf.copy_within(self.caret..self.len, self.caret + 1);
-                    self.buf[self.caret] = ch;
-                    self.len += 1;
-                    self.caret += 1;
+                let n = ch.len_utf8();
+                if self.len + n <= N {
+                    self.buf.copy_within(self.caret..self.len, self.caret + n);
+                    ch.encode_utf8(&mut self.buf[self.caret..self.caret + n]);
+                    self.len += n;
+                    self.caret += n;
                 }
             }
             Key::Backspace if self.caret > 0 => {
-                self.buf.copy_within(self.caret..self.len, self.caret - 1);
-                self.len -= 1;
-                self.caret -= 1;
+                let from = prev_char(&self.buf, self.caret);
+                self.buf.copy_within(self.caret..self.len, from);
+                self.len -= self.caret - from;
+                self.caret = from;
             }
             Key::Delete if self.caret < self.len => {
-                self.buf.copy_within(self.caret + 1..self.len, self.caret);
-                self.len -= 1;
+                let to = next_char(&self.buf, self.caret, self.len);
+                self.buf.copy_within(to..self.len, self.caret);
+                self.len -= to - self.caret;
             }
-            Key::Left => self.caret = self.caret.saturating_sub(1),
-            Key::Right => self.caret = (self.caret + 1).min(self.len),
+            Key::Left => self.caret = prev_char(&self.buf, self.caret),
+            Key::Right => self.caret = next_char(&self.buf, self.caret, self.len),
             Key::Home => self.caret = 0,
             Key::End => self.caret = self.len,
             Key::Backspace | Key::Delete => {}
@@ -267,22 +385,26 @@ impl<const N: usize> TextField<N> {
         let inner = inset(rect, 1);
         c.fill_rect(&inner, FIELD_BG);
         let fits = ((inner.w as i32 - 2 * 4) / GLYPH_WIDTH as i32).max(1) as usize;
-        let first = self.caret.saturating_sub(fits - 1);
-        let shown = &self.text()[first..self.len.min(first + fits)];
+        let col = count_chars(&self.buf, 0, self.caret);
+        let first = col.saturating_sub(fits - 1);
+        let from = skip_chars(&self.buf, 0, first, self.len);
+        let mut out = [0u8; 4 * 128];
+        let shown = shown_text(&self.buf, from, self.len, fits, &mut out);
         let ty = rect.y + (rect.h as i32 - LINE_H as i32) / 2;
         let mut area = c.clipped(&inner);
         area.text(inner.x + 4, ty, shown, FG, None);
         if focused {
-            let cx = inner.x + 4 + ((self.caret - first) * GLYPH_WIDTH) as i32;
+            let cx = inner.x + 4 + ((col - first) * GLYPH_WIDTH) as i32;
             area.fill_rect(&Rect::new(cx, ty, 1, LINE_H), FG);
         }
     }
 }
 
 /// A multi-line text of at most `N` bytes, edited with the keys (the
-/// desktop's editor). Lines end with `\n`; bytes that are not printable
-/// ASCII are kept as they are and shown as `?`. Long lines are not
-/// wrapped: the view scrolls sideways to the caret.
+/// desktop's editor). Lines end with `\n`. The text is UTF-8 (ADR 0076);
+/// bytes that are not are kept as they are and shown as `?`, one column
+/// each. Long lines are not wrapped: the view scrolls sideways to the
+/// caret. Columns count characters.
 pub struct TextArea<const N: usize> {
     buf: [u8; N],
     len: usize,
@@ -316,6 +438,7 @@ impl<const N: usize> TextArea<N> {
         &self.buf[..self.len]
     }
 
+    /// The caret, in bytes of the text.
     pub fn caret(&self) -> usize {
         self.caret
     }
@@ -328,10 +451,19 @@ impl<const N: usize> TextArea<N> {
         self.changed = false;
     }
 
-    /// Replaces the text (cut to `N` bytes); the caret goes to the start.
-    /// Returns whether it all fitted.
+    /// Replaces the text (cut to `N` bytes, before a character that would
+    /// not fit whole); the caret goes to the start. Returns whether it all
+    /// fitted.
     pub fn set(&mut self, text: &[u8]) -> bool {
-        let n = text.len().min(N);
+        let mut n = text.len().min(N);
+        if n < text.len() {
+            // Not inside a character: back over at most three continuation
+            // bytes from the cut (audit of ADR 0076, L3).
+            let cut = n;
+            while n > 0 && text[n] & 0xC0 == 0x80 && cut - n < 3 {
+                n -= 1;
+            }
+        }
         self.buf[..n].copy_from_slice(&text[..n]);
         self.len = n;
         self.caret = 0;
@@ -355,28 +487,32 @@ impl<const N: usize> TextArea<N> {
             .map_or(self.len, |i| pos + i)
     }
 
-    /// The caret's line and column (from 0).
+    /// The caret's line and column (from 0; the column in characters).
     pub fn caret_line_col(&self) -> (usize, usize) {
         let line = self.buf[..self.caret]
             .iter()
             .filter(|&&b| b == b'\n')
             .count();
-        (line, self.caret - self.line_start(self.caret))
+        let start = self.line_start(self.caret);
+        (line, count_chars(&self.buf, start, self.caret))
     }
 
-    fn insert(&mut self, b: u8) {
-        if self.len < N {
-            self.buf.copy_within(self.caret..self.len, self.caret + 1);
-            self.buf[self.caret] = b;
-            self.len += 1;
-            self.caret += 1;
+    fn insert(&mut self, ch: char) {
+        let n = ch.len_utf8();
+        if self.len + n <= N {
+            self.buf.copy_within(self.caret..self.len, self.caret + n);
+            ch.encode_utf8(&mut self.buf[self.caret..self.caret + n]);
+            self.len += n;
+            self.caret += n;
             self.changed = true;
         }
     }
 
+    /// Removes the character that starts at `at`.
     fn remove(&mut self, at: usize) {
-        self.buf.copy_within(at + 1..self.len, at);
-        self.len -= 1;
+        let to = next_char(&self.buf, at, self.len);
+        self.buf.copy_within(to..self.len, at);
+        self.len -= to - at;
         self.changed = true;
     }
 
@@ -384,7 +520,7 @@ impl<const N: usize> TextArea<N> {
     /// the line is long enough.
     fn vertical(&mut self, up: bool) {
         let start = self.line_start(self.caret);
-        let col = self.caret - start;
+        let col = count_chars(&self.buf, start, self.caret);
         let target = if up {
             if start == 0 {
                 return;
@@ -397,7 +533,7 @@ impl<const N: usize> TextArea<N> {
             }
             end + 1
         };
-        self.caret = (target + col).min(self.line_end(target));
+        self.caret = skip_chars(&self.buf, target, col, self.line_end(target));
     }
 
     /// Edits or moves with `key`; whether it was the area's. A character
@@ -405,16 +541,16 @@ impl<const N: usize> TextArea<N> {
     pub fn key(&mut self, key: Key) -> bool {
         match key {
             Key::Char(ch) => self.insert(ch),
-            Key::Enter => self.insert(b'\n'),
-            Key::Tab => self.insert(b'\t'),
+            Key::Enter => self.insert('\n'),
+            Key::Tab => self.insert('\t'),
             Key::Backspace if self.caret > 0 => {
-                self.caret -= 1;
+                self.caret = prev_char(&self.buf, self.caret);
                 self.remove(self.caret);
             }
             Key::Delete if self.caret < self.len => self.remove(self.caret),
             Key::Backspace | Key::Delete => {}
-            Key::Left => self.caret = self.caret.saturating_sub(1),
-            Key::Right => self.caret = (self.caret + 1).min(self.len),
+            Key::Left => self.caret = prev_char(&self.buf, self.caret),
+            Key::Right => self.caret = next_char(&self.buf, self.caret, self.len),
             Key::Up => self.vertical(true),
             Key::Down => self.vertical(false),
             Key::Home => self.caret = self.line_start(self.caret),
@@ -455,23 +591,15 @@ impl<const N: usize> TextArea<N> {
             start = self.line_end(start) + 1;
             line += 1;
         }
-        let mut shown = [0u8; 256];
+        let mut out = [0u8; 4 * 256];
         for row in 0..rows {
             if start > self.len || (start == self.len && line > caret_line) {
                 break;
             }
             let end = self.line_end(start);
-            let from = (start + self.left).min(end);
-            let n = (end - from).min(cols).min(shown.len());
-            for (d, &b) in shown[..n].iter_mut().zip(&self.buf[from..from + n]) {
-                *d = match b {
-                    b'\t' => b' ',
-                    0x20..=0x7E => b,
-                    _ => b'?',
-                };
-            }
+            let from = skip_chars(&self.buf, start, self.left, end);
+            let text = shown_text(&self.buf, from, end, cols.min(256), &mut out);
             let y = rect.y + (row as u32 * LINE_H) as i32;
-            let text = core::str::from_utf8(&shown[..n]).unwrap_or("");
             area.text(rect.x + 4, y, text, FG, None);
             if focused && line == caret_line {
                 let x = rect.x + 4 + ((caret_col - self.left) * GLYPH_WIDTH) as i32;
@@ -525,8 +653,62 @@ mod tests {
         assert!(!t.changed());
         assert!(!t.set(&[b'x'; 65]), "cut to 64 bytes");
         assert_eq!(t.text().len(), 64);
-        assert!(t.key(Key::Char(b'y')), "refused but the area's");
+        assert!(t.key(Key::Char('y')), "refused but the area's");
         assert_eq!(t.text().len(), 64);
+    }
+
+    #[test]
+    fn text_area_edits_characters_not_bytes() {
+        let mut t = TextArea::<64>::new();
+        t.set("año\nüñ".as_bytes());
+        t.key(Key::End);
+        assert_eq!(t.caret_line_col(), (0, 3), "three characters");
+        t.key(Key::Down);
+        assert_eq!(t.caret_line_col(), (1, 2), "clamped to two");
+        t.key(Key::Backspace);
+        assert_eq!(t.text(), "año\nü".as_bytes());
+        t.key(Key::Left);
+        t.key(Key::Char('é'));
+        assert_eq!(t.text(), "año\néü".as_bytes());
+        t.key(Key::Up);
+        t.key(Key::Delete);
+        assert_eq!(t.text(), "ao\néü".as_bytes(), "the ñ, whole");
+        // A cut keeps whole characters; bytes that are not UTF-8 stay.
+        let mut small = TextArea::<3>::new();
+        assert!(!small.set("añb".as_bytes()));
+        assert_eq!(small.text(), "añ".as_bytes());
+        assert!(!small.set("aañ".as_bytes()));
+        assert_eq!(small.text(), b"aa");
+        assert!(!small.set("añ€€€".as_bytes()), "cut far from the end");
+        assert_eq!(small.text(), "añ".as_bytes());
+        // Stray bytes are one `?` each, and never swallow a character.
+        t.set(b"said \x93hi\x94");
+        t.key(Key::End);
+        assert_eq!(t.caret_line_col(), (0, 9));
+        t.key(Key::Backspace);
+        assert_eq!(t.text(), b"said \x93hi");
+        t.key(Key::Backspace);
+        assert_eq!(t.text(), b"said \x93h");
+        t.set(b"a\x80\x80\x80\x80");
+        t.key(Key::End);
+        assert_eq!(t.caret_line_col(), (0, 5));
+        for _ in 0..5 {
+            t.key(Key::Left);
+        }
+        assert_eq!(t.caret(), 0, "left and right agree on the steps");
+        t.set(b"a\xFFb");
+        t.key(Key::End);
+        assert_eq!(t.caret_line_col(), (0, 3));
+        let mut px = vec![0u32; 120 * 40];
+        let mut c = Canvas::new(&mut px, 120, 40, 120).unwrap();
+        t.draw(&mut c, &Rect::new(0, 0, 120, LINE_H), true);
+    }
+
+    #[test]
+    fn a_cut_message_keeps_what_is_whole() {
+        let msg = "no ñ".as_bytes();
+        assert_eq!(utf8_prefix(msg), "no ñ");
+        assert_eq!(utf8_prefix(&msg[..4]), "no ", "cut inside ñ");
     }
 
     #[test]
@@ -560,16 +742,25 @@ mod tests {
             f.key(k);
         }
         assert_eq!(f.text(), "oXes1234");
-        assert!(f.key(Key::Char(b'5')), "refused but the field's");
+        assert!(f.key(Key::Char('5')), "refused but the field's");
         assert_eq!(f.text(), "oXes1234", "cut at 8 bytes");
         assert!(!f.key(Key::Up));
         f.set("a/b.txt");
         assert_eq!((f.text(), f.caret()), ("a/b.txt", 7));
-        // Never anything but printable ASCII, so no cut splits a character.
-        f.set("año");
-        assert_eq!(f.text(), "a??o");
-        f.key(Key::Char(0xC3));
-        assert_eq!(f.text(), "a??o");
+        // UTF-8, cut between characters, edited a character at a time.
+        f.set("año\tx");
+        assert_eq!(f.text(), "año?x", "a control becomes ?");
+        f.set("ññññé");
+        assert_eq!(f.text(), "ññññ", "é would not fit whole in 8 bytes");
+        f.key(Key::Char('€'));
+        assert_eq!(f.text(), "ññññ", "no room for 3 more bytes");
+        f.key(Key::Backspace);
+        f.key(Key::Backspace);
+        f.key(Key::Left);
+        f.key(Key::Char('€'));
+        assert_eq!(f.text(), "ñ€ñ");
+        f.key(Key::Delete);
+        assert_eq!((f.text(), f.caret()), ("ñ€", 5));
         let mut c = [0u32; 64 * 32];
         let mut canvas = Canvas::new(&mut c, 64, 32, 64).unwrap();
         f.draw(&mut canvas, &Rect::new(0, 0, 40, ROW_H), true);

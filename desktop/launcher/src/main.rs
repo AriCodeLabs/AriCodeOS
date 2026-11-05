@@ -135,7 +135,7 @@ impl Launcher {
         OPEN.draw(&mut c, true);
         REFRESH.draw(&mut c, false);
         LEAVE.draw(&mut c, false);
-        let status = core::str::from_utf8(&self.status[..self.status_len]).unwrap_or("");
+        let status = widgets::utf8_prefix(&self.status[..self.status_len]);
         let color = if self.status_error {
             widgets::ERROR
         } else {
@@ -190,6 +190,9 @@ fn main(_arg: u64) -> u64 {
     }
     say(&[b"ready"]);
     let mut keys = KeyDecoder::new();
+    // Leaving ends every app the launcher started, unsaved text included:
+    // the first press only arms it (audit of ADR 0077, M1).
+    let mut leave_armed = false;
     loop {
         let event = match win.poll(1000) {
             Ok(Some(e)) => e,
@@ -197,6 +200,27 @@ fn main(_arg: u64) -> u64 {
             // The compositor is gone: so is the desktop.
             Err(_) => return 4,
         };
+        let leave = match event {
+            Event::Close => true,
+            Event::Click { x, y, .. } => LEAVE.contains(x, y),
+            _ => false,
+        };
+        if leave {
+            if leave_armed {
+                break;
+            }
+            leave_armed = true;
+            l.set_status(
+                true,
+                &[b"again to leave the desktop: open apps close with it"],
+            );
+            l.draw(&mut win);
+            let _ = win.present();
+            continue;
+        }
+        if !matches!(event, Event::Focus(_)) {
+            leave_armed = false;
+        }
         match event {
             Event::Click { x, y, .. } => {
                 if let Some(row) = l.list.hit(x, y) {
@@ -209,8 +233,6 @@ fn main(_arg: u64) -> u64 {
                     l.open(apps);
                 } else if REFRESH.contains(x, y) {
                     l.refresh(apps);
-                } else if LEAVE.contains(x, y) {
-                    break;
                 }
             }
             Event::Key(b) => {
@@ -222,7 +244,8 @@ fn main(_arg: u64) -> u64 {
                     }
                 }
             }
-            Event::Focus(_) => {}
+            // The close box and Leave are handled above (ADR 0077).
+            _ => {}
         }
         l.draw(&mut win);
         let _ = win.present();

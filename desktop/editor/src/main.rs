@@ -61,6 +61,8 @@ enum Confirm {
     Discard,
     /// Save over another file of that name.
     Replace,
+    /// Close the window, throwing the unsaved changes away (ADR 0077).
+    Close,
 }
 
 struct Editor {
@@ -101,7 +103,10 @@ impl Editor {
             return None;
         }
         if !aricode_proto::fs::valid_plain_name(text, 26) {
-            self.set_status(true, &[b"a name has letters, digits, '.', '_' or '-' only"]);
+            self.set_status(
+                true,
+                &["names: a-z, 0-9, . _ - (no accents or ñ)".as_bytes()],
+            );
             self.focus = Focus::Name;
             return None;
         }
@@ -119,6 +124,22 @@ impl Editor {
         }
         self.armed = Some((what, name));
         false
+    }
+
+    /// The owner clicked the close box: whether to close now. Unsaved
+    /// changes ask first; a second click discards them (ADR 0077).
+    fn close_asked(&mut self) -> bool {
+        if !TEXT.lock().changed() || self.confirmed(Confirm::Close, [0; 26]) {
+            return true;
+        }
+        self.set_status(true, &[b"unsaved changes: close again to discard them"]);
+        false
+    }
+
+    fn disarm_close(&mut self) {
+        if matches!(self.armed, Some((Confirm::Close, _))) {
+            self.armed = None;
+        }
     }
 
     /// The name field shows the file the text belongs to again, after an
@@ -179,11 +200,9 @@ impl Editor {
             self.set_status(true, &[name.as_bytes(), why]);
             return self.restore_name();
         }
-        // Edited a byte at a time, text that is not ASCII can change near
-        // the caret (audit of the editor, L5).
-        let plain = scratch[..loaded]
-            .iter()
-            .all(|&b| matches!(b, b'\n' | b'\t' | 0x20..=0x7E));
+        // Text that is not UTF-8 is kept and shown as `?` (ADR 0076):
+        // editing near those bytes changes them, so the owner is told.
+        let plain = core::str::from_utf8(&scratch[..loaded]).is_ok();
         TEXT.lock().set(&scratch[..loaded]);
         drop(scratch);
         self.loaded = buf;
@@ -200,7 +219,7 @@ impl Editor {
                 if plain {
                     b" bytes)"
                 } else {
-                    b" bytes; not all ASCII, shown as ?)"
+                    b" bytes; not all UTF-8, shown as ?)"
                 },
             ],
         );
@@ -319,7 +338,7 @@ impl Editor {
         } else {
             widgets::MUTED
         };
-        let shown = core::str::from_utf8(&status[..n]).unwrap_or("");
+        let shown = widgets::utf8_prefix(&status[..n]);
         c.text(PAD, STATUS_Y, shown, color, None);
         text.draw(&mut c, &TEXT_RECT, self.focus == Focus::Text);
     }
@@ -382,6 +401,11 @@ fn main(_arg: u64) -> u64 {
             // The compositor is gone: so is the desktop.
             Err(_) => return 5,
         };
+        // Anything but a second click on the close box disarms it (audit
+        // of ADR 0077, L6).
+        if !matches!(event, Event::Close | Event::Focus(_)) {
+            ed.disarm_close();
+        }
         match event {
             Event::Key(b) => {
                 for key in keys.feed(b).into_iter().flatten() {
@@ -399,7 +423,12 @@ fn main(_arg: u64) -> u64 {
                     ed.save();
                 }
             }
-            Event::Focus(_) => {}
+            Event::Close if ed.close_asked() => {
+                say(&[b"closed"]);
+                let _ = win.close();
+                return 0;
+            }
+            _ => {}
         }
         ed.draw(&mut win);
         let _ = win.present();
