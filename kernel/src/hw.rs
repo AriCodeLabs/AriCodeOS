@@ -384,12 +384,23 @@ fn msi_enable(cfg_virt: u64, cap: u8, on: bool) {
     }
 }
 
-/// MMIO region of a device (physical, uncached) or a DMA buffer (contiguous
-/// RAM, cached).
+/// How the CPU may cache a mapped region.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Caching {
+    /// Ordinary memory: DMA buffers.
+    WriteBack,
+    /// Device registers: every access reaches the device, in order.
+    Uncached,
+    /// A framebuffer: writes are combined into bursts, never read back
+    /// from a cache (ADR 0078, stage 0; `arch::pat`).
+    WriteCombining,
+}
+
+/// MMIO region of a device (physical) or a DMA buffer (contiguous RAM).
 pub struct Region {
     pub phys: u64,
     pub len: u64,
-    pub cacheable: bool,
+    pub caching: Caching,
     /// PCI function it belongs to (`bus << 8 | dev << 3 | fn`): mapping it
     /// assigns the device to the process's IOMMU domain (Phase 33).
     pub source_id: Option<u16>,
@@ -489,7 +500,7 @@ pub fn dma_alloc(len: u64) -> Result<ObjectRef, &'static str> {
         region: Region {
             phys: first.addr(),
             len: frames as u64 * FRAME_SIZE,
-            cacheable: true,
+            caching: Caching::WriteBack,
             source_id: None,
             claim: None,
         },
@@ -611,7 +622,7 @@ pub fn selftest(info: &boot_protocol::BootInfo) {
         let region = KernelObject::new(ObjectKind::Mmio(Region {
             phys: fb.address,
             len: fb.size,
-            cacheable: false,
+            caching: Caching::WriteCombining,
             source_id: None,
             claim: None,
         }));

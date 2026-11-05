@@ -496,6 +496,7 @@ fn diag(fs: &mut FsClient, net_client: &NetClient, mask: u64, rest: &[u8]) {
         net(net_client);
     }
     devices();
+    screen();
     events();
     print(b"=== end of diagnostics ===\n");
     if name.is_empty() {
@@ -724,6 +725,78 @@ fn devices() {
     }
     num(n);
     print(b" PCI function(s)\n");
+}
+
+/// The screen and how the loader chose its mode (`sysinfo::DISPLAY`, ADR
+/// 0078 stage 0): `screen  1366x768, the panel's own (EDID)`, then the
+/// modes the firmware offered, `*` the screen's, `-` one the system cannot
+/// draw on.
+fn screen() {
+    use abi::sysinfo::{Display, DisplaySource, Framebuffer};
+    let mut fb = [0u8; Framebuffer::LEN];
+    let mut d = [0u8; Display::LEN];
+    let (Ok(_), Ok(_)) = (
+        sys::system_info(SYSTEM, abi::sysinfo::FRAMEBUFFER, &mut fb),
+        sys::system_info(SYSTEM, abi::sysinfo::DISPLAY, &mut d),
+    ) else {
+        print(b"screen  none\n");
+        return;
+    };
+    let (Some(fb), Some(d)) = (Framebuffer::decode(&fb), Display::decode(&d)) else {
+        return;
+    };
+    let size = |(w, h): (u32, u32)| {
+        num(w as u64);
+        print(b"x");
+        num(h as u64);
+    };
+    print(b"screen  ");
+    size((fb.width, fb.height));
+    print(match d.source {
+        DisplaySource::Requested => b", asked for with video=".as_slice(),
+        DisplaySource::Edid => b", the panel's own (EDID)",
+        DisplaySource::Firmware => b", the firmware's mode",
+        DisplaySource::SetFailed => b", the firmware's mode: setting a better one failed",
+        DisplaySource::NotListed => b", the firmware's mode, missing from its own list",
+        DisplaySource::Unknown => b", the loader did not say how\n",
+    });
+    if d.source == DisplaySource::Unknown {
+        return;
+    }
+    if d.preferred.0 != 0 {
+        print(b"; the panel prefers ");
+        size(d.preferred);
+    } else {
+        print(b"; no usable EDID from the firmware");
+    }
+    if d.bad_request {
+        print(b"; video= is not WxH");
+    }
+    // After a failed set or an unlisted mode, nothing was looked up.
+    if d.requested.0 != 0 && matches!(d.source, DisplaySource::Edid | DisplaySource::Firmware) {
+        print(b"; video=");
+        size(d.requested);
+        print(b" is not offered");
+    }
+    print(b"\nmodes  ");
+    for m in &d.modes[..d.listed as usize] {
+        print(b" ");
+        size((m.width as u32, m.height as u32));
+        if m.chosen {
+            print(b"*");
+        }
+        if !m.usable {
+            print(b"-");
+        }
+    }
+    if d.offered > d.listed as u32 {
+        print(b" (the first ");
+        num(d.listed as u64);
+        print(b" of ");
+        num(d.offered as u64);
+        print(b")");
+    }
+    print(b"\n");
 }
 
 fn print_ip(ip: [u8; 4]) {

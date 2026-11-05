@@ -10,7 +10,7 @@
 #![no_main]
 
 use aricode_cmdline::{keys, CmdLine};
-use aricode_gfx::{Canvas, Damage, Desktop, Hit, Rect, Scene, Window};
+use aricode_gfx::{Canvas, Damage, Desktop, Hit, PixelMasks, Rect, Scene, Window};
 use aricode_input::{EscapeChord, Keyboard, Layout, BTN_LEFT, EV_KEY, EV_REL, REL_X, REL_Y};
 use aricode_proto::input::Status as InputStatus;
 use aricode_proto::input::MAX_EVENTS;
@@ -78,8 +78,18 @@ fn now(system: Handle) -> u64 {
 /// Screen: description, framebuffer mapping and back buffer in RAM.
 struct Screen {
     info: abi::sysinfo::Framebuffer,
+    pixels: Pixels,
     fb: *mut u32,
     back: &'static mut [u32],
+}
+
+/// How a back buffer pixel (`0x00RRGGBB`) is written to the screen.
+#[derive(Clone, Copy)]
+enum Pixels {
+    /// Blue in the low byte: as it is.
+    Bgr,
+    Rgb,
+    Masks(PixelMasks),
 }
 
 impl Screen {
@@ -89,11 +99,28 @@ impl Screen {
         let info = abi::sysinfo::Framebuffer::decode(&b[..n]).ok_or(11u64)?;
         let fb = sys::mmio_map(FRAMEBUFFER).map_err(|_| 12u64)? as *mut u32;
         let pixels = info.stride as u64 * info.height as u64;
+        // A screen of less than 32 bits per pixel (its masks may say 16)
+        // is smaller than this; `flip` writes 32 bits.
+        if pixels * 4 > info.size {
+            return Err(15);
+        }
+        let format = match info.format {
+            abi::sysinfo::FB_FORMAT_RGB => Pixels::Rgb,
+            abi::sysinfo::FB_FORMAT_BGR => Pixels::Bgr,
+            _ => Pixels::Masks(
+                PixelMasks::new(info.red_mask, info.green_mask, info.blue_mask).ok_or(16u64)?,
+            ),
+        };
         let dma = sys::dma_alloc(HW, pixels * 4).map_err(|_| 13u64)?;
         let virt = sys::mmio_map(dma).map_err(|_| 14u64)?;
         // SAFETY: our own DMA buffer of `pixels` u32, mapped RW; lives until exit.
         let back = unsafe { core::slice::from_raw_parts_mut(virt as *mut u32, pixels as usize) };
-        Ok(Self { info, fb, back })
+        Ok(Self {
+            info,
+            pixels: format,
+            fb,
+            back,
+        })
     }
 
     fn canvas(&mut self) -> Canvas<'_> {
@@ -109,18 +136,26 @@ impl Screen {
     /// Flushes `rects` (inside the screen) of the back buffer to the
     /// screen, converting the pixel format.
     fn flip(&self, rects: &[Rect]) {
-        let rgb = self.info.format == abi::sysinfo::FB_FORMAT_RGB;
+        match self.pixels {
+            Pixels::Bgr => self.blit(rects, |px| px),
+            Pixels::Rgb => self.blit(rects, |px| {
+                (px & 0xFF) << 16 | (px & 0xFF00) | (px >> 16) & 0xFF
+            }),
+            Pixels::Masks(masks) => self.blit(rects, |px| masks.encode(px)),
+        }
+        // The framebuffer is write-combining: the last bursts stay in the
+        // CPU's buffers until a fence.
+        // SAFETY: a fence has no operands and touches no state.
+        unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
+    }
+
+    fn blit(&self, rects: &[Rect], encode: impl Fn(u32) -> u32) {
         let stride = self.info.stride as usize;
         for r in rects {
             for y in r.y..r.bottom() {
                 let row = y as usize * stride;
                 for i in row + r.x as usize..row + r.right() as usize {
-                    let px = self.back[i];
-                    let v = if rgb {
-                        (px & 0xFF) << 16 | (px & 0xFF00) | (px >> 16) & 0xFF
-                    } else {
-                        px
-                    };
+                    let v = encode(self.back[i]);
                     // SAFETY: `r` lies inside width x height, so `i` <
                     // stride*height <= size/4, inside the mapped framebuffer.
                     unsafe { self.fb.add(i).write_volatile(v) };

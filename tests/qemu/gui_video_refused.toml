@@ -1,0 +1,19 @@
+# `video=` for a mode the firmware does not offer: the screen stays in the
+# firmware's mode, and `diag` says the size was not offered.
+name = "gui.video_refused"
+description = "video=WxH for a mode not offered keeps the firmware's mode and diag says so"
+level = "full"
+areas = ["gui", "boot"]
+cmdline = "qemu_exit gui shell video=1111x222"
+install = ["examples/gui_demo"]
+stdin = ["sleep 1000", "diag", "shutdown"]
+timeout_secs = 60
+
+[expect]
+exit = 33
+serial_contains = [
+    "video: 1111x222 asked for, not offered as a usable mode",
+    "the firmware's mode; no usable EDID from the firmware; video=1111x222 is not offered",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "video: setting"]

@@ -276,3 +276,63 @@ matter.
   list. The audit of each stage covers them.
 - Two font files enter the repository under OFL 1.1, with their notices,
   as Terminus did.
+
+## Stage 0: results so far
+
+### Write-combining
+
+Measured on the reference laptop, full flip at 800x600: 43.6 ms uncached,
+0.86 ms write-combining. That figure predates the fence the audit asked for,
+so it is measured again with the native mode.
+
+### The native mode
+
+AriBoot's choice works, but the reference laptop's firmware does not offer
+the panel's mode. `diag` there says:
+
+```
+screen  800x600, the firmware's mode; the panel prefers 1366x768
+modes   1024x768 800x600*
+```
+
+The EDID reads correctly; the GOP lists two 4:3 modes on a 16:9 panel. The
+owner chose a driver built from Intel's manuals over any BIOS change, because
+a BIOS setting helps one machine: ADR 0079, to come.
+
+### Audit
+
+An independent read-only review found no high findings. All of these are
+fixed:
+
+- **M1.** AriBoot compared whole `ModeInfo` values, including fields UEFI
+  leaves undefined, and could fail to find the current mode. It compares
+  size, stride and format.
+- **L2.** `IA32_PAT` was written bare. It now follows the SDM's procedure
+  (caches off and flushed, TLB flushed) and checks CPUID. Without PAT, the
+  framebuffer stays uncached and the log says so.
+- **L3.** The kernel's physical map aliased the write-combining framebuffer
+  as write-back. The range now has the same type there (`Mapper::map_linear`),
+  on 4 KiB pages inside its 2 MiB windows.
+- **L4.** The display's own BAR aliased it as uncached. A BAR holding the
+  framebuffer is now write-combining, and `map_foreign` refuses a second
+  mapping of a range with another type.
+- **L5.** `diag` claimed "is not offered" after a failed set, and "no EDID"
+  for an invalid one. Both are worded for what is known.
+- **L6.** `BootInfo::video` read the field before checking `size`.
+- **L7.** A chosen mode past the 32 listed had no `*`. It takes the last slot.
+- **L8.** A malformed `video=` was ignored silently. AriBoot logs it and `diag`
+  reports it (`gui.video_malformed`, and `gui.video_refused` for a size not
+  offered).
+- **L9.** Stride 0 or under the width, and absurd sizes, could count as usable.
+  An interlaced first timing could count as a panel size.
+- **L10.** No fence followed a flip, so the last bursts could wait in the CPU's
+  buffers, and the measurement ended early. `flip` ends with `sfence`.
+- **L11.** `SCREEN_MAX_BYTES` and `DMA_MAX_LEN` are now tied by a compile-time
+  check. A misplaced doc comment went home.
+- **`Bitmask`** (this stage's own item): a firmware-left mask mode was drawn as
+  BGR. The compositor now encodes through the masks (`PixelMasks`, host-tested),
+  and refuses a screen of under 32 bits per pixel instead of writing past it.
+  The kernel console scales channels wider than 8 bits too.
+
+**Not tested in QEMU:** the path without PAT, and a `Bitmask` screen, since OVMF
+offers none and scenarios cannot change the CPU model. Host tests cover the masks.

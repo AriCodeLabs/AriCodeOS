@@ -99,6 +99,10 @@ pub mod keys {
     /// console's PS/2 one, the USB and virtio ones through the console
     /// bridge, and all of them in the compositor's windows.
     pub const KBD: &str = "kbd";
+    /// `video=WxH`: the screen mode AriBoot sets, when the firmware offers
+    /// it; otherwise the panel's preferred one (EDID), otherwise the
+    /// firmware's (ADR 0078, stage 0).
+    pub const VIDEO: &str = "video";
     /// `ps2=console`: the PS/2 keyboard and touchpad serve only the kernel
     /// console; while a process holds the screen their keys are withheld
     /// instead of going to the desktop (ADR 0075).

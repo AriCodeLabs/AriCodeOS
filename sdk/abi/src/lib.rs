@@ -477,6 +477,10 @@ pub mod sysinfo {
     /// D): `size` is the memory reserved that way (`.bss`, a runtime's heap
     /// arena), `touched` what the process has made the kernel back so far.
     pub const ON_DEMAND: u64 = 14;
+    /// One [`Display`] (280 bytes): what the loader did with the screen
+    /// (ADR 0078, stage 0), so `diag` can tell it on a machine without a
+    /// serial console. `NotFound` without a screen.
+    pub const DISPLAY: u64 = 15;
 
     /// What seeded the kernel generator. The number is the code of the
     /// `net tcp secret weak` and `ssh entropy weak` fault events.
@@ -817,6 +821,114 @@ pub mod sysinfo {
                 green_mask: u32::from_le_bytes(b[28..32].try_into().ok()?),
                 blue_mask: u32::from_le_bytes(b[32..36].try_into().ok()?),
             })
+        }
+    }
+
+    /// How the screen got its mode. The numbers are the loader's
+    /// (`boot_protocol::video_source`).
+    #[repr(u8)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub enum DisplaySource {
+        /// A loader that predates the report.
+        #[default]
+        Unknown = 0,
+        /// The size asked for with `video=`.
+        Requested = 1,
+        /// The panel's preferred size, from its EDID.
+        Edid = 2,
+        /// The firmware's own mode, kept.
+        Firmware = 3,
+        /// A better mode was chosen but the firmware failed to set it.
+        SetFailed = 4,
+        /// The firmware's mode is missing from its own list; it was kept.
+        NotListed = 5,
+    }
+
+    impl DisplaySource {
+        pub fn from_u32(v: u32) -> Self {
+            match v {
+                1 => Self::Requested,
+                2 => Self::Edid,
+                3 => Self::Firmware,
+                4 => Self::SetFailed,
+                5 => Self::NotListed,
+                _ => Self::Unknown,
+            }
+        }
+    }
+
+    /// One mode the firmware offered, in [`Display`].
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct DisplayMode {
+        pub width: u16,
+        pub height: u16,
+        /// The system can draw on it (RGB or BGR, within the size limit).
+        pub usable: bool,
+        /// The screen's mode.
+        pub chosen: bool,
+    }
+
+    /// The reply to [`DISPLAY`].
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct Display {
+        pub source: DisplaySource,
+        /// Modes the firmware offered; the first `listed` are in `modes`.
+        pub offered: u32,
+        pub listed: u8,
+        /// `video=` was given but is not `WxH`.
+        pub bad_request: bool,
+        /// The size asked for with `video=`, 0x0 if none.
+        pub requested: (u32, u32),
+        /// The panel's preferred size, 0x0 if the firmware gave no EDID.
+        pub preferred: (u32, u32),
+        pub modes: [DisplayMode; Display::MODES],
+    }
+
+    impl Display {
+        pub const MODES: usize = 32;
+        pub const LEN: usize = 24 + Self::MODES * 8;
+
+        pub fn encode(&self) -> [u8; Self::LEN] {
+            let mut b = [0u8; Self::LEN];
+            b[0] = self.source as u8;
+            b[1] = self.listed;
+            b[2] = self.bad_request as u8;
+            b[4..8].copy_from_slice(&self.offered.to_le_bytes());
+            b[8..12].copy_from_slice(&self.requested.0.to_le_bytes());
+            b[12..16].copy_from_slice(&self.requested.1.to_le_bytes());
+            b[16..20].copy_from_slice(&self.preferred.0.to_le_bytes());
+            b[20..24].copy_from_slice(&self.preferred.1.to_le_bytes());
+            for (m, c) in self.modes.iter().zip(b[24..].as_chunks_mut::<8>().0) {
+                c[0..2].copy_from_slice(&m.width.to_le_bytes());
+                c[2..4].copy_from_slice(&m.height.to_le_bytes());
+                c[4] = m.usable as u8 | (m.chosen as u8) << 1;
+            }
+            b
+        }
+
+        pub fn decode(b: &[u8]) -> Option<Self> {
+            if b.len() < Self::LEN {
+                return None;
+            }
+            let word = |i: usize| u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
+            let mut d = Self {
+                source: DisplaySource::from_u32(b[0] as u32),
+                listed: b[1].min(Self::MODES as u8),
+                bad_request: b[2] != 0,
+                offered: word(4),
+                requested: (word(8), word(12)),
+                preferred: (word(16), word(20)),
+                modes: [DisplayMode::default(); Self::MODES],
+            };
+            for (m, c) in d.modes.iter_mut().zip(b[24..Self::LEN].as_chunks::<8>().0) {
+                *m = DisplayMode {
+                    width: u16::from_le_bytes([c[0], c[1]]),
+                    height: u16::from_le_bytes([c[2], c[3]]),
+                    usable: c[4] & 1 != 0,
+                    chosen: c[4] & 2 != 0,
+                };
+            }
+            Some(d)
         }
     }
 
@@ -1288,6 +1400,40 @@ mod tests {
         };
         assert_eq!(Framebuffer::decode(&f.encode()), Some(f));
         assert!(Framebuffer::decode(&[0u8; 10]).is_none());
+    }
+
+    #[test]
+    fn display_report_round_trip() {
+        use super::sysinfo::*;
+        let mut d = Display {
+            source: DisplaySource::Edid,
+            offered: 21,
+            listed: 2,
+            bad_request: true,
+            requested: (0, 0),
+            preferred: (1366, 768),
+            modes: [DisplayMode::default(); Display::MODES],
+        };
+        d.modes[0] = DisplayMode {
+            width: 800,
+            height: 600,
+            usable: true,
+            chosen: false,
+        };
+        d.modes[1] = DisplayMode {
+            width: 1366,
+            height: 768,
+            usable: true,
+            chosen: true,
+        };
+        assert_eq!(Display::decode(&d.encode()), Some(d));
+        assert!(Display::decode(&[0u8; Display::LEN - 1]).is_none());
+        let mut b = d.encode();
+        b[0] = 99;
+        b[1] = 200;
+        let odd = Display::decode(&b).unwrap();
+        assert_eq!(odd.source, DisplaySource::Unknown);
+        assert_eq!(odd.listed as usize, Display::MODES, "never past the array");
     }
 
     #[test]

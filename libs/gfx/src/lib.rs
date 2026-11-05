@@ -17,6 +17,56 @@ pub mod widgets;
 /// Color `0x00RRGGBB`.
 pub type Color = u32;
 
+/// One channel of a screen pixel: where it is and how wide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Channel {
+    shift: u32,
+    bits: u32,
+}
+
+impl Channel {
+    fn from_mask(mask: u32) -> Option<Self> {
+        if mask == 0 {
+            return None;
+        }
+        let shift = mask.trailing_zeros();
+        let run = mask >> shift;
+        // Contiguous, and of a width a `u8` can be scaled to.
+        let bits = run.count_ones();
+        (run & run.wrapping_add(1) == 0 && bits <= 16).then_some(Self { shift, bits })
+    }
+
+    const fn place(self, v: u32) -> u32 {
+        ((v << self.bits) >> 8) << self.shift
+    }
+}
+
+/// A screen whose firmware describes its pixels by bit masks (UEFI
+/// `PixelBitMask`). Turns a [`Color`] into that pixel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PixelMasks {
+    red: Channel,
+    green: Channel,
+    blue: Channel,
+}
+
+impl PixelMasks {
+    /// `None` if a mask is empty, has holes or is wider than 16 bits.
+    pub fn new(red: u32, green: u32, blue: u32) -> Option<Self> {
+        Some(Self {
+            red: Channel::from_mask(red)?,
+            green: Channel::from_mask(green)?,
+            blue: Channel::from_mask(blue)?,
+        })
+    }
+
+    pub const fn encode(&self, c: Color) -> u32 {
+        self.red.place((c >> 16) & 0xFF)
+            | self.green.place((c >> 8) & 0xFF)
+            | self.blue.place(c & 0xFF)
+    }
+}
+
 pub const fn rgb(r: u8, g: u8, b: u8) -> Color {
     (r as u32) << 16 | (g as u32) << 8 | b as u32
 }
@@ -760,6 +810,27 @@ impl<'a> Iterator for RevIter<'a> {
 mod tests {
     extern crate std;
     use super::*;
+
+    #[test]
+    fn pixel_masks_place_each_channel() {
+        let c = rgb(0x12, 0x34, 0x56);
+        // The two layouts UEFI names, written as masks.
+        let bgr = PixelMasks::new(0xFF_0000, 0xFF00, 0xFF).unwrap();
+        assert_eq!(bgr.encode(c), c);
+        let rgb_order = PixelMasks::new(0xFF, 0xFF00, 0xFF_0000).unwrap();
+        assert_eq!(rgb_order.encode(c), 0x56_3412);
+        // 10 bits per channel: full scale reaches the top of the field.
+        let deep = PixelMasks::new(0x3FF0_0000, 0xF_FC00, 0x3FF).unwrap();
+        assert_eq!(deep.encode(rgb(0xFF, 0, 0)), 0xFF << 2 << 20);
+        assert_eq!(deep.encode(rgb(0, 0, 0x80)), 0x80 << 2);
+    }
+
+    #[test]
+    fn pixel_masks_refuse_what_they_cannot_place() {
+        assert_eq!(PixelMasks::new(0, 0xFF00, 0xFF), None, "empty");
+        assert_eq!(PixelMasks::new(0xF0F0, 0xFF00, 0xFF), None, "with holes");
+        assert_eq!(PixelMasks::new(0x1_FFFF, 0xFF00, 0xFF), None, "too wide");
+    }
 
     #[test]
     fn set_is_clipped() {

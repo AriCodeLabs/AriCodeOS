@@ -113,6 +113,74 @@ pub struct BootInfo {
     /// One of the [`carried_seed`] values.
     pub carried_seed_status: u32,
     pub _reserved: u32,
+
+    /// What AriBoot did with the screen (ADR 0078, stage 0), so `diag`
+    /// can tell it on a machine without a serial console. Appended after
+    /// the carried seed: a kernel reads it only when `size` covers it
+    /// ([`BootInfo::video`]).
+    pub video: VideoReport,
+}
+
+/// The modes the firmware offered and the one AriBoot set.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct VideoReport {
+    /// One of the [`video_source`] values.
+    pub source: u32,
+    /// Modes the firmware offered, all of them: only the first
+    /// [`VideoReport::MODES`] are in `modes`.
+    pub offered: u32,
+    /// The size asked for with `video=`, 0x0 if none.
+    pub requested_width: u32,
+    pub requested_height: u32,
+    /// The panel's preferred size from its EDID, 0x0 if the firmware gave
+    /// no EDID.
+    pub preferred_width: u32,
+    pub preferred_height: u32,
+    /// 1 if `video=` was given but is not `WxH`.
+    pub bad_request: u32,
+    pub _reserved: u32,
+    pub modes: [VideoMode; VideoReport::MODES],
+}
+
+impl VideoReport {
+    pub const MODES: usize = 32;
+}
+
+/// One mode the firmware offered.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct VideoMode {
+    pub width: u16,
+    pub height: u16,
+    /// [`VideoMode::USABLE`], [`VideoMode::CHOSEN`].
+    pub flags: u16,
+    pub _reserved: u16,
+}
+
+impl VideoMode {
+    /// Direct RGB or BGR pixels within AriBoot's size limit: a mode it
+    /// would set.
+    pub const USABLE: u16 = 1;
+    /// The mode the screen is in when the kernel starts.
+    pub const CHOSEN: u16 = 2;
+}
+
+/// `VideoReport::source`: how the screen got its mode.
+pub mod video_source {
+    /// No report: a loader that predates it, or no screen.
+    pub const NONE: u32 = 0;
+    /// The size asked for with `video=`.
+    pub const REQUESTED: u32 = 1;
+    /// The panel's preferred size, from its EDID.
+    pub const EDID: u32 = 2;
+    /// The firmware's own mode, kept.
+    pub const FIRMWARE: u32 = 3;
+    /// A better mode was chosen but the firmware failed to set it; its
+    /// own mode stays.
+    pub const SET_FAILED: u32 = 4;
+    /// The firmware's mode is missing from its own list; it was kept.
+    pub const NOT_LISTED: u32 = 5;
 }
 
 /// The carried seed's bytes in `BootInfo`: a `Debug` of `BootInfo` must
@@ -154,6 +222,24 @@ impl BootInfo {
     /// Smallest `size` that covers `carried_seed` and its status: a loader
     /// that knows the field (an older one hands a shorter `BootInfo`).
     pub const CARRIED_SEED_END: usize = core::mem::offset_of!(BootInfo, _reserved);
+
+    /// The largest screen the system draws on: the compositor's back buffer
+    /// is one DMA buffer (the kernel checks this against `DMA_MAX_LEN`).
+    pub const SCREEN_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+    /// Smallest `size` that covers `video`.
+    pub const VIDEO_END: usize =
+        core::mem::offset_of!(BootInfo, video) + core::mem::size_of::<VideoReport>();
+
+    /// The loader's video report, or `None` from a loader that predates it.
+    pub fn video(&self) -> Option<VideoReport> {
+        // Not `then_some`: past `size`, the field must not even be read.
+        if self.size as usize >= Self::VIDEO_END {
+            Some(self.video)
+        } else {
+            None
+        }
+    }
 
     /// Command line as `&str` (empty if missing or not UTF-8).
     ///
@@ -369,8 +455,8 @@ impl FramebufferInfo {
                         return 0;
                     }
                     let shift = mask.trailing_zeros();
-                    let bits = (mask >> shift).count_ones().min(8);
-                    ((v as u32) >> (8 - bits)) << shift
+                    let bits = (mask >> shift).count_ones().min(16);
+                    (((v as u32) << bits) >> 8) << shift
                 };
                 place(r, self.red_mask) | place(g, self.green_mask) | place(b, self.blue_mask)
             }
@@ -645,6 +731,23 @@ mod tests {
         let text = std::format!("{info:?}");
         assert!(text.contains("SeedBytes(..)"), "{text}");
         assert!(!text.contains("171"), "{text}");
+    }
+
+    #[test]
+    fn video_report_is_appended_and_gated_by_size() {
+        let mut info = unsafe { core::mem::zeroed::<BootInfo>() };
+        assert_eq!(
+            core::mem::offset_of!(BootInfo, video),
+            BootInfo::CARRIED_SEED_END + 4,
+            "after the seed's status and the reserved word"
+        );
+        assert_eq!(BootInfo::VIDEO_END, core::mem::size_of::<BootInfo>());
+        assert!(BootInfo::VIDEO_END <= 4096, "one page");
+        info.video.source = video_source::EDID;
+        info.size = BootInfo::CARRIED_SEED_END as u32 + 4;
+        assert!(info.video().is_none(), "an older loader's size");
+        info.size = BootInfo::VIDEO_END as u32;
+        assert_eq!(info.video().map(|v| v.source), Some(video_source::EDID));
     }
 
     #[test]

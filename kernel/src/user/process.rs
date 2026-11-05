@@ -179,6 +179,7 @@ struct Foreign {
     phys: u64,
     span: u64,
     dma: Option<crate::object::ObjectRef>,
+    caching: crate::hw::Caching,
     /// Mapping it put the buffer in the process's IOMMU domain: unmapping
     /// takes it out again (audit 2026-10-25 C, L11).
     in_domain: bool,
@@ -1285,7 +1286,7 @@ pub struct Mapped {
 pub fn map_foreign(
     phys: u64,
     len: u64,
-    cacheable: bool,
+    caching: crate::hw::Caching,
     dma: Option<crate::object::ObjectRef>,
 ) -> Result<Mapped, aricode_abi::Error> {
     use aricode_x86_paging::{CACHE_DISABLE, WRITE_THROUGH};
@@ -1300,6 +1301,10 @@ pub fn map_foreign(
     // mapped DMA buffer cannot be freed, so the same physical range is
     // still the same buffer.
     if let Some(f) = p.foreign.iter().find(|f| f.phys == start && f.span == span) {
+        // Two memory types on one range would be an alias the SDM forbids.
+        if f.caching != caching {
+            return Err(aricode_abi::Error::Invalid);
+        }
         return Ok(Mapped {
             virt: f.virt + offset,
             created: false,
@@ -1317,9 +1322,11 @@ pub fn map_foreign(
     // end of user space.
     let virt = p.mmio_ranges.alloc(span).ok_or(aricode_abi::Error::Limit)?;
     let mut flags = USER | WRITABLE | NO_EXECUTE;
-    if !cacheable {
-        flags |= CACHE_DISABLE | WRITE_THROUGH;
-    }
+    flags |= match caching {
+        crate::hw::Caching::WriteBack => 0,
+        crate::hw::Caching::Uncached => CACHE_DISABLE | WRITE_THROUGH,
+        crate::hw::Caching::WriteCombining => crate::arch::x86_64::pat::write_combining_flags(),
+    };
     let Some(m) = p.mapper.as_mut() else {
         p.mmio_ranges.free(virt, span);
         return Err(aricode_abi::Error::Fault);
@@ -1346,6 +1353,7 @@ pub fn map_foreign(
         phys: start,
         span,
         dma,
+        caching,
         in_domain: lingered,
     });
     Ok(Mapped {
