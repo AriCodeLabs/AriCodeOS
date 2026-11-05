@@ -1,7 +1,7 @@
 # ADR 0078: A desktop worth the name
 
 - **Date:** 2026-11-05
-- **Status:** Proposed. On 2026-11-05 the owner judged the 0.18 desktop
+- **Status:** Accepted on 2026-11-05. That day the owner judged the 0.18 desktop
   "very basic" and asked for a desktop with good UX. It should take the
   best of the existing ones, drop their faults and save resources. The
   owner chose:
@@ -11,7 +11,7 @@
     space used to the pixel, "neither cramped nor separated by tedious
     lines", correct type sizes, and coherence.
 
-  The open points in "Decisions for the owner" wait for the owner.
+  The four points in "The owner's choices" were decided on the same day.
 
 ## Context
 
@@ -159,10 +159,18 @@ Air ran macOS at 1366×768 at 1x.
 
 Following "compare, then reuse or improve" (ADR 0063):
 
-1. **Glyphs: adopt ab_glyph** over ttf-parser.
-   - It is the smallest and draws lazily.
-   - skrifa stays the finalist, measured again if the owner wants
-     hinting.
+1. **Glyphs: adopt skrifa** (fontations) with zeno, with light vertical
+   hinting: baselines and x-heights fall on whole pixels. This is the
+   owner's choice, made for sharpness on 1x screens.
+   - skrifa is the only candidate with hinting. It is the rasterizer
+     Chrome uses instead of FreeType, it is `forbid(unsafe_code)`, and it
+     is fuzzed.
+   - It is given a heap buffer (`DrawMemory::Buffer`), so its 16 KiB
+     stack scratch stays inside our frame budget (`cargo xtask stack`).
+   - Its API changes with every 0.x release, so it is pinned and updated
+     on purpose.
+   - ab_glyph (77 KiB, unhinted) is the fallback if skrifa fails on
+     size, stack or speed.
    - Our own glyph atlas, keyed by font, size and glyph, with quarter-pixel
      positions. Blending is gamma-correct with slight stem darkening, 4
      pixels per SSE2 instruction.
@@ -241,31 +249,30 @@ There is no sharing between processes, so each program carries its own
 fonts and code:
 - three weights of Inter subset to Latin, about 0.3 MiB;
 - JetBrains Mono for the terminal;
-- ab_glyph and the toolkit, 0.2 to 0.4 MiB.
+- skrifa and zeno, about 0.75 MiB;
+- the toolkit, 0.2 to 0.4 MiB.
 
 With the six programs of the launcher's pool, that is a few MiB of the
 laptop's 4 GiB. Read-only memory shared between processes would remove
 the copies; it is a kernel change, left for when it is measured to
 matter.
 
-## Decisions for the owner
+## The owner's choices (2026-11-05)
 
-1. **Menus:** a macOS-style global menu bar at the top for the active
-   program, or menus in each window?
-2. **Text sharpness at 1x:** unhinted, exactly as macOS (softer), or light
-   vertical hinting with skrifa (sharper on the laptop's screen, at
-   0.7 MiB more per program)?
-3. **Theme:** light by default with dark available, or the other way
-   round?
-4. **Fonts:** Inter and JetBrains Mono, or another of the measured ones
-   (Noto Sans, IBM Plex, Source Sans 3)?
+1. **Menus:** a global menu bar at the top, as in macOS, for the active
+   program, with the clock and status.
+2. **Text:** light vertical hinting with skrifa, sharper than macOS at
+   1x, at about 0.7 MiB more per program.
+3. **Theme:** light by default; dark is chosen in settings.
+4. **Fonts:** Inter and JetBrains Mono.
 
 ## Consequences
 
 - The 0.18 desktop keeps working through stage 0. The protocol keeps the
   old events, and every app moves to the toolkit in stage 2.
-- Three new crate families enter the build: ab_glyph (with ttf-parser),
-  tiny-skia and their dependencies. Each is pinned and on the licence
+- New crate families enter the build: skrifa (with read-fonts and
+  font-types), zeno, ttf-parser for the OpenType layout tables, tiny-skia,
+  and their dependencies. Each is pinned and on the licence
   list. The audit of each stage covers them.
 - Two font files enter the repository under OFL 1.1, with their notices,
   as Terminus did.
