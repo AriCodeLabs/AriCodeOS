@@ -439,6 +439,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "aricode-intel-display"
+version = "0.18.0"
+dependencies = [
+ "aricode-abi",
+]
+
+[[package]]
 name = "aricode-iommu"
 version = "0.18.0"
 dependencies = [
@@ -635,6 +642,7 @@ dependencies = [
  "aricode-heap",
  "aricode-initrd",
  "aricode-input",
+ "aricode-intel-display",
  "aricode-iommu",
  "aricode-pci",
  "aricode-pmm",

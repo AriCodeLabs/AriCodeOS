@@ -58,6 +58,21 @@ pub fn init_framebuffer(info: boot_protocol::FramebufferInfo) -> bool {
     }
 }
 
+/// The screen changed size during boot, or went blank trying (ADR 0079): the
+/// console starts over on it, if it had the screen, painted in steps (incident
+/// 0031). What it showed stays on serial.
+pub fn screen_resized(info: boot_protocol::FramebufferInfo) {
+    let base = crate::memory::phys::phys_to_virt(info.address);
+    let Some(surface) = MmioSurface::new(info, base) else {
+        return;
+    };
+    let mut guard = wait_fb();
+    if guard.is_attached() {
+        guard.resize(surface);
+        paint_in_steps(guard);
+    }
+}
+
 /// Lends the screen to a user driver under test (`test=drivers`): the
 /// console stops drawing, so its next scroll does not repaint what the
 /// driver painted, until `take_back_framebuffer`. `None` without one.

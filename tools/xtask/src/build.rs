@@ -39,6 +39,7 @@ pub const PACKAGES: &[(&str, Option<&str>)] = &[
     ("aricode-elf", None),
     ("aricode-x86-paging", None),
     ("aricode-display", None),
+    ("aricode-intel-display", None),
     ("aricode-cmdline", None),
     ("aricode-fb-console", None),
     ("aricode-x86-cpu", None),

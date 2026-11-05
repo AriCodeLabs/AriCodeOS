@@ -758,16 +758,22 @@ fn screen() {
         DisplaySource::Firmware => b", the firmware's mode",
         DisplaySource::SetFailed => b", the firmware's mode: setting a better one failed",
         DisplaySource::NotListed => b", the firmware's mode, missing from its own list",
-        DisplaySource::Unknown => b", the loader did not say how\n",
+        DisplaySource::OnRunningPipe => b", the panel's own, set on the running pipe",
+        DisplaySource::Kept => b", the firmware's mode, kept by video=firmware",
+        DisplaySource::Unknown => b", the loader did not say how",
     });
-    if d.source == DisplaySource::Unknown {
-        return;
-    }
     if d.preferred.0 != 0 {
         print(b"; the panel prefers ");
         size(d.preferred);
-    } else {
+    } else if !matches!(
+        d.source,
+        DisplaySource::Unknown | DisplaySource::OnRunningPipe | DisplaySource::Kept
+    ) {
         print(b"; no usable EDID from the firmware");
+    }
+    if let Some(why) = abi::sysinfo::display_refusal(d.native_refused) {
+        print(b"; not its own size: ");
+        print(why.as_bytes());
     }
     if d.bad_request {
         print(b"; video= is not WxH");
@@ -778,7 +784,11 @@ fn screen() {
         size(d.requested);
         print(b" is not offered");
     }
-    print(b"\nmodes  ");
+    print(b"\n");
+    if d.listed == 0 {
+        return;
+    }
+    print(b"modes  ");
     for m in &d.modes[..d.listed as usize] {
         print(b" ");
         size((m.width as u32, m.height as u32));

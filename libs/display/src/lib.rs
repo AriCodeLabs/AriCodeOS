@@ -40,6 +40,9 @@ impl Mode {
     }
 }
 
+/// The value of `video=` that keeps the firmware's mode.
+pub const FIRMWARE: &str = "firmware";
+
 /// Why a mode was chosen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {

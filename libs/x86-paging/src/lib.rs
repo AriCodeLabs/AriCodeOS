@@ -301,9 +301,10 @@ impl<A: FrameAlloc, M: PhysMap> Mapper<A, M> {
     }
 
     /// Maps physical `[0, limit)` at `base` with 2 MiB pages, and `range`
-    /// (`start`, `len`) with `flags | range_flags` even past `limit`. The 2
-    /// MiB windows around `range` use 4 KiB pages, so what shares a window
-    /// with it keeps `flags`, and no page has two memory types.
+    /// (`start`, `len`) with `flags | range_flags` even past `limit`. A 2 MiB
+    /// window only partly in `range` uses 4 KiB pages, so what shares it keeps
+    /// `flags`, and no page has two memory types. `range_flags` must mean the
+    /// same on both page sizes (the PAT bit is not among them).
     pub fn map_linear(
         &mut self,
         base: u64,
@@ -320,12 +321,21 @@ impl<A: FrameAlloc, M: PhysMap> Mapper<A, M> {
         let window_start = start & !(HUGE_2M - 1);
         let window_end = end.next_multiple_of(HUGE_2M);
         self.map_range_2m(base, 0, window_start.min(limit), flags)?;
-        let mut page = window_start;
-        while page < window_end {
-            let in_range = page + PAGE_SIZE > start && page < end;
-            let leaf = if in_range { flags | range_flags } else { flags };
-            self.map_4k(base + page, page, leaf)?;
-            page += PAGE_SIZE;
+        let mut window = window_start;
+        while window < window_end {
+            if window >= start && window + HUGE_2M <= end {
+                self.map_2m(base + window, window, flags | range_flags)?;
+            } else {
+                for page in (window..window + HUGE_2M).step_by(PAGE_SIZE as usize) {
+                    let in_range = page + PAGE_SIZE > start && page < end;
+                    if in_range {
+                        self.map_4k(base + page, page, flags | range_flags)?;
+                    } else if page < limit {
+                        self.map_4k(base + page, page, flags)?;
+                    }
+                }
+            }
+            window += HUGE_2M;
         }
         if window_end < limit {
             self.map_range_2m(base + window_end, window_end, limit - window_end, flags)?;
@@ -857,6 +867,19 @@ mod tests {
     }
 
     #[test]
+    fn map_linear_keeps_huge_pages_inside_the_range() {
+        const MIB: u64 = 1 << 20;
+        let base = 0xFFFF_8000_0000_0000;
+        // 64 MiB, aligned: PML4, PDPT and one directory, no page table.
+        let mut m = mapper(3);
+        m.map_linear(base, 0, WRITABLE, (1024 * MIB, 64 * MIB), WRITE_THROUGH)
+            .unwrap();
+        let (to, flags) = m.translate(base + 1024 * MIB + 3 * MIB).unwrap();
+        assert_eq!(to, 1024 * MIB + 3 * MIB);
+        assert_ne!(flags & WRITE_THROUGH, 0);
+    }
+
+    #[test]
     fn map_linear_reaches_a_range_past_the_limit() {
         const MIB: u64 = 1 << 20;
         let base = 0xFFFF_8000_0000_0000;
@@ -865,6 +888,7 @@ mod tests {
             .unwrap();
         assert_eq!(m.translate(base + 2 * MIB).map(|t| t.0), Some(2 * MIB));
         assert_eq!(m.translate(base + 8 * MIB), None, "nothing in between");
+        assert_eq!(m.translate(base + 65 * MIB), None, "nor past the range");
         let (to, flags) = m.translate(base + 64 * MIB).unwrap();
         assert_eq!(to, 64 * MIB);
         assert_ne!(flags & WRITE_THROUGH, 0);

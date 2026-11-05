@@ -101,7 +101,9 @@ pub mod keys {
     pub const KBD: &str = "kbd";
     /// `video=WxH`: the screen mode AriBoot sets, when the firmware offers
     /// it; otherwise the panel's preferred one (EDID), otherwise the
-    /// firmware's (ADR 0078, stage 0).
+    /// firmware's (ADR 0078, stage 0). `video=firmware` keeps the firmware's
+    /// mode and touches nothing: the way back on the rare machine where the
+    /// panel's size goes wrong (ADR 0079).
     pub const VIDEO: &str = "video";
     /// `ps2=console`: the PS/2 keyboard and touchpad serve only the kernel
     /// console; while a process holds the screen their keys are withheld
