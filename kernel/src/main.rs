@@ -79,7 +79,7 @@ pub unsafe extern "C" fn kernel_entry(boot_info: *const BootInfo) -> ! {
     let cmdline = CmdLine::new(unsafe { info.cmdline() });
     QEMU_EXIT.store(cmdline.has(keys::QEMU_EXIT), Ordering::Relaxed);
 
-    framebuffer::set_info(info.framebuffer);
+    framebuffer::set_info(info.framebuffer, info.video());
     // With `gui` the screen belongs to the user compositor: the kernel only
     // writes to serial.
     let gui = cmdline.has(keys::GUI);

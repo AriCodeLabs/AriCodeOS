@@ -27,8 +27,9 @@ use aricode_x86_paging::{
     WRITABLE,
 };
 use boot_protocol::{
-    Beacon, BootInfo, FramebufferInfo, MemoryMap, MemoryRegionKind, PixelFormat,
-    BOOT_PROTOCOL_MAGIC, BOOT_PROTOCOL_VERSION, KERNEL_VIRT_BASE, PHYS_MAP_BASE,
+    video_source, Beacon, BootInfo, FramebufferInfo, MemoryMap, MemoryRegionKind, PixelFormat,
+    VideoMode, VideoReport, BOOT_PROTOCOL_MAGIC, BOOT_PROTOCOL_VERSION, KERNEL_VIRT_BASE,
+    PHYS_MAP_BASE,
 };
 use core::ptr::NonNull;
 use log::{error, info, warn};
@@ -109,7 +110,7 @@ fn run(
     let requested = CmdLine::from_bytes(cmdline_bytes)
         .get(keys::VIDEO)
         .and_then(aricode_display::parse_size);
-    let framebuffer = framebuffer_info(requested);
+    let (framebuffer, video) = framebuffer_info(requested);
     if framebuffer.address != 0 {
         info!(
             "GOP: {}x{} stride {} {:?} @ {:#x}",
@@ -308,6 +309,7 @@ fn run(
         carried_seed: boot_protocol::SeedBytes(seed.seed),
         carried_seed_status: seed.status,
         _reserved: 0,
+        video,
     };
     // The kernel's share now lives only in `boot_info` (wiped below once
     // it is in its page) and, after the jump, in the kernel.
@@ -501,8 +503,13 @@ fn panel_preferred(handle: uefi::Handle) -> Option<(u32, u32)> {
 }
 
 /// Sets the mode `aricode_display::choose` picks (ADR 0078, stage 0): the
-/// one asked for with `video=`, the panel's own, or the firmware's.
-fn choose_mode(gop: &mut GraphicsOutput, handle: uefi::Handle, requested: Option<(u32, u32)>) {
+/// one asked for with `video=`, the panel's own, or the firmware's. Returns
+/// what it did, for `diag`.
+fn choose_mode(
+    gop: &mut GraphicsOutput,
+    handle: uefi::Handle,
+    requested: Option<(u32, u32)>,
+) -> VideoReport {
     let current = gop.current_mode_info();
     let mut modes: Vec<(gop::Mode, aricode_display::Mode)> = Vec::new();
     for m in gop.modes() {
@@ -522,20 +529,32 @@ fn choose_mode(gop: &mut GraphicsOutput, handle: uefi::Handle, requested: Option
             },
         ));
     }
+    let list: Vec<aricode_display::Mode> = modes.iter().map(|(_, d)| *d).collect();
+    let preferred = panel_preferred(handle);
+    let (rw, rh) = requested.unwrap_or((0, 0));
+    let (pw, ph) = preferred.unwrap_or((0, 0));
+    let mut report = VideoReport {
+        source: video_source::NOT_LISTED,
+        offered: list.len() as u32,
+        requested_width: rw,
+        requested_height: rh,
+        preferred_width: pw,
+        preferred_height: ph,
+        modes: [VideoMode::default(); VideoReport::MODES],
+    };
+    match preferred {
+        Some((w, h)) => info!("video: the panel prefers {w}x{h} (EDID)"),
+        None => info!("video: no EDID from the firmware"),
+    }
     let Some(now) = modes.iter().position(|(m, _)| *m.info() == current) else {
         warn!("video: the firmware's mode is not in its own list; kept");
-        return;
+        mark_modes(&mut report, &list, None);
+        return report;
     };
-    let preferred = panel_preferred(handle);
-    let list: Vec<aricode_display::Mode> = modes.iter().map(|(_, d)| *d).collect();
     let (i, source) = aricode_display::choose(&list, now, requested, preferred, SCREEN_MAX_BYTES);
     let chosen = list[i];
     if let Some((w, h)) = requested.filter(|_| source != aricode_display::Source::Requested) {
         warn!("video: {w}x{h} asked for, not offered as a usable mode");
-    }
-    match preferred {
-        Some((w, h)) => info!("video: the panel prefers {w}x{h} (EDID)"),
-        None => info!("video: no EDID from the firmware"),
     }
     if i != now {
         if let Err(e) = gop.set_mode(&modes[i].0) {
@@ -543,7 +562,9 @@ fn choose_mode(gop: &mut GraphicsOutput, handle: uefi::Handle, requested: Option
                 "video: setting {}x{} failed ({e:?}); the firmware's mode stays",
                 chosen.width, chosen.height
             );
-            return;
+            report.source = video_source::SET_FAILED;
+            mark_modes(&mut report, &list, Some(now));
+            return report;
         }
     }
     info!(
@@ -553,11 +574,37 @@ fn choose_mode(gop: &mut GraphicsOutput, handle: uefi::Handle, requested: Option
         source.name(),
         list.len()
     );
+    report.source = match source {
+        aricode_display::Source::Requested => video_source::REQUESTED,
+        aricode_display::Source::Edid => video_source::EDID,
+        aricode_display::Source::Firmware => video_source::FIRMWARE,
+    };
+    mark_modes(&mut report, &list, Some(i));
+    report
 }
 
-fn framebuffer_info(requested: Option<(u32, u32)>) -> FramebufferInfo {
+/// Copies the first offered modes into `report`, flagged usable and chosen.
+fn mark_modes(report: &mut VideoReport, list: &[aricode_display::Mode], chosen: Option<usize>) {
+    for (i, (slot, m)) in report.modes.iter_mut().zip(list).enumerate() {
+        let mut flags = 0;
+        if m.usable(SCREEN_MAX_BYTES) {
+            flags |= VideoMode::USABLE;
+        }
+        if chosen == Some(i) {
+            flags |= VideoMode::CHOSEN;
+        }
+        *slot = VideoMode {
+            width: m.width.min(u16::MAX as u32) as u16,
+            height: m.height.min(u16::MAX as u32) as u16,
+            flags,
+            _reserved: 0,
+        };
+    }
+}
+
+fn framebuffer_info(requested: Option<(u32, u32)>) -> (FramebufferInfo, VideoReport) {
     let Ok(handle) = boot::get_handle_for_protocol::<GraphicsOutput>() else {
-        return FramebufferInfo::none();
+        return (FramebufferInfo::none(), VideoReport::default());
     };
     // Non-exclusive open: an exclusive one disconnects the firmware console
     // driver and on real hardware the screen stops showing AriBoot's traces
@@ -574,9 +621,9 @@ fn framebuffer_info(requested: Option<(u32, u32)>) -> FramebufferInfo {
             OpenProtocolAttributes::GetProtocol,
         )
     }) else {
-        return FramebufferInfo::none();
+        return (FramebufferInfo::none(), VideoReport::default());
     };
-    choose_mode(&mut gop, handle, requested);
+    let video = choose_mode(&mut gop, handle, requested);
     let mode = gop.current_mode_info();
     let (width, height) = mode.resolution();
     let (pixel_format, masks) = match mode.pixel_format() {
@@ -591,10 +638,10 @@ fn framebuffer_info(requested: Option<(u32, u32)>) -> FramebufferInfo {
             });
             (PixelFormat::Bitmask, (m.red, m.green, m.blue))
         }
-        gop::PixelFormat::BltOnly => return FramebufferInfo::none(),
+        gop::PixelFormat::BltOnly => return (FramebufferInfo::none(), video),
     };
     let mut fb = gop.frame_buffer();
-    FramebufferInfo {
+    let info = FramebufferInfo {
         address: fb.as_mut_ptr() as u64,
         size: fb.size() as u64,
         width: width as u32,
@@ -605,7 +652,8 @@ fn framebuffer_info(requested: Option<(u32, u32)>) -> FramebufferInfo {
         green_mask: masks.1,
         blue_mask: masks.2,
         _reserved: 0,
-    }
+    };
+    (info, video)
 }
 
 fn find_rsdp() -> u64 {

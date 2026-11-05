@@ -313,6 +313,10 @@ fn system_info(h: Handle, kind: u64, ptr: u64, len: u64) -> Result<u64, Error> {
             Some(fb) => fb.encode().to_vec(),
             None => return Err(Error::NotFound),
         },
+        sysinfo::DISPLAY => match crate::framebuffer::abi_display() {
+            Some(d) => d.encode().to_vec(),
+            None => return Err(Error::NotFound),
+        },
         sysinfo::PROCESSES => {
             let max = (len as usize) / sysinfo::ProcessEntry::LEN;
             process::snapshot()

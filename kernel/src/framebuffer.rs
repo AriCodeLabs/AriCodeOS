@@ -4,13 +4,16 @@
 
 use crate::sync::IrqLock;
 use aricode_fb_console::{Rgb, Surface};
-use boot_protocol::{FramebufferInfo, PixelFormat};
+use boot_protocol::{FramebufferInfo, PixelFormat, VideoMode, VideoReport};
 
 static INFO: IrqLock<Option<FramebufferInfo>> = IrqLock::new(None);
+static VIDEO: IrqLock<Option<VideoReport>> = IrqLock::new(None);
 
-/// Stores the GOP framebuffer description for `system_info`.
-pub fn set_info(info: FramebufferInfo) {
+/// Stores the GOP framebuffer description, and the loader's report on how
+/// it got its mode if the loader made one, for `system_info`.
+pub fn set_info(info: FramebufferInfo, video: Option<VideoReport>) {
     *INFO.lock() = Some(info);
+    *VIDEO.lock() = video;
 }
 
 /// The framebuffer's physical range `[start, end)`, if there is one: no
@@ -48,6 +51,37 @@ pub fn abi_info() -> Option<aricode_abi::sysinfo::Framebuffer> {
         green_mask: info.green_mask,
         blue_mask: info.blue_mask,
     })
+}
+
+/// The loader's video report in the ABI format (`sysinfo::Display`), or
+/// `None` if there is no screen. From a loader that predates the report,
+/// the source is `Unknown` and no mode is listed.
+pub fn abi_display() -> Option<aricode_abi::sysinfo::Display> {
+    use aricode_abi::sysinfo::{Display, DisplayMode, DisplaySource};
+    abi_info()?;
+    let Some(v) = *VIDEO.lock() else {
+        return Some(Display::default());
+    };
+    let listed = (v.offered as usize)
+        .min(VideoReport::MODES)
+        .min(Display::MODES);
+    let mut d = Display {
+        source: DisplaySource::from_u32(v.source),
+        offered: v.offered,
+        listed: listed as u8,
+        requested: (v.requested_width, v.requested_height),
+        preferred: (v.preferred_width, v.preferred_height),
+        modes: [DisplayMode::default(); Display::MODES],
+    };
+    for (out, m) in d.modes.iter_mut().zip(&v.modes).take(listed) {
+        *out = DisplayMode {
+            width: m.width,
+            height: m.height,
+            usable: m.flags & VideoMode::USABLE != 0,
+            chosen: m.flags & VideoMode::CHOSEN != 0,
+        };
+    }
+    Some(d)
 }
 
 pub struct MmioSurface {

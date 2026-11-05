@@ -29,6 +29,11 @@ impl Mode {
     fn bytes(&self) -> u64 {
         self.stride as u64 * self.height as u64 * 4
     }
+
+    /// Whether the system can draw on this mode.
+    pub fn usable(&self, max_bytes: u64) -> bool {
+        self.direct && self.bytes() <= max_bytes
+    }
 }
 
 /// Why a mode was chosen.
@@ -88,11 +93,10 @@ pub fn choose(
     preferred: Option<(u32, u32)>,
     max_bytes: u64,
 ) -> (usize, Source) {
-    let usable = |m: &Mode| m.direct && m.bytes() <= max_bytes;
     let find = |(w, h): (u32, u32)| {
         modes
             .iter()
-            .position(|m| m.width == w && m.height == h && usable(m))
+            .position(|m| m.width == w && m.height == h && m.usable(max_bytes))
     };
     if let Some(i) = requested.and_then(find) {
         return (i, Source::Requested);
