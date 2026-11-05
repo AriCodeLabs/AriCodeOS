@@ -564,7 +564,7 @@ pub fn usb_hid_selftest() {
 
 /// Test bench (`test=drivers`): PIT IRQ0, DMA and the framebuffer as MMIO,
 /// all serviced by user drivers.
-pub fn selftest(info: &boot_protocol::BootInfo) {
+pub fn selftest() {
     use crate::arch::x86_64::pit;
     use crate::user::{process, programs};
     use alloc::vec;
@@ -616,7 +616,7 @@ pub fn selftest(info: &boot_protocol::BootInfo) {
     // The screen is the driver's until the check: the kernel console would
     // repaint pixel (0,0) on its next scroll, which any log line (the
     // driver's exit) can cause once the screen is full of boot lines.
-    let fb = info.framebuffer;
+    let fb = crate::framebuffer::current();
     let lent = crate::console::lend_framebuffer();
     if fb.address != 0 {
         let region = KernelObject::new(ObjectKind::Mmio(Region {

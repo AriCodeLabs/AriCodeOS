@@ -206,6 +206,7 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
         Some("bar") => pci::Lie::BarInRam,
         _ => pci::Lie::None,
     });
+    framebuffer::use_panel_size(cmdline.get(keys::VIDEO).is_some());
     if cmdline.get(keys::PCI_FLR) == Some("off") {
         pci::set_flr_enabled(false);
         info!("pci: function level resets disabled on the command line (pci.flr=off)");
@@ -213,11 +214,11 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
     if cmdline.get(keys::IOMMU) == Some("off") {
         info!("iommu: disabled on the command line (iommu=off); untranslated DMA");
     } else {
-        iommu::init(&info.framebuffer);
+        iommu::init(&framebuffer::current());
     }
 
     if cmdline.get(keys::TEST).is_some() {
-        run_requested_test(&cmdline, info);
+        run_requested_test(&cmdline);
     } else {
         let mut init_flags = 0;
         if cmdline.has(keys::SHELL) {
@@ -243,7 +244,7 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
         if cmdline.has(keys::SERVICE_HANG) {
             init_flags |= aricode_abi::init_arg::SERVICE_HANG;
         }
-        run_init(init_flags, info.framebuffer);
+        run_init(init_flags, framebuffer::current());
     }
 
     println!("ARICODEOS_KERNEL_READY");
@@ -349,7 +350,7 @@ fn report_memory(info: &BootInfo) {
 }
 
 /// Deliberate faults for the test scenarios (`test=<name>`).
-fn run_requested_test(cmdline: &CmdLine, info: &BootInfo) {
+fn run_requested_test(cmdline: &CmdLine) {
     let Some(name) = cmdline.get(keys::TEST) else {
         return;
     };
@@ -371,7 +372,7 @@ fn run_requested_test(cmdline: &CmdLine, info: &BootInfo) {
         "ipc_late" => ipc::late_reply_selftest(),
         "ipc_peer" => ipc::peer_closed_selftest(),
         "wait_set" => ipc::wait_set_selftest(),
-        "drivers" => hw::selftest(info),
+        "drivers" => hw::selftest(),
         "usb_hid" => hw::usb_hid_selftest(),
         "random" => random::selftest(),
         "console_input" => console_input::selftest(),
@@ -456,7 +457,7 @@ fn run_init(arg: u64, fb: boot_protocol::FramebufferInfo) {
     let console_in = object::KernelObject::new(object::ObjectKind::Console);
     let framebuffer = object::KernelObject::new(object::ObjectKind::Mmio(hw::Region {
         phys: fb.address,
-        len: fb.size,
+        len: framebuffer::screen_bytes(&fb),
         caching: hw::Caching::WriteCombining,
         source_id: None,
         claim: None,

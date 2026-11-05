@@ -12,7 +12,8 @@
 //!
 //! [`plan`] only reads, and refuses unless the hardware is in exactly the state
 //! the method needs. An unknown model or any other state keeps the firmware's
-//! mode, and says why. [`apply`] writes, checks, and restores on failure.
+//! mode, and says why. [`apply`] writes, checks, and restores on failure. The
+//! kernel calls these once, during boot, before any program has the screen.
 
 #![no_std]
 
@@ -67,8 +68,9 @@ pub enum Refusal {
 pub struct Request {
     /// PCI device ID.
     pub device: u16,
-    /// The panel's size, from its EDID.
-    pub panel: (u32, u32),
+    /// The panel's size from its EDID, if the loader had one. The pipe's
+    /// timing says it too; this must not disagree.
+    pub panel: Option<(u32, u32)>,
     /// The firmware's mode.
     pub firmware: (u32, u32),
     /// Pixels per row of the firmware's mode.
@@ -78,6 +80,9 @@ pub struct Request {
     pub aperture_size: u64,
     /// The largest buffer allowed.
     pub max_bytes: u64,
+    /// How much of the aperture, from the framebuffer's start, is known to be
+    /// the screen's: the firmware's framebuffer region.
+    pub region: u64,
 }
 
 /// The change [`apply`] makes.
@@ -150,17 +155,6 @@ const PF_PIPE_MASK: u32 = 3;
 /// so this is far more than a frame of any refresh rate.
 const FRAME_READS: u32 = 2_000_000;
 
-/// The aperture's size from the byte of MSAC (PCI configuration 62h, Volume 3
-/// Part 2, section 1.29); `None` for its illegal value.
-pub const fn aperture_size(msac: u8) -> Option<u64> {
-    match (msac >> 1) & 3 {
-        0b00 => Some(128 << 20),
-        0b01 => Some(256 << 20),
-        0b11 => Some(512 << 20),
-        _ => None,
-    }
-}
-
 const fn size_field(w: u32, h: u32) -> u32 {
     (w - 1) << 16 | (h - 1)
 }
@@ -170,8 +164,9 @@ const fn active(reg: u32) -> u32 {
     (reg & 0xFFF) + 1
 }
 
-/// Reads the hardware and decides. Writes nothing.
-pub fn plan(regs: &impl Regs, r: &Request) -> Result<Plan, Refusal> {
+/// Reads the hardware and decides. Writes nothing. `None`: the screen already
+/// has the pipe's size, so there is nothing to change.
+pub fn plan(regs: &impl Regs, r: &Request) -> Result<Option<Plan>, Refusal> {
     if !SUPPORTED.contains(&r.device) {
         return Err(Refusal::NotThisFamily);
     }
@@ -186,15 +181,15 @@ pub fn plan(regs: &impl Regs, r: &Request) -> Result<Plan, Refusal> {
     if regs.read(pipe_ctl(pipe, PIPE_CONF)) & PIPE_INTERLACE_MASK != 0 {
         return Err(Refusal::Interlaced);
     }
-    let (width, height) = r.panel;
-    if width == 0
-        || height == 0
-        || active(regs.read(pipe_timing(pipe, HTOTAL))) != width
-        || active(regs.read(pipe_timing(pipe, VTOTAL))) != height
-    {
+    let width = active(regs.read(pipe_timing(pipe, HTOTAL)));
+    let height = active(regs.read(pipe_timing(pipe, VTOTAL)));
+    if r.panel.is_some_and(|p| p != (width, height)) {
         return Err(Refusal::NotPanelTiming);
     }
     let (fw, fh) = r.firmware;
+    if (fw, fh) == (width, height) {
+        return Ok(None);
+    }
     if fw == 0 || fh == 0 || regs.read(pipe_timing(pipe, SRCSZ)) != size_field(fw, fh) {
         return Err(Refusal::SourceNotFirmwareMode);
     }
@@ -210,13 +205,14 @@ pub fn plan(regs: &impl Regs, r: &Request) -> Result<Plan, Refusal> {
     {
         return Err(Refusal::PlaneNotFramebuffer);
     }
-    if width % 2 != 0 {
+    if !width.is_multiple_of(2) {
         return Err(Refusal::OddWidth);
     }
     let stride_bytes = (width as u64 * 4).next_multiple_of(STRIDE_ALIGN);
     let bytes = stride_bytes * height as u64;
     if stride_bytes > STRIDE_MAX
         || bytes > r.max_bytes
+        || bytes > r.region
         || r.surface.saturating_add(bytes) > r.aperture_size
     {
         return Err(Refusal::TooLarge);
@@ -231,14 +227,14 @@ pub fn plan(regs: &impl Regs, r: &Request) -> Result<Plan, Refusal> {
     if !mapped {
         return Err(Refusal::NotMapped);
     }
-    Ok(Plan {
+    Ok(Some(Plan {
         pipe,
         fitter,
         width,
         height,
         stride: (stride_bytes / 4) as u32,
         bytes,
-    })
+    }))
 }
 
 /// The one enabled fitter on `pipe`, filling the whole panel from its corner.
@@ -380,19 +376,20 @@ mod tests {
     fn request() -> Request {
         Request {
             device: 0x0166,
-            panel: (1366, 768),
+            panel: Some((1366, 768)),
             firmware: (800, 600),
             firmware_stride: 800,
             surface: 0,
             aperture_size: 256 << 20,
             max_bytes: 8 << 20,
+            region: 64 << 20,
         }
     }
 
     #[test]
     fn the_laptop_gets_its_panel_size() {
         let mut hw = laptop();
-        let plan = plan(&hw, &request()).unwrap();
+        let plan = plan(&hw, &request()).unwrap().unwrap();
         assert_eq!((plan.width, plan.height), (1366, 768));
         assert_eq!(plan.stride, 1376, "1366 x 4 bytes, up to 64");
         assert_eq!(plan.bytes, 5504 * 768);
@@ -408,9 +405,33 @@ mod tests {
     }
 
     #[test]
+    fn a_loader_without_an_edid_still_gets_it_from_the_pipe() {
+        let r = Request {
+            panel: None,
+            ..request()
+        };
+        let plan = plan(&laptop(), &r).unwrap().unwrap();
+        assert_eq!((plan.width, plan.height), (1366, 768));
+    }
+
+    #[test]
+    fn a_screen_at_the_pipes_size_needs_nothing() {
+        let mut hw = laptop();
+        hw.regs.insert(0x68080, 0);
+        hw.regs.insert(0x6001C, 0x0555_02FF);
+        let r = Request {
+            firmware: (1366, 768),
+            firmware_stride: 1376,
+            ..request()
+        };
+        assert_eq!(plan(&hw, &r), Ok(None));
+        assert!(hw.writes.is_empty());
+    }
+
+    #[test]
     fn the_source_changes_before_the_fitter_leaves() {
         let mut hw = laptop();
-        let plan = plan(&hw, &request()).unwrap();
+        let plan = plan(&hw, &request()).unwrap().unwrap();
         apply(&mut hw, &plan).unwrap();
         let at = |reg: u32| hw.writes.iter().position(|w| w.0 == reg).unwrap();
         assert!(at(0x70188) < at(0x7019C), "PRI_SURF arms the stride");
@@ -434,11 +455,8 @@ mod tests {
                 |h, _| drop(h.regs.insert(0x70008, 0xD860_0050)),
                 Refusal::Interlaced,
             ),
-            (|_, r| r.panel = (1920, 1080), Refusal::NotPanelTiming),
-            (
-                |h, _| drop(h.regs.insert(0x60000, 0x05B9_031F)),
-                Refusal::NotPanelTiming,
-            ),
+            (|_, r| r.panel = Some((1920, 1080)), Refusal::NotPanelTiming),
+            (|_, r| r.region = 2 << 20, Refusal::TooLarge),
             (
                 |_, r| r.firmware = (1024, 768),
                 Refusal::SourceNotFirmwareMode,
@@ -475,7 +493,7 @@ mod tests {
         hw.regs.insert(0x60000, 0x05B9_0554);
         hw.regs.insert(0x68074, 0x0555_0300);
         let r = Request {
-            panel: (1365, 768),
+            panel: None,
             ..request()
         };
         assert_eq!(plan(&hw, &r), Err(Refusal::OddWidth));
@@ -489,7 +507,7 @@ mod tests {
     fn a_stopped_pipe_restores_the_firmware_state() {
         let mut hw = laptop();
         let before = firmware_state(&hw);
-        let plan = plan(&hw, &request()).unwrap();
+        let plan = plan(&hw, &request()).unwrap().unwrap();
         hw.frozen = true;
         assert_eq!(apply(&mut hw, &plan), Err(Refusal::NoFrames));
         assert_eq!(firmware_state(&hw), before);
@@ -499,19 +517,10 @@ mod tests {
     fn a_register_that_ignores_its_value_restores_the_firmware_state() {
         let mut hw = laptop();
         let before = firmware_state(&hw);
-        let plan = plan(&hw, &request()).unwrap();
+        let plan = plan(&hw, &request()).unwrap().unwrap();
         hw.ignored.insert(0x6001C);
         assert_eq!(apply(&mut hw, &plan), Err(Refusal::NotApplied));
         assert_eq!(firmware_state(&hw), before);
-    }
-
-    #[test]
-    fn the_aperture_size_comes_from_msac() {
-        assert_eq!(aperture_size(0b000), Some(128 << 20));
-        assert_eq!(aperture_size(0b010), Some(256 << 20), "the default, 02h");
-        assert_eq!(aperture_size(0b110), Some(512 << 20));
-        assert_eq!(aperture_size(0b100), None, "illegal");
-        assert_eq!(aperture_size(0xF2), Some(256 << 20), "scratch bits");
     }
 
     #[test]

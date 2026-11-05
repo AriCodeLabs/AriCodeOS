@@ -19,7 +19,6 @@ aricode-cmdline = { path = "../libs/cmdline" }
 aricode-gpt = { path = "../libs/gpt" }
 aricode-ab = { path = "../libs/ab" }
 aricode-display = { path = "../libs/display" }
-aricode-intel-display = { path = "../libs/intel-display" }
 # Portable backends: no SIMD in the trusted base (ADR 0066).
 aricode-crypto = { path = "../libs/crypto", features = ["soft"] }
 uefi = { version = "0.41", default-features = false, features = ["alloc", "global_allocator", "panic_handler", "logger"] }

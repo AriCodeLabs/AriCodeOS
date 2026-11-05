@@ -15,7 +15,6 @@
 extern crate alloc;
 
 mod memmap;
-mod native;
 mod qemu;
 mod seed;
 mod slots;
@@ -111,12 +110,11 @@ fn run(
     let asked = CmdLine::from_bytes(cmdline_bytes).get(keys::VIDEO);
     let keep_firmware = asked == Some(aricode_display::FIRMWARE);
     let requested = asked.and_then(aricode_display::parse_size);
-    let (mut framebuffer, mut video) = framebuffer_info(requested, keep_firmware);
+    let (framebuffer, mut video) = framebuffer_info(requested, keep_firmware);
     if asked.is_some() && requested.is_none() && !keep_firmware {
         warn!("video: video= is not WxH; ignored");
         video.bad_request = 1;
     }
-    let native = plan_native(&framebuffer, &mut video, requested);
     if framebuffer.address != 0 {
         info!(
             "GOP: {}x{} stride {} {:?} @ {:#x}",
@@ -246,12 +244,7 @@ fn run(
     step(2);
     if framebuffer.address != 0 {
         let fb_start = framebuffer.address & !(HUGE_2M - 1);
-        // The larger of the two screens this boot may end up with.
-        let span = native
-            .as_ref()
-            .map_or(0, |n| n.framebuffer.size)
-            .max(framebuffer.size);
-        let fb_end = (framebuffer.address + span).next_multiple_of(HUGE_2M);
+        let fb_end = (framebuffer.address + framebuffer.size).next_multiple_of(HUGE_2M);
         // Only the part outside the physical map already built.
         let start = fb_start.max(phys_limit);
         if start < fb_end {
@@ -345,17 +338,6 @@ fn run(
     };
     // The map buffer must survive: do not free it (it could not be freed anyway).
     core::mem::forget(final_map);
-    if let Some(n) = &native {
-        match native::apply(n) {
-            Ok(()) => {
-                framebuffer = n.framebuffer;
-                video.source = video_source::ON_RUNNING_PIPE;
-                boot_info.framebuffer = framebuffer;
-            }
-            Err(why) => video.native_refused = why as u32,
-        }
-        boot_info.video = video;
-    }
     // SAFETY: as for the previous beacon; ExitBootServices does not change paging.
     unsafe { framebuffer.beacon(framebuffer.address as *mut u8, Beacon::LOADER_JUMP) };
 
@@ -520,35 +502,6 @@ fn panel_preferred(handle: uefi::Handle) -> Option<(u32, u32)> {
         .ok()
         .and_then(|p| p.edid().and_then(aricode_display::edid_preferred))
     })
-}
-
-/// If the firmware does not offer the panel's size and nothing asked for
-/// another, whether this machine can show it anyway (ADR 0079). Only reads:
-/// the change waits for the end of boot services.
-fn plan_native(
-    framebuffer: &FramebufferInfo,
-    video: &mut VideoReport,
-    requested: Option<(u32, u32)>,
-) -> Option<native::Planned> {
-    if video.source != video_source::FIRMWARE
-        || requested.is_some()
-        || video.preferred_width == 0
-        || framebuffer.pixel_format != PixelFormat::Bgr
-    {
-        return None;
-    }
-    let panel = (video.preferred_width, video.preferred_height);
-    match native::plan(framebuffer, panel, SCREEN_MAX_BYTES) {
-        Ok(planned) => {
-            info!("video: {}x{} on the running pipe", panel.0, panel.1);
-            Some(planned)
-        }
-        Err(why) => {
-            warn!("video: the firmware's mode stays: {why:?}");
-            video.native_refused = why as u32;
-            None
-        }
-    }
 }
 
 /// Sets the mode `aricode_display::choose` picks (ADR 0078, stage 0): the
@@ -724,9 +677,7 @@ fn framebuffer_info(
     let mut fb = gop.frame_buffer();
     let info = FramebufferInfo {
         address: fb.as_mut_ptr() as u64,
-        // What the screen takes, not the firmware's whole region (64 MiB on
-        // the reference laptop), which the kernel would map page by page.
-        size: (fb.size() as u64).min(mode.stride() as u64 * height as u64 * 4),
+        size: fb.size() as u64,
         width: width as u32,
         height: height as u32,
         stride: mode.stride() as u32,

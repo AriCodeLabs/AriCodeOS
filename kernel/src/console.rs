@@ -58,6 +58,14 @@ pub fn init_framebuffer(info: boot_protocol::FramebufferInfo) -> bool {
     }
 }
 
+/// The screen changed size during boot (ADR 0079): the console starts over on
+/// it, if it had the screen. What it showed stays on serial.
+pub fn screen_resized(info: boot_protocol::FramebufferInfo) {
+    if FB.lock().is_attached() {
+        init_framebuffer(info);
+    }
+}
+
 /// Lends the screen to a user driver under test (`test=drivers`): the
 /// console stops drawing, so its next scroll does not repaint what the
 /// driver painted, until `take_back_framebuffer`. `None` without one.
