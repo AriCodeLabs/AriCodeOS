@@ -308,6 +308,7 @@ dependencies = [
  "aricode-ab",
  "aricode-cmdline",
  "aricode-crypto",
+ "aricode-display",
  "aricode-elf",
  "aricode-gpt",
  "aricode-x86-paging",
@@ -362,6 +363,10 @@ dependencies = [
  "sha3",
  "x25519-dalek",
 ]
+
+[[package]]
+name = "aricode-display"
+version = "0.18.0"
 
 [[package]]
 name = "aricode-ehci"

@@ -1,0 +1,21 @@
+# The screen mode AriBoot sets (ADR 0078, stage 0): `video=1024x768` on the
+# command line asks for a mode OVMF offers, and the compositor gets that
+# screen. A mode it does not offer would leave the panel's or the
+# firmware's (unit tests of libs/display).
+name = "gui.video_mode"
+description = "video=WxH on the command line sets that GOP mode, and the compositor draws on it"
+level = "full"
+areas = ["gui", "boot"]
+cmdline = "qemu_exit gui shell video=1024x768"
+install = ["examples/gui_demo"]
+stdin = ["sleep 1000", "shutdown"]
+timeout_secs = 60
+
+[expect]
+exit = 33
+serial_contains = [
+    "video: 1024x768 (requested,",
+    "compositor: screen 1024x768",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "video: setting"]
