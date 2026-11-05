@@ -1,0 +1,68 @@
+# The window protocol's events (ADR 0078, stage 0). Demo D (gui_demo 3) asks
+# for them and says each kind the first time it comes. Its content is at
+# (40,60), 400x300; the pointer starts at the centre of the 1280x800 screen.
+# A window that does not ask gets none of this: gui.close_box and the others
+# keep running with programs that do not know these events.
+name = "gui.window_events"
+description = "a window that asks gets motion, release, enter, leave, wheel, key codes, key repeat, damage and resize"
+level = "full"
+areas = ["gui"]
+cmdline = "qemu_exit gui shell gui_trace"
+install = ["examples/gui_demo"]
+stdin = ["run gui_demo 3", "sleep 1000", "shutdown"]
+timeout_secs = 120
+
+[host_input]
+marker = "gui_demo D: window presented"
+mouse_rel = [-300, -200]
+
+[[host_input_then]]
+marker = "gui_demo D: motion"
+drag = [30, 30]
+
+[[host_input_then]]
+marker = "gui_demo D: release of the left button"
+click = "wheel-up"
+
+[[host_input_then]]
+marker = "gui_demo D: wheel"
+hold_key = ["a", 900]
+
+[[host_input_then]]
+marker = "gui_demo D: key code released"
+keys = ["shift+b"]
+
+[[host_input_then]]
+marker = "gui_demo D: key code with shift"
+keys = ["d"]
+
+[[host_input_then]]
+marker = "gui_demo D: presented a part"
+keys = ["r"]
+
+[[host_input_then]]
+marker = "gui_demo D: resized to 500x350"
+mouse_rel = [-320, -190]
+
+[[host_input_then]]
+marker = "gui_demo D: leave"
+keys = ["q"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "compositor: window 1 'Demo D' 400x300",
+    "gui_demo D: enter",
+    "gui_demo D: motion, left held",
+    "gui_demo D: key code pressed",
+    "gui_demo D: key code repeated",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "the resize failed", "gui_demo D: key repeats 0\n"]
+serial_order = [
+    "gui_demo D: key code pressed",
+    "gui_demo D: key code repeated",
+    "gui_demo D: key code released",
+    "gui_demo D: resized to 500x350",
+    "gui_demo D: leave",
+]

@@ -29,7 +29,13 @@ pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
         nr::THREAD_GET_TID => Ok(scheduler::current_tid().0 as u64),
         nr::ABI_VERSION => Ok(ABI_VERSION as u64),
         nr::HANDLE_CLOSE => {
-            let r = with_handles(|t| t.remove(h).map(|_| 0).map_err(abi_error));
+            // The last handle of a DMA buffer frees it, page by page: outside
+            // the lock of the process table (audit of the quota refund).
+            let removed = with_handles(|t| t.remove(h).map_err(abi_error));
+            let r = removed.map(|object| {
+                drop(object);
+                0
+            });
             process::settle_lingering();
             r
         }
@@ -993,6 +999,7 @@ fn dma_alloc(h: Handle, len: u64) -> Result<u64, Error> {
             .union(Rights::WRITE)
             .union(Rights::DUPLICATE)
             .union(Rights::TRANSFER);
-        with_handles(|t| insert(t, dma, rights).map(|h| h.0 as u64))
+        // A refused buffer goes with `dma`, outside the table's lock.
+        with_handles(|t| insert(t, dma.clone(), rights).map(|h| h.0 as u64))
     })()
 }

@@ -232,6 +232,10 @@ pub struct HostInput {
     /// finger on a touchpad does (incident 0058: about 100 moves a second).
     pub mouse_steps: Option<(u32, i32, i32, u64)>,
     pub click: Option<String>,
+    /// A drag after that: the left button down, a move by (dx, dy), and up.
+    pub drag: Option<(i32, i32)>,
+    /// A key held for this many ms, before `keys` are typed.
+    pub hold_key: Option<(String, u64)>,
     /// A pause after the marker, before anything is sent (ms): a stage
     /// that must come a while after the one before it (ADR 0077).
     #[serde(default)]

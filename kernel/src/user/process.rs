@@ -65,7 +65,7 @@ pub struct Process {
     /// Bytes of the buffers it allocated whose frames are still in use, by
     /// whoever holds them now (ADR 0078, stage 0): each buffer gives its
     /// share back with its frames.
-    pub dma_used: alloc::sync::Arc<core::sync::atomic::AtomicU64>,
+    dma_used: alloc::sync::Arc<core::sync::atomic::AtomicU64>,
     /// Console output waiting for a complete line (Phase 32): with several
     /// CPUs, two processes printing a line in several pieces would
     /// interleave; the kernel emits each line whole.
@@ -1019,6 +1019,40 @@ pub fn dma_lifetime_selftest() {
         ExitStatus::Exited(0),
         "dma lifetime: the quota must bound live buffers, and failed allocations and freed buffers give their charge back"
     );
+    // 5. The charge stays while another process holds the buffer, whoever made
+    //    it, and goes back with the frames when that process goes.
+    use core::sync::atomic::{AtomicU64, Ordering};
+    let used = alloc::sync::Arc::new(AtomicU64::new(LEN));
+    let charge = crate::hw::DmaCharge::new(used.clone(), LEN);
+    let dma = crate::hw::dma_alloc(LEN, Some(charge)).expect("DMA buffer");
+    let pid = spawn_with_handles_and_arg(
+        "dma_holder",
+        crate::user::programs::by_name("dma_holder").expect("dma_holder in the initrd"),
+        alloc::vec![(
+            dma,
+            aricode_handles::Rights::READ.union(aricode_handles::Rights::WRITE)
+        )],
+        0,
+        0,
+    )
+    .expect("dma_holder");
+    scheduler::sleep_ms(50);
+    assert_eq!(
+        used.load(Ordering::Relaxed),
+        LEN,
+        "dma lifetime: a held buffer stays charged"
+    );
+    assert!(request_kill(pid, KILLED_BY_REQUEST));
+    assert_eq!(wait(pid), ExitStatus::Killed(KILLED_BY_REQUEST));
+    let mut waited_ms = 0;
+    while used.load(Ordering::Relaxed) != 0 {
+        assert!(
+            waited_ms < 10_000,
+            "dma lifetime: the charge must go back with the last holder"
+        );
+        scheduler::sleep_ms(10);
+        waited_ms += 10;
+    }
     info!(
         "dma lifetime selftest ok ({} frames kept by a mapping after the last handle, freed on reap and on mmio_unmap; mapping beyond the quota refused; failed allocations refunded)",
         LEN / PAGE_SIZE

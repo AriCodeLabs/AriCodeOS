@@ -178,7 +178,7 @@ pub struct Manifest {
     pub name: [u8; MAX_NAME],
     pub name_len: u8,
     pub caps: Caps,
-    /// Memory (DMA buffers) it can allocate, in KiB.
+    /// Memory (DMA buffers) it can hold at once, in KiB.
     pub memory_kib: u32,
     /// AriFS files (full name) it receives in read mode, in
     /// manifest order (ADR 0016).

@@ -619,6 +619,8 @@ pub fn run_scenario(
                 mouse_steps: h.mouse_steps,
                 wait_ms: h.wait_ms,
                 click: h.click.as_deref(),
+                drag: h.drag,
+                hold_key: h.hold_key.as_ref().map(|(k, ms)| (k.as_str(), *ms)),
                 key_delay_ms: h.key_delay_ms,
                 echo_prompt: h.echo_prompt.as_deref(),
             })

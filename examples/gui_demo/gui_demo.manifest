@@ -1,4 +1,4 @@
 # Test graphical application: a compositor session and its window buffer.
 name = gui_demo
 caps = window
-memory = 1M
+memory = 2M

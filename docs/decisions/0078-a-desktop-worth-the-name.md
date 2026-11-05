@@ -306,7 +306,38 @@ without a lock, whoever held it last. A closed buffer whose frames a mapping
 keeps stays charged. `memory.dma_lifetime` checks it: 32 allocations and frees
 within a quota of two pages.
 
-### Audit
+An independent review of the refund found no high findings. It moved the frees
+of `handle_close` and a failed `dma_alloc` out of the process table's lock, and
+asked for a case with a charged buffer outliving its handle: step 5 of the self
+test.
+
+### The window protocol and key repeat
+
+The wire format grew compatibly, so the protocol number stays and the 0.18 apps
+run unchanged:
+- `Create` carries what the window wants (`wants::POINTER`, `wants::KEY_CODES`).
+  A program built before sends zero there and gets exactly the events it knows.
+- With them: `Motion`, `Release`, `Enter`, `Leave`, `Wheel` and `KeyCode`. A button
+  pressed on a window holds the pointer's events until it is released, wherever
+  the pointer goes. Queued motion and wheel events merge, so a program that falls
+  behind keeps its keys.
+- `Present` can name up to 5 rectangles; none means all of it.
+- `Resize` changes the content's buffer. `Configure`, the compositor asking a
+  program to resize, comes in stage 1 with the frame that needs it.
+
+Key repeat is in software: 500 ms, then every 33 ms, the same on every keyboard.
+A USB keyboard sends a key once, and a PS/2 one repeats by itself, at its own
+rate; both are now ignored in favour of this. The console does not use it yet.
+
+`gui.window_events` checks all of this through QEMU's mouse and keyboard, with new
+runner options `drag` and `hold_key`.
+
+### Still open in stage 0
+
+The `ui.*` figures of `perf` measure what stage 1 brings (glyphs, shapes, layout),
+so they come with it.
+
+### Audit of the first three items
 
 An independent read-only review found no high findings. All of these are
 fixed:

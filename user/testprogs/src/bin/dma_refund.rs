@@ -60,9 +60,9 @@ fn main(_arg: u64) -> u64 {
 /// page was granted while a mapping keeps a closed buffer's frames, 10 = a
 /// page was refused after the unmap.
 fn freed_buffers_give_back(first: Handle) -> u64 {
-    let Ok(second) = sys::dma_alloc(HW, 4096) else {
+    if sys::dma_alloc(HW, 4096).is_err() {
         return 5;
-    };
+    }
     if sys::dma_alloc(HW, 4096) != Err(Error::Limit) {
         return 6;
     }
@@ -94,7 +94,6 @@ fn freed_buffers_give_back(first: Handle) -> u64 {
     if sys::dma_alloc(HW, 4096).is_err() {
         return 10;
     }
-    let _ = second;
     sys::print(b"dma_refund: freed buffers gave their quota back ok\n");
     0
 }

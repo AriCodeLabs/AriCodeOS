@@ -538,6 +538,18 @@ impl Desktop {
         true
     }
 
+    /// Gives a window's content a new size; its corner stays.
+    pub fn resize(&mut self, id: u32, w: u32, h: u32) -> bool {
+        match self.windows.iter_mut().flatten().find(|win| win.id == id) {
+            Some(win) if w != 0 && h != 0 => {
+                win.content.w = w;
+                win.content.h = h;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// What the composition depends on, besides the window contents.
     pub fn scene(&self) -> Scene {
         let mut windows = [None; MAX_WINDOWS];
@@ -810,6 +822,18 @@ impl<'a> Iterator for RevIter<'a> {
 mod tests {
     extern crate std;
     use super::*;
+
+    #[test]
+    fn a_resized_window_keeps_its_corner() {
+        let mut d = Desktop::new(800, 600);
+        let id = d.create(100, 50, "w").unwrap();
+        let corner = (d.get(id).unwrap().content.x, d.get(id).unwrap().content.y);
+        assert!(d.resize(id, 300, 200));
+        let c = d.get(id).unwrap().content;
+        assert_eq!((c.x, c.y, c.w, c.h), (corner.0, corner.1, 300, 200));
+        assert!(!d.resize(id, 0, 200));
+        assert!(!d.resize(id + 1, 10, 10));
+    }
 
     #[test]
     fn pixel_masks_place_each_channel() {
