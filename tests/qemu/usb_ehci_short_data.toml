@@ -12,7 +12,7 @@
 # full repaint of the screen console (incident 0031).
 name = "usb.ehci_short_data"
 description = "EHCI driver: a data stage one sector short is never a success; the request answers Io with the count, fault in diag, no recovery, the next write succeeds"
-level = "full"
+level = "release"
 areas = ["usb", "storage", "diag"]
 usb_ehci_storage = true
 cmdline = "qemu_exit shell usb_fault=idle:short-data"

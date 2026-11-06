@@ -5,7 +5,7 @@
 # finds home/ empty again.
 name = "usb.desktop_files"
 description = "the desktop file manager creates, renames and deletes files in home/"
-level = "full"
+level = "release"
 areas = ["usb", "apps", "gui", "fs"]
 cmdline = "qemu_exit shell"
 selftest = false

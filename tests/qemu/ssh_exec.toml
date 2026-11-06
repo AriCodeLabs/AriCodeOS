@@ -11,7 +11,7 @@
 # 300 KB through sshd's flow control and the last line arrives whole.
 name = "ssh.exec"
 description = "sshd: public-key login from the host's OpenSSH client, commands in session shells, shutdown over SSH"
-level = "full"
+level = "release"
 areas = ["ssh", "network", "shell"]
 cmdline = "qemu_exit shell"
 timeout_secs = 200

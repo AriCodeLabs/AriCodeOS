@@ -5,7 +5,7 @@
 # public halves whose private halves were never kept.
 name = "ssh.key_options_refused"
 description = "an authorized_keys line with options is refused by number, never silently; a plain line opens port 22"
-level = "full"
+level = "release"
 areas = ["ssh", "filesystem", "shell"]
 cmdline = "qemu_exit shell"
 timeout_secs = 120

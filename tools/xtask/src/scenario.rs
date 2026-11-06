@@ -13,8 +13,12 @@ pub enum Level {
     Unit,
     /// Unit + the nominal QEMU boot. Default level and minimum for `develop`.
     Smoke,
-    /// Every QEMU scenario, including induced failures. Required for `main`.
+    /// The QEMU scenarios that are quick, including induced failures: what a
+    /// branch runs by area, and `--all`.
     Full,
+    /// Also the slow ones (15 s or more): they prove nothing a change usually
+    /// touches, and wait for a version. Required for `main`.
+    Release,
 }
 
 impl std::str::FromStr for Level {
@@ -24,7 +28,8 @@ impl std::str::FromStr for Level {
             "unit" => Ok(Self::Unit),
             "smoke" => Ok(Self::Smoke),
             "full" => Ok(Self::Full),
-            other => Err(format!("unknown level '{other}' (unit|smoke|full)")),
+            "release" => Ok(Self::Release),
+            other => Err(format!("unknown level '{other}' (unit|smoke|full|release)")),
         }
     }
 }

@@ -11,7 +11,7 @@
 # nobody was using.
 name = "usb.ehci_hotplug"
 description = "EHCI driver: a keyboard hot-plugged while the controller is idle is detected and enumerated"
-level = "full"
+level = "release"
 areas = ["usb", "drivers", "input"]
 cmdline = "qemu_exit shell"
 usb_legacy_controller = true

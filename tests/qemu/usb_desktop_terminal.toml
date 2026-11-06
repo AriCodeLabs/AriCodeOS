@@ -8,7 +8,7 @@
 # paced: a few, within QEMU's queue.)
 name = "usb.desktop_terminal"
 description = "the desktop terminal runs the owner's shell in a window"
-level = "full"
+level = "release"
 areas = ["usb", "apps", "gui", "shell"]
 cmdline = "qemu_exit shell"
 selftest = false

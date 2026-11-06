@@ -8,7 +8,7 @@
 # nothing and logs nothing (audit of the settings, M2).
 name = "usb.desktop_settings"
 description = "the desktop settings show the system and choose what the machine boots into"
-level = "full"
+level = "release"
 areas = ["usb", "apps", "gui"]
 cmdline = "qemu_exit shell"
 selftest = false

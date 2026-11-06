@@ -5,7 +5,7 @@
 # no shell is left behind holding a session or a slot.
 name = "usb.desktop_terminal_end"
 description = "ending the desktop stops the terminal and its shell"
-level = "full"
+level = "release"
 areas = ["usb", "apps", "gui", "shell"]
 cmdline = "qemu_exit shell"
 selftest = false

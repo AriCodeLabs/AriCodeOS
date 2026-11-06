@@ -9,7 +9,7 @@
 # full repaint of the screen console (incident 0031).
 name = "strict.ehci_halt"
 description = "strict: an injected EHCI transfer failure halts usb_ehci with a dump, no recovery, no restart, fault in diag"
-level = "full"
+level = "release"
 areas = ["usb", "storage", "init", "diag"]
 usb_ehci_storage = true
 cmdline = "qemu_exit shell strict usb_fault=idle"

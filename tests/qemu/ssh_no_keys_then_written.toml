@@ -5,7 +5,7 @@
 # whose private half was never kept: nobody can log in with it.
 name = "ssh.no_keys_then_written"
 description = "sshd starts closed; authorized_keys written from the console afterwards opens port 22 through the share granted before it existed"
-level = "full"
+level = "release"
 areas = ["ssh", "filesystem", "shell"]
 cmdline = "qemu_exit shell"
 timeout_secs = 120
