@@ -56,6 +56,10 @@ pub enum Action {
     Cancel,
     /// Ctrl and a letter that no widget took.
     Shortcut(u8),
+    /// The owner copied: the text is in [`Ui::take_copied`], for the clipboard.
+    Copied,
+    /// The owner pressed Ctrl+V here: the clipboard's text goes to [`Ui::paste`].
+    Paste(Id),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -313,8 +317,8 @@ pub struct Ui {
     keys: KeyDecoder,
     mods: u8,
     actions: VecDeque<Action>,
-    /// What Ctrl+C and Ctrl+X last took.
-    clipboard: String,
+    /// What Ctrl+C or Ctrl+X took, until the program takes it.
+    copied: Option<String>,
 }
 
 fn outset(r: &Rect, by: i32) -> Rect {
@@ -353,7 +357,7 @@ impl Ui {
             keys: KeyDecoder::new(),
             mods: 0,
             actions: VecDeque::new(),
-            clipboard: String::new(),
+            copied: None,
         }
     }
 
@@ -925,15 +929,12 @@ impl Ui {
             Key::Ctrl(b'v') => paste = true,
             _ => return false,
         }
-        if let Some(taken) = clipboard {
-            self.clipboard = taken;
+        if clipboard.is_some() {
+            self.copied = clipboard;
+            self.actions.push_back(Action::Copied);
         }
         if paste {
-            let text = core::mem::take(&mut self.clipboard);
-            if let Some(edit) = self.edit_mut(id) {
-                edited = edit.insert(&text);
-            }
-            self.clipboard = text;
+            self.actions.push_back(Action::Paste(id));
         }
         if let Kind::Area(area) = &mut self.node_mut(id).kind {
             area.goal_x = None;
@@ -947,6 +948,27 @@ impl Ui {
             self.actions.push_back(Action::Edited(id));
         }
         true
+    }
+
+    /// What the owner copied last, once.
+    pub fn take_copied(&mut self) -> Option<String> {
+        self.copied.take()
+    }
+
+    /// The clipboard's text, for [`Action::Paste`]: it goes in at the caret of `id`.
+    pub fn paste(&mut self, id: Id, text: &str) {
+        let Some(edit) = self.edit_mut(id) else {
+            return;
+        };
+        if edit.insert(text) {
+            if let Kind::Area(area) = &mut self.node_mut(id).kind {
+                area.goal_x = None;
+                area.index_lines();
+            }
+            self.reveal_caret(id);
+            self.dirty(id);
+            self.actions.push_back(Action::Edited(id));
+        }
     }
 
     /// Up or Down in an area: to the character nearest where the caret was aiming.

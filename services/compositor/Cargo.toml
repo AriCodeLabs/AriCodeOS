@@ -13,6 +13,7 @@ test = false
 bench = false
 
 [dependencies]
+aricode-sync = { path = "../../libs/sync" }
 aricode-sys = { path = "../../sdk/rust" }
 aricode-proto = { path = "../../sdk/proto" }
 aricode-cmdline = { path = "../../libs/cmdline" }

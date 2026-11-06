@@ -1274,6 +1274,41 @@ pub const MAX_DAMAGE: usize = 8;
 /// (numerator, denominator) become the whole screen.
 pub const FULL_SCREEN_FRACTION: (u64, u64) = (1, 2);
 
+/// Who may read the clipboard now: what the owner copied may be a password, so a program
+/// reads it only with the focus and only when the owner pressed Ctrl+V in it, once for
+/// each press. No program can watch the clipboard from behind, nor take it unasked.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct PasteGrant(Option<u32>);
+
+/// The byte a window gets for Ctrl+V.
+const CTRL_V: u8 = 0x16;
+
+impl PasteGrant {
+    /// A key went to the focused window as these bytes. A key with no bytes (a release,
+    /// a modifier) changes nothing.
+    pub fn on_key(&mut self, focus: u32, bytes: &[u8]) {
+        if bytes == [CTRL_V] {
+            self.0 = Some(focus);
+        } else if !bytes.is_empty() {
+            self.0 = None;
+        }
+    }
+
+    /// The focus moved.
+    pub fn on_focus_change(&mut self) {
+        self.0 = None;
+    }
+
+    /// Whether `window` may read now; this uses up the press.
+    pub fn take(&mut self, window: u32, focus: Option<u32>) -> bool {
+        let granted = self.0 == Some(window) && focus == Some(window);
+        if granted {
+            self.0 = None;
+        }
+        granted
+    }
+}
+
 /// The screen areas to recompose and flush: at most [`MAX_DAMAGE`]
 /// disjoint rectangles inside the screen. A rectangle that overlaps one
 /// already kept is merged with it (their bounding box); when the set is
@@ -1396,6 +1431,30 @@ impl<'a> Iterator for RevIter<'a> {
 mod tests {
     extern crate std;
     use super::*;
+
+    #[test]
+    fn only_a_press_in_the_focused_window_opens_the_clipboard() {
+        let mut g = PasteGrant::default();
+        // Nothing pressed: nobody reads.
+        assert!(!g.take(1, Some(1)));
+        // A press in window 1 is for window 1, once.
+        g.on_key(1, &[CTRL_V]);
+        assert!(!g.take(2, Some(1)), "another window");
+        assert!(!g.take(1, Some(2)), "it has lost the focus");
+        assert!(g.take(1, Some(1)));
+        assert!(!g.take(1, Some(1)), "one read for one press");
+        // Letting the keys go keeps it until it is read; another key ends it.
+        g.on_key(1, &[CTRL_V]);
+        g.on_key(1, &[]);
+        assert!(g.take(1, Some(1)));
+        g.on_key(1, &[CTRL_V]);
+        g.on_key(1, b"x");
+        assert!(!g.take(1, Some(1)));
+        // Moving away ends it, even coming back.
+        g.on_key(1, &[CTRL_V]);
+        g.on_focus_change();
+        assert!(!g.take(1, Some(1)));
+    }
 
     #[test]
     fn the_frame_has_three_circles_on_its_left_and_a_title_bar() {

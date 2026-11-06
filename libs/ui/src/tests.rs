@@ -251,14 +251,28 @@ fn a_field_edits_utf8_with_a_selection() {
     f.mods(0);
     f.keys(b"x");
     assert_eq!(f.ui.text(f.field), "añx");
-    // Ctrl+A, Ctrl+C, End, Ctrl+V doubles it.
+    // Ctrl+A, Ctrl+C gives the program the text, End, Ctrl+V asks for it and it goes in.
+    f.actions();
     f.keys(&[1, 3]);
+    assert_eq!(f.actions(), [Action::Copied]);
+    let copied = f.ui.take_copied().unwrap();
+    assert_eq!(copied, "añx");
+    assert_eq!(f.ui.take_copied(), None);
     f.keys(b"\x1b[F");
     f.keys(&[0x16]);
+    assert_eq!(f.actions(), [Action::Paste(f.field)]);
+    assert_eq!(
+        f.ui.text(f.field),
+        "añx",
+        "nothing until the program answers"
+    );
+    f.ui.paste(f.field, &copied);
+    assert_eq!(f.actions(), [Action::Edited(f.field)]);
     assert_eq!(f.ui.text(f.field), "añxañx");
     // Ctrl+A, Ctrl+X empties it.
     f.keys(&[1, 0x18]);
     assert_eq!(f.ui.text(f.field), "");
+    assert_eq!(f.ui.take_copied().as_deref(), Some("añxañx"));
     f.same_as_full_paint();
     f.actions();
     f.keys(b"\r");

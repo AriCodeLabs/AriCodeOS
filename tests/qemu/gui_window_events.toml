@@ -4,7 +4,7 @@
 # A window that does not ask gets none of this: gui.close_box and the others
 # keep running with programs that do not know these events.
 name = "gui.window_events"
-description = "a window that asks gets motion, release, enter, leave, wheel, key codes, key repeat, damage and resize"
+description = "a window that asks gets motion, release, enter, leave, wheel, key codes, key repeat, damage and resize; the clipboard opens only for Ctrl+V"
 level = "full"
 areas = ["gui"]
 cmdline = "qemu_exit gui shell gui_trace"
@@ -49,6 +49,15 @@ mouse_rel = [-190, -220]
 
 [[host_input_then]]
 marker = "gui_demo D: leave 2"
+keys = ["c"]
+
+# The clipboard (ADR 0078): read without the owner's press, refused and logged.
+[[host_input_then]]
+marker = "gui_demo D: the clipboard stays closed without Ctrl+V"
+keys = ["ctrl+v"]
+
+[[host_input_then]]
+marker = "gui_demo D: one read for one press"
 keys = ["q"]
 
 [expect]
@@ -65,10 +74,13 @@ serial_contains = [
     "flushed 400 px in 1 rect(s)",
     # The resized content's colour reached the screen.
     "= 0x208080",
+    "gui_demo D: copied",
+    "compositor: window 1 read the clipboard without the owner's Ctrl+V: refused",
+    "gui_demo D: pasted what was copied",
     "gui_demo D: done",
     "ARICODEOS_SHUTDOWN",
 ]
-serial_absent = ["KERNEL PANIC", "the resize failed", "the key did not repeat"]
+serial_absent = ["KERNEL PANIC", "the resize failed", "the key did not repeat", "copying was refused", "was open without Ctrl+V", "the paste failed", "a second read"]
 serial_order = [
     "gui_demo D: motion outside it, left held",
     "gui_demo D: release of the left button",

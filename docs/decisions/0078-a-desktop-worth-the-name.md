@@ -497,7 +497,22 @@ field. Shift+Tab goes back, and Esc returns to the list or the name.
 
 The terminal stays on its text grid, and keeps its text across sizes (`Console::resize_keeping`).
 
-**Still to do in this stage:** the clipboard service (Ctrl+C, X and V work within one program for
-now), dark in settings, menus and dialogs. `ui.*` figures in `perf` are not measured yet.
+### The clipboard
+
+The ADR planned a service with its own capability. It became two requests of the window session
+the compositor already serves, because that needs no new authority and closes more:
+
+- A window copies only while it has the focus.
+- A window reads only with the focus, and once for each Ctrl+V the owner pressed in it. What the
+  owner copied may be a password: no program can watch the clipboard from behind, or take it
+  unasked while it has the focus. The first refusal of each window is logged.
+- 64 KiB of UTF-8 at most, kept outside the compositor's heap, in pages that cost nothing until
+  something is copied. Text coming in is copied once and checked before it replaces what was there.
+
+The price: only the keyboard opens it. A Paste menu item will need its own way to show the owner
+asked, and the terminal has no copy and paste yet, since Ctrl+C and Ctrl+V are the shell's.
+
+**Still to do in this stage:** dark in settings, menus and dialogs. `ui.*` figures in `perf` are
+not measured yet.
 
 Next: those, then the shell (stage 3).

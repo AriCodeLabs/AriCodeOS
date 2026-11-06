@@ -359,6 +359,14 @@ fn main(_arg: u64) -> u64 {
                 Action::Pressed(id) if id == f.rename => f.rename(),
                 Action::Pressed(id) if id == f.delete => f.delete(),
                 Action::Pressed(id) if id == f.refresh && f.refresh(None) => f.say_count(),
+                Action::Copied => {
+                    if let Some(text) = f.ui.take_copied() {
+                        let _ = win.clipboard_set(hw, &text);
+                    }
+                }
+                Action::Paste(id) => {
+                    let _ = win.clipboard_get(hw, |text| f.ui.paste(id, text));
+                }
                 _ => {}
             }
         }
