@@ -5,8 +5,8 @@
 //! capability: a directory session of fsd on that folder), with their
 //! sizes, and creates, renames and deletes them. A name typed in the field
 //! is what New creates and what Rename gives the selected file; a rename
-//! never replaces a file that already has the name. Delete asks for a
-//! second press. From the keyboard: Tab moves between the controls, Enter
+//! never replaces a file that already has the name. Delete asks first.
+//! From the keyboard: Tab moves between the controls, Enter
 //! in the field creates, Ctrl+R renames, Delete deletes, Esc goes back to
 //! the list. Built on the toolkit (ADR 0078, stage 2).
 //!
@@ -24,7 +24,7 @@ use aricode_proto::fs::Status as FsStatus;
 use aricode_rt::sys::fs::{FsClient, FsError};
 use aricode_rt::sys::window::{wants, Event, Window};
 use aricode_rt::sys::{self, kind, permissions};
-use aricode_ui::{Action, Fill, Id, Space, Stack, Style, Theme, Tone, Ui};
+use aricode_ui::{Action, Dialog, Fill, Id, Space, Stack, Style, Theme, Tone, Ui};
 
 const W: u32 = 480;
 const H: u32 = 400;
@@ -53,8 +53,8 @@ struct Files {
     status: Id,
     /// The names in the list's rows.
     names: Vec<String>,
-    /// The file a first Delete was pressed on.
-    armed: Option<usize>,
+    /// Deleting asks first.
+    deleting: Dialog,
     /// More files than `MAX_FILES`: the list shows the first ones.
     more: bool,
     /// Files in subfolders of `home/`, not listed.
@@ -72,11 +72,6 @@ impl Files {
         let tone = if error { Tone::Error } else { Tone::Secondary };
         self.ui.set_tone(self.status, tone);
         say(parts);
-    }
-
-    fn arm(&mut self, armed: Option<usize>) {
-        self.armed = armed;
-        self.ui.set_primary(self.delete, armed.is_some());
     }
 
     /// The selected file's name.
@@ -123,7 +118,6 @@ impl Files {
         }
         self.ui.set_rows(self.list, rows.iter().map(String::as_str));
         self.names = names;
-        self.arm(None);
         if let Some(row) = select
             .or(before.as_deref())
             .and_then(|w| self.names.iter().position(|n| n == w))
@@ -216,14 +210,19 @@ impl Files {
         }
     }
 
-    fn delete(&mut self) {
-        let Some((i, name)) = self.selected() else {
+    fn ask_to_delete(&mut self) {
+        let Some((_, name)) = self.selected() else {
             return self.set_status(true, &[b"select a file first"]);
         };
-        if self.armed != Some(i) {
-            self.arm(Some(i));
-            return self.set_status(false, &[b"press Delete again to delete ", name.as_bytes()]);
-        }
+        let question = format!("Delete {name}? It cannot be brought back.");
+        self.ui.ask(&self.deleting, &question, "Delete");
+        say(&[b"asks to delete ", name.as_bytes()]);
+    }
+
+    fn delete(&mut self) {
+        let Some((_, name)) = self.selected() else {
+            return;
+        };
         match self.fs.delete(&name) {
             Ok(()) => {
                 if self.refresh(None) {
@@ -276,6 +275,7 @@ fn build(fs: FsClient, dark: bool) -> Files {
     );
     ui.set_root(root);
     ui.focus(list);
+    let deleting = ui.dialog("Delete", "Keep");
     Files {
         fs,
         ui,
@@ -287,7 +287,7 @@ fn build(fs: FsClient, dark: bool) -> Files {
         refresh,
         status,
         names: Vec::new(),
-        armed: None,
+        deleting,
         more: false,
         nested: 0,
     }
@@ -334,8 +334,6 @@ fn main(_arg: u64) -> u64 {
             // The compositor is gone: so is the desktop.
             Err(_) => return 5,
         };
-        let inputs = f.ui.inputs();
-        let mut deleting = false;
         match event {
             // Nothing to save: it closes at once (ADR 0077).
             Event::Close => {
@@ -352,20 +350,21 @@ fn main(_arg: u64) -> u64 {
         }
         while let Some(action) = f.ui.next_action() {
             match action {
-                Action::Selected(..) => f.arm(None),
-                Action::DeleteRow(..) => {
-                    deleting = true;
+                Action::Pressed(id) if id == f.deleting.yes => {
+                    f.ui.answered();
                     f.delete();
                 }
+                Action::Pressed(id) if id == f.deleting.no => {
+                    f.ui.answered();
+                    say(&[b"kept the file"]);
+                }
+                Action::DeleteRow(..) => f.ask_to_delete(),
                 Action::Submitted(_) => f.create(),
                 Action::Shortcut(b'r') => f.rename(),
                 Action::Cancel => f.ui.focus(f.list),
                 Action::Pressed(id) if id == f.new => f.create(),
                 Action::Pressed(id) if id == f.rename => f.rename(),
-                Action::Pressed(id) if id == f.delete => {
-                    deleting = true;
-                    f.delete();
-                }
+                Action::Pressed(id) if id == f.delete => f.ask_to_delete(),
                 Action::Pressed(id) if id == f.refresh && f.refresh(None) => f.say_count(),
                 Action::Copied => {
                     if let Some(text) = f.ui.take_copied() {
@@ -389,10 +388,6 @@ fn main(_arg: u64) -> u64 {
                 },
                 _ => {}
             }
-        }
-        // Anything else the owner does takes back a first Delete (audit of ADR 0078).
-        if !deleting && f.ui.inputs() != inputs {
-            f.arm(None);
         }
         f.show(&mut win);
     }

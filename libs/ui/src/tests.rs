@@ -883,21 +883,206 @@ fn the_thumb_of_a_very_long_text_does_not_overflow() {
     assert!(to > 0 && to <= s.furthest(2000));
 }
 
-#[test]
-fn inputs_count_what_the_owner_does_not_the_bytes() {
+/// A form with a question ready.
+fn asking() -> (Form, Dialog) {
     let mut f = form();
+    let d = f.ui.dialog("Delete", "Cancel");
+    f.same_as_full_paint();
+    (f, d)
+}
+
+#[test]
+fn a_dialog_takes_the_keys_and_gives_them_back() {
+    let (mut f, d) = asking();
     f.ui.focus(f.list);
-    let n = f.ui.inputs();
-    // Delete is four bytes and one key.
-    f.keys(b"\x1b[3~");
-    assert_eq!(f.ui.inputs(), n + 1);
-    // A click counts at its release, when a button answers.
-    let r = f.rect(f.cancel);
-    let (x, y) = (r.x + 2, r.y + 2);
-    f.ui.handle(Event::Click { x, y, button: LEFT });
-    assert_eq!(f.ui.inputs(), n + 1);
-    f.ui.handle(Event::Release { x, y, button: LEFT });
-    assert_eq!(f.ui.inputs(), n + 2);
-    f.ui.handle(Event::Motion { x, y, buttons: 0 });
-    assert_eq!(f.ui.inputs(), n + 2);
+    f.ui.ask(&d, "Delete it?", "Delete");
+    assert!(f.ui.asking());
+    assert_eq!(
+        f.ui.focused(),
+        Some(d.no),
+        "the keys start on the safe answer"
+    );
+    f.same_as_full_paint();
+    // Tab stays inside, on its two answers.
+    f.keys(b"\t");
+    assert_eq!(f.ui.focused(), Some(d.yes));
+    f.keys(b"\t");
+    assert_eq!(f.ui.focused(), Some(d.no));
+    f.same_as_full_paint();
+    // Keys for the window behind go nowhere; Enter answers what has the focus.
+    f.keys(b"\x1b[B");
+    assert_eq!(f.ui.selected(f.list), Some(0));
+    f.actions();
+    f.keys(&[0x13]);
+    assert_eq!(f.actions(), [], "no shortcut behind a question");
+    f.keys(b"\r");
+    assert_eq!(f.actions(), [Action::Pressed(d.no)]);
+    f.ui.answered();
+    assert!(!f.ui.asking());
+    assert_eq!(f.ui.focused(), Some(f.list));
+    f.same_as_full_paint();
+}
+
+#[test]
+fn nothing_behind_a_dialog_can_be_clicked() {
+    let (mut f, d) = asking();
+    f.ui.ask(&d, "Delete it?", "Delete");
+    f.paint();
+    f.click(f.cancel);
+    f.click(f.ok);
+    assert_eq!(f.actions(), []);
+    // Outside its card: nothing either, and it stays.
+    f.ui.handle(Event::Click {
+        x: 1,
+        y: 1,
+        button: LEFT,
+    });
+    f.ui.handle(Event::Release {
+        x: 1,
+        y: 1,
+        button: LEFT,
+    });
+    assert_eq!(f.actions(), []);
+    assert!(f.ui.asking());
+    f.click(d.yes);
+    assert_eq!(f.actions(), [Action::Pressed(d.yes)]);
+}
+
+#[test]
+fn a_held_key_does_not_answer_a_dialog_and_esc_says_no() {
+    let (mut f, d) = asking();
+    f.ui.ask(&d, "Delete it?", "Delete");
+    f.paint();
+    let code = |code, state| Event::KeyCode {
+        code,
+        state,
+        mods: 0,
+    };
+    f.ui.handle(code(111, KeyState::Repeated));
+    f.keys(b"\r ");
+    assert_eq!(f.actions(), [], "held");
+    // Esc answers at once, without waiting for the key after it, and only once.
+    f.ui.handle(code(1, KeyState::Pressed));
+    assert_eq!(f.actions(), [Action::Pressed(d.no)]);
+    f.keys(&[0x1b]);
+    f.ui.handle(code(1, KeyState::Released));
+    f.ui.handle(code(30, KeyState::Pressed));
+    f.keys(b"a");
+    assert_eq!(f.actions(), []);
+}
+
+#[test]
+fn a_dialog_paints_what_a_full_paint_does_and_fits_a_small_window() {
+    let (mut f, d) = asking();
+    f.ui.ask(
+        &d,
+        "A question long enough to need more than one line in this card, surely.",
+        "Do it",
+    );
+    f.same_as_full_paint();
+    assert!(f.rect(d.yes).bottom() < H as i32);
+    // What changes behind it is painted under it.
+    f.ui.set_text(f.title, "Another title");
+    f.same_as_full_paint();
+    f.ui.answered();
+    f.same_as_full_paint();
+    let mut small = Ui::new(Theme::light(), 100, 60);
+    let d = small.dialog("Yes", "No");
+    let label = small.label("x", Style::Body, Tone::Primary);
+    small.set_root(label);
+    small.ask(&d, "Fits?", "Yes");
+    let mut pixels = vec![0; 100 * 60];
+    let mut c = Canvas::new(&mut pixels, 100, 60, 100).unwrap();
+    small.paint_all(&mut c);
+}
+
+/// The `ui.*` figures of ADR 0078, on the host: `cargo test --release -p aricode-ui --
+/// --ignored --nocapture ui_figures`. They compare builds on one machine, and say what
+/// grew; a program on the target pays what its processor pays.
+#[test]
+#[ignore]
+fn ui_figures() {
+    use aricode_text::{Face, Typesetter, INTER_REGULAR};
+    use std::time::Instant;
+    const FACE: Face = Face(INTER_REGULAR);
+    fn figure(name: &str, runs: u32, mut work: impl FnMut()) {
+        let start = Instant::now();
+        for _ in 0..runs {
+            work();
+        }
+        let each = start.elapsed().as_nanos() as f64 / f64::from(runs) / 1000.0;
+        std::println!("ui.{name}: {each:.1} us");
+    }
+    const SW: u32 = 1366;
+    const SH: u32 = 768;
+    let mut pixels = vec![0u32; (SW * SH) as usize];
+
+    let mut canvas = Canvas::new(&mut pixels, SW, SH, SW).unwrap();
+    figure("glyph_cold", 50, || {
+        let mut text = Typesetter::new();
+        text.draw(&mut canvas, (FACE, 13), "g", (10, 20), 0);
+    });
+    let mut text = Typesetter::new();
+    text.draw(&mut canvas, (FACE, 13), "g", (10, 20), 0);
+    figure("glyph_warm", 1000, || {
+        text.draw(&mut canvas, (FACE, 13), "g", (10, 20), 0);
+    });
+    let line = "The quick brown fox jumps over the lazy dog, again and again";
+    figure("line", 1000, || {
+        text.draw(&mut canvas, (FACE, 13), line, (10, 40), 0);
+    });
+    let frame = Rect::new(100, 100, 720, 400);
+    figure("shadow", 200, || canvas.window_shadow(&frame, 77));
+    let button = Rect::new(100, 100, 80, 22);
+    figure("rounded_control", 1000, || canvas.rounded(&button, 6, 0));
+
+    let mut ui = Ui::new(Theme::light(), SW, SH);
+    let title = ui.label("Files", Style::Headline, Tone::Primary);
+    let field = ui.field(64, "Name");
+    let list = ui.list();
+    ui.set_flex(list, 1);
+    let rows: Vec<String> = (0..64).map(|i| std::format!("file-{i}\t{i}")).collect();
+    ui.set_rows(list, rows.iter().map(String::as_str));
+    let spacer = ui.spacer();
+    let cancel = ui.button("Cancel");
+    let ok = ui.default_button("Open");
+    let buttons = ui.stack(Stack::row(), &[spacer, cancel, ok]);
+    let root = ui.stack(
+        Stack::column().pad(Space::Margin).fill(Fill::Window),
+        &[title, field, list, buttons],
+    );
+    ui.set_root(root);
+    ui.focus(field);
+    ui.paint_all(&mut canvas);
+    figure("layout", 200, || {
+        ui.layout();
+        ui.damage.clear();
+    });
+    figure("full_repaint", 50, || ui.paint_all(&mut canvas));
+    figure("button_press", 500, || {
+        ui.handle(Event::Click {
+            x: 0,
+            y: 0,
+            button: LEFT,
+        });
+        ui.dirty(ok);
+        ui.paint(&mut canvas);
+    });
+    figure("key_in_a_field", 200, || {
+        ui.handle(Event::Key(b'a'));
+        ui.handle(Event::Key(0x7F));
+        ui.paint(&mut canvas);
+    });
+    let area = ui.area(64 * 1024);
+    ui.set_root(area);
+    ui.focus(area);
+    let text_64k = "A line of text for the editor.\n".repeat(2100);
+    ui.set_text(area, &text_64k);
+    ui.paint_all(&mut canvas);
+    figure("key_in_64k_of_text", 200, || {
+        ui.handle(Event::Key(b'a'));
+        ui.paint(&mut canvas);
+        ui.handle(Event::Key(0x7F));
+        ui.paint(&mut canvas);
+    });
 }

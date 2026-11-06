@@ -46,7 +46,7 @@ mouse_rel = [-546, -306]
 click = "left"
 
 [[host_input_then]]
-marker = "editor: unsaved changes: close again to discard them"
+marker = "editor: asks: Close without saving the changes?"
 click = "left"
 
 [expect]
@@ -54,7 +54,7 @@ exit = 33
 serial_contains = [
     "editor: saved a (7 bytes)",
     "editor: saved a (8 bytes)",
-    "editor: unsaved changes: close again to discard them",
+    "editor: asks: Close without saving the changes?",
     "editor: closed",
     "ARICODEOS_SHUTDOWN",
 ]
