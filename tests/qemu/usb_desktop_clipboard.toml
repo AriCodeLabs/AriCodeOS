@@ -34,8 +34,9 @@ keys = ["ctrl+l", "ctrl+v", "ret"]
 key_delay_ms = 100
 
 [[host_input_then]]
-marker = "editor: unsaved changes: Open again to discard them"
-keys = ["ret"]
+marker = "editor: asks: Discard the unsaved changes?"
+keys = ["tab", "ret"]
+key_delay_ms = 100
 
 [expect]
 exit = 33

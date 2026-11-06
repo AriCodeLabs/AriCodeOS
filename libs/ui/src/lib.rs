@@ -32,6 +32,8 @@ pub use theme::{Fill, Space, Style, Theme, Tone, Type};
 
 /// The window system's left button.
 const LEFT: u8 = 1;
+/// The Esc key's code in `Event::KeyCode` (evdev).
+const KEY_ESC: u16 = 1;
 
 /// A widget of a [`Ui`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -291,6 +293,26 @@ enum Held {
     Thumb(Id, i32),
 }
 
+/// A question with two answers, built once and shown with [`Ui::ask`].
+#[derive(Debug, Clone, Copy)]
+pub struct Dialog {
+    root: Id,
+    text: Id,
+    /// The answer that does what was asked: never the one the keys start on.
+    pub yes: Id,
+    /// The answer that leaves things as they are. Esc gives this one.
+    pub no: Id,
+}
+
+/// A dialog on show.
+#[derive(Clone, Copy)]
+struct Modal {
+    root: Id,
+    no: Id,
+    /// Who had the keys, to get them back.
+    focus: Option<Id>,
+}
+
 /// The rectangles a paint changed, to present.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Frame {
@@ -331,8 +353,10 @@ pub struct Ui {
     actions: VecDeque<Action>,
     /// What Ctrl+C or Ctrl+X took, until the program takes it.
     copied: Option<String>,
-    /// How many times the owner did something: see [`inputs`](Ui::inputs).
-    inputs: u32,
+    /// The dialog showing, if any: nothing else takes the pointer or the keys.
+    modal: Option<Modal>,
+    /// The Esc key came as a key code: its byte, on its way, says nothing new.
+    esc_told: bool,
 }
 
 fn outset(r: &Rect, by: i32) -> Rect {
@@ -373,7 +397,8 @@ impl Ui {
             repeating: false,
             actions: VecDeque::new(),
             copied: None,
-            inputs: 0,
+            modal: None,
+            esc_told: false,
         }
     }
 
@@ -454,6 +479,67 @@ impl Ui {
             self.node_mut(c).parent = Some(id);
         }
         id
+    }
+
+    /// A dialog, to [`ask`](Self::ask) with.
+    pub fn dialog(&mut self, yes: &str, no: &str) -> Dialog {
+        let text = self.paragraph("", Style::Body, Tone::Primary);
+        let spacer = self.spacer();
+        let no = self.button(no);
+        let yes = self.button(yes);
+        let answers = self.stack(Stack::row(), &[spacer, no, yes]);
+        let root = self.stack(
+            Stack::column()
+                .pad(Space::Margin)
+                .gap(Space::Group)
+                .card(Fill::Window),
+            &[text, answers],
+        );
+        Dialog {
+            root,
+            text,
+            yes,
+            no,
+        }
+    }
+
+    /// Shows a dialog with this question, `yes` named for what it does. The keys start on
+    /// `no`: a key already on its way, or held, cannot answer it by accident.
+    pub fn ask(&mut self, dialog: &Dialog, question: &str, yes: &str) {
+        self.set_text(dialog.text, question);
+        self.set_text(dialog.yes, yes);
+        let focus = match self.modal {
+            Some(modal) => modal.focus,
+            None => self.focus,
+        };
+        self.modal = Some(Modal {
+            root: dialog.root,
+            no: dialog.no,
+            focus,
+        });
+        self.focus = Some(dialog.no);
+        self.held = None;
+        self.needs_layout = true;
+        self.damage = Damage::full(self.screen());
+    }
+
+    /// The dialog goes, and the keys go back where they were.
+    pub fn answered(&mut self) {
+        if let Some(modal) = self.modal.take() {
+            self.focus = modal.focus;
+            self.held = None;
+            self.damage = Damage::full(self.screen());
+        }
+    }
+
+    /// Whether a dialog is on show.
+    pub fn asking(&self) -> bool {
+        self.modal.is_some()
+    }
+
+    /// What takes the pointer and the keys: the dialog on show, or the window.
+    fn active_root(&self) -> Option<Id> {
+        self.modal.map(|m| m.root).or(self.root)
     }
 
     /// Takes what a row or a column has left, as `flex` does.
@@ -598,16 +684,6 @@ impl Ui {
             match self.node(id).parent {
                 Some(p) => id = p,
                 None => return false,
-            }
-        }
-    }
-
-    /// A button shown in the accent colour, or back.
-    pub fn set_primary(&mut self, id: Id, on: bool) {
-        if let Kind::Button { primary, .. } = &mut self.node_mut(id).kind {
-            if *primary != on {
-                *primary = on;
-                self.dirty(id);
             }
         }
     }
@@ -758,14 +834,6 @@ impl Ui {
         self.focus
     }
 
-    /// Counts each thing the owner does: a key (a whole one, not each of its bytes), the
-    /// release of a click, a turn of the wheel. A program asking "press again to confirm"
-    /// compares it around an event: if it moved and the answer did not come, the owner
-    /// did something else, and the question is off.
-    pub fn inputs(&self) -> u32 {
-        self.inputs
-    }
-
     /// What the owner did since the last call.
     pub fn next_action(&mut self) -> Option<Action> {
         self.actions.pop_front()
@@ -776,25 +844,25 @@ impl Ui {
     /// One event of the window. `Configure` is the program's: it answers with a buffer.
     pub fn handle(&mut self, event: Event) {
         match event {
+            // Its byte alone is known only with the key after it, as a sequence's start.
+            Event::Key(0x1B) if self.esc_told => self.esc_told = false,
             Event::Key(byte) => {
                 for key in self.keys.feed(byte).into_iter().flatten() {
                     self.on_key(key);
                 }
             }
-            Event::KeyCode { mods, state, .. } => {
+            Event::KeyCode { code, mods, state } => {
                 self.mods = mods;
                 self.repeating = state == KeyState::Repeated;
+                if code == KEY_ESC && state != KeyState::Released {
+                    self.esc_told = true;
+                    self.on_key(Key::Escape);
+                }
             }
             Event::Click { x, y, button: LEFT } => self.press(x, y),
             Event::Motion { x, y, .. } => self.pointer_to(x, y),
-            Event::Release { x, y, button: LEFT } => {
-                self.inputs = self.inputs.wrapping_add(1);
-                self.release(x, y);
-            }
-            Event::Wheel { x, y, delta } => {
-                self.inputs = self.inputs.wrapping_add(1);
-                self.wheel(x, y, delta);
-            }
+            Event::Release { x, y, button: LEFT } => self.release(x, y),
+            Event::Wheel { x, y, delta } => self.wheel(x, y, delta),
             Event::Appearance { dark } => self.set_theme(Theme::of(dark)),
             Event::Focus(on) => {
                 self.active = on;
@@ -810,21 +878,27 @@ impl Ui {
     }
 
     fn on_key(&mut self, key: Key) {
-        self.inputs = self.inputs.wrapping_add(1);
         let shift = self.mods & mods::SHIFT != 0;
         let writes_tabs = self
             .focus
             .is_some_and(|id| matches!(self.node(id).kind, Kind::Area(_)));
         match key {
             Key::Tab if !writes_tabs || shift => return self.focus_next(shift),
-            Key::Escape if !self.repeating => return self.actions.push_back(Action::Cancel),
+            Key::Escape if !self.repeating => {
+                let answer = match self.modal {
+                    Some(modal) => Action::Pressed(modal.no),
+                    None => Action::Cancel,
+                };
+                return self.actions.push_back(answer);
+            }
             _ => {}
         }
         let taken = self.focus.is_some_and(|id| self.key_for(id, key, shift));
         if taken {
             return;
         }
-        if self.repeating {
+        // Behind a question nothing else answers: no default button and no shortcut.
+        if self.repeating || self.modal.is_some() {
             return;
         }
         match key {
@@ -1119,7 +1193,9 @@ impl Ui {
     }
 
     fn focus_next(&mut self, back: bool) {
-        let Some(root) = self.root else { return };
+        let Some(root) = self.active_root() else {
+            return;
+        };
         let mut order = Vec::new();
         self.focusable(root, &mut order);
         if order.is_empty() {
@@ -1161,7 +1237,7 @@ impl Ui {
     }
 
     fn press(&mut self, x: i32, y: i32) {
-        let Some(id) = self.root.and_then(|r| self.hit(r, x, y)) else {
+        let Some(id) = self.active_root().and_then(|r| self.hit(r, x, y)) else {
             return;
         };
         let theme = self.theme;
@@ -1281,7 +1357,7 @@ impl Ui {
     }
 
     fn wheel(&mut self, x: i32, y: i32, delta: i32) {
-        let Some(mut id) = self.root.and_then(|r| self.hit(r, x, y)) else {
+        let Some(mut id) = self.active_root().and_then(|r| self.hit(r, x, y)) else {
             return;
         };
         let step = self.theme.wheel_rows * self.theme.row_h;
@@ -1691,6 +1767,15 @@ impl Ui {
             let screen = self.screen();
             self.place(root, screen);
         }
+        if let Some(modal) = self.modal {
+            let t = &self.theme;
+            let room = self.width as i32 - 2 * t.margin;
+            let wide = t.dialog_w.min(room).max(1);
+            let (_, high) = self.measure(modal.root, wide);
+            let x = (self.width as i32 - wide) / 2;
+            let y = (self.height as i32 - high).max(0) / 2;
+            self.place(modal.root, Rect::new(x, y, wide as u32, high as u32));
+        }
     }
 
     // ---- painting ----
@@ -1708,6 +1793,12 @@ impl Ui {
                 let mut part = canvas.clipped(r);
                 part.fill(self.theme.window);
                 self.paint_node(root, &mut part, &mut text);
+                if let Some(modal) = self.modal {
+                    part.shade(0, self.theme.scrim);
+                    let frame = self.node(modal.root).rect;
+                    part.window_shadow(&frame, self.theme.dialog_shadow);
+                    self.paint_node(modal.root, &mut part, &mut text);
+                }
                 frame.rects[frame.count] = DamageRect {
                     x: r.x as u16,
                     y: r.y as u16,
