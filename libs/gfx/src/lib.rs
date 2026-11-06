@@ -1304,14 +1304,14 @@ pub struct PasteGrant(Option<u32>);
 const CTRL_V: u8 = 0x16;
 
 impl PasteGrant {
-    /// A key went to the focused window as these bytes. A key with no bytes (a release,
-    /// a modifier) changes nothing.
-    pub fn on_key(&mut self, focus: u32, bytes: &[u8]) {
-        if bytes == [CTRL_V] {
-            self.0 = Some(focus);
-        } else if !bytes.is_empty() {
-            self.0 = None;
+    /// A key went to the focused window as these bytes; `held` when it repeats on its
+    /// own, which is not a press. A key with no bytes (a release, a modifier) changes
+    /// nothing.
+    pub fn on_key(&mut self, focus: u32, bytes: &[u8], held: bool) {
+        if bytes.is_empty() {
+            return;
         }
+        self.0 = (bytes == [CTRL_V] && !held).then_some(focus);
     }
 
     /// The focus moved.
@@ -1458,20 +1458,23 @@ mod tests {
         // Nothing pressed: nobody reads.
         assert!(!g.take(1, Some(1)));
         // A press in window 1 is for window 1, once.
-        g.on_key(1, &[CTRL_V]);
+        g.on_key(1, &[CTRL_V], false);
         assert!(!g.take(2, Some(1)), "another window");
         assert!(!g.take(1, Some(2)), "it has lost the focus");
         assert!(g.take(1, Some(1)));
         assert!(!g.take(1, Some(1)), "one read for one press");
         // Letting the keys go keeps it until it is read; another key ends it.
-        g.on_key(1, &[CTRL_V]);
-        g.on_key(1, &[]);
+        g.on_key(1, &[CTRL_V], false);
+        g.on_key(1, &[], false);
         assert!(g.take(1, Some(1)));
-        g.on_key(1, &[CTRL_V]);
-        g.on_key(1, b"x");
+        // Holding the key is one press, not one for each repeat.
+        g.on_key(1, &[CTRL_V], true);
+        assert!(!g.take(1, Some(1)));
+        g.on_key(1, &[CTRL_V], false);
+        g.on_key(1, b"x", false);
         assert!(!g.take(1, Some(1)));
         // Moving away ends it, even coming back.
-        g.on_key(1, &[CTRL_V]);
+        g.on_key(1, &[CTRL_V], false);
         g.on_focus_change();
         assert!(!g.take(1, Some(1)));
     }

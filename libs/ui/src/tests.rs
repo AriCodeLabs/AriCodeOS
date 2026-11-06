@@ -270,9 +270,17 @@ fn a_field_edits_utf8_with_a_selection() {
     assert_eq!(f.actions(), [Action::Edited(f.field)]);
     assert_eq!(f.ui.text(f.field), "añxañx");
     // Ctrl+A, Ctrl+X empties it.
+    f.actions();
     f.keys(&[1, 0x18]);
-    assert_eq!(f.ui.text(f.field), "");
+    assert_eq!(f.actions(), [Action::Cut(f.field)]);
     assert_eq!(f.ui.take_copied().as_deref(), Some("añxañx"));
+    assert_eq!(
+        f.ui.text(f.field),
+        "añxañx",
+        "kept until the clipboard has it"
+    );
+    f.ui.cut_done(f.field);
+    assert_eq!(f.ui.text(f.field), "");
     f.same_as_full_paint();
     f.actions();
     f.keys(b"\r");
@@ -729,4 +737,167 @@ fn a_size_refused_changes_nothing() {
     assert_eq!(f.ui.size(), (W, H));
     f.same_as_full_paint();
     assert_eq!(f.rect(f.ok).right(), W as i32 - Theme::light().margin);
+}
+
+#[test]
+fn a_held_key_edits_and_moves_but_never_answers_a_question() {
+    let mut f = form();
+    let code = |state| Event::KeyCode {
+        code: 28,
+        state,
+        mods: 0,
+    };
+    // On a list: the arrows repeat; Enter and Delete do not.
+    f.ui.focus(f.list);
+    f.ui.handle(code(KeyState::Repeated));
+    f.keys(b"\x1b[B");
+    assert_eq!(f.ui.selected(f.list), Some(1));
+    f.actions();
+    f.keys(b"\r\x1b[3~");
+    assert_eq!(f.actions(), [], "held, it opens and deletes nothing");
+    // On a button, in a field, and for what no widget takes.
+    f.ui.focus(f.cancel);
+    f.keys(b"\r ");
+    assert_eq!(f.actions(), []);
+    f.ui.focus(f.field);
+    f.keys(b"ab\r");
+    assert_eq!(f.ui.text(f.field), "ab", "typing repeats");
+    f.actions();
+    assert_eq!(f.ui.next_action(), None);
+    f.keys(&[0x16, 3, 0x18]);
+    assert_eq!(f.actions(), [], "nor the clipboard");
+    f.ui.focus(f.title);
+    f.keys(&[b'\r', 0x13]);
+    assert_eq!(f.actions(), []);
+    // A new press answers again.
+    f.ui.handle(code(KeyState::Pressed));
+    f.keys(b"\r");
+    assert_eq!(f.actions(), [Action::Pressed(f.ok)]);
+}
+
+#[test]
+fn a_button_gone_while_held_does_not_fire() {
+    let mut f = form();
+    let r = f.rect(f.cancel);
+    let (x, y) = (r.x + 2, r.y + 2);
+    f.ui.handle(Event::Click { x, y, button: LEFT });
+    f.ui.set_enabled(f.cancel, false);
+    f.ui.handle(Event::Release { x, y, button: LEFT });
+    assert_eq!(f.actions(), []);
+    f.same_as_full_paint();
+}
+
+#[test]
+fn a_hidden_stack_hides_its_default_button_and_its_focus_ring() {
+    let mut ui = Ui::new(Theme::light(), W, H);
+    let ok = ui.default_button("Open");
+    let inner = ui.stack(Stack::column(), &[ok]);
+    let root = ui.stack(Stack::column().pad(Space::Margin), &[inner]);
+    ui.set_root(root);
+    ui.focus(ok);
+    let mut f = form();
+    f.ui = ui;
+    f.same_as_full_paint();
+    f.ui.set_hidden(inner, true);
+    assert_eq!(f.ui.focused(), None);
+    f.same_as_full_paint();
+    f.keys(b"\r");
+    assert_eq!(f.actions(), []);
+}
+
+#[test]
+fn a_long_line_shows_where_the_caret_is() {
+    let (mut f, area) = writer();
+    f.ui.set_text(area, &"m".repeat(1000));
+    f.keys(b"\x1b[F");
+    f.same_as_full_paint();
+    // Text is drawn up to the caret, at the right of the view.
+    let t = Theme::light();
+    let y = (t.control_gap + 9) as usize;
+    let x = W as usize - t.control_pad as usize - 4;
+    let row = &f.pixels[y * W as usize..(y + 1) * W as usize];
+    assert!(
+        row[x - 30..x].iter().any(|&p| p != t.content),
+        "glyphs near the caret"
+    );
+}
+
+#[test]
+fn another_widgets_text_does_not_move_a_view_the_owner_scrolled() {
+    let mut f = form();
+    let mut ui = Ui::new(Theme::light(), W, H);
+    let status = ui.label("", Style::Callout, Tone::Primary);
+    let area = ui.area(64 * 1024);
+    ui.set_flex(area, 1);
+    let root = ui.stack(Stack::column().pad(Space::Margin), &[status, area]);
+    ui.set_root(root);
+    ui.focus(area);
+    f.ui = ui;
+    let mut text = String::new();
+    for _ in 0..100 {
+        text.push_str("line\n");
+    }
+    f.ui.set_text(area, &text);
+    f.same_as_full_paint();
+    let r = f.rect(area);
+    f.ui.handle(Event::Wheel {
+        x: r.x + 4,
+        y: r.y + 4,
+        delta: -5,
+    });
+    f.same_as_full_paint();
+    let offset = |f: &Form| {
+        let Kind::Area(a) = &f.ui.node(area).kind else {
+            panic!()
+        };
+        a.scroll.offset
+    };
+    let scrolled = offset(&f);
+    assert!(scrolled > 0);
+    f.ui.set_text(status, "saved");
+    f.same_as_full_paint();
+    assert_eq!(offset(&f), scrolled);
+}
+
+#[test]
+fn a_paste_says_when_it_did_not_all_fit() {
+    let mut ui = Ui::new(Theme::light(), W, H);
+    let field = ui.field(4, "");
+    ui.set_root(field);
+    assert!(ui.paste(field, "ab"));
+    assert!(!ui.paste(field, "cdef"));
+    assert_eq!(ui.text(field), "abcd");
+}
+
+#[test]
+fn the_thumb_of_a_very_long_text_does_not_overflow() {
+    let view = Rect::new(0, 0, 100, 2000);
+    let t = Theme::light();
+    let s = Scroller {
+        offset: 1_100_000,
+        content: 1_200_000,
+    };
+    let thumb = s.thumb(&view, &t).unwrap();
+    assert!(thumb.y >= 0 && thumb.bottom() <= 2000);
+    let to = s.dragged_to(&view, &t, 1900, 0);
+    assert!(to > 0 && to <= s.furthest(2000));
+}
+
+#[test]
+fn inputs_count_what_the_owner_does_not_the_bytes() {
+    let mut f = form();
+    f.ui.focus(f.list);
+    let n = f.ui.inputs();
+    // Delete is four bytes and one key.
+    f.keys(b"\x1b[3~");
+    assert_eq!(f.ui.inputs(), n + 1);
+    // A click counts at its release, when a button answers.
+    let r = f.rect(f.cancel);
+    let (x, y) = (r.x + 2, r.y + 2);
+    f.ui.handle(Event::Click { x, y, button: LEFT });
+    assert_eq!(f.ui.inputs(), n + 1);
+    f.ui.handle(Event::Release { x, y, button: LEFT });
+    assert_eq!(f.ui.inputs(), n + 2);
+    f.ui.handle(Event::Motion { x, y, buttons: 0 });
+    assert_eq!(f.ui.inputs(), n + 2);
 }

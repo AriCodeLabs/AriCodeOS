@@ -512,7 +512,29 @@ the compositor already serves, because that needs no new authority and closes mo
 The price: only the keyboard opens it. A Paste menu item will need its own way to show the owner
 asked, and the terminal has no copy and paste yet, since Ctrl+C and Ctrl+V are the shell's.
 
-**Still to do in this stage:** dark in settings, menus and dialogs. `ui.*` figures in `perf` are
-not measured yet.
+### Light and dark
+
+Settings chooses, and init keeps it in the file `appearance`. The compositor changes the frames
+and tells each window that asked, at once, and a new window learns it in the answer to `Create`,
+so its first picture is already right. `usb.desktop_appearance` checks it across a reboot.
+
+### The audit of this stage
+
+The clipboard's rules held. What it found was in the programs, and it was worth having:
+
+- **High, holding a key answered questions:** holding Delete in the files armed and then deleted,
+  and the refresh selected the next file, so it emptied `home/` at about 15 files a second. Holding
+  Enter on "Leave the desktop" left. The old programs had this too. The toolkit now knows a repeat
+  from a press: a repeat edits and moves, and opens, presses, confirms and shortcuts nothing.
+- **High, typing on a focused Open:** two spaces discarded unsaved text. A two-press question now
+  ends at anything else the owner does (`Ui::inputs`), not only at some of it. Two spaces in a row
+  on that button still answer it, and modal dialogs will end that.
+- **Medium:** Ctrl+X took the text before the clipboard had it (now it waits); a long line stopped
+  drawing at 160 glyphs (the limit is gone, and lines past 32767 px measure right); a status line
+  moved a view the owner had scrolled, without painting it.
+- **Low:** a CRLF is one line end for the caret; a held Ctrl+V reads once; refusals are logged per
+  reason; a paste that does not fit says so.
+
+**Still to do in this stage:** menus and dialogs. `ui.*` figures in `perf` are not measured yet.
 
 Next: those, then the shell (stage 3).
