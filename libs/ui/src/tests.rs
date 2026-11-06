@@ -1086,3 +1086,24 @@ fn ui_figures() {
         ui.paint(&mut canvas);
     });
 }
+
+#[test]
+fn a_field_hands_its_arrows_to_the_list_it_searches() {
+    let mut f = form();
+    f.ui.focus(f.field);
+    f.keys(b"\x1b[B\x1b[A");
+    assert_eq!(
+        f.actions(),
+        [Action::Arrow(f.field, false), Action::Arrow(f.field, true)]
+    );
+    f.ui.select_next(f.list, false);
+    assert_eq!(f.ui.selected(f.list), Some(1));
+    f.ui.select_next(f.list, true);
+    f.ui.select_next(f.list, true);
+    assert_eq!(f.ui.selected(f.list), Some(0), "it stops at the top");
+    for _ in 0..20 {
+        f.ui.select_next(f.list, false);
+    }
+    assert_eq!(f.ui.selected(f.list), Some(7), "and at the end");
+    f.same_as_full_paint();
+}
