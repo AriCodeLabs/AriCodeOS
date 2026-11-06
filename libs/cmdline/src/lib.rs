@@ -105,6 +105,9 @@ pub mod keys {
     /// mode and touches nothing: the way back on the rare machine where the
     /// panel's size goes wrong (ADR 0079).
     pub const VIDEO: &str = "video";
+    /// `thermal_off=DEGREES`: the CPU temperature at which the kernel's watch powers
+    /// the machine off; `0` never does. By default 3 degrees below the CPU's limit.
+    pub const THERMAL_OFF: &str = "thermal_off";
     /// `ps2=console`: the PS/2 keyboard and touchpad serve only the kernel
     /// console; while a process holds the screen their keys are withheld
     /// instead of going to the desktop (ADR 0075).
