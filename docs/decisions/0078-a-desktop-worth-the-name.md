@@ -563,4 +563,9 @@ xtask perf`, which measures inside QEMU, where software emulation hides this kin
 
 Menus move to stage 3, with the menu bar that uses them: built now, nothing would call them.
 
+## Stage 3: results so far
+
+The launcher searches as the owner types, and Enter opens the first match. The rest of this stage,
+the menu bar, the dock, notifications and the manifests' names and icons, is still to come.
+
 Next: those, then the shell (stage 3).
