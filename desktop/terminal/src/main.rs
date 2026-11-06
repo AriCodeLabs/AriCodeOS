@@ -18,6 +18,7 @@ use aricode_proto::session;
 use aricode_rt::sys::window::{self, Event, Window};
 use aricode_rt::sys::{self, abi, kind, permissions, Error, Handle};
 use aricode_sync::SpinLock;
+use aricode_text::{Face, Typesetter, JETBRAINS_MONO};
 use core::fmt::Write;
 
 /// 80 columns and 25 rows of the 8x16 font.
@@ -32,8 +33,13 @@ fn say(text: &[u8]) {
     sys::print(b"\n");
 }
 
+/// JetBrains Mono at 13 px fills the 8x16 cells of the grid (ADR 0078): 7.8 px wide,
+/// on a baseline that leaves its descenders inside the cell.
+const FONT: (Face, u32) = (Face(JETBRAINS_MONO), 13);
+const BASELINE: i32 = 12;
+
 /// The window as the console's surface.
-struct Screen(Window);
+struct Screen(Window, Typesetter);
 
 impl Surface for Screen {
     fn width(&self) -> usize {
@@ -56,6 +62,26 @@ impl Surface for Screen {
                 let color = if bits & (0x80 >> dx) != 0 { fg } else { bg };
                 c.set((x + dx) as i32, (y + dy) as i32, color);
             }
+        }
+    }
+
+    fn cell(&mut self, x: usize, y: usize, code: u8, fg: Rgb, bg: Rgb) {
+        let (fg, bg) = (encode(fg), encode(bg));
+        let (x, y) = (x as i32, y as i32);
+        let mut c = self.0.canvas();
+        c.fill_rect(&aricode_gfx::Rect::new(x, y, 8, 16), bg);
+        // A cell code is the character's Latin-1 value, but for the euro sign.
+        let ch = if code == aricode_fb_console::font::EURO {
+            '€'
+        } else {
+            code as char
+        };
+        if ch != ' ' {
+            let mut text = [0u8; 4];
+            let cell = aricode_gfx::Rect::new(x, y, 8, 16);
+            let mut inside = c.clipped(&cell);
+            let text = ch.encode_utf8(&mut text);
+            self.1.draw(&mut inside, FONT, text, (x, y + BASELINE), fg);
         }
     }
 
@@ -313,7 +339,7 @@ fn main(_arg: u64) -> u64 {
         say(b"could not create its window");
         return 2;
     };
-    CONSOLE.lock().attach(Screen(win));
+    CONSOLE.lock().attach(Screen(win, Typesetter::new()));
     let shell = match open_shell(terminals) {
         Ok(s) => s,
         Err(_) => {
@@ -341,7 +367,7 @@ fn main(_arg: u64) -> u64 {
     let shown = SHOWN.load(core::sync::atomic::Ordering::Relaxed);
     sys::print(aricode_rt::fmt_u64(shown, &mut b));
     sys::print(b" bytes of the shell's text shown)\n");
-    if let Some(Screen(win)) = CONSOLE.lock().detach() {
+    if let Some(Screen(win, _)) = CONSOLE.lock().detach() {
         let _ = win.close();
     }
     0

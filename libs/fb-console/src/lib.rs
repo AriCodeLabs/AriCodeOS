@@ -76,6 +76,11 @@ pub trait Surface {
             }
         }
     }
+    /// Draws a cell by its code (`cell_code`): the console's font by default, and a
+    /// surface with a better one draws the character itself.
+    fn cell(&mut self, x: usize, y: usize, code: u8, fg: Rgb, bg: Rgb) {
+        self.glyph(x, y, glyph(code), fg, bg);
+    }
     /// Fills `rows` full pixel rows starting at `y`.
     fn fill_rows(&mut self, y: usize, rows: usize, color: Rgb) {
         for yy in y..(y + rows).min(self.height()) {
@@ -505,14 +510,7 @@ impl<S: Surface> Console<S> {
         let Some(surface) = self.surface.as_mut() else {
             return;
         };
-        let glyph = glyph(b);
-        surface.glyph(
-            col * GLYPH_WIDTH,
-            row * GLYPH_HEIGHT,
-            glyph,
-            self.fg,
-            self.bg,
-        );
+        surface.cell(col * GLYPH_WIDTH, row * GLYPH_HEIGHT, b, self.fg, self.bg);
     }
 }
 

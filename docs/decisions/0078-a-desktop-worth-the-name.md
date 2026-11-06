@@ -438,4 +438,26 @@ An independent review found no high findings. All fixed:
 (stage 3). The compositor's handling logic has scenarios but no host tests: it lives in the
 service, and moving it into `libs/gfx` is for when it grows.
 
-Next in this stage: Inter and JetBrains Mono, the atlas and our shaper.
+### Text
+
+`libs/text` draws Inter 4.1 and JetBrains Mono NL 2.304, subset to Latin (49, 50 and
+24 KB; `libs/text/fonts/`, SIL OFL 1.1), with skrifa's outlines and light hinting.
+Title bars are Inter semibold 13 and the terminal is JetBrains Mono 13. Apps move to it
+with the toolkit (stage 2).
+
+- **Coverage is ours,** not zeno's. zeno keeps 24 KB of working data on the stack even when
+  given the heap, in a program with 64 KB. Ours is the signed-area method of font-rs and
+  fontdue: about 100 lines, nothing on the stack. A host test checks it against zeno on every
+  glyph of the three fonts at four sizes: mean difference 0.44 of 255, worst 24.
+- **Spacing** is the font's advances and its GPOS kerning, on ttf-parser. A host test checks
+  line widths against harfrust, which is not shipped. Ligatures and the rest of OpenType wait
+  until something needs them.
+- **Stack:** read-fonts keeps the autohinter's 16 KB scratch on the stack, with no way to give
+  it the heap. The compositor has an exception of 48 KB of path for this (`cargo xtask
+  stack-check`), used only while a glyph not yet cached is rendered. The terminal does the
+  same work, but that check measures initrd programs, not packages.
+- **Cost:** the stripped compositor is 598 KB. A screen of mixed text fits the cache in 16 KB.
+- **Not done yet:** blending is in sRGB with a slight lift of the coverage instead of the ADR's
+  gamma-correct blend, and 4 pixels per SSE2 instruction. To be measured before it grows.
+
+Next: the toolkit (stage 2).
