@@ -792,6 +792,12 @@ impl Compositor {
             let left = code == BTN_LEFT;
             match self.desktop.hit(px, py) {
                 Hit::Window { id, x, y } => Some((id, x, y)),
+                Hit::Shelf { id } if left => {
+                    self.desktop.set_hidden(id, false);
+                    self.set_focus(id);
+                    self.pointer.moved = true;
+                    None
+                }
                 Hit::Close { id } if left => {
                     self.ask_close(id, at);
                     None

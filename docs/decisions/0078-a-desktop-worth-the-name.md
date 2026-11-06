@@ -434,8 +434,8 @@ An independent review found no high findings. All fixed:
   nothing; a queue keeps `Configure`; the shadow skips what the frame covers and fills
   the corners' notches.
 
-**Known limit:** a minimized window has no way back without a keyboard until the dock
-(stage 3). The compositor's handling logic has scenarios but no host tests: it lives in the
+A minimized window has a place at the bottom of the screen, with its title, that a click brings
+back: the way back without a keyboard, ahead of the dock (stage 3). The compositor's handling logic has scenarios but no host tests: it lives in the
 service, and moving it into `libs/gfx` is for when it grows.
 
 ### Text

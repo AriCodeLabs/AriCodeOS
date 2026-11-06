@@ -486,6 +486,14 @@ pub const SHADOW: i32 = 24;
 pub const RESIZE_BAND: i32 = 6;
 /// The smallest content a window is dragged to.
 pub const MIN_CONTENT: (u32, u32) = (160, 80);
+/// A minimized window's place at the bottom of the screen: how to get it back with the
+/// pointer. Its size at most, the space between places, and from the screen's edge.
+pub const SHELF_ITEM: (u32, u32) = (140, 28);
+pub const SHELF_GAP: i32 = 8;
+pub const SHELF_MARGIN: i32 = 12;
+/// The minimized windows' places: id and rectangle.
+pub type Shelf = [Option<(u32, Rect)>; MAX_WINDOWS];
+
 /// How near the screen's edge a dragged title bar snaps.
 pub const SNAP_MARGIN: i32 = 8;
 pub const MAX_WINDOWS: usize = 8;
@@ -847,6 +855,10 @@ fn band_edges(frame: &Rect, x: i32, y: i32) -> u8 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hit {
     Desktop,
+    /// A minimized window's place at the bottom of the screen.
+    Shelf {
+        id: u32,
+    },
     /// Window and coordinates relative to the content (negative on the frame).
     Window {
         id: u32,
@@ -1009,6 +1021,11 @@ impl Desktop {
 
     /// Topmost window under `(x, y)` (frame included).
     pub fn hit(&self, x: i32, y: i32) -> Hit {
+        for (id, place) in self.shelf().into_iter().flatten() {
+            if place.contains(x, y) {
+                return Hit::Shelf { id };
+            }
+        }
         for w in self.iter().collect_rev() {
             if w.hidden {
                 continue;
@@ -1072,6 +1089,26 @@ impl Desktop {
         }
     }
 
+    /// Where the minimized windows show, centred at the bottom of the screen, narrower
+    /// when many would not fit.
+    pub fn shelf(&self) -> Shelf {
+        let mut shelf = [None; MAX_WINDOWS];
+        let n = self.iter().filter(|w| w.hidden).count() as i32;
+        if n == 0 {
+            return shelf;
+        }
+        let room = self.screen.w as i32 - 2 * SHELF_MARGIN - (n - 1) * SHELF_GAP;
+        let w = (room / n).clamp(1, SHELF_ITEM.0 as i32);
+        let all = n * w + (n - 1) * SHELF_GAP;
+        let y = self.screen.h as i32 - SHELF_MARGIN - SHELF_ITEM.1 as i32;
+        let mut x = (self.screen.w as i32 - all) / 2;
+        for (slot, window) in shelf.iter_mut().zip(self.iter().filter(|w| w.hidden)) {
+            *slot = Some((window.id, Rect::new(x, y, w as u32, SHELF_ITEM.1)));
+            x += w + SHELF_GAP;
+        }
+        shelf
+    }
+
     /// Hides or shows a window. A hidden one is neither drawn nor hit, and takes
     /// no focus.
     pub fn set_hidden(&mut self, id: u32, hidden: bool) {
@@ -1120,6 +1157,7 @@ impl Desktop {
             count: self.count,
             focus: self.focus,
             pointer: self.pointer,
+            shelf: self.shelf(),
         }
     }
 
@@ -1226,6 +1264,20 @@ impl Desktop {
                 draw_content(w, &mut out.clipped(&line));
             }
         }
+        for (id, place) in self.shelf().into_iter().flatten() {
+            if !place.intersects(&clip) {
+                continue;
+            }
+            out.rounded(&place, RADIUS, self.theme.window);
+            if let Some(w) = self.get(id) {
+                let mut inside = out.clipped(&place);
+                let name = labels.width(w.title_str());
+                let x = place.x + (place.w as i32 - name).max(0) / 2;
+                let middle = place.y + place.h as i32 / 2;
+                let ink = self.theme.title_active;
+                labels.draw(&mut inside, w.title_str(), x, middle, ink);
+            }
+        }
         out.cursor(self.pointer.0, self.pointer.1);
     }
 }
@@ -1241,6 +1293,7 @@ pub struct Scene {
     count: usize,
     focus: Option<u32>,
     pointer: (i32, i32),
+    shelf: Shelf,
 }
 
 impl Scene {
@@ -1263,6 +1316,11 @@ impl Scene {
         if self.pointer != newer.pointer {
             damage.add(&cursor_rect(self.pointer.0, self.pointer.1));
             damage.add(&cursor_rect(newer.pointer.0, newer.pointer.1));
+        }
+        if self.shelf != newer.shelf {
+            for (_, place) in self.shelf.iter().chain(&newer.shelf).flatten() {
+                damage.add(place);
+            }
         }
         let focused = |s: &Scene, id: u32| s.focus == Some(id);
         for old in self.iter() {
@@ -1462,6 +1520,43 @@ impl<'a> Iterator for RevIter<'a> {
 mod tests {
     extern crate std;
     use super::*;
+
+    #[test]
+    fn a_minimized_window_has_a_place_at_the_bottom_that_brings_it_back() {
+        let mut d = Desktop::new(800, 600);
+        let a = d.create(100, 100, "A").unwrap();
+        let b = d.create(100, 100, "B").unwrap();
+        assert_eq!(
+            d.shelf(),
+            [None; MAX_WINDOWS],
+            "nothing minimized, nothing shown"
+        );
+        let before = d.scene();
+        d.set_hidden(a, true);
+        let (id, place) = d.shelf()[0].unwrap();
+        assert_eq!(id, a);
+        assert_eq!(place.bottom(), 600 - SHELF_MARGIN);
+        assert_eq!(place.x + place.right(), 800, "centred");
+        assert_eq!(d.hit(place.x + 1, place.y + 1), Hit::Shelf { id: a });
+        // Its place is damage, and pixels match a full composition.
+        let mut damage = Damage::new(Rect::new(0, 0, 800, 600));
+        before.damage(&d.scene(), &mut damage);
+        assert!(damage.rects().iter().any(|r| r.intersects(&place)));
+        // Many at once stay on the screen and apart.
+        for i in 0..6 {
+            let id = d.create(100, 100, "x").unwrap();
+            assert!(i < 6);
+            d.set_hidden(id, true);
+        }
+        d.set_hidden(b, true);
+        let places: [Option<(u32, Rect)>; MAX_WINDOWS] = d.shelf();
+        let mut last_right = 0;
+        for (_, p) in places.into_iter().flatten() {
+            assert!(p.x >= last_right && p.right() <= 800, "{p:?}");
+            last_right = p.right();
+        }
+        assert_eq!(places.iter().flatten().count(), 8);
+    }
 
     #[test]
     fn only_a_press_in_the_focused_window_opens_the_clipboard() {
