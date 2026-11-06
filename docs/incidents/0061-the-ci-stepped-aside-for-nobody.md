@@ -1,6 +1,6 @@
 # Incident 0061: The CI stepped aside for nobody, and a red smoke reached develop
 
-- Opened: 2026-11-06. Status: closed.
+- Opened: 2026-11-06. Status: closed 2026-11-07.
 - Found by: the CI container's log, then the smoke run before a merge.
 
 ## Evidence
@@ -32,3 +32,13 @@ runs was affected: the test only runs in the test tools. It stayed red for minut
 - A waiter now polls the suite lock, retrying the waiting file, because a look may hold that for a
   moment.
 - Merges push only if the checks before them passed: `&&`, never a new line.
+
+## Twelve hours later
+
+The container had taken up commit 27240b2 before the fix, and a pass keeps the code of the commit
+it started on. That commit's look saw a waiter on nearly every try, so the pass stepped aside 451
+times over 12 hours without finishing, on a host otherwise idle, and no newer commit was tested. The
+report said nothing, because a pass that steps aside is not a failure. Found when looking at why
+`develop` had no result; the container was restarted to take up the fixed code.
+
+A pass now stops stepping aside after 5 tries in a row with no scenario done, and says so.
