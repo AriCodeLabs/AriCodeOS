@@ -1,0 +1,21 @@
+# Pista, the kart game, runs on the system: its window opens through the broker,
+# its manifest is honoured, and 60 frames go through the whole path from the 3D
+# renderer to the compositor. Its world and its pictures have host tests in
+# libs/pista; speed is measured on the reference laptop, not here.
+name = "gui.pista"
+description = "the kart game opens its window and draws frames through the compositor"
+level = "full"
+areas = ["gui", "apps"]
+cmdline = "qemu_exit gui shell gui_trace"
+install = ["desktop/pista"]
+stdin = ["run pista 60", "sleep 500", "shutdown"]
+timeout_secs = 120
+
+[expect]
+exit = 33
+serial_contains = [
+    "compositor: window 1 'Pista' 960x540",
+    "pista: 60 frames: world ",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "pista: could not", "pista: started without", "killed by fault"]
