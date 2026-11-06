@@ -13,7 +13,7 @@
 //! without that mount the lock would be private to the container and
 //! guard nothing, so the runner refuses to start (fail closed).
 //! `ARICODEOS_SUITE_LOCK_HELD` says a parent process already holds it (the
-//! CI script, which holds it across both of its passes).
+//! CI script, which takes it for each of its passes).
 //!
 //! The lock is the kernel's `flock`, released when the process ends however
 //! it ends; the holder's details written into the file are information only.

@@ -3,8 +3,8 @@
 #
 # Continuous test container for AriCodeOS (ADR 0040): the development
 # image plus a script that keeps its own clone of the public repository in
-# a named volume, runs `cargo xtask check`, `cargo xtask test --all` and
-# `cargo xtask test --all --cpus 4` on each new commit of a branch
+# a named volume, runs `cargo xtask check`, `cargo xtask test --level release`
+# and `cargo xtask test --level release --cpus 4` on each new commit of a branch
 # (default develop) and writes a dated report to a mounted directory. It
 # never touches a developer's checkout and holds no credentials: the
 # repository is fetched over https. Build the development image first,
