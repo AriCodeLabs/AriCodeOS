@@ -115,8 +115,8 @@ with one on the host or in another container (ADR 0040).
 `tools/docker/ci/Dockerfile` adds to that image a script that keeps its
 own clone of the public repository in a named volume (never your
 checkout), and on each new commit of a branch (default `develop`) runs
-`cargo xtask check`, `cargo xtask test --all` and `--all --cpus 4`, then
-writes a dated report (pass/fail per scenario, the logs of the failed ones)
+`cargo xtask check`, `cargo xtask test --level release` and `--level release
+--cpus 4` (the slow scenarios included), then writes a dated report (pass/fail per scenario, the logs of the failed ones)
 to a mounted directory. It fetches over https and holds no credentials.
 
 ```bash
@@ -138,10 +138,10 @@ another branch and `--jobs N` overrides the concurrency. The suites run one
 after another, at nice 10, and `--cpus`, `--memory` and `--cpu-shares` keep
 the container from taking the machine: the runner sizes its jobs from them
 (10 CPUs give 10 jobs, 6 for the `--cpus 4` pass), so development goes on
-beside it. Its two test passes run holding the suite lock (taken before
-the first, released after the second): a suite started meanwhile on the
-host or in another container waits for them, and the CI waits for it, so
-nobody has to stop the container by hand. A failure in its report is an
+beside it. Each of its two test passes runs holding the suite lock, let go
+between them: a suite started meanwhile on the host or in another container
+waits for the current pass, and the CI waits for it, so nobody has to stop
+the container by hand. A failure in its report is an
 incident (`docs/WORKFLOW.md`).
 
 To try the system without building it, `tools/docker/try/Dockerfile` packs
