@@ -397,7 +397,6 @@ name = "aricode-gfx"
 version = "0.18.0"
 dependencies = [
  "aricode-fb-console",
- "aricode-input",
 ]
 
 [[package]]
@@ -567,6 +566,16 @@ dependencies = [
  "rcgen",
  "rustls",
  "rustls-webpki",
+]
+
+[[package]]
+name = "aricode-ui"
+version = "0.18.0"
+dependencies = [
+ "aricode-gfx",
+ "aricode-input",
+ "aricode-proto",
+ "aricode-text",
 ]
 
 [[package]]

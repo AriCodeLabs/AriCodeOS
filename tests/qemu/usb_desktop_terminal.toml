@@ -5,7 +5,8 @@
 # and its text (banner, prompt, echo) comes back into the window: `exit`
 # ends the shell and closes the terminal, which says how much text it
 # showed. (The echo is in the window, not on serial, so the keys are only
-# paced: a few, within QEMU's queue.)
+# paced: a few, within QEMU's queue.) Before that, its zoom circle asks for the
+# whole screen, and the text stays.
 name = "usb.desktop_terminal"
 description = "the desktop terminal runs the owner's shell in a window"
 level = "release"
@@ -24,6 +25,14 @@ keys = ["ret"]
 
 [[host_input_then]]
 marker = "terminal: shell started"
+wait_ms = 500
+mouse_rel = [-506, -306]
+click = "left"
+
+[[host_input_then]]
+marker = "terminal: window 1280x772"
+wait_ms = 500
+screendump = "zoomed"
 keys = ["e", "x", "i", "t", "ret"]
 key_delay_ms = 100
 
@@ -34,6 +43,7 @@ serial_contains = [
     "AriInit: launch terminal from AriFS (apps/terminal.aripkg version 1",
     "with manifest [window terminal]",
     "terminal: shell started",
+    "terminal: window 1280x772",
     "terminal: the shell ended; closing (",
     "bytes of the shell's text shown)",
     "ARICODEOS_SHUTDOWN",
@@ -46,5 +56,6 @@ serial_absent = [
     "KERNEL PANIC",
     "USER STACK OVERFLOW",
     "terminal shell refused",
+    "terminal: could not take",
     "closing (0 bytes",
 ]

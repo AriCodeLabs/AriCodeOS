@@ -460,4 +460,44 @@ with the toolkit (stage 2).
 - **Not done yet:** blending is in sRGB with a slight lift of the coverage instead of the ADR's
   gamma-correct blend, and 4 pixels per SSE2 instruction. To be measured before it grows.
 
-Next: the toolkit (stage 2).
+## Stage 2: results so far
+
+### The toolkit
+
+`libs/ui` holds retained widgets in stacks, with keyboard focus, in about 1900 lines and no
+`dyn`. A program builds its `Ui` once, gives it the window's events, reads back `Action`s and
+presents what `paint` answers. The launcher, the settings, the files and the editor run on it,
+and all four resize: their fixed coordinates are gone. The old `aricode_gfx::widgets` went
+with them.
+
+- **Controls:** labels and paragraphs, buttons, one-line fields and multi-line areas with a
+  selection, lists with a second column, scroll views with a thumb that drags, and the Tab
+  order, with a focus ring and a default button.
+- **Damage:** a change marks its area, and painting walks the whole tree clipped to the marks.
+  No widget has a second way of drawing itself, so a partial paint is the full paint's pixels by
+  construction. A host test checks that after every kind of event, and it found that rounded
+  corners blended twice when nothing cleaned below them.
+- **Tokens:** a widget names a role, never a value. Space, type and colour are one `Theme` value
+  a program can change or replace, which is the owner's rule against hardcoding. Light and dark
+  both exist; choosing one in settings is still to come.
+- **Long text:** an area lays out only the lines that show, so a key costs the same in a 64 KiB
+  file. Lines are not wrapped: a long one scrolls sideways with the caret.
+- **The quota:** a resize holds two buffers for a moment, so the apps ask for 8 MiB, which holds
+  a 1366x768 window going to any smaller one. It is a limit, not what they use: a buffer as
+  large as the screen costs 4.1 MiB only while it is that large. A refused size leaves the
+  window as it was, and says so where a program can.
+
+**Changed for the owner:** the editor opens plain text only. The old one kept bytes that were
+not UTF-8, shown as `?`; on Strings they would not come back as they were, so such a file is
+now refused and left alone (`is not plain text: not opened`), as is one with control characters.
+CRLF and tabs stay.
+
+**Tab now walks every control,** as on other systems, instead of going between a list and a
+field. Shift+Tab goes back, and Esc returns to the list or the name.
+
+The terminal stays on its text grid, and keeps its text across sizes (`Console::resize_keeping`).
+
+**Still to do in this stage:** the clipboard service (Ctrl+C, X and V work within one program for
+now), dark in settings, menus and dialogs. `ui.*` figures in `perf` are not measured yet.
+
+Next: those, then the shell (stage 3).

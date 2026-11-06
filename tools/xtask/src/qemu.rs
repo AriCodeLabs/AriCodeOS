@@ -284,6 +284,8 @@ pub struct InputProbe<'a> {
     pub drag: Option<(i32, i32)>,
     /// A key held for this many ms.
     pub hold_key: Option<(&'a str, u64)>,
+    /// A picture of the screen, `NAME.ppm` in the scenario's directory.
+    pub screendump: Option<&'a str>,
     /// Pause after the marker before anything is sent (ms).
     pub wait_ms: u64,
     /// Minimum pause after each key event (ms); none by default.
@@ -362,6 +364,8 @@ struct Pointing {
     click: Option<String>,
     drag: Option<(i32, i32)>,
     hold_key: Option<(String, u64)>,
+    /// Where to keep a picture of the screen, before anything is sent.
+    screendump: Option<PathBuf>,
 }
 
 fn run_input_probe(
@@ -386,6 +390,13 @@ fn run_input_probe(
         Ok(())
     };
     let result: Result = (|| {
+        if let Some(file) = &pointing.screendump {
+            qmp.execute(&format!(
+                r#"{{"execute":"screendump","arguments":{{"filename":"{}"}}}}"#,
+                file.display()
+            ))
+            .map_err(|e| e.to_string())?;
+        }
         // Natural order: point, click, then type.
         if let Some((dx, dy)) = mouse_rel {
             step(
@@ -1457,6 +1468,7 @@ pub fn run_headless(
         Some(esp)
     };
     let qmp = QmpSocket::new(workdir);
+    let picture_dir = workdir.canonicalize().map_err(|e| e.to_string())?;
     let stderr =
         std::fs::File::create(stderr_log).map_err(|e| format!("{}: {e}", stderr_log.display()))?;
     // Every frame on the guest's network, for the count of guest
@@ -1639,6 +1651,9 @@ pub fn run_headless(
                     click: p.click.map(String::from),
                     drag: p.drag,
                     hold_key: p.hold_key.map(|(k, ms)| (k.to_string(), ms)),
+                    screendump: p
+                        .screendump
+                        .map(|name| picture_dir.join(format!("{name}.ppm"))),
                 };
                 let wait = Duration::from_millis(p.wait_ms);
                 let delay = Duration::from_millis(p.key_delay_ms);

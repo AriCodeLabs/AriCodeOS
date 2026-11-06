@@ -26,7 +26,7 @@ key_delay_ms = 100
 
 [[host_input_then]]
 marker = "files: renamed mo to p"
-keys = ["tab", "delete", "delete"]
+keys = ["shift+tab", "delete", "delete"]
 key_delay_ms = 100
 
 [expect]
