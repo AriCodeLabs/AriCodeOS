@@ -122,7 +122,8 @@ and chooses what the machine boots into, through init. Keyboards send
 Ctrl with a letter as its control character (Ctrl+S is `0x13`), as a
 terminal does. Controls, layout, keyboard focus and damage are the toolkit's,
 `libs/ui` (ADR 0078): build a `Ui` once, give it the window's events, read its
-`Action`s and present what `paint` answers. When the
+`Action`s and present what `paint` answers. `Window::clipboard_set` copies, and
+`Window::clipboard_get` reads, only as the answer to the owner's Ctrl+V in that window. When the
 launcher exits, or on Ctrl+Alt+Backspace on any keyboard, the desktop ends
 and the text console gets the screen and the keyboards back. A stick can come with a profile: `cargo xtask
 usb-image --app DIR:VER... --profile desktop:launcher,...`.

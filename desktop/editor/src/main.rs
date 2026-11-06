@@ -438,6 +438,19 @@ fn main(_arg: u64) -> u64 {
                     ed.armed = None;
                     ed.ui.focus(ed.name);
                 }
+                Action::Copied => {
+                    if let Some(text) = ed.ui.take_copied() {
+                        let mut b = [0u8; 20];
+                        let n = aricode_rt::fmt_u64(text.len() as u64, &mut b);
+                        match win.clipboard_set(hw, &text) {
+                            Ok(()) => say(&[b"copied ", n, b" bytes"]),
+                            Err(_) => say(&[b"could not copy ", n, b" bytes"]),
+                        }
+                    }
+                }
+                Action::Paste(id) => {
+                    let _ = win.clipboard_get(hw, |text| ed.ui.paste(id, text));
+                }
                 _ => {}
             }
         }

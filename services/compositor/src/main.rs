@@ -14,18 +14,21 @@ extern crate alloc;
 use alloc::vec::Vec;
 use aricode_cmdline::{keys, CmdLine};
 use aricode_gfx::{
-    resized, snap_at, snap_content, Canvas, Damage, Desktop, Hit, Labels, PixelMasks, Rect, Scene,
-    Window,
+    resized, snap_at, snap_content, Canvas, Damage, Desktop, Hit, Labels, PasteGrant, PixelMasks,
+    Rect, Scene, Window,
 };
 use aricode_input::{
     EscapeChord, KeyRepeat, Keyboard, Layout, BTN_LEFT, EV_KEY, EV_REL, REL_WHEEL, REL_X, REL_Y,
 };
 use aricode_proto::input::Status as InputStatus;
 use aricode_proto::input::MAX_EVENTS;
-use aricode_proto::window::{mods, wants, Event, KeyState, Op, Reply, Request, Status, MAX_SIDE};
+use aricode_proto::window::{
+    mods, wants, Event, KeyState, Op, Reply, Request, Status, MAX_CLIPBOARD, MAX_SIDE,
+};
 use aricode_rt::sys::input::{DriverInstance, InputClient, InputError};
 use aricode_rt::sys::{self, abi, Handle};
 use aricode_rt::{fmt_hex, fmt_u64};
+use aricode_sync::SpinLock;
 use aricode_text::{Face, Typesetter, INTER_SEMIBOLD};
 
 const SERVICE: Handle = Handle(0x0001_0004);
@@ -203,6 +206,8 @@ struct Content {
     /// answer to its poll (ms since boot), while it has not polled since:
     /// it has not come back from it (ADR 0077, audit L4).
     close_waiting: Option<u64>,
+    /// A refused clipboard request was said: a program that keeps trying is said once.
+    said_clipboard: bool,
 }
 
 impl Content {
@@ -362,7 +367,22 @@ struct Switching {
     at: usize,
 }
 
+/// The owner's clipboard. Outside the heap, which it would fill: it costs nothing
+/// until something is copied, and text coming in is checked before it replaces this.
+struct Clipboard {
+    text: [u8; MAX_CLIPBOARD],
+    len: usize,
+    incoming: [u8; MAX_CLIPBOARD],
+}
+
+static CLIPBOARD: SpinLock<Clipboard> = SpinLock::new(Clipboard {
+    text: [0; MAX_CLIPBOARD],
+    len: 0,
+    incoming: [0; MAX_CLIPBOARD],
+});
+
 struct Compositor {
+    paste_grant: PasteGrant,
     screen: Screen,
     desktop: Desktop,
     /// On the heap: with their event queues, they would take 6 KB of the stack.
@@ -907,6 +927,7 @@ impl Compositor {
         if told {
             self.deliver_wanted(id, wants::KEY_CODES, Event::KeyCode { code, state, mods });
         }
+        self.paste_grant.on_key(id, bytes.as_slice());
         // Each byte of the key (editing keys are escape sequences).
         for &ch in bytes.as_slice() {
             self.deliver(id, Event::Key(ch));
@@ -1069,6 +1090,7 @@ impl Compositor {
         // The key held was for the window that had the focus.
         self.keys.repeat.stop();
         self.release_keys_of_focus();
+        self.paste_grant.on_focus_change();
         if let Some(old) = self.desktop.focus {
             self.deliver(old, Event::Focus(false));
         }
@@ -1206,6 +1228,7 @@ impl Compositor {
                     dirty: None,
                     place_at: None,
                     close_waiting: None,
+                    said_clipboard: false,
                 });
                 if req.events & wants::RESIZE != 0 {
                     self.desktop.set_resizable(id);
@@ -1273,6 +1296,8 @@ impl Compositor {
                 answer(reply_to, Reply::ok(0));
             }
             Op::Resize => self.resize(req, owner, reply_to, buf),
+            Op::ClipboardSet => self.clipboard_set(req, owner, reply_to, buf),
+            Op::ClipboardGet => self.clipboard_get(req, owner, reply_to, buf),
             Op::Poll => {
                 let Some(c) = self.owned(req.window, owner) else {
                     return answer(reply_to, Reply::status(Status::BadWindow));
@@ -1307,6 +1332,82 @@ impl Compositor {
                 answer(reply_to, Reply::ok(0));
             }
         }
+    }
+
+    /// A clipboard request refused, said the first time for each window.
+    fn clipboard_refused(&mut self, id: u32, what: &[u8], reply_to: Handle) {
+        if let Some(c) = self.content(id) {
+            if !core::mem::replace(&mut c.said_clipboard, true) {
+                sys::print(b"compositor: window ");
+                num(id as u64);
+                sys::print(what);
+                sys::print(b": refused\n");
+            }
+        }
+        answer(reply_to, Reply::status(Status::Denied));
+    }
+
+    /// Maps a program's buffer of at least `need` bytes for a clipboard request. It may
+    /// be one a window shows: [`unmap_unused`](Self::unmap_unused) keeps that mapping.
+    fn clipboard_buffer(buf: Option<Handle>, need: usize) -> Result<u64, Status> {
+        let buf = buf.ok_or(Status::BadHandles)?;
+        // A DMA buffer, as for a window's content: never a device's registers.
+        if sys::dma_phys(buf).is_err() || sys::region_len(buf).map_or(true, |l| l < need as u64) {
+            return Err(Status::BadHandles);
+        }
+        sys::mmio_map(buf).map_err(|_| Status::BadHandles)
+    }
+
+    fn clipboard_set(&mut self, req: Request, owner: usize, reply_to: Handle, buf: Option<Handle>) {
+        if self.owned(req.window, owner).is_none() {
+            return answer(reply_to, Reply::status(Status::BadWindow));
+        }
+        if self.desktop.focus != Some(req.window) {
+            let what = b" copied without the focus";
+            return self.clipboard_refused(req.window, what, reply_to);
+        }
+        let len = req.width as usize;
+        if len > MAX_CLIPBOARD {
+            return answer(reply_to, Reply::status(Status::Invalid));
+        }
+        let virt = match Self::clipboard_buffer(buf, len) {
+            Ok(virt) => virt,
+            Err(status) => return answer(reply_to, Reply::status(status)),
+        };
+        let mut guard = CLIPBOARD.lock();
+        let clip = &mut *guard;
+        // SAFETY: mapped and at least `len` bytes, checked above. The program may change
+        // them meanwhile: only the copy is looked at.
+        let given = unsafe { core::slice::from_raw_parts(virt as *const u8, len) };
+        clip.incoming[..len].copy_from_slice(given);
+        self.unmap_unused(virt);
+        if core::str::from_utf8(&clip.incoming[..len]).is_err() {
+            return answer(reply_to, Reply::status(Status::Invalid));
+        }
+        clip.text[..len].copy_from_slice(&clip.incoming[..len]);
+        clip.len = len;
+        answer(reply_to, Reply::ok(len as u64));
+    }
+
+    fn clipboard_get(&mut self, req: Request, owner: usize, reply_to: Handle, buf: Option<Handle>) {
+        if self.owned(req.window, owner).is_none() {
+            return answer(reply_to, Reply::status(Status::BadWindow));
+        }
+        if !self.paste_grant.take(req.window, self.desktop.focus) {
+            let what = b" read the clipboard without the owner's Ctrl+V";
+            return self.clipboard_refused(req.window, what, reply_to);
+        }
+        let virt = match Self::clipboard_buffer(buf, MAX_CLIPBOARD) {
+            Ok(virt) => virt,
+            Err(status) => return answer(reply_to, Reply::status(status)),
+        };
+        let clip = CLIPBOARD.lock();
+        let len = clip.len;
+        // SAFETY: mapped and at least `MAX_CLIPBOARD` bytes, which is the most the
+        // clipboard holds.
+        unsafe { core::ptr::copy_nonoverlapping(clip.text.as_ptr(), virt as *mut u8, len) };
+        self.unmap_unused(virt);
+        answer(reply_to, Reply::ok(len as u64));
     }
 
     /// `Op::Resize`: the same checks as `Create`, and only then the old buffer
@@ -1516,6 +1617,7 @@ fn main(inputs: u64) -> u64 {
         damage: Damage::full(desktop.screen),
         desktop,
         screen,
+        paste_grant: PasteGrant::default(),
         contents: (0..MAX_WINDOWS).map(|_| None).collect(),
         keys: Keys {
             keyboard,

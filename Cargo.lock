@@ -142,6 +142,7 @@ dependencies = [
  "aricode-input",
  "aricode-proto",
  "aricode-rt",
+ "aricode-sync",
  "aricode-sys",
  "aricode-text",
 ]

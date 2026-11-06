@@ -7,7 +7,7 @@ use crate::{self as sys, rights, rpc, Error, Handle};
 use aricode_gfx::Canvas;
 pub use aricode_proto::window::Event;
 pub use aricode_proto::window::{mods, wants, DamageRect, KeyState};
-use aricode_proto::window::{Op, Reply, Request, Status, MAX_DAMAGE};
+use aricode_proto::window::{Op, Reply, Request, Status, MAX_CLIPBOARD, MAX_DAMAGE};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowError {
@@ -88,12 +88,16 @@ impl Window {
     }
 
     fn call(&self, req: Request, with_buffer: bool) -> Result<Reply, WindowError> {
+        self.call_with(req, with_buffer.then_some(self.dma))
+    }
+
+    fn call_with(&self, req: Request, buffer: Option<Handle>) -> Result<Reply, WindowError> {
         let mut extra = [Handle(0); 1];
         let mut n = 0;
-        if with_buffer {
+        if let Some(buffer) = buffer {
             // `mmio_map` requires READ|WRITE even though the compositor only reads.
             extra[0] =
-                sys::handle_duplicate(self.dma, rights::READ | rights::WRITE | rights::TRANSFER)
+                sys::handle_duplicate(buffer, rights::READ | rights::WRITE | rights::TRANSFER)
                     .map_err(WindowError::Ipc)?;
             n = 1;
         }
@@ -136,6 +140,57 @@ impl Window {
             req.damage_len = rects.len() as u8;
         }
         self.call(req, false).map(|_| ())
+    }
+
+    /// A buffer of `len` bytes for a clipboard request, given to `use_it` mapped.
+    fn with_buffer<R>(
+        hardware: Handle,
+        len: usize,
+        use_it: impl FnOnce(Handle, *mut u8) -> Result<R, WindowError>,
+    ) -> Result<R, WindowError> {
+        let dma = sys::dma_alloc(hardware, len.max(1) as u64).map_err(WindowError::Ipc)?;
+        let result = match sys::mmio_map(dma) {
+            Ok(virt) => {
+                let result = use_it(dma, virt as *mut u8);
+                let _ = sys::mmio_unmap(virt);
+                result
+            }
+            Err(e) => Err(WindowError::Ipc(e)),
+        };
+        let _ = sys::handle_close(dma);
+        result
+    }
+
+    /// The owner's clipboard becomes `text`: what a program does when the owner copies.
+    /// Refused while the window lacks the focus.
+    pub fn clipboard_set(&self, hardware: Handle, text: &str) -> Result<(), WindowError> {
+        if text.len() > MAX_CLIPBOARD {
+            return Err(WindowError::Invalid);
+        }
+        Self::with_buffer(hardware, text.len(), |dma, virt| {
+            // SAFETY: our own new buffer, of at least this many bytes.
+            unsafe { core::ptr::copy_nonoverlapping(text.as_ptr(), virt, text.len()) };
+            let mut req = self.request(Op::ClipboardSet);
+            req.width = text.len() as u32;
+            self.call_with(req, Some(dma)).map(|_| ())
+        })
+    }
+
+    /// Reads the owner's clipboard into `take`, once for each Ctrl+V the owner pressed
+    /// in this window: at any other time it is refused, so call it for that key.
+    pub fn clipboard_get<R>(
+        &self,
+        hardware: Handle,
+        take: impl FnOnce(&str) -> R,
+    ) -> Result<R, WindowError> {
+        Self::with_buffer(hardware, MAX_CLIPBOARD, |dma, virt| {
+            let reply = self.call_with(self.request(Op::ClipboardGet), Some(dma))?;
+            let len = (reply.value as usize).min(MAX_CLIPBOARD);
+            // SAFETY: our own buffer, of `MAX_CLIPBOARD` bytes, and the compositor is done.
+            let bytes = unsafe { core::slice::from_raw_parts(virt, len) };
+            let text = core::str::from_utf8(bytes).map_err(|_| WindowError::Invalid)?;
+            Ok(take(text))
+        })
     }
 
     /// Gives the content a new size, in a new buffer that `paint` draws first: the

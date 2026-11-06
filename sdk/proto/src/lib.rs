@@ -1126,6 +1126,8 @@ pub mod window {
     pub const MAX_SIDE: u32 = 4096;
     /// Rectangles a `Present` can name.
     pub const MAX_DAMAGE: usize = 5;
+    /// The most the clipboard holds, in bytes.
+    pub const MAX_CLIPBOARD: usize = 64 * 1024;
 
     /// What a window asks for beyond the events every window gets, in
     /// [`Request::events`] of `Create` (ADR 0078, stage 0). The wire format
@@ -1194,6 +1196,13 @@ pub mod window {
         /// The window's content becomes `width`x`height`, in a new buffer;
         /// handles `[reply, buffer]`, as `Create`. The old buffer is released.
         Resize = 7,
+        /// The owner's clipboard becomes the `width` bytes of UTF-8 at the start of
+        /// the buffer; handles `[reply, buffer]`. Only the focused window.
+        ClipboardSet = 8,
+        /// The clipboard's text goes to the start of the buffer, of [`MAX_CLIPBOARD`]
+        /// bytes, and `Reply::value` says how many; handles `[reply, buffer]`. Only
+        /// the focused window, once for each Ctrl+V the owner pressed in it.
+        ClipboardGet = 9,
     }
 
     /// Request (64 bytes).
@@ -1293,6 +1302,8 @@ pub mod window {
                 5 => Op::Attach,
                 6 => Op::Detach,
                 7 => Op::Resize,
+                8 => Op::ClipboardSet,
+                9 => Op::ClipboardGet,
                 _ => return None,
             };
             let mut req = Self::new(op);
@@ -1329,6 +1340,8 @@ pub mod window {
         BadHandles = 3,
         BadWindow = 4,
         Timeout = 5,
+        /// Not while it lacks the focus, or the owner's press.
+        Denied = 6,
     }
 
     /// Event delivered to a window. More kinds may come: a program matches
@@ -1479,6 +1492,7 @@ pub mod window {
                 3 => Status::BadHandles,
                 4 => Status::BadWindow,
                 5 => Status::Timeout,
+                6 => Status::Denied,
                 _ => return None,
             };
             let event = match b[3] {
