@@ -17,6 +17,7 @@ pub mod port;
 pub mod power;
 pub mod smp;
 pub mod syscall;
+pub mod thermal;
 pub mod usermode;
 
 /// Installs the BSP's per-CPU tables (GDT + TSS with an IST stack for #DF),

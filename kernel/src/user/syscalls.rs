@@ -319,6 +319,14 @@ fn system_info(h: Handle, kind: u64, ptr: u64, len: u64) -> Result<u64, Error> {
             Some(fb) => fb.encode().to_vec(),
             None => return Err(Error::NotFound),
         },
+        sysinfo::TEMPERATURE => match crate::arch::x86_64::thermal::read() {
+            Some((degrees, limit)) => {
+                let mut v = degrees.to_le_bytes().to_vec();
+                v.extend_from_slice(&limit.to_le_bytes());
+                v
+            }
+            None => return Err(Error::NotFound),
+        },
         sysinfo::DISPLAY => match crate::framebuffer::abi_display() {
             Some(d) => d.encode().to_vec(),
             None => return Err(Error::NotFound),

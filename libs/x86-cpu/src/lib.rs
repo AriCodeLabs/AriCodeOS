@@ -7,6 +7,43 @@
 
 #![no_std]
 
+/// The temperature an Intel CPU's digital sensor reports (Intel SDM vol. 3B, "Thermal
+/// Monitoring and Protection"; compared with Linux's coretemp).
+pub mod thermal {
+    /// `CPUID.06H:EAX`: the sensor exists, and the package has its own.
+    pub const CPUID_SENSOR: u32 = 1 << 0;
+    pub const CPUID_PACKAGE_SENSOR: u32 = 1 << 6;
+    pub const IA32_THERM_STATUS: u32 = 0x19C;
+    pub const IA32_PACKAGE_THERM_STATUS: u32 = 0x1B1;
+    pub const IA32_TEMPERATURE_TARGET: u32 = 0x1A2;
+    /// What Linux assumes when a CPU does not say its limit.
+    pub const DEFAULT_LIMIT: u32 = 100;
+
+    /// Whether a CPU of this family and model has `IA32_TEMPERATURE_TARGET`: the
+    /// register appeared with Nehalem, and reading one that is missing faults.
+    pub const fn has_target(family: u32, model: u32) -> bool {
+        family == 6 && model >= 0x1A
+    }
+
+    /// The limit in degrees from `IA32_TEMPERATURE_TARGET`.
+    pub const fn limit(target: u64) -> u32 {
+        match ((target >> 16) & 0xFF) as u32 {
+            0 => DEFAULT_LIMIT,
+            limit => limit,
+        }
+    }
+
+    /// Degrees from a thermal status register: its readout is how far below the
+    /// limit the sensor is. `None` if it says the reading is not valid.
+    pub const fn celsius(status: u64, limit: u32) -> Option<u32> {
+        const VALID: u64 = 1 << 31;
+        if status & VALID == 0 {
+            return None;
+        }
+        Some(limit.saturating_sub(((status >> 16) & 0x7F) as u32))
+    }
+}
+
 /// Pointer for `lgdt`/`lidt`.
 #[repr(C, packed(2))]
 #[derive(Debug, Clone, Copy)]
@@ -380,6 +417,25 @@ pub mod exception {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_temperature_is_how_far_below_the_limit() {
+        use thermal::*;
+        // Valid, 40 degrees below a limit of 105.
+        let status = 1u64 << 31 | 40 << 16;
+        assert_eq!(limit(105 << 16), 105);
+        assert_eq!(celsius(status, 105), Some(65));
+        assert_eq!(celsius(40 << 16, 105), None, "not valid");
+        assert_eq!(limit(0), DEFAULT_LIMIT, "the CPU does not say");
+        assert_eq!(
+            celsius(1 << 31 | 120 << 16, 100),
+            Some(0),
+            "never below zero"
+        );
+        assert!(has_target(6, 0x3A), "Ivy Bridge");
+        assert!(!has_target(6, 0x17), "before Nehalem");
+        assert!(!has_target(15, 0x3A));
+    }
 
     #[test]
     fn segment_descriptors_match_known_encodings() {

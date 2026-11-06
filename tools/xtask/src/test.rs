@@ -40,7 +40,10 @@ pub fn run(cli: &Cli, release: bool) -> Result {
     };
 
     let all = scenario::load_all()?;
-    let selected = scenario::select(&all, level, &areas)?;
+    let selected = match cli.value("--only") {
+        Some(names) => scenario::by_name(&all, names)?,
+        None => scenario::select(&all, level, &areas)?,
+    };
 
     if cli.flag("--list") {
         for s in &all {
