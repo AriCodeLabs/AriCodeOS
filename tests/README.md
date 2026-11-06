@@ -18,6 +18,7 @@ cargo xtask test --level unit       # host only
 cargo xtask test --all              # every quick scenario: by area on a branch
 cargo xtask test --all --jobs 8     # 8 QEMU scenarios at a time (see "Parallel runs")
 cargo xtask test --area boot        # QEMU scenarios of one area (with --all to include the full ones)
+cargo xtask test --only NAME[,NAME]  # just these scenarios, slow ones too
 cargo xtask test --list             # list scenarios and which ones the filter selects
 ```
 

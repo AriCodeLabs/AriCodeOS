@@ -268,7 +268,7 @@ fn trim(s: &[u8]) -> &[u8] {
 
 fn help() {
     print(
-        b"commands:\n  help      this help\n  ps        processes\n  mem       physical memory\n  ls        AriFS files\n  cat NAME  show a file\n  write NAME TEXT  save TEXT to the file (creates it or replaces it entirely)\n  devices   PCI functions\n  services  boot services (--detail: supervisor state)\n  uptime    time since boot\n  sleep MS  wait MS milliseconds (at most 60000)\n  cpus      online processors and idle time per CPU\n  diag [NAME]  full report (uptime, mem, cpus, entropy, ps, stacks, services, net, devices); with NAME saves it to AriFS\n  net       network configuration\n  ping IP   ICMP echo (4 attempts)\n  dns NAME  resolve a name\n  http URL  GET and show the body (http:// or https://)\n  run PROG  run an initrd program and wait\n\
+        b"commands:\n  help      this help\n  ps        processes\n  mem       physical memory\n  ls        AriFS files\n  cat NAME  show a file\n  write NAME TEXT  save TEXT to the file (creates it or replaces it entirely)\n  devices   PCI functions\n  services  boot services (--detail: supervisor state)\n  uptime    time since boot\n  sleep MS  wait MS milliseconds (at most 60000)\n  cpus      online processors and idle time per CPU\n  temp      the CPU's temperature\n  diag [NAME]  full report (uptime, mem, cpus, entropy, ps, stacks, services, net, devices); with NAME saves it to AriFS\n  net       network configuration\n  ping IP   ICMP echo (4 attempts)\n  dns NAME  resolve a name\n  http URL  GET and show the body (http:// or https://)\n  run PROG  run an initrd program and wait\n\
   update [--channel stable|dev]  fetch and verify the signed index of every source of the channel (stable by default) and show what is new (installs nothing; ADR 0029, ADR 0045)\n  update add [--channel dev] URL|IP[:PORT]  register an update source (stable unless --channel dev)\n  update remove N|URL  unregister a source\n  update sources  list the sources\n  update profile add|remove NAME  follow a profile of the sources (upgrade installs its apps) or stop following it (its apps are deleted; ADR 0074)\n  update profiles  list the followed profiles\n  session [shell|desktop]  show or choose what the machine boots into: the text console, or the desktop of the desktop profile once installed (ADR 0074)\n  update apply [--allow-downgrade]  install the image in the UPDATE partition\n  update rollback  boot the system in the other slot next (no network; then `reboot`)\n  upgrade [--channel stable|dev] [--allow-downgrade]  install what the last `update` found (system into the inactive slot, then `reboot`; apps through the installer); only --channel moves the system to another channel\n  spawn PROG  launch it in the background (cannot be stopped)\n  repeat N CMD  repeat a command N times\n  reboot    reboot\n  shutdown  power off\n  exit      exit the shell\n",
     );
 }
@@ -394,6 +394,20 @@ fn uptime() {
     print(b" s\n");
 }
 
+/// The CPU's temperature (`sysinfo::TEMPERATURE`): `temp`, and in `diag`.
+fn temp() {
+    let mut b = [0u8; 8];
+    if sys::system_info(SYSTEM, abi::sysinfo::TEMPERATURE, &mut b) != Ok(8) {
+        print(b"temperature: not readable on this CPU\n");
+        return;
+    }
+    print(b"temperature: ");
+    num(u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as u64);
+    print(b" C, throttles at ");
+    num(u32::from_le_bytes([b[4], b[5], b[6], b[7]]) as u64);
+    print(b" C\n");
+}
+
 fn cpus() {
     let mut buf = [0u8; 8];
     if sys::system_info(SYSTEM, abi::sysinfo::CPUS, &mut buf) != Ok(8) {
@@ -487,6 +501,7 @@ fn diag(fs: &mut FsClient, net_client: &NetClient, mask: u64, rest: &[u8]) {
     uptime();
     mem();
     cpus();
+    temp();
     entropy();
     ps();
     memory_usage();
@@ -2050,6 +2065,7 @@ fn execute(
         b"uptime" => uptime(),
         b"sleep" => sleep(rest),
         b"cpus" => cpus(),
+        b"temp" => temp(),
         b"diag" => diag(fs, net_client, mask, rest),
         // Without a network service the shell's net handle is a
         // placeholder that reaches nobody (init, `spawn_shell`).

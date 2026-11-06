@@ -20,6 +20,8 @@ serial_contains = [
     "compositor: screen 1024x768",
     "screen  1024x768, asked for with video=; no usable EDID from the firmware",
     " 1024x768* ",
+    # QEMU's CPU has no sensor to read.
+    "temperature: not readable on this CPU",
     "ARICODEOS_SHUTDOWN",
 ]
 serial_absent = ["KERNEL PANIC", "video: setting"]

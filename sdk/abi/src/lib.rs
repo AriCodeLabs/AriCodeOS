@@ -481,6 +481,9 @@ pub mod sysinfo {
     /// (ADR 0078, stage 0), so `diag` can tell it on a machine without a
     /// serial console. `NotFound` without a screen.
     pub const DISPLAY: u64 = 15;
+    /// Two `u32`s: the CPU's temperature in degrees and the limit at which it
+    /// throttles itself. `NotFound` if it cannot be read here.
+    pub const TEMPERATURE: u64 = 16;
 
     /// What seeded the kernel generator. The number is the code of the
     /// `net tcp secret weak` and `ssh entropy weak` fault events.
