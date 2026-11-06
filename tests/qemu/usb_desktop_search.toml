@@ -1,0 +1,30 @@
+# The launcher searches as the owner types (ADR 0078, stage 3). Two applications are
+# offered: `ter` leaves the terminal alone at the top, and Enter opens it, whichever came
+# first in the list.
+name = "usb.desktop_search"
+description = "typing in the launcher narrows the list, and Enter opens what is left"
+level = "release"
+areas = ["usb", "apps", "gui"]
+cmdline = "qemu_exit shell"
+selftest = false
+disk = "usb-image"
+install = ["desktop/launcher", "desktop/editor", "desktop/terminal"]
+stick_profiles = ["desktop:launcher,editor,terminal"]
+stdin = ["sleep 9000", "shutdown"]
+timeout_secs = 90
+
+[host_input]
+marker = "launcher: ready"
+keys = ["t", "e", "r", "ret"]
+key_delay_ms = 100
+
+[expect]
+exit = 33
+serial_contains = [
+    "launcher: offers editor",
+    "launcher: offers terminal",
+    "launcher: started terminal",
+    "terminal: shell started",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "launcher: started editor"]

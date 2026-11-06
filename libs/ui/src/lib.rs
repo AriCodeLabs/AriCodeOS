@@ -52,6 +52,9 @@ pub enum Action {
     Edited(Id),
     /// Enter in a field.
     Submitted(Id),
+    /// Up (`true`) or Down in a one-line field, which has no lines to move in: a search
+    /// field moves the list it filters.
+    Arrow(Id, bool),
     /// The Delete key on a list's row.
     DeleteRow(Id, usize),
     /// Escape.
@@ -806,6 +809,18 @@ impl Ui {
         }
     }
 
+    /// Moves a list's selection one row, as its own arrow keys do.
+    pub fn select_next(&mut self, id: Id, up: bool) {
+        let last = self.list_len(id).saturating_sub(1);
+        let at = self.selected(id).unwrap_or(0);
+        let to = if up {
+            at.saturating_sub(1)
+        } else {
+            (at + 1).min(last)
+        };
+        self.select(id, Some(to));
+    }
+
     /// Selects a row, or none, without telling the program it was the owner.
     pub fn select(&mut self, id: Id, row: Option<usize>) {
         if let Kind::List { rows, selected, .. } = &mut self.node_mut(id).kind {
@@ -1001,6 +1016,10 @@ impl Ui {
             return true;
         }
         let repeating = self.repeating;
+        if !lines && matches!(key, Key::Up | Key::Down) {
+            self.actions.push_back(Action::Arrow(id, key == Key::Up));
+            return true;
+        }
         let Some(edit) = self.edit_mut(id) else {
             return false;
         };

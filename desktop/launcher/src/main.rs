@@ -3,7 +3,8 @@
 //! The desktop's launcher (ADR 0074 phase C). It asks the broker which
 //! installed applications it may offer (signed packages that open a
 //! window) and starts the one chosen, in the background and with that
-//! application's own manifest; the broker refuses anything else. A click
+//! application's own manifest; the broker refuses anything else. Typing
+//! narrows the list, and the arrows move in it from the search field. A click
 //! selects a row, and a click on the selected row, Enter or "Open" opens
 //! it (a stray click starts nothing); "Leave the desktop" ends the desktop
 //! session and gives the screen back to the text console.
@@ -39,6 +40,10 @@ fn say(parts: &[&[u8]]) {
 /// What the launcher shows.
 struct Launcher {
     ui: Ui,
+    /// What is typed narrows the list.
+    search: Id,
+    /// Every application offered; the list shows those that match.
+    names: Vec<String>,
     list: Id,
     open: Id,
     refresh: Id,
@@ -53,7 +58,7 @@ struct Launcher {
 impl Launcher {
     fn new(dark: bool) -> Self {
         let mut ui = Ui::new(Theme::of(dark), W, H);
-        let title = ui.label("Applications", Style::Headline, Tone::Primary);
+        let search = ui.field(NAME_MAX, "Search applications");
         let list = ui.list();
         ui.set_flex(list, 1);
         let status = ui.paragraph("", Style::Callout, Tone::Secondary);
@@ -62,19 +67,21 @@ impl Launcher {
         let leave = ui.button("Leave the desktop");
         let buttons = ui.stack(Stack::row(), &[open, refresh, leave]);
         let hint = ui.label(
-            "Enter opens; Ctrl+Alt+Backspace leaves",
+            "Type to search; Enter opens; Ctrl+Alt+Backspace leaves",
             Style::Subheadline,
             Tone::Secondary,
         );
         let root = ui.stack(
             Stack::column().pad(Space::Margin).fill(Fill::Window),
-            &[title, list, status, buttons, hint],
+            &[search, list, status, buttons, hint],
         );
         ui.set_root(root);
-        ui.focus(list);
+        ui.focus(search);
         let leaving = ui.dialog("Leave", "Stay");
         Self {
             ui,
+            search,
+            names: Vec::new(),
             list,
             open,
             refresh,
@@ -111,22 +118,38 @@ impl Launcher {
                 }
             }
         }
-        self.ui
-            .set_rows(self.list, names.iter().map(String::as_str));
+        let count = names.len();
+        self.names = names;
+        self.show_matches();
         let mut b = [0u8; 20];
         if failed {
             self.set_status(true, &[b"the broker did not list the applications"]);
-        } else if names.is_empty() {
+        } else if count == 0 {
             self.set_status(false, &[b"no applications installed yet"]);
         } else {
             self.set_status(
                 false,
                 &[
-                    aricode_rt::fmt_u64(names.len() as u64, &mut b),
+                    aricode_rt::fmt_u64(count as u64, &mut b),
                     b" application(s) offered",
                 ],
             );
         }
+    }
+
+    /// The list shows the names that hold what was typed, in any case, the first of them
+    /// selected.
+    fn show_matches(&mut self) {
+        let typed = self.ui.text(self.search).to_lowercase();
+        let rows: Vec<&str> = self
+            .names
+            .iter()
+            .map(String::as_str)
+            .filter(|n| n.to_lowercase().contains(&typed))
+            .collect();
+        self.ui.set_rows(self.list, rows);
+        let first = (self.ui.list_len(self.list) > 0).then_some(0);
+        self.ui.select(self.list, first);
     }
 
     /// Starts the selected application.
@@ -222,7 +245,9 @@ fn main(_arg: u64) -> u64 {
                 Action::Pressed(id) if id == l.leave => l.ask_to_leave(),
                 Action::Pressed(id) if id == l.open => l.open(apps),
                 Action::Pressed(id) if id == l.refresh => l.refresh(apps),
-                Action::Activated(..) => l.open(apps),
+                Action::Activated(..) | Action::Submitted(_) => l.open(apps),
+                Action::Edited(id) if id == l.search => l.show_matches(),
+                Action::Arrow(_, up) => l.ui.select_next(l.list, up),
                 _ => {}
             }
         }
