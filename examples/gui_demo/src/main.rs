@@ -13,7 +13,7 @@
 #![no_std]
 #![no_main]
 
-use aricode_gfx::{rgb, Rect};
+use aricode_gfx::{rgb, Canvas, Rect};
 use aricode_proto::window::{Op, Reply, Request, Status};
 use aricode_rt::sys::window::{wants, DamageRect, Event, KeyState, Window, WindowError};
 use aricode_rt::sys::{self, kind, permissions, rpc, Handle};
@@ -75,6 +75,7 @@ fn events(session: Handle, hw: Handle) -> u64 {
         };
         match ev {
             Event::Focus(true) => sys::print(b"gui_demo D: focus gained\n"),
+            Event::Focus(false) => sys::print(b"gui_demo D: focus lost\n"),
             Event::Enter { .. } => say(&mut seen, 1, b"enter"),
             Event::Leave => {
                 leaves += 1;
@@ -115,10 +116,10 @@ fn events(session: Handle, hw: Handle) -> u64 {
                 say(&mut seen, 512, b"key code with shift");
             }
             Event::Configure { width, height } => {
-                if win.resize(hw, width, height).is_err() {
+                let paint = |c: &mut Canvas| c.fill(rgb(0x20, 0x80, 0x80));
+                if win.resize(hw, width, height, paint).is_err() {
                     return 4;
                 }
-                win.canvas().fill(rgb(0x20, 0x80, 0x80));
                 let drawn = win.present().is_ok() && win.size() == (width, height);
                 sys::print(if drawn {
                     b"gui_demo D: configured\n" as &[u8]
@@ -127,10 +128,10 @@ fn events(session: Handle, hw: Handle) -> u64 {
                 });
             }
             Event::Key(b'r') => {
-                if win.resize(hw, 500, 350).is_err() {
+                let paint = |c: &mut Canvas| c.fill(rgb(0x20, 0x80, 0x80));
+                if win.resize(hw, 500, 350, paint).is_err() {
                     return 4;
                 }
-                win.canvas().fill(rgb(0x20, 0x80, 0x80));
                 let drawn = win.present().is_ok() && win.size() == (500, 350);
                 sys::print(if drawn {
                     b"gui_demo D: resized to 500x350\n" as &[u8]

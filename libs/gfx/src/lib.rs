@@ -210,7 +210,8 @@ impl<'a> Canvas<'a> {
             for y in [r.y + row, r.bottom() - 1 - row] {
                 let span = Rect::new(r.x + inset, y, (r.w as i32 - 2 * inset).max(0) as u32, 1);
                 self.fill_rect(&span, color);
-                for col in 0..inset {
+                // Of a very narrow window, only its own columns.
+                for col in 0..inset.min(r.w as i32 / 2) {
                     let cover = CORNER[row as usize][col as usize] as u32;
                     self.blend_pixel(r.x + col, y, color, cover);
                     self.blend_pixel(r.right() - 1 - col, y, color, cover);
@@ -223,6 +224,9 @@ impl<'a> Canvas<'a> {
 
     /// A filled circle within `r`, edges smoothed by 4x4 samples.
     pub fn circle(&mut self, r: &Rect, color: Color) {
+        if !r.intersects(&self.clip) {
+            return;
+        }
         let d = r.w.min(r.h) as i32;
         let q = d * 4;
         for y in 0..d {
@@ -260,17 +264,32 @@ impl<'a> Canvas<'a> {
             if dy >= SHADOW_SIDE {
                 continue;
             }
+            // Nothing to darken under the frame, except in its corners' notches.
+            let (hole_from, hole_to) = if y < frame.y || y >= frame.bottom() {
+                (0, 0)
+            } else if dy > 0 {
+                (x0, x1 + 1)
+            } else {
+                (frame.x, frame.right())
+            };
             let row = y as usize * self.stride as usize;
-            for x in outer.x..outer.right() {
-                let dx = (x0 - x).max(x - x1).max(0) as usize;
-                if dx >= SHADOW_SIDE {
-                    continue;
+            let mut shade = |from: i32, to: i32| {
+                for x in from..to {
+                    let dx = (x0 - x).max(x - x1).max(0) as usize;
+                    if dx < SHADOW_SIDE {
+                        let fall = SHADOW_FALL[dy][dx] as u32;
+                        if fall != 0 {
+                            let px = &mut self.pixels[row + x as usize];
+                            *px = blend(*px, 0, (fall * strength) >> 8);
+                        }
+                    }
                 }
-                let fall = SHADOW_FALL[dy][dx] as u32;
-                if fall != 0 && !frame.contains(x, y) {
-                    let px = &mut self.pixels[row + x as usize];
-                    *px = blend(*px, 0, (fall * strength) >> 8);
-                }
+            };
+            if hole_from >= hole_to {
+                shade(outer.x, outer.right());
+            } else {
+                shade(outer.x, hole_from.min(outer.right()));
+                shade(hole_to.max(outer.x), outer.right());
             }
         }
     }

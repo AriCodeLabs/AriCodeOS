@@ -422,4 +422,20 @@ keep their size until they move to the toolkit (stage 2).
 that moment. Before, a window moved away and back within one frame kept its old pixels:
 the host test of damage against full composition found it, once frames could move.
 
+An independent review found no high findings. All fixed:
+- A size asked of a busy program could be applied after the owner had gone back. A place
+  now remembers its size, and only that answer takes it there.
+- Minimizing told the window nothing, and lost its keys' releases.
+- A window that opened without the focus could block Alt+Tab and being raised by a click.
+- A resize could show a black buffer: `Window::resize` now paints first.
+- A window closed during Alt+Tab, a click on a title bar near the top, and an empty
+  window list no longer misbehave; a minimized window Tab goes past is minimized again.
+- Sizes asked of a program stay within what it may answer; a hidden window's Present costs
+  nothing; a queue keeps `Configure`; the shadow skips what the frame covers and fills
+  the corners' notches.
+
+**Known limit:** a minimized window has no way back without a keyboard until the dock
+(stage 3). The compositor's handling logic has scenarios but no host tests: it lives in the
+service, and moving it into `libs/gfx` is for when it grows.
+
 Next in this stage: Inter and JetBrains Mono, the atlas and our shaper.
