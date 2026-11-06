@@ -21,13 +21,13 @@
 # first. --quick runs `check` and the default test level only: it is for
 # trying the container itself.
 #
-# One QEMU suite at a time on the whole host (ADR 0040): the test passes
-# run holding the host's suite lock (ARICODEOS_SUITE_LOCK, the host's
-# $HOME/.cache/aricodeos-lock mounted at /run/aricodeos-lock), taken with
-# flock before the first pass and released after the last one is
-# collected, so no other suite runs between them; the passes inherit it
-# (ARICODEOS_SUITE_LOCK_HELD). Without the mount the run fails instead of
-# testing beside another suite.
+# One QEMU suite at a time on the whole host (ADR 0040): each test pass
+# runs holding the host's suite lock (ARICODEOS_SUITE_LOCK, the host's
+# $HOME/.cache/aricodeos-lock mounted at /run/aricodeos-lock), and inherits
+# it (ARICODEOS_SUITE_LOCK_HELD). The lock is let go between the passes,
+# with a pause for a waiter to take it: a branch's test waits for one pass,
+# not for both. Without the mount the run fails instead of testing beside
+# another suite.
 #
 # The repository is public and fetched over https: no credentials.
 set -u
@@ -37,6 +37,9 @@ branch=${ARICODEOS_CI_BRANCH:-develop}
 jobs=${ARICODEOS_CI_JOBS:-}
 interval=${ARICODEOS_CI_INTERVAL:-300}
 pause=${ARICODEOS_CI_PAUSE:-600}
+# Seconds without the lock between two passes, long enough for a waiting
+# suite to wake up and take it.
+between=5
 loop=false
 quick=false
 work=/work
@@ -140,6 +143,21 @@ collect() {
     done
 }
 
+# pass NAME SUITE COMMAND...: one test pass under the suite lock.
+pass() {
+    pass_name=$1
+    pass_suite=$2
+    shift 2
+    if lock_suites "$pass_suite"; then
+        step "$pass_name" "$@"
+        collect "$pass_name"
+        unlock_suites
+    else
+        printf '%-12s %s  %s\n' "$pass_name" FAIL "host suite lock unavailable (container log)" >>"$dir/steps.txt"
+        failed_steps=$((failed_steps + 1))
+    fi
+}
+
 run_once() {
     sha=$1
     git -C "$src" checkout --quiet --force --detach "$sha" || return 1
@@ -160,25 +178,12 @@ run_once() {
     step check cargo xtask check
     if $quick; then
         tests="test"
-        suite="default level"
+        pass test "default level" cargo xtask test "$@"
     else
         tests="test-1cpu test-4cpus"
-        suite="test --all and --all --cpus 4"
-    fi
-    if lock_suites "$suite"; then
-        if $quick; then
-            step test cargo xtask test "$@"
-            collect test
-        else
-            step test-1cpu cargo xtask test --level release "$@"
-            collect test-1cpu
-            step test-4cpus cargo xtask test --level release --cpus 4 "$@"
-            collect test-4cpus
-        fi
-        unlock_suites
-    else
-        printf '%-12s %s  %s\n' lock FAIL "host suite lock unavailable (container log)" >>"$dir/steps.txt"
-        failed_steps=$((failed_steps + 1))
+        pass test-1cpu "release level" cargo xtask test --level release "$@"
+        sleep "$between"
+        pass test-4cpus "release level, 4 CPUs" cargo xtask test --level release --cpus 4 "$@"
     fi
     total=$(( $(date +%s) - run_start ))
     if [ $failed_steps -eq 0 ]; then verdict=PASS; else verdict=FAIL; fi
