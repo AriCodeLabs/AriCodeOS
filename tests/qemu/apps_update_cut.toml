@@ -3,7 +3,7 @@
 # (never a mix) and it launches; the installer finishes the update.
 name = "apps.update_cut"
 description = "power cut while installing a package: the installed one still launches and the update completes afterwards"
-level = "full"
+level = "release"
 areas = ["apps", "update", "filesystem", "shell"]
 install = ["examples/hello_ext"]
 packages = ["examples/hello_ext:2"]

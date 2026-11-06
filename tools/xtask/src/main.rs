@@ -18,8 +18,9 @@
 //!                                             --channel dev: the development channel's key, e.g. ~/.config/aricodeos/dev-signing-key)
 //! cargo xtask test  [options]                 test levels (see tests/README.md)
 //! cargo xtask fs-cat DISK [NAME]             reads a file from ARI0 (or lists it) in an image or dump
-//!     --level unit|smoke|full                 default: unit + smoke
-//!     --all                                   unit + full (required before main)
+//!     --level unit|smoke|full|release         default: unit + smoke; release (the slow
+//!                                             scenarios too) is required before main
+//!     --all                                   unit + full: every quick scenario
 //!     --area boot[,memory,...]                only QEMU scenarios from those areas
 //!     --cpus N                                N processors for scenarios that do not declare cpus
 //!     --jobs N                                N QEMU scenarios at a time (default: CPUs / 2, CPUs / 4 with

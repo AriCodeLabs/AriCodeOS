@@ -79,29 +79,48 @@ Before uploading, the same files can be tried locally through the mirror
 of the public path (`serve-update`, docs/hardware.md, "The public source
 and its local mirror").
 
+## Lines of work
+
+The owner's rule (2026-11-06): several lines advance at once, and a change does
+not wait for what it cannot affect. Each line is a long-lived branch off `develop`,
+with its own worktree:
+
+```text
+stream/desktop   -> the desktop, the toolkit and its apps (ADR 0078)
+stream/platform  -> kernel, drivers and the path to the hardware (ADR 0080)
+stream/demos     -> what shows the system working: games, simulation
+```
+
+`feature/*` and `fix/*` branch from their line and merge back into it. A line
+merges `develop` before each feature, and merges into `develop` when a step works,
+on the reference laptop if it can be shown there. A change to what several lines
+share (`sdk/`, the protocols) goes to `develop` first, so the others take it soon.
+
 ## Test levels per branch
 
-The tests live in the repository ([tests/README.md](../tests/README.md)) and have three levels
-so that each change runs the fastest check that still gives coverage. The
-full suite is for `main`; small changes do not wait for it:
+The tests live in the repository ([tests/README.md](../tests/README.md)). A test is
+there to find what a change can break, so each moment runs only what it can find:
 
 ```text
 each commit on feature/* or fix/*     cargo xtask check && cargo xtask test --level unit      (minutes)
-  same branch, touching running code  cargo xtask test --all --area <areas touched>           (minutes)
-before merging into develop           cargo xtask check && cargo xtask test   (unit + smoke)  (~5 min)
-before merging into main (release)    cargo xtask check && cargo xtask test --all
-                                      and cargo xtask test --all --cpus 4                     (~12 min both)
+  same branch, touching running code  cargo xtask test --all --area <areas touched>           (a minute or two)
+merging a line into develop           cargo xtask check && cargo xtask test   (unit + smoke)  (~2 min)
+composing a version (before main)     cargo xtask check && cargo xtask test --level release
+                                      and cargo xtask test --level release --cpus 4           (~12 min both)
                                       and cargo xtask perf && cargo xtask perf --cpus 4       (~2 min, alone)
 ```
 
-The QEMU scenarios run several at a time (`--jobs N`, by default from the
-CPUs and memory; ADR 0040), which brought the two full passes from about
-an hour to the time above on the reference host (16 CPUs). Run the full
-suite on a branch only when it changes the kernel's scheduling/SMP, memory
-or the test runner itself, or when a scenario of another area could
-plausibly break, and say why. Never run the same suite twice for the same
-commit, and never rerun a red suite into green: explain the failure first
-(failure protocol, ADR 0028).
+- **Slow scenarios wait for the version.** A scenario of 15 s or more has `level =
+  "release"`: `--all` and `--area` skip it. Working on what one covers, run it by
+  name (`--only`). A new scenario over 15 s starts at that level.
+- **A test that a harder one already covers goes.** A scenario earns its place by
+  what it alone can fail on: when one extends another, keep the larger.
+- **The full run is not for branches,** whatever they touch: not for kernel
+  changes either. The CI container runs it on `develop` after each merge, and a
+  failure there is an incident, fixed forward.
+
+Never rerun a red suite into green: explain the failure first (failure protocol,
+ADR 0028).
 
 The full suite on `develop` runs continuously in the CI container
 (`tools/docker/ci/`, README.md "Docker"); a failure there becomes an

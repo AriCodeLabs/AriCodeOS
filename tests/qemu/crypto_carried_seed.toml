@@ -16,7 +16,7 @@
 # (`seed_store`), without ever printing it.
 name = "crypto.carried_seed"
 description = "kernel seed carried across boots: first boot weak and seed written, second boot mixes it in, the stored seed changes every boot"
-level = "full"
+level = "release"
 areas = ["crypto", "network", "diag", "update"]
 timeout_secs = 120
 

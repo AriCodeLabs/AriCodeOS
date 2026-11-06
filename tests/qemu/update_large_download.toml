@@ -7,7 +7,7 @@
 # misplaced write changes the hash (audit of ADR 0064, L5).
 name = "update.large_download"
 description = "an image larger than the updater's memory downloads into UPDATE, installs and boots"
-level = "full"
+level = "release"
 areas = ["update", "network", "boot", "shell"]
 disk = "slots"
 timeout_secs = 240

@@ -5,7 +5,7 @@
 # the next boot tries.
 name = "update.refuse_downgrade"
 description = "an older signed system image is refused unless upgrade --allow-downgrade"
-level = "full"
+level = "release"
 areas = ["update", "network", "shell", "boot"]
 disk = "pending-b"
 timeout_secs = 180
