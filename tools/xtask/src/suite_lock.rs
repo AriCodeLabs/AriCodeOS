@@ -19,6 +19,12 @@
 //! it ends; the holder's details written into the file are information only.
 //! Rust opens files close-on-exec, so QEMU and other children never inherit
 //! the descriptor.
+//!
+//! A suite that has to wait also holds a shared `flock` on `suite.lock.waiting`
+//! while it waits. The CI container's passes look at that between scenarios
+//! ([`someone_waits`]) and step aside, so a branch's short test waits for the
+//! scenarios already running, not for a whole pass (the owner's rule: slow tests
+//! must not get in a feature's way). A waiter that dies leaves nothing behind.
 
 use crate::Result;
 use std::fs::{File, OpenOptions, TryLockError};
@@ -145,6 +151,14 @@ pub fn lock_file(path: &Path, details: &str, waiting: impl FnOnce(&str)) -> Resu
             } else {
                 &holder
             });
+            // Says so for as long as it waits; without it the wait only takes longer.
+            let _waiting = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(waiting_path(path))
+                .and_then(|f| f.lock_shared().map(|()| f));
             file.lock()
                 .map_err(|e| format!("{}: {e}", path.display()))?;
         }
@@ -158,6 +172,28 @@ pub fn lock_file(path: &Path, details: &str, waiting: impl FnOnce(&str)) -> Resu
     };
     write(&mut file).map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(file)
+}
+
+fn waiting_path(lock: &Path) -> PathBuf {
+    let mut name = lock.as_os_str().to_owned();
+    name.push(".waiting");
+    PathBuf::from(name)
+}
+
+/// Whether a suite is waiting for the lock of this environment.
+pub fn someone_waits() -> bool {
+    let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    let path = match (var("ARICODEOS_SUITE_LOCK"), var("HOME")) {
+        (Some(p), _) => PathBuf::from(p),
+        (None, Some(h)) => Path::new(&h).join(".cache/aricodeos-lock/suite.lock"),
+        (None, None) => return false,
+    };
+    waits_for(&path)
+}
+
+fn waits_for(lock: &Path) -> bool {
+    File::open(waiting_path(lock))
+        .is_ok_and(|f| matches!(f.try_lock(), Err(TryLockError::WouldBlock)))
 }
 
 /// Who holds the lock: process, machine (the container id inside one),
@@ -308,6 +344,32 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             "pid 2\nsuite second\n"
         );
+        drop(held);
+    }
+
+    /// A suite waiting says so while it waits, and not after.
+    #[test]
+    fn someone_waiting_is_seen_until_it_has_the_lock() {
+        let dir = crate::test_util::TempDir::new("suite-wait");
+        let path = dir.path().join("suite.lock");
+        assert!(!waits_for(&path), "nobody yet");
+        let first = lock_file(&path, "pid 1\n", |_| panic!("free lock")).unwrap();
+        assert!(!waits_for(&path), "holding it is not waiting");
+        let second = {
+            let path = path.clone();
+            std::thread::spawn(move || lock_file(&path, "pid 2\n", |_| ()).unwrap())
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !waits_for(&path) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the waiter is not seen"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        drop(first);
+        let held = second.join().unwrap();
+        assert!(!waits_for(&path), "it has the lock now");
         drop(held);
     }
 
