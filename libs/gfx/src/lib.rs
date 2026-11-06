@@ -306,6 +306,24 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    /// Blends `color` through a `w`x`h` coverage mask at (x, y), clipped: what text
+    /// is drawn with.
+    pub fn blend_mask(&mut self, x: i32, y: i32, w: u32, h: u32, mask: &[u8], color: Color) {
+        let area = Rect::new(x, y, w, h).intersect(&self.clip);
+        for py in area.y..area.bottom() {
+            let row = (py - y) as usize * w as usize;
+            let out = py as usize * self.stride as usize;
+            for px in area.x..area.right() {
+                let cover = mask[row + (px - x) as usize] as u32;
+                if cover != 0 {
+                    let p = &mut self.pixels[out + px as usize];
+                    // 255 of 255 is the color itself.
+                    *p = blend(*p, color, cover + (cover >> 7));
+                }
+            }
+        }
+    }
+
     /// Copies `src` with its top-left corner at `(x, y)`, clipping.
     pub fn blit(&mut self, src: &Canvas, x: i32, y: i32) {
         let dst_rect = Rect::new(x, y, src.width, src.height).intersect(&self.clip);
@@ -700,6 +718,26 @@ impl Window {
     }
 }
 
+/// What draws the title bars' text: the console font by default, a real one from a
+/// caller that has it (`aricode-text`, in the compositor).
+pub trait Labels {
+    fn width(&mut self, text: &str) -> i32;
+    /// Draws `text` inside `canvas`'s clip, its line centred on `middle`, from `x`.
+    fn draw(&mut self, canvas: &mut Canvas, text: &str, x: i32, middle: i32, color: Color);
+}
+
+/// The console font, for what has nothing better.
+pub struct CellLabels;
+
+impl Labels for CellLabels {
+    fn width(&mut self, text: &str) -> i32 {
+        (text.chars().count() * GLYPH_WIDTH) as i32
+    }
+    fn draw(&mut self, canvas: &mut Canvas, text: &str, x: i32, middle: i32, color: Color) {
+        canvas.text(x, middle - 8, text, color, None);
+    }
+}
+
 /// Which edges of `frame` the point (x, y) is on, in the band outside it.
 fn band_edges(frame: &Rect, x: i32, y: i32) -> u8 {
     let band = RESIZE_BAND;
@@ -1027,6 +1065,17 @@ impl Desktop {
         &self,
         out: &mut Canvas,
         region: &Rect,
+        draw_content: impl FnMut(&Window, &mut Canvas),
+    ) {
+        self.compose_labeled(out, region, &mut CellLabels, draw_content);
+    }
+
+    /// [`Desktop::compose_region`], with the title bars' text from `labels`.
+    pub fn compose_labeled(
+        &self,
+        out: &mut Canvas,
+        region: &Rect,
+        labels: &mut impl Labels,
         mut draw_content: impl FnMut(&Window, &mut Canvas),
     ) {
         let mut out = out.clipped(region);
@@ -1055,22 +1104,20 @@ impl Desktop {
                 self.theme.title_inactive
             };
             let buttons = w.zoom_box().map_or(frame.x, |z| z.right());
-            let name = w.title_str().chars().count();
-            let mark = if w.hung { HUNG_MARK.chars().count() } else { 0 };
-            let wide = ((name + mark) * GLYPH_WIDTH) as i32;
+            let mark = if w.hung { labels.width(HUNG_MARK) } else { 0 };
+            let name = labels.width(w.title_str());
             let room = Rect::new(
                 buttons,
                 frame.y,
                 (frame.right() - buttons).max(0) as u32,
                 TITLE_H,
             );
-            let x = (frame.x + (frame.w as i32 - wide) / 2).max(buttons + 4);
-            let y = frame.y + (TITLE_H as i32 - 16) / 2;
+            let x = (frame.x + (frame.w as i32 - name - mark) / 2).max(buttons + 4);
+            let middle = frame.y + TITLE_H as i32 / 2;
             let mut titled = out.clipped(&room);
-            titled.text(x, y, w.title_str(), color, None);
+            labels.draw(&mut titled, w.title_str(), x, middle, color);
             if w.hung {
-                let after = x + (name * GLYPH_WIDTH) as i32;
-                titled.text(after, y, HUNG_MARK, color, None);
+                labels.draw(&mut titled, HUNG_MARK, x + name, middle, color);
             }
             let circles = [
                 (w.close_box(), self.theme.close),
