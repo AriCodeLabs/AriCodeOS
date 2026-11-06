@@ -42,6 +42,8 @@ pause=${ARICODEOS_CI_PAUSE:-600}
 # Seconds without the lock between two passes, long enough for a waiting
 # suite to wake up and take it.
 between=5
+# Times in a row a pass may step aside without finishing one scenario.
+max_idle=5
 loop=false
 quick=false
 work=/work
@@ -155,6 +157,8 @@ pass() {
     pass_suite=$2
     shift 2
     export ARICODEOS_SUITE_YIELD="$dir/$pass_name.progress"
+    done_before=0
+    idle=0
     while :; do
         if ! lock_suites "$pass_suite"; then
             printf '%-12s %s  %s\n' "$pass_name" FAIL "host suite lock unavailable (container log)" >>"$dir/steps.txt"
@@ -164,6 +168,19 @@ pass() {
         step "$pass_name" "$@"
         unlock_suites
         [ $status -eq 75 ] || break
+        # Stepping aside again and again with nothing done means the look is wrong, not
+        # that someone waits: the pass then runs to its end (incident 0061).
+        done_now=$(wc -l <"$ARICODEOS_SUITE_YIELD" 2>/dev/null || echo 0)
+        if [ "$done_now" -gt "$done_before" ]; then
+            idle=0
+        else
+            idle=$((idle + 1))
+        fi
+        done_before=$done_now
+        if [ "$idle" -ge "$max_idle" ]; then
+            log "$pass_name: stepped aside $idle times with nothing done; not stepping aside again"
+            unset ARICODEOS_SUITE_YIELD
+        fi
         sleep "$between"
     done
     unset ARICODEOS_SUITE_YIELD
