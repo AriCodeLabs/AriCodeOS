@@ -540,7 +540,7 @@ fn a_hidden_widget_gives_back_its_room_and_the_keys() {
 fn the_theme_changes_every_pixel_it_owns() {
     let mut f = form();
     let corner = f.pixels[0];
-    f.ui.set_theme(Theme::dark());
+    f.ui.handle(Event::Appearance { dark: true });
     f.same_as_full_paint();
     assert_ne!(f.pixels[0], corner);
     assert_eq!(f.pixels[0], Theme::dark().window);

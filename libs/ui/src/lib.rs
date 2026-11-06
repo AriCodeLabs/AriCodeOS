@@ -756,6 +756,7 @@ impl Ui {
             Event::Motion { x, y, .. } => self.pointer_to(x, y),
             Event::Release { x, y, button: LEFT } => self.release(x, y),
             Event::Wheel { x, y, delta } => self.wheel(x, y, delta),
+            Event::Appearance { dark } => self.set_theme(Theme::of(dark)),
             Event::Focus(on) => {
                 self.active = on;
                 if !on {

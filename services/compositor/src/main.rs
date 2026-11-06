@@ -383,6 +383,7 @@ static CLIPBOARD: SpinLock<Clipboard> = SpinLock::new(Clipboard {
 
 struct Compositor {
     paste_grant: PasteGrant,
+    dark: bool,
     screen: Screen,
     desktop: Desktop,
     /// On the heap: with their event queues, they would take 6 KB of the stack.
@@ -1168,12 +1169,16 @@ impl Compositor {
     ) {
         // The main endpoint (init, the broker) only makes and ends
         // sessions; windows live in sessions, which can do neither.
-        if (owner == MAIN) != matches!(req.op, Op::Attach | Op::Detach) {
+        if (owner == MAIN) != matches!(req.op, Op::Attach | Op::Detach | Op::Appearance) {
             return answer(reply_to, Reply::status(Status::Invalid));
         }
         match req.op {
             Op::Attach => self.attach(reply_to, now_ms),
             Op::Detach => self.detach(reply_to, req.window),
+            Op::Appearance => {
+                self.set_appearance(req.width != 0);
+                answer(reply_to, Reply::ok(0));
+            }
             Op::Create => {
                 let Some(buf) = buf else {
                     return answer(reply_to, Reply::status(Status::BadHandles));
@@ -1242,7 +1247,9 @@ impl Compositor {
                 sys::print(b"x");
                 num(req.height as u64);
                 sys::print(b"\n");
-                answer(reply_to, Reply::ok(id as u64));
+                // Above the id: how to look, so its first picture is already right.
+                let dark = u64::from(self.dark) << 32;
+                answer(reply_to, Reply::ok(id as u64 | dark));
                 // The program the owner just opened gets the keys typed
                 // next, and no other window takes them (audit of phase C,
                 // M2).
@@ -1331,6 +1338,26 @@ impl Compositor {
                 self.close_window(slot);
                 answer(reply_to, Reply::ok(0));
             }
+        }
+    }
+
+    /// The owner chose light or dark: the frames at the next frame, and each program
+    /// that asked.
+    fn set_appearance(&mut self, dark: bool) {
+        if self.dark == dark {
+            return;
+        }
+        self.dark = dark;
+        self.desktop.theme = aricode_gfx::Theme::of(dark);
+        self.damage = Damage::full(self.desktop.screen);
+        sys::print(if dark {
+            b"compositor: appearance dark\n" as &[u8]
+        } else {
+            b"compositor: appearance light\n"
+        });
+        let ids: Vec<u32> = self.contents.iter().flatten().map(|c| c.id).collect();
+        for id in ids {
+            self.deliver_wanted(id, wants::APPEARANCE, Event::Appearance { dark });
         }
     }
 
@@ -1618,6 +1645,7 @@ fn main(inputs: u64) -> u64 {
         desktop,
         screen,
         paste_grant: PasteGrant::default(),
+        dark: false,
         contents: (0..MAX_WINDOWS).map(|_| None).collect(),
         keys: Keys {
             keyboard,

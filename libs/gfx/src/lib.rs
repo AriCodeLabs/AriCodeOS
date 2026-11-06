@@ -510,6 +510,26 @@ impl Theme {
         shadow_active: 77,
         shadow_inactive: 38,
     };
+
+    /// The dark theme of ADR 0078: the frame on #323232, over a darker desktop.
+    pub const DARK: Self = Self {
+        desktop: rgb(0x2A, 0x35, 0x41),
+        window: rgb(0x32, 0x32, 0x32),
+        title_active: rgb(0xE6, 0xE6, 0xE6),
+        title_inactive: rgb(0x8C, 0x8C, 0x8C),
+        circle_off: rgb(0x55, 0x55, 0x55),
+        shadow_active: 110,
+        shadow_inactive: 60,
+        ..Self::LIGHT
+    };
+
+    pub const fn of(dark: bool) -> Self {
+        if dark {
+            Self::DARK
+        } else {
+            Self::LIGHT
+        }
+    }
 }
 
 impl Default for Theme {

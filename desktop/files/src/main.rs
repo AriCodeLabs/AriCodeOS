@@ -255,8 +255,8 @@ impl Files {
 }
 
 /// The window's widgets, and the folder they show.
-fn build(fs: FsClient) -> Files {
-    let mut ui = Ui::new(Theme::light(), W, H);
+fn build(fs: FsClient, dark: bool) -> Files {
+    let mut ui = Ui::new(Theme::of(dark), W, H);
     let title = ui.label("home/", Style::Headline, Tone::Primary);
     let list = ui.list();
     ui.set_flex(list, 1);
@@ -313,12 +313,12 @@ fn main(_arg: u64) -> u64 {
         say(&[b"cannot reach home/"]);
         return 2;
     };
-    let wanted = wants::POINTER | wants::KEY_CODES | wants::RESIZE;
+    let wanted = wants::POINTER | wants::KEY_CODES | wants::RESIZE | wants::APPEARANCE;
     let Ok(mut win) = Window::create_wanting(session, hw, W, H, "Files", wanted) else {
         say(&[b"could not create its window"]);
         return 3;
     };
-    let mut f = build(fs);
+    let mut f = build(fs, win.starts_dark());
     if f.refresh(None) {
         f.say_count();
     }
