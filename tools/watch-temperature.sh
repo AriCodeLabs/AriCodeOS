@@ -1,10 +1,9 @@
 #!/bin/sh
 # SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 # SPDX-License-Identifier: Apache-2.0
-# Watches a machine under test through its `temp` command: logs each reading, says the
-# maximum, and past the limit shuts the machine down. For heavy runs on the reference
-# laptop (the owner's rule: every heavy test has a
-# watch).
+# Logs a machine's temperature through its `temp` command, and past the limit shuts it
+# down. A record, not the guard: the kernel's own watch (`thermal_off=`) is what stops a
+# hot machine, since this one's readings wait while a program started over SSH runs.
 #
 #   tools/watch-temperature.sh ari@192.168.1.27 [limit] [log] -- [ssh options]
 set -u
