@@ -192,6 +192,10 @@ pub fn someone_waits() -> bool {
 }
 
 fn waits_for(lock: &Path) -> bool {
+    // The look itself holds the file for a moment, exclusively: two threads of a pass
+    // looking at once would each take the other for a waiter.
+    static LOOKING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one_at_a_time = LOOKING.lock().unwrap_or_else(|e| e.into_inner());
     File::open(waiting_path(lock))
         .is_ok_and(|f| matches!(f.try_lock(), Err(TryLockError::WouldBlock)))
 }
@@ -371,6 +375,23 @@ mod tests {
         let held = second.join().unwrap();
         assert!(!waits_for(&path), "it has the lock now");
         drop(held);
+    }
+
+    /// The jobs of a pass look at the same time, and none is a waiter.
+    #[test]
+    fn looking_from_many_threads_sees_no_waiter() {
+        let dir = crate::test_util::TempDir::new("suite-look");
+        let path = dir.path().join("suite.lock");
+        std::fs::write(waiting_path(&path), "").unwrap();
+        std::thread::scope(|s| {
+            for _ in 0..8 {
+                s.spawn(|| {
+                    for _ in 0..2000 {
+                        assert!(!waits_for(&path), "a look taken for a waiter");
+                    }
+                });
+            }
+        });
     }
 
     #[test]
