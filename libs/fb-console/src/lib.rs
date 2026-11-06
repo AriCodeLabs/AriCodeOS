@@ -265,6 +265,9 @@ impl<S: Surface> Console<S> {
         self.cursor_row -= above;
         self.cursor_col = self.cursor_col.min(cols - 1);
         self.cursor_drawn = None;
+        // A range marked for the old grid means nothing in this one.
+        self.dirty_from = 0;
+        self.dirty_to = 0;
         self.invalidate();
     }
 

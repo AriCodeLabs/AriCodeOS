@@ -449,16 +449,6 @@ fn run_input_probe(
             std::thread::sleep(Duration::from_millis(100));
             step(&mut qmp, &[button(false)])?;
         }
-        if let Some((key, ms)) = &pointing.hold_key {
-            let key_event = |down: bool| {
-                format!(
-                    r#"{{"type":"key","data":{{"down":{down},"key":{{"type":"qcode","data":"{key}"}}}}}}"#
-                )
-            };
-            step(&mut qmp, &[key_event(true)])?;
-            std::thread::sleep(Duration::from_millis(*ms));
-            step(&mut qmp, &[key_event(false)])?;
-        }
         std::thread::sleep(Duration::from_millis(100));
         // Without an echo to follow, every key is only paced by the delay.
         let steps = match echo {
@@ -506,6 +496,16 @@ fn run_input_probe(
                 };
                 typing::wait_past(&mut cursor, &guest, &needle, typing::ECHO_TIMEOUT)?;
             }
+        }
+        if let Some((key, ms)) = &pointing.hold_key {
+            let key_event = |down: bool| {
+                format!(
+                    r#"{{"type":"key","data":{{"down":{down},"key":{{"type":"qcode","data":"{key}"}}}}}}"#
+                )
+            };
+            step(&mut qmp, &[key_event(true)])?;
+            std::thread::sleep(Duration::from_millis(*ms));
+            step(&mut qmp, &[key_event(false)])?;
         }
         Ok(())
     })();

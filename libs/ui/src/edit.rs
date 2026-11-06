@@ -102,14 +102,22 @@ impl TextEdit {
         self.insert("")
     }
 
+    /// Where the character before `pos` starts; a CRLF is one character.
     pub fn before(&self, pos: usize) -> usize {
+        if self.text[..pos].ends_with("\r\n") {
+            return pos - 2;
+        }
         self.text[..pos]
             .char_indices()
             .next_back()
             .map_or(0, |(i, _)| i)
     }
 
+    /// Where the character after `pos` starts; a CRLF is one character.
     pub fn after(&self, pos: usize) -> usize {
+        if self.text[pos..].starts_with("\r\n") {
+            return pos + 2;
+        }
         self.text[pos..]
             .chars()
             .next()
@@ -140,11 +148,15 @@ impl TextEdit {
         self.text[..pos].rfind('\n').map_or(0, |i| i + 1)
     }
 
-    /// The end of the line that holds `pos`, before its line break.
+    /// The end of the line that holds `pos`, before its line break, CRLF or LF.
     pub fn line_end(&self, pos: usize) -> usize {
-        self.text[pos..]
-            .find('\n')
-            .map_or(self.text.len(), |i| pos + i)
+        let rest = &self.text[pos..];
+        let end = rest.find('\n').map_or(self.text.len(), |i| pos + i);
+        if end > pos && self.text.as_bytes()[end - 1] == b'\r' && end < self.text.len() {
+            end - 1
+        } else {
+            end
+        }
     }
 
     /// Moves the caret to `pos`, a character's start; with `extend` the selection follows.
@@ -216,7 +228,7 @@ mod tests {
 
     #[test]
     fn controls_do_not_get_in() {
-        let mut e = edit("a\u{7}b\nc\td");
+        let e = edit("a\u{7}b\nc\td");
         assert_eq!(e.text(), "a?b c d");
         let mut lines = TextEdit::new(32, true);
         lines.set_text("a\u{7}b\nc\td");
@@ -227,6 +239,22 @@ mod tests {
             "a\r\nb",
             "a file's line ends stay as they were"
         );
+    }
+
+    #[test]
+    fn a_crlf_is_one_line_end() {
+        let mut e = TextEdit::new(32, true);
+        e.set_text("ab\r\ncd");
+        assert_eq!(e.line_end(0), 2);
+        assert_eq!(e.after(2), 4);
+        assert_eq!(e.before(4), 2);
+        e.move_to(4, false);
+        assert!(e.backspace());
+        assert_eq!(e.text(), "abcd", "both go together");
+        e.set_text("ab\r\ncd");
+        e.move_to(2, false);
+        assert!(e.delete());
+        assert_eq!(e.text(), "abcd");
     }
 
     #[test]

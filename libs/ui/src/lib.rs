@@ -25,7 +25,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use aricode_gfx::{Canvas, Damage, Rect};
 use aricode_input::term::{Key, KeyDecoder};
-use aricode_proto::window::{mods, DamageRect, Event};
+use aricode_proto::window::{mods, DamageRect, Event, KeyState};
 use aricode_text::Typesetter;
 use edit::TextEdit;
 pub use theme::{Fill, Space, Style, Theme, Tone, Type};
@@ -58,6 +58,9 @@ pub enum Action {
     Shortcut(u8),
     /// The owner copied: the text is in [`Ui::take_copied`], for the clipboard.
     Copied,
+    /// The owner cut: as `Copied`, and once the clipboard has it, [`Ui::cut_done`] takes
+    /// it out. If the clipboard refuses, the text stays.
+    Cut(Id),
     /// The owner pressed Ctrl+V here: the clipboard's text goes to [`Ui::paste`].
     Paste(Id),
 }
@@ -155,8 +158,10 @@ impl Scroller {
         if furthest == 0 {
             return None;
         }
-        let long = (h * h / self.content).max(t.thumb_min).min(h);
-        let y = view.y + (self.offset.min(furthest) * (h - long)) / furthest;
+        let long = (h as i64 * h as i64 / self.content as i64) as i32;
+        let long = long.max(t.thumb_min).min(h);
+        let along = self.offset.min(furthest) as i64 * (h - long) as i64 / furthest as i64;
+        let y = view.y + along as i32;
         Some(Rect::new(
             view.right() - t.thumb_w - 2,
             y,
@@ -169,9 +174,11 @@ impl Scroller {
     fn dragged_to(&self, view: &Rect, t: &Theme, y: i32, grab: i32) -> i32 {
         let h = view.h as i32;
         let furthest = self.furthest(h);
-        let long = (h * h / self.content.max(1)).max(t.thumb_min).min(h);
-        let room = (h - long).max(1);
-        ((y - grab - view.y) * furthest / room).clamp(0, furthest)
+        let long = (h as i64 * h as i64 / self.content.max(1) as i64) as i32;
+        let long = long.max(t.thumb_min).min(h);
+        let room = (h - long).max(1) as i64;
+        let at = (y - grab - view.y) as i64 * furthest as i64 / room;
+        at.clamp(0, furthest as i64) as i32
     }
 }
 
@@ -251,7 +258,9 @@ impl Area {
             .lines
             .get(i + 1)
             .map_or(self.edit.text().len(), |&next| next as usize - 1);
-        (from, to)
+        // A CRLF's carriage return belongs to the line end, not to the line.
+        let cr = to > from && self.edit.text().as_bytes()[to - 1] == b'\r';
+        (from, if cr { to - 1 } else { to })
     }
 }
 
@@ -316,9 +325,14 @@ pub struct Ui {
     held: Option<Held>,
     keys: KeyDecoder,
     mods: u8,
+    /// The key arriving repeats on its own: it edits and moves, but opens, confirms and
+    /// presses nothing, or holding a key would answer a question before it is read.
+    repeating: bool,
     actions: VecDeque<Action>,
     /// What Ctrl+C or Ctrl+X took, until the program takes it.
     copied: Option<String>,
+    /// How many times the owner did something: see [`inputs`](Ui::inputs).
+    inputs: u32,
 }
 
 fn outset(r: &Rect, by: i32) -> Rect {
@@ -356,8 +370,10 @@ impl Ui {
             held: None,
             keys: KeyDecoder::new(),
             mods: 0,
+            repeating: false,
             actions: VecDeque::new(),
             copied: None,
+            inputs: 0,
         }
     }
 
@@ -567,7 +583,8 @@ impl Ui {
             node.hidden = hidden;
             node.rect = Rect::new(0, 0, 0, 0);
             self.needs_layout = true;
-            if hidden && self.focus.is_some_and(|f| self.is_within(f, id)) {
+            if let Some(f) = self.focus.filter(|&f| hidden && self.is_within(f, id)) {
+                self.dirty(f);
                 self.focus = None;
             }
         }
@@ -680,6 +697,11 @@ impl Ui {
             if let Kind::List { scroll, .. } = &mut self.node_mut(id).kind {
                 scroll.content = height;
             }
+            let offset = match &self.node(id).kind {
+                Kind::List { scroll, .. } => scroll.offset,
+                _ => 0,
+            };
+            self.scroll_to(id, offset);
             self.reveal_selected(id);
             self.dirty(id);
             self.needs_layout = true;
@@ -736,6 +758,14 @@ impl Ui {
         self.focus
     }
 
+    /// Counts each thing the owner does: a key (a whole one, not each of its bytes), the
+    /// release of a click, a turn of the wheel. A program asking "press again to confirm"
+    /// compares it around an event: if it moved and the answer did not come, the owner
+    /// did something else, and the question is off.
+    pub fn inputs(&self) -> u32 {
+        self.inputs
+    }
+
     /// What the owner did since the last call.
     pub fn next_action(&mut self) -> Option<Action> {
         self.actions.pop_front()
@@ -751,11 +781,20 @@ impl Ui {
                     self.on_key(key);
                 }
             }
-            Event::KeyCode { mods, .. } => self.mods = mods,
+            Event::KeyCode { mods, state, .. } => {
+                self.mods = mods;
+                self.repeating = state == KeyState::Repeated;
+            }
             Event::Click { x, y, button: LEFT } => self.press(x, y),
             Event::Motion { x, y, .. } => self.pointer_to(x, y),
-            Event::Release { x, y, button: LEFT } => self.release(x, y),
-            Event::Wheel { x, y, delta } => self.wheel(x, y, delta),
+            Event::Release { x, y, button: LEFT } => {
+                self.inputs = self.inputs.wrapping_add(1);
+                self.release(x, y);
+            }
+            Event::Wheel { x, y, delta } => {
+                self.inputs = self.inputs.wrapping_add(1);
+                self.wheel(x, y, delta);
+            }
             Event::Appearance { dark } => self.set_theme(Theme::of(dark)),
             Event::Focus(on) => {
                 self.active = on;
@@ -771,17 +810,21 @@ impl Ui {
     }
 
     fn on_key(&mut self, key: Key) {
+        self.inputs = self.inputs.wrapping_add(1);
         let shift = self.mods & mods::SHIFT != 0;
         let writes_tabs = self
             .focus
             .is_some_and(|id| matches!(self.node(id).kind, Kind::Area(_)));
         match key {
             Key::Tab if !writes_tabs || shift => return self.focus_next(shift),
-            Key::Escape => return self.actions.push_back(Action::Cancel),
+            Key::Escape if !self.repeating => return self.actions.push_back(Action::Cancel),
             _ => {}
         }
         let taken = self.focus.is_some_and(|id| self.key_for(id, key, shift));
         if taken {
+            return;
+        }
+        if self.repeating {
             return;
         }
         match key {
@@ -795,12 +838,16 @@ impl Ui {
         }
     }
 
+    /// Whether `id` can act: shown, with everything around it, and not disabled.
     fn is_enabled(&self, id: Id) -> bool {
-        !self.node(id).hidden
-            && match self.node(id).kind {
-                Kind::Button { enabled, .. } => enabled,
-                _ => true,
+        let mut at = Some(id);
+        while let Some(up) = at {
+            if self.node(up).hidden {
+                return false;
             }
+            at = self.node(up).parent;
+        }
+        !matches!(self.node(id).kind, Kind::Button { enabled: false, .. })
     }
 
     /// Whether `id` took the key.
@@ -808,7 +855,7 @@ impl Ui {
         match self.node(id).kind {
             Kind::Button { .. } => {
                 let press = matches!(key, Key::Enter | Key::Char(' '));
-                if press {
+                if press && !self.repeating && self.is_enabled(id) {
                     self.actions.push_back(Action::Pressed(id));
                 }
                 press
@@ -834,13 +881,13 @@ impl Ui {
             Key::Home => 0,
             Key::End => last,
             Key::Enter => {
-                if now.is_some() {
+                if now.is_some() && !self.repeating {
                     self.actions.push_back(Action::Activated(id, at));
                 }
                 return true;
             }
             Key::Delete => {
-                if now.is_some() {
+                if now.is_some() && !self.repeating {
                     self.actions.push_back(Action::DeleteRow(id, at));
                 }
                 return true;
@@ -871,6 +918,7 @@ impl Ui {
         let word = self.mods & mods::CTRL != 0;
         let lines = matches!(self.node(id).kind, Kind::Area(_));
         let mut clipboard = None;
+        let mut cut = false;
         let mut paste = false;
         if lines && matches!(key, Key::Up | Key::Down) {
             self.move_line(id, key == Key::Up, shift);
@@ -878,6 +926,7 @@ impl Ui {
             self.dirty(id);
             return true;
         }
+        let repeating = self.repeating;
         let Some(edit) = self.edit_mut(id) else {
             return false;
         };
@@ -912,10 +961,13 @@ impl Ui {
             Key::Home => edit.move_to(edit.line_start(edit.caret()), shift),
             Key::End => edit.move_to(edit.line_end(edit.caret()), shift),
             Key::Enter => {
-                self.actions.push_back(Action::Submitted(id));
+                if !repeating {
+                    self.actions.push_back(Action::Submitted(id));
+                }
                 return true;
             }
             Key::Ctrl(b'a') => edit.select_all(),
+            Key::Ctrl(b'c' | b'x' | b'v') if repeating => return true,
             Key::Ctrl(b'c') => {
                 if !edit.selected().is_empty() {
                     clipboard = Some(String::from(edit.selected()));
@@ -924,7 +976,7 @@ impl Ui {
             Key::Ctrl(b'x') => {
                 if !edit.selected().is_empty() {
                     clipboard = Some(String::from(edit.selected()));
-                    edited = edit.insert("");
+                    cut = true;
                 }
             }
             Key::Ctrl(b'v') => paste = true,
@@ -932,7 +984,8 @@ impl Ui {
         }
         if clipboard.is_some() {
             self.copied = clipboard;
-            self.actions.push_back(Action::Copied);
+            self.actions
+                .push_back(if cut { Action::Cut(id) } else { Action::Copied });
         }
         if paste {
             self.actions.push_back(Action::Paste(id));
@@ -957,19 +1010,35 @@ impl Ui {
     }
 
     /// The clipboard's text, for [`Action::Paste`]: it goes in at the caret of `id`.
-    pub fn paste(&mut self, id: Id, text: &str) {
+    /// Whether all of it fitted.
+    pub fn paste(&mut self, id: Id, text: &str) -> bool {
         let Some(edit) = self.edit_mut(id) else {
-            return;
+            return false;
         };
+        let before = edit.text().len() - edit.selected().len();
         if edit.insert(text) {
-            if let Kind::Area(area) = &mut self.node_mut(id).kind {
-                area.goal_x = None;
-                area.index_lines();
-            }
-            self.reveal_caret(id);
-            self.dirty(id);
-            self.actions.push_back(Action::Edited(id));
+            let whole = edit.text().len() >= before + text.len();
+            self.after_edit(id);
+            return whole;
         }
+        text.is_empty()
+    }
+
+    /// The clipboard took what [`Action::Cut`] offered: it goes from the text.
+    pub fn cut_done(&mut self, id: Id) {
+        if self.edit_mut(id).is_some_and(|edit| edit.insert("")) {
+            self.after_edit(id);
+        }
+    }
+
+    fn after_edit(&mut self, id: Id) {
+        if let Kind::Area(area) = &mut self.node_mut(id).kind {
+            area.goal_x = None;
+            area.index_lines();
+        }
+        self.reveal_caret(id);
+        self.dirty(id);
+        self.actions.push_back(Action::Edited(id));
     }
 
     /// Up or Down in an area: to the character nearest where the caret was aiming.
@@ -1204,7 +1273,7 @@ impl Ui {
         self.pointer_to(x, y);
         if let Some(Held::Button(id, over)) = self.held {
             self.dirty(id);
-            if over {
+            if over && self.is_enabled(id) {
                 self.actions.push_back(Action::Pressed(id));
             }
         }
@@ -1508,7 +1577,8 @@ impl Ui {
     /// Puts `id` at `rect`, marking both places if it moved.
     fn place(&mut self, id: Id, rect: Rect) {
         let old = self.painted_area(id);
-        if self.node(id).rect != rect {
+        let moved = self.node(id).rect != rect;
+        if moved {
             self.damage.add(&old);
             self.node_mut(id).rect = rect;
             self.dirty(id);
@@ -1530,10 +1600,10 @@ impl Ui {
                     Rect::new(rect.x, rect.y - offset, rect.w, content.max(view) as u32),
                 );
             }
-            Kind::List { .. } => {
-                self.reveal_selected(id);
-            }
-            Kind::Field { .. } | Kind::Area(_) => self.reveal_caret(id),
+            // A view stays where the owner left it unless its own size changed: another
+            // widget's new text must not move it under the pointer.
+            Kind::List { .. } if moved => self.reveal_selected(id),
+            Kind::Field { .. } | Kind::Area(_) if moved => self.reveal_caret(id),
             Kind::Label {
                 text, style, wrap, ..
             } => {
@@ -1827,8 +1897,14 @@ impl Ui {
                     let line = &area.edit.text()[start..end];
                     let x0 = inner.x - area.scroll_x;
                     let (mut sel_from, mut sel_to, mut caret_x) = (0, 0, None);
+                    let (mut first_byte, mut first_x) = (None, 0);
                     let source = &*text;
                     source.offsets(mono.face, mono.size, line, |offset, x| {
+                        // Drawn from the first glyph that shows: a long line is not
+                        // walked for what is off to the left.
+                        if first_byte.is_none() && x >= area.scroll_x - mono.size as i32 {
+                            (first_byte, first_x) = (Some(offset), x);
+                        }
                         let at = start + offset;
                         if at == from.clamp(start, end) {
                             sel_from = x;
@@ -1852,8 +1928,9 @@ impl Ui {
                         );
                         view.fill_rect(&band, tint);
                     }
-                    let shown = shown_line(line);
-                    let at = (x0, baseline_in(text, mono, y, mono.leading));
+                    let visible = line.get(first_byte.unwrap_or(line.len())..).unwrap_or("");
+                    let shown = shown_line(visible);
+                    let at = (x0 + first_x, baseline_in(text, mono, y, mono.leading));
                     text.draw(&mut view, (mono.face, mono.size), &shown, at, t.primary);
                     if let (Some(x), true) = (caret_x, focused && from == to) {
                         let bar = Rect::new(x0 + x, y, 1, mono.leading as u32);

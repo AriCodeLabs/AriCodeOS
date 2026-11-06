@@ -196,6 +196,7 @@ fn main(_arg: u64) -> u64 {
             // The compositor is gone: so is the desktop.
             Err(_) => return 4,
         };
+        let inputs = l.ui.inputs();
         let mut leave = false;
         match event {
             Event::Close => leave = true,
@@ -223,6 +224,11 @@ fn main(_arg: u64) -> u64 {
                 }
                 _ => leave_armed = false,
             }
+        }
+        // Whatever else the owner does, the question was not answered: only the same
+        // press twice in a row leaves (audit of ADR 0078, stage 2, M3).
+        if !leave && l.ui.inputs() != inputs {
+            leave_armed = false;
         }
         if leave {
             if leave_armed {

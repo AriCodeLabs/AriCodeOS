@@ -143,7 +143,7 @@ impl Typesetter {
     pub fn width(&self, face: Face, size: u32, text: &str) -> i32 {
         let mut x = 0;
         layout(face, size, text, |_, at| x = at);
-        (x + 0xFFFF) >> 16
+        ((x + 0xFFFF) >> 16) as i32
     }
 
     /// Walks `text` once: `at` gets each character's byte offset and where it starts in
@@ -156,7 +156,7 @@ impl Typesetter {
                 Some(_) => chars.next().map_or(text.len(), |(i, _)| i),
                 None => text.len(),
             };
-            at(offset, (x + 0x8000) >> 16);
+            at(offset, ((x + 0x8000) >> 16) as i32);
         });
     }
 
@@ -170,21 +170,14 @@ impl Typesetter {
         (x, y): (i32, i32),
         color: Color,
     ) {
-        let mut placed = [(0u32, 0i32); 160];
-        let mut n = 0;
         layout(face, size, text, |glyph, at| {
-            if let (Some(g), Some(slot)) = (glyph, placed.get_mut(n)) {
-                *slot = (g, at);
-                n += 1;
-            }
-        });
-        for &(id, at) in &placed[..n] {
+            let Some(id) = glyph else { return };
             // Q16.16 from the start of the line: its whole pixels and its quarter.
             let quarter = (at + (1 << 13)) >> 14;
-            let sub = (quarter.rem_euclid(SUBPIXELS)) as u8;
-            let px = x + quarter.div_euclid(SUBPIXELS);
+            let sub = (quarter.rem_euclid(SUBPIXELS as i64)) as u8;
+            let px = x + quarter.div_euclid(SUBPIXELS as i64) as i32;
             let Some(g) = self.glyph(face, size, id, sub) else {
-                continue;
+                return;
             };
             canvas.blend_mask(
                 px + g.left,
@@ -194,7 +187,7 @@ impl Typesetter {
                 &g.coverage,
                 color,
             );
-        }
+        });
     }
 
     fn glyph(&mut self, face: Face, size: u32, id: u32, sub: u8) -> Option<&Glyph> {
@@ -287,7 +280,7 @@ fn libm_ceil(v: f32) -> i32 {
 
 /// Walks `text`: `place` gets each glyph with its position in Q16.16 pixels, then
 /// `None` and the line's end.
-fn layout(face: Face, size: u32, text: &str, mut place: impl FnMut(Option<u32>, i32)) {
+fn layout(face: Face, size: u32, text: &str, mut place: impl FnMut(Option<u32>, i64)) {
     let Ok(font) = FontRef::new(face.0) else {
         return;
     };
@@ -303,14 +296,14 @@ fn layout(face: Face, size: u32, text: &str, mut place: impl FnMut(Option<u32>, 
         if let (Some(a), Some(f)) = (before, parsed.as_ref()) {
             x += scale(kerning(f, a as u16, id as u16) as i64);
         }
-        place(Some(id), x as i32);
+        place(Some(id), x);
         let advance = advances
             .as_ref()
             .map_or(0, |h| h.advance(skrifa::GlyphId::new(id)).unwrap_or(0));
         x += scale(advance as i64);
         before = Some(id);
     }
-    place(None, x as i32);
+    place(None, x);
 }
 
 /// What the font's `kern` feature moves the second glyph of a pair by, in font units.
@@ -414,6 +407,9 @@ mod tests {
         }
         t.draw(&mut c, (INTER, 13), "", (0, 8), 0);
         assert_eq!(t.width(INTER, 13, ""), 0);
+        // A line longer than Q16.16 holds in an i32 still has its width.
+        let long = "m".repeat(4000);
+        assert!(t.width(INTER, 13, &long) > 32768);
         t.draw(&mut c, (Face(b"not a font"), 13), "abc", (0, 8), 0);
     }
 

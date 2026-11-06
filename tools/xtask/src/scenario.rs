@@ -239,7 +239,7 @@ pub struct HostInput {
     pub click: Option<String>,
     /// A drag after that: the left button down, a move by (dx, dy), and up.
     pub drag: Option<(i32, i32)>,
-    /// A key held for this many ms, before `keys` are typed.
+    /// A key held for this many ms, after `keys` are typed.
     pub hold_key: Option<(String, u64)>,
     /// A picture of the screen, kept as `NAME.ppm` in the scenario's directory:
     /// taken after `wait_ms` and before anything is sent.
