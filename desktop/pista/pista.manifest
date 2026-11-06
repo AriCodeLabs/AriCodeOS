@@ -1,0 +1,5 @@
+# Pista, a kart racing game: its window, and the system's clock to keep time.
+# Its 960x540 window takes about 2 MiB.
+name = pista
+caps = system, window
+memory = 3M
