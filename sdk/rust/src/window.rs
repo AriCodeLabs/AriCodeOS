@@ -24,6 +24,8 @@ pub struct Window {
     pixels: u64,
     width: u32,
     height: u32,
+    /// The desktop was dark when this opened.
+    dark: bool,
 }
 
 impl Window {
@@ -64,6 +66,7 @@ impl Window {
         let mut w = Self {
             service,
             id: 0,
+            dark: false,
             dma,
             pixels,
             width,
@@ -72,11 +75,18 @@ impl Window {
         w.canvas().fill(0);
         let r = w.call(req, true)?;
         w.id = r.value as u32;
+        w.dark = (r.value >> 32) & 1 != 0;
         Ok(w)
     }
 
     pub fn id(&self) -> u32 {
         self.id
+    }
+
+    /// Whether the desktop was dark when this window opened: what its first picture
+    /// follows. [`wants::APPEARANCE`](super::window::wants) tells of a change after that.
+    pub fn starts_dark(&self) -> bool {
+        self.dark
     }
 
     /// Canvas over the content buffer.
@@ -284,6 +294,27 @@ pub fn poll_reply(msg: &[u8]) -> Result<Option<Event>, WindowError> {
         Status::Ok => Ok(reply.event),
         Status::Timeout => Ok(None),
         s => Err(WindowError::Status(s)),
+    }
+}
+
+/// Init only, over the compositor's main endpoint: the desktop becomes dark or light.
+pub fn set_appearance(compositor: Handle, dark: bool) -> Result<(), WindowError> {
+    let mut req = Request::new(Op::Appearance);
+    req.width = u32::from(dark);
+    let mut msg = [0u8; Reply::LEN];
+    let len = rpc::call(
+        compositor,
+        &req.encode(),
+        &[],
+        rpc::GRACE_MS,
+        rpc::GRACE_MS,
+        &mut msg,
+    )
+    .map_err(WindowError::Ipc)?;
+    match Reply::decode(&msg[..len]).map(|r| r.status) {
+        Some(Status::Ok) => Ok(()),
+        Some(s) => Err(WindowError::Status(s)),
+        None => Err(WindowError::Ipc(Error::Invalid)),
     }
 }
 

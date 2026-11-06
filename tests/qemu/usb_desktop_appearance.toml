@@ -1,0 +1,49 @@
+# Light and dark (ADR 0078, stage 2). In the settings, Tab goes to the appearance list,
+# and Down and Enter choose dark: init keeps it, and the frames and each window of the
+# toolkit change at once. Then the shell reads the file, the machine reboots, and the
+# desktop comes up dark by itself, from its first picture.
+name = "usb.desktop_appearance"
+description = "dark is chosen in the settings, applies at once and survives a reboot"
+level = "release"
+areas = ["usb", "apps", "gui"]
+selftest = false
+disk = "usb-image"
+install = ["desktop/launcher", "desktop/settings"]
+stick_profiles = ["desktop:launcher,settings"]
+timeout_secs = 120
+
+[host_input]
+marker = "launcher: ready"
+keys = ["ret"]
+
+[[host_input_then]]
+marker = "settings: ready"
+keys = ["tab", "down", "ret"]
+key_delay_ms = 100
+
+[[host_input_then]]
+marker = "settings: appearance: dark"
+wait_ms = 800
+screendump = "dark"
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["sleep 10000", "cat appearance", "reboot"]
+[boots.expect]
+exit = 0
+serial_contains = [
+    "settings: appearance: dark",
+    "compositor: appearance dark",
+    "ari> cat appearance",
+    "AriCodeOS: rebooting",
+]
+serial_order = ["compositor: appearance dark", "ari> cat appearance", "dark"]
+serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "refused, the settings"]
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["sleep 9000", "shutdown"]
+[boots.expect]
+exit = 33
+serial_contains = ["compositor: appearance dark", "launcher: ready", "ARICODEOS_SHUTDOWN"]
+serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "did not take the appearance"]

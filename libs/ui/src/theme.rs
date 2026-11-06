@@ -178,6 +178,14 @@ impl Theme {
         )
     }
 
+    pub const fn of(dark: bool) -> Self {
+        if dark {
+            Self::dark()
+        } else {
+            Self::light()
+        }
+    }
+
     pub const fn style(&self, style: Style) -> Type {
         match style {
             Style::LargeTitle => regular(26, 32),

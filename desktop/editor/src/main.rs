@@ -304,8 +304,8 @@ impl Editor {
 }
 
 /// The window's widgets, and the folder they work in.
-fn build(fs: FsClient) -> Editor {
-    let mut ui = Ui::new(Theme::light(), W, H);
+fn build(fs: FsClient, dark: bool) -> Editor {
+    let mut ui = Ui::new(Theme::of(dark), W, H);
     let name = ui.field(26, "File name");
     ui.set_flex(name, 1);
     let open = ui.button("Open");
@@ -377,12 +377,12 @@ fn main(_arg: u64) -> u64 {
     };
     // SAFETY: a new mapping of whole pages, never unmapped, used by nothing else.
     unsafe { aricode_rt::extend_heap(heap as usize, MORE_HEAP) };
-    let wanted = wants::POINTER | wants::KEY_CODES | wants::RESIZE;
+    let wanted = wants::POINTER | wants::KEY_CODES | wants::RESIZE | wants::APPEARANCE;
     let Ok(mut win) = Window::create_wanting(session, hw, W, H, "Editor", wanted) else {
         say(&[b"could not create its window"]);
         return 3;
     };
-    let mut ed = build(fs);
+    let mut ed = build(fs, win.starts_dark());
     ed.set_status(false, &[b"files in home/; type a name and press Enter"]);
     let frame = ed.ui.paint(&mut win.canvas());
     if frame.is_empty() || win.present().is_err() {
