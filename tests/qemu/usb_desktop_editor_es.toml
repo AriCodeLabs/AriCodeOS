@@ -42,7 +42,7 @@ key_delay_ms = 100
 
 [[host_input_then]]
 marker = "editor: saved a (8 bytes)"
-mouse_rel = [70, -314]
+mouse_rel = [-546, -306]
 click = "left"
 
 [[host_input_then]]

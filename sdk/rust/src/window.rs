@@ -138,10 +138,18 @@ impl Window {
         self.call(req, false).map(|_| ())
     }
 
-    /// Gives the content a new size, in a new buffer, blank until painted. The
-    /// old buffer goes once the compositor lets it go: for this call, the
-    /// program's quota must hold both.
-    pub fn resize(&mut self, hardware: Handle, width: u32, height: u32) -> Result<(), WindowError> {
+    /// Gives the content a new size, in a new buffer that `paint` draws first: the
+    /// compositor shows the new size with its picture, never blank. The old buffer
+    /// goes once the compositor lets it go: for this call, the program's quota must
+    /// hold both. Should the answer be lost in a timeout, the compositor may hold the
+    /// new buffer while this keeps the old one, until the next resize.
+    pub fn resize(
+        &mut self,
+        hardware: Handle,
+        width: u32,
+        height: u32,
+        paint: impl FnOnce(&mut Canvas),
+    ) -> Result<(), WindowError> {
         if width == 0 || height == 0 {
             return Err(WindowError::Invalid);
         }
@@ -156,7 +164,7 @@ impl Window {
         };
         let old = (self.dma, self.pixels, self.width, self.height);
         (self.dma, self.pixels, self.width, self.height) = (dma, pixels, width, height);
-        self.canvas().fill(0);
+        paint(&mut self.canvas());
         let mut req = self.request(Op::Resize);
         req.width = width;
         req.height = height;

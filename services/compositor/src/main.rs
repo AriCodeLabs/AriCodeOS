@@ -10,13 +10,15 @@
 #![no_main]
 
 use aricode_cmdline::{keys, CmdLine};
-use aricode_gfx::{Canvas, Damage, Desktop, Hit, PixelMasks, Rect, Scene, Window};
+use aricode_gfx::{
+    resized, snap_at, snap_content, Canvas, Damage, Desktop, Hit, PixelMasks, Rect, Scene, Window,
+};
 use aricode_input::{
     EscapeChord, KeyRepeat, Keyboard, Layout, BTN_LEFT, EV_KEY, EV_REL, REL_WHEEL, REL_X, REL_Y,
 };
 use aricode_proto::input::Status as InputStatus;
 use aricode_proto::input::MAX_EVENTS;
-use aricode_proto::window::{wants, Event, KeyState, Op, Reply, Request, Status, MAX_SIDE};
+use aricode_proto::window::{mods, wants, Event, KeyState, Op, Reply, Request, Status, MAX_SIDE};
 use aricode_rt::sys::input::{DriverInstance, InputClient, InputError};
 use aricode_rt::sys::{self, abi, Handle};
 use aricode_rt::{fmt_hex, fmt_u64};
@@ -32,6 +34,11 @@ const RETRY_MS: u64 = 50;
 /// Input services: up to four USB or virtio ones and the PS/2 one (ADR 0075).
 const MAX_INPUTS: usize = 5;
 const MAX_WINDOWS: usize = aricode_gfx::MAX_WINDOWS;
+/// evdev codes the desktop itself answers to.
+const KEY_TAB: u16 = 15;
+const KEY_LEFTALT: u16 = 56;
+/// A title bar moved less than this was clicked, not dragged: it does not snap.
+const MIN_DRAG: i32 = 4;
 const QUEUE: usize = 32;
 const _: () = assert!(aricode_input::mods::CAPS == aricode_proto::window::mods::CAPS);
 /// Client sessions (ADR 0052): one per program the broker launches with
@@ -181,6 +188,12 @@ struct Content {
     pending: Option<(Handle, u64)>,
     /// What it asked for beyond the basic events (`wants`).
     wants: u32,
+    /// What it presented since the last frame, in content coordinates: it goes on
+    /// screen where the window is when the frame is made.
+    dirty: Option<Rect>,
+    /// The place asked of its program, position and size: the window goes there
+    /// when that size arrives, and any other size leaves it where it is.
+    place_at: Option<Rect>,
     /// When a request to close was handed to the client, queued or as the
     /// answer to its poll (ms since boot), while it has not polled since:
     /// it has not come back from it (ADR 0077, audit L4).
@@ -199,6 +212,10 @@ impl Content {
                     self.events[self.count - 1] = Some(Event::Motion { x, y, buttons });
                     return;
                 }
+                (Some(Event::Configure { .. }), Event::Configure { width, height }) => {
+                    self.events[self.count - 1] = Some(Event::Configure { width, height });
+                    return;
+                }
                 (Some(Event::Wheel { delta: sum, .. }), Event::Wheel { x, y, delta }) => {
                     let delta = sum.saturating_add(delta);
                     self.events[self.count - 1] = Some(Event::Wheel { x, y, delta });
@@ -213,7 +230,13 @@ impl Content {
             let once = |e: &Option<Event>| {
                 matches!(
                     e,
-                    Some(Event::Close | Event::Release { .. } | Event::Focus(_) | Event::Leave)
+                    Some(
+                        Event::Close
+                            | Event::Release { .. }
+                            | Event::Focus(_)
+                            | Event::Leave
+                            | Event::Configure { .. }
+                    )
                 )
             };
             let drop = (0..QUEUE)
@@ -285,8 +308,29 @@ struct Pointer {
     grab: Option<u32>,
     /// The held buttons it saw pressed, and so will see released.
     grabbed: u8,
+    drag: Option<Drag>,
     /// Buttons held, bit 0 = left.
     buttons: u8,
+}
+
+/// The owner dragging a window's title bar or an edge.
+#[derive(Clone, Copy)]
+struct Drag {
+    id: u32,
+    from: (i32, i32),
+    start: Rect,
+    /// `None` moves it; otherwise the `edge` bits being dragged.
+    edges: Option<u8>,
+}
+
+/// Alt+Tab in progress: the windows in order, whether each was minimized when it
+/// began, how many, and which now.
+#[derive(Clone, Copy)]
+struct Switching {
+    order: [u32; MAX_WINDOWS],
+    hidden: [bool; MAX_WINDOWS],
+    n: usize,
+    at: usize,
 }
 
 struct Compositor {
@@ -295,6 +339,7 @@ struct Compositor {
     contents: [Option<Content>; MAX_WINDOWS],
     keys: Keys,
     pointer: Pointer,
+    switching: Option<Switching>,
     /// Ctrl+Alt+Backspace: the owner asks for the text console (ADR 0074).
     escape: EscapeChord,
     /// When a key was last pressed (ms since boot): a window opened after
@@ -476,6 +521,9 @@ impl Compositor {
             return;
         }
         let (px, py) = self.desktop.pointer;
+        if self.pointer.drag.is_some() {
+            return self.continue_drag(px, py);
+        }
         let under = self.pointer.grab.or_else(|| self.content_at(px, py));
         if under != self.pointer.inside {
             if let Some(old) = self.pointer.inside {
@@ -492,6 +540,156 @@ impl Compositor {
         }
     }
 
+    /// Asks a window's program for a place on the screen. It moves at once if the
+    /// size stays; otherwise when its program answers, so it is never shown cut.
+    fn place(&mut self, id: u32, to: Rect) {
+        let Some(w) = self.desktop.get(id).copied() else {
+            return;
+        };
+        // No size a program can be asked for is outside these.
+        let to = Rect::new(to.x, to.y, to.w.clamp(1, MAX_SIDE), to.h.clamp(1, MAX_SIDE));
+        let same = (w.content.w, w.content.h) == (to.w, to.h);
+        let asked = self.content(id).and_then(|c| c.place_at);
+        if same && asked.is_none() {
+            self.desktop.move_window(id, to.x, to.y);
+            return;
+        }
+        if !w.resizable || asked.is_some_and(|a| a == to) {
+            return;
+        }
+        if same {
+            // Back to its size while another is asked: that one's answer must not
+            // stay. The program is asked again, for this one.
+            self.desktop.move_window(id, to.x, to.y);
+        }
+        if let Some(c) = self.content(id) {
+            c.place_at = (!same).then_some(to);
+        }
+        let ev = Event::Configure {
+            width: to.w,
+            height: to.h,
+        };
+        self.deliver_wanted(id, wants::RESIZE, ev);
+    }
+
+    fn continue_drag(&mut self, px: i32, py: i32) {
+        let Some(d) = self.pointer.drag else {
+            return;
+        };
+        let (dx, dy) = (px - d.from.0, py - d.from.1);
+        match d.edges {
+            None => {
+                self.desktop
+                    .move_window(d.id, d.start.x + dx, d.start.y + dy);
+            }
+            Some(edges) => self.place(d.id, resized(d.start, edges, dx, dy)),
+        }
+    }
+
+    /// The button is up: a title bar left at the screen's edge snaps there.
+    fn end_drag(&mut self, px: i32, py: i32) {
+        let Some(d) = self.pointer.drag.take() else {
+            return;
+        };
+        self.pointer.moved = true;
+        let travelled = (px - d.from.0).abs().max((py - d.from.1).abs());
+        if d.edges.is_some() || travelled < MIN_DRAG {
+            return;
+        }
+        let screen = self.desktop.screen;
+        let resizable = self.desktop.get(d.id).is_some_and(|w| w.resizable);
+        if let Some(snap) = snap_at(px, py, screen.w, screen.h).filter(|_| resizable) {
+            // Where to go back to is where it was first, not the last snap.
+            if self.desktop.get(d.id).is_some_and(|w| w.restore.is_none()) {
+                self.desktop.set_restore(d.id, Some(d.start));
+            }
+            self.place(d.id, snap_content(snap, screen.w, screen.h));
+        }
+    }
+
+    /// The zoom button: fills the screen, or goes back.
+    fn zoom(&mut self, id: u32) {
+        let Some(w) = self.desktop.get(id).copied() else {
+            return;
+        };
+        let screen = self.desktop.screen;
+        match w.restore.filter(|_| w.resizable) {
+            Some(back) => {
+                self.desktop.set_restore(id, None);
+                self.place(id, back);
+            }
+            None if w.resizable => {
+                self.desktop.set_restore(id, Some(w.content));
+                let full = snap_content(aricode_gfx::Snap::Full, screen.w, screen.h);
+                self.place(id, full);
+            }
+            None => {}
+        }
+    }
+
+    /// Alt+Tab: the next window in the order they had when Alt went down, brought
+    /// forward, even a minimized one: it stays shown if Alt comes up there, and is
+    /// minimized again if Tab goes past it. The window in use is first, and each Tab
+    /// goes one further.
+    fn cycle_windows(&mut self) {
+        if self.switching.is_none() {
+            let mut sw = Switching {
+                order: [0; MAX_WINDOWS],
+                hidden: [false; MAX_WINDOWS],
+                n: 0,
+                at: 0,
+            };
+            let mut front_first = [None; MAX_WINDOWS];
+            for (slot, w) in front_first.iter_mut().zip(self.desktop.iter()) {
+                *slot = Some(*w);
+            }
+            let count = self.desktop.count();
+            for w in front_first[..count].iter().rev().flatten() {
+                sw.order[sw.n] = w.id;
+                sw.hidden[sw.n] = w.hidden;
+                sw.n += 1;
+            }
+            if let Some(focus) = sw.order[..sw.n]
+                .iter()
+                .position(|&id| Some(id) == self.desktop.focus)
+            {
+                sw.order[..=focus].rotate_right(1);
+                sw.hidden[..=focus].rotate_right(1);
+            }
+            self.switching = Some(sw);
+        }
+        let Some(mut sw) = self.switching else {
+            return;
+        };
+        // Windows closed meanwhile are skipped.
+        let Some(next) = (1..=sw.n)
+            .map(|step| (sw.at + step) % sw.n.max(1))
+            .find(|&i| self.desktop.get(sw.order[i]).is_some())
+        else {
+            self.switching = None;
+            return;
+        };
+        if sw.hidden[sw.at] && next != sw.at {
+            self.hide(sw.order[sw.at]);
+        }
+        sw.at = next;
+        self.switching = Some(sw);
+        let id = sw.order[next];
+        self.desktop.set_hidden(id, false);
+        self.set_focus(id);
+    }
+
+    /// Minimizes a window: it hears that it lost the focus and that its keys went up,
+    /// and the one below takes the focus.
+    fn hide(&mut self, id: u32) {
+        if self.desktop.focus == Some(id) {
+            self.keys.repeat.stop();
+            self.release_keys_of_focus();
+            self.deliver(id, Event::Focus(false));
+        }
+        self.desktop.set_hidden(id, true);
+    }
+
     /// A button. While one pressed on a window is held, every button goes to
     /// that window: a program that saw a press sees its release.
     fn on_button(&mut self, code: u16, pressed: bool, at: u64) {
@@ -501,6 +699,9 @@ impl Compositor {
         let (px, py) = self.desktop.pointer;
         if !pressed {
             self.pointer.buttons &= !bit;
+            if code == BTN_LEFT {
+                self.end_drag(px, py);
+            }
             if let Some(id) = self
                 .pointer
                 .grab
@@ -526,16 +727,35 @@ impl Compositor {
         let target = if let Some(id) = self.pointer.grab {
             self.in_content(id, px, py).map(|(x, y)| (id, x, y))
         } else {
+            let left = code == BTN_LEFT;
             match self.desktop.hit(px, py) {
                 Hit::Window { id, x, y } => Some((id, x, y)),
-                Hit::Close { id } if code == BTN_LEFT => {
+                Hit::Close { id } if left => {
                     self.ask_close(id, at);
                     None
                 }
-                // Another button on the box is a click on the window, as
-                // before the box (audit of ADR 0077, L7).
-                Hit::Close { id } => self.in_content(id, px, py).map(|(x, y)| (id, x, y)),
-                Hit::Desktop => None,
+                Hit::Minimize { id } if left => {
+                    self.hide(id);
+                    self.pointer.moved = true;
+                    self.refocus();
+                    None
+                }
+                Hit::Zoom { id } if left => {
+                    self.set_focus(id);
+                    self.zoom(id);
+                    None
+                }
+                Hit::TitleBar { id } if left => {
+                    self.set_focus(id);
+                    self.start_drag(id, (px, py), None);
+                    None
+                }
+                Hit::Edge { id, edges } if left => {
+                    self.set_focus(id);
+                    self.start_drag(id, (px, py), Some(edges));
+                    None
+                }
+                _ => None,
             }
         };
         if let Some((id, x, y)) = target {
@@ -550,6 +770,18 @@ impl Compositor {
                     button: number,
                 },
             );
+        }
+    }
+
+    fn start_drag(&mut self, id: u32, from: (i32, i32), edges: Option<u8>) {
+        if let Some(w) = self.desktop.get(id) {
+            let start = w.content;
+            self.pointer.drag = Some(Drag {
+                id,
+                from,
+                start,
+                edges,
+            });
         }
     }
 
@@ -577,7 +809,9 @@ impl Compositor {
         }
         self.pointer.buttons = 0;
         self.pointer.grabbed = 0;
+        self.pointer.drag = None;
         self.pointer.moved = true;
+        self.switching = None;
     }
 
     /// The focused window hears the release of every key it saw go down.
@@ -797,6 +1031,8 @@ impl Compositor {
 
     fn set_focus(&mut self, id: u32) {
         if self.desktop.focus == Some(id) {
+            // It may be below a window that opened without taking the focus.
+            self.desktop.raise(id);
             return;
         }
         // The key held was for the window that had the focus.
@@ -849,6 +1085,14 @@ impl Compositor {
         }
         if ev.kind != EV_KEY || !self.keys.repeat.follow(&ev, at) {
             return;
+        }
+        // Alt+Tab is the desktop's: no window sees it.
+        if ev.code == KEY_TAB && ev.value == 1 && self.keys.keyboard.modifiers() & mods::ALT != 0 {
+            self.keys.repeat.stop();
+            return self.cycle_windows();
+        }
+        if ev.code == KEY_LEFTALT && ev.value == 0 {
+            self.switching = None;
         }
         if ev.value == 1 {
             self.last_key_ms = Some(at);
@@ -928,8 +1172,13 @@ impl Compositor {
                     count: 0,
                     pending: None,
                     wants: req.events,
+                    dirty: None,
+                    place_at: None,
                     close_waiting: None,
                 });
+                if req.events & wants::RESIZE != 0 {
+                    self.desktop.set_resizable(id);
+                }
                 sys::print(b"compositor: window ");
                 num(id as u64);
                 sys::print(b" '");
@@ -948,11 +1197,13 @@ impl Compositor {
                     let first = !core::mem::replace(&mut session.opened, true);
                     let made = session.made_ms;
                     let typed = self.last_key_ms.is_some_and(|k| k >= made);
-                    if aricode_gfx::new_window_takes_focus(
-                        first,
-                        now_ms.saturating_sub(made),
-                        typed,
-                    ) {
+                    if self.desktop.focus.is_none()
+                        || aricode_gfx::new_window_takes_focus(
+                            first,
+                            now_ms.saturating_sub(made),
+                            typed,
+                        )
+                    {
                         self.set_focus(id);
                     }
                 }
@@ -962,25 +1213,30 @@ impl Compositor {
                 else {
                     return answer(reply_to, Reply::status(Status::BadWindow));
                 };
-                // Every window on that buffer shows the new pixels.
-                for c in self.contents.iter().flatten().filter(|c| c.virt == virt) {
-                    let Some(w) = self.desktop.get(c.id) else {
-                        continue;
-                    };
+                // Every window on that buffer shows the new pixels, wherever it
+                // is when the frame is made.
+                for c in self
+                    .contents
+                    .iter_mut()
+                    .flatten()
+                    .filter(|c| c.virt == virt)
+                {
+                    let whole = Rect::new(0, 0, c.width, c.height);
                     // The rectangles are in the presenter's rows: a window that
                     // shows the same buffer at another width shows them elsewhere.
                     if req.damage_len == 0 || c.width != width {
-                        self.damage.add(&w.content);
+                        c.dirty = Some(whole);
                         continue;
                     }
                     for d in &req.damage[..req.damage_len as usize] {
-                        let at = Rect::new(
-                            w.content.x + d.x as i32,
-                            w.content.y + d.y as i32,
-                            d.width as u32,
-                            d.height as u32,
-                        );
-                        self.damage.add(&at.intersect(&w.content));
+                        let part =
+                            Rect::new(d.x as i32, d.y as i32, d.width as u32, d.height as u32)
+                                .intersect(&whole);
+                        c.dirty = Some(match c.dirty {
+                            Some(sum) if !part.is_empty() => sum.union(&part),
+                            Some(sum) => sum,
+                            None => part,
+                        });
                     }
                 }
                 answer(reply_to, Reply::ok(0));
@@ -1059,6 +1315,23 @@ impl Compositor {
         let old = core::mem::replace(&mut c.virt, virt);
         c.width = req.width;
         c.height = req.height;
+        c.dirty = None;
+        sys::print(b"compositor: window ");
+        num(req.window as u64);
+        sys::print(b" is now ");
+        num(req.width as u64);
+        sys::print(b"x");
+        num(req.height as u64);
+        sys::print(b"\n");
+        // The size asked for: it goes to its place. Any other, say an earlier
+        // answer, stays where it is until that one comes.
+        let place = c.place_at.filter(|p| (p.w, p.h) == (req.width, req.height));
+        if place.is_some() {
+            c.place_at = None;
+        }
+        if let Some(p) = place {
+            self.desktop.move_window(req.window, p.x, p.y);
+        }
         self.unmap_unused(old);
         answer(reply_to, Reply::ok(0));
     }
@@ -1090,6 +1363,14 @@ impl Compositor {
         let scene = self.desktop.scene();
         self.shown.damage(&scene, &mut self.damage);
         self.shown = scene;
+        for c in self.contents.iter_mut().flatten() {
+            let Some(part) = c.dirty.take() else { continue };
+            // A hidden window's pixels show when it does, through the scene.
+            if let Some(w) = self.desktop.get(c.id).filter(|w| !w.hidden) {
+                let at = Rect::new(w.content.x + part.x, w.content.y + part.y, part.w, part.h);
+                self.damage.add(&at);
+            }
+        }
         if self.damage.is_empty() || now_ms < self.next_frame_ms {
             return;
         }
@@ -1140,7 +1421,7 @@ impl Compositor {
         sys::print(b" rect(s)\n");
         let mut hex = [0u8; 16];
         let screen = self.screen.canvas();
-        for w in self.desktop.iter() {
+        for w in self.desktop.iter().filter(|w| !w.hidden) {
             let (sx, sy) = (w.content.x + 10, w.content.y + 10);
             if let Some(px) = screen.get(sx, sy) {
                 sys::print(b"compositor: window ");
@@ -1211,6 +1492,7 @@ fn main(inputs: u64) -> u64 {
             lost: false,
         },
         pointer: Pointer::default(),
+        switching: None,
         escape: EscapeChord::new(),
         last_key_ms: None,
         next_frame_ms: 0,

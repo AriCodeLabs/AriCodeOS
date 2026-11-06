@@ -1136,6 +1136,9 @@ pub mod window {
         pub const POINTER: u32 = 1;
         /// `KeyCode`, for each key, beside the `Key` bytes.
         pub const KEY_CODES: u32 = 2;
+        /// The owner may resize it: `Configure`, answered with `Resize`. Without
+        /// this a window keeps the size its program gave it.
+        pub const RESIZE: u32 = 4;
     }
 
     /// The modifiers in `Event::KeyCode`. The numbers are those of
@@ -1363,6 +1366,11 @@ pub mod window {
             state: KeyState,
             mods: u8,
         },
+        /// [`wants::RESIZE`]: the owner wants the content at this size. The
+        /// program paints a buffer of it and answers with `Op::Resize`; the
+        /// window changes when it does, so a busy program keeps its picture
+        /// whole. While the owner drags, only the latest counts.
+        Configure { width: u32, height: u32 },
     }
 
     /// Reply (32 bytes): status, value and optional event.
@@ -1451,6 +1459,11 @@ pub mod window {
                     b[18] = state as u8;
                     b[19] = mods;
                 }
+                Some(Event::Configure { width, height }) => {
+                    b[3] = 11;
+                    b[16..20].copy_from_slice(&width.to_le_bytes());
+                    b[20..24].copy_from_slice(&height.to_le_bytes());
+                }
             }
             b
         }
@@ -1507,6 +1520,10 @@ pub mod window {
                         _ => return None,
                     },
                     mods: b[19],
+                }),
+                11 => Some(Event::Configure {
+                    width: u32::from_le_bytes(b[16..20].try_into().ok()?),
+                    height: u32::from_le_bytes(b[20..24].try_into().ok()?),
                 }),
                 _ => return None,
             };
@@ -2599,6 +2616,10 @@ pub mod status {
                 },
                 Event::Enter { x: 1, y: 2 },
                 Event::Leave,
+                Event::Configure {
+                    width: 800,
+                    height: 600,
+                },
                 Event::Wheel {
                     x: 1,
                     y: 2,
