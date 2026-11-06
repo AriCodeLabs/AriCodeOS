@@ -4,9 +4,9 @@
 # request waits in C's queue, untaken; a second click 2.5 s later
 # (FORCE_CLOSE_MS is 2 s) marks C as not responding, and a third ends C's
 # session (audit of ADR 0077, M2), so C, polling at last, finds its window
-# gone. Window C is at content (40,60), A at (80,100), both
-# 400x300, so their close boxes are at (424,40) and (464,80), 16x16; the
-# pointer starts at the centre of the 1280x800 screen.
+# gone. Window C's frame starts at (40,40), A's at (80,80), so their close
+# circles are at (48,48) and (88,88), 12x12; the pointer starts at the centre of
+# the 1280x800 screen.
 name = "gui.close_box"
 description = "the close box asks a window's program to close, and closes a hung one's window at the second click"
 level = "release"
@@ -18,7 +18,7 @@ timeout_secs = 120
 
 [host_input]
 marker = "gui_demo A: focus gained"
-mouse_rel = [-170, -314]
+mouse_rel = [-548, -308]
 click = "left"
 
 [[host_input_then]]
