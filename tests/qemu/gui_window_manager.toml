@@ -1,0 +1,89 @@
+# Windows as the owner handles them (ADR 0078, stage 1): moved by the title bar,
+# resized by an edge, zoomed and back, snapped to half the screen, minimized, and
+# Alt+Tab. Two Demo D windows, whose frames start at (40,40) and (80,80), 400x300.
+# The program answers a size it is asked for; `gui_trace` shows where each window is.
+# The pointer starts at the centre of the 1280x800 screen.
+name = "gui.window_manager"
+description = "windows move, resize, zoom, snap, minimize and switch with Alt+Tab"
+level = "full"
+areas = ["gui"]
+cmdline = "qemu_exit gui shell gui_trace"
+install = ["examples/gui_demo"]
+stdin = ["spawn gui_demo 3", "sleep 600", "run gui_demo 3", "sleep 500", "shutdown"]
+timeout_secs = 120
+
+# The title bar of the second, then a drag of (100,50): its content goes to (180,158).
+[host_input]
+marker = "compositor: window 2 'Demo D' 400x300"
+wait_ms = 400
+mouse_rel = [-360, -310]
+drag = [100, 50]
+
+# Its bottom right corner is at (580,458); a drag of (40,20) from just outside.
+[[host_input_then]]
+marker = "sample (190,168)"
+mouse_rel = [202, 320]
+drag = [40, 20]
+
+# Now 440x320. The zoom circle, at (228,138): the screen, less the title bar.
+[[host_input_then]]
+marker = "gui_demo D: configured"
+mouse_rel = [-388, -336]
+click = "left"
+
+# Its frame is at (0,0): the zoom circle at (48,8). Back to where it was.
+[[host_input_then]]
+marker = "compositor: window 2 is now 1280x772"
+mouse_rel = [-180, -130]
+click = "left"
+
+# Alt+Tab gives the first window the focus.
+[[host_input_then]]
+marker = "compositor: window 2 is now 440x320"
+keys = ["alt+tab"]
+
+# Its minimize circle, at (68,48): the second takes the focus.
+[[host_input_then]]
+marker = "gui_demo D: focus gained"
+mouse_rel = [20, 40]
+click = "left"
+
+# The second's title bar at (380,140), dragged to the left edge: half the screen.
+[[host_input_then]]
+marker = "gui_demo D: focus gained"
+mouse_rel = [306, 86]
+drag = [-500, 0]
+
+# From (0,140) to its title bar, and dropped in the corner: a quarter.
+[[host_input_then]]
+marker = "compositor: window 2 is now 640x772"
+mouse_rel = [300, -130]
+drag = [-400, -100]
+
+# Alt+Tab brings the minimized window back: its pixels are on screen again.
+[[host_input_then]]
+marker = "compositor: window 2 is now 640x372"
+keys = ["alt+tab"]
+
+[[host_input_then]]
+marker = "compositor: window 1 sample (50,78)"
+keys = ["q"]
+
+# It closes, the other takes the focus, and it closes too.
+[[host_input_then]]
+marker = "gui_demo D: done"
+keys = ["q"]
+
+[expect]
+exit = 33
+serial_contains = ["gui_demo D: focus lost", "ARICODEOS_SHUTDOWN"]
+serial_absent = ["KERNEL PANIC", "the resize failed", "killed by fault"]
+serial_order = [
+    "sample (190,168)",
+    "compositor: window 2 is now 1280x772",
+    "compositor: window 2 is now 440x320",
+    "compositor: window 2 is now 640x772",
+    "compositor: window 2 is now 640x372",
+    "gui_demo D: done",
+    "gui_demo D: done",
+]

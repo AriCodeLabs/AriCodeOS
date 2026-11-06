@@ -392,3 +392,50 @@ fixed:
 
 **Not tested in QEMU:** the path without PAT, and a `Bitmask` screen, since OVMF
 offers none and scenarios cannot change the CPU model. Host tests cover the masks.
+
+## Stage 1: results so far
+
+### The frame and handling windows
+
+The compositor draws the frame of the look above: a 28 px title bar with its three
+circles on the left and the title centred, 10 px corners with smoothed edges, and the
+shadow from one table, blurred once at build time and used in slices. Colours and the
+shadow's strength are a `Theme`, not constants.
+
+The owner handles windows without the program's help:
+- the title bar moves one;
+- the three circles close, minimize and zoom;
+- a title bar dropped at the screen's edge snaps: sides to halves, corners to quarters,
+  the top to all of it;
+- Alt+Tab brings the next one forward, in the order they had when Alt went down, even a
+  minimized one.
+
+A program that asks (`wants::RESIZE`) can be resized by a band 6 px outside its frame,
+and zoomed or snapped to another size: it gets `Configure`, paints a buffer of that size
+and answers with `Resize`, and the window changes only then, so it is never shown cut.
+While the owner drags, only the latest size counts. The 0.18 apps do not ask yet, so they
+keep their size until they move to the toolkit (stage 2).
+
+`gui.window_manager` checks all of it, in QEMU.
+
+`Present` now takes effect where a window is when the frame is made, not where it was at
+that moment. Before, a window moved away and back within one frame kept its old pixels:
+the host test of damage against full composition found it, once frames could move.
+
+An independent review found no high findings. All fixed:
+- A size asked of a busy program could be applied after the owner had gone back. A place
+  now remembers its size, and only that answer takes it there.
+- Minimizing told the window nothing, and lost its keys' releases.
+- A window that opened without the focus could block Alt+Tab and being raised by a click.
+- A resize could show a black buffer: `Window::resize` now paints first.
+- A window closed during Alt+Tab, a click on a title bar near the top, and an empty
+  window list no longer misbehave; a minimized window Tab goes past is minimized again.
+- Sizes asked of a program stay within what it may answer; a hidden window's Present costs
+  nothing; a queue keeps `Configure`; the shadow skips what the frame covers and fills
+  the corners' notches.
+
+**Known limit:** a minimized window has no way back without a keyboard until the dock
+(stage 3). The compositor's handling logic has scenarios but no host tests: it lives in the
+service, and moving it into `libs/gfx` is for when it grows.
+
+Next in this stage: Inter and JetBrains Mono, the atlas and our shaper.
