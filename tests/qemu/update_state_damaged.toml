@@ -9,7 +9,7 @@
 # slot boots, so only the updater's own run can meet one there.
 name = "update.state_damaged"
 description = "a damaged boot state is rebuilt from what AriBoot booted; nothing installed in that run"
-level = "full"
+level = "release"
 areas = ["update", "boot", "shell"]
 disk = "a-corrupt-state-damaged"
 timeout_secs = 150

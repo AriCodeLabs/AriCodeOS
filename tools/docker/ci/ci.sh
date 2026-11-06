@@ -8,8 +8,8 @@
 #
 # Keeps its own clone of the repository in /work (a named volume, never a
 # developer's checkout), checks out the head of the branch (default
-# develop), runs `cargo xtask check`, `cargo xtask test --all` and
-# `cargo xtask test --all --cpus 4` and writes a dated report under
+# develop), runs `cargo xtask check`, `cargo xtask test --level release` and
+# `cargo xtask test --level release --cpus 4` and writes a dated report under
 # /reports: summary.txt (commit, steps, pass/fail per scenario of both
 # passes), the full log of each step and the logs of every failed scenario.
 # /reports/index.txt gets one line per run and /reports/latest points at
@@ -170,9 +170,9 @@ run_once() {
             step test cargo xtask test "$@"
             collect test
         else
-            step test-1cpu cargo xtask test --all "$@"
+            step test-1cpu cargo xtask test --level release "$@"
             collect test-1cpu
-            step test-4cpus cargo xtask test --all --cpus 4 "$@"
+            step test-4cpus cargo xtask test --level release --cpus 4 "$@"
             collect test-4cpus
         fi
         unlock_suites

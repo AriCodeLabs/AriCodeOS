@@ -8,12 +8,14 @@ All tests live in the repository and run with `cargo xtask test`.
 |---------|-----------------------------------------------------------|----------|-----------------------------------------|
 | `unit`  | `cargo test` of the host crates (`libs/*`, protocols, xtask) | seconds | on every commit of a feature            |
 | `smoke` | unit + nominal boot in QEMU (`boot.kernel_ready`)          | ~5 s     | before merging into `develop`           |
-| `full`  | unit + every QEMU scenario (provoked faults included)      | minutes  | before merging into `main` (`--all`)    |
+| `release` | full + the slow scenarios (15 s or more)               | ~12 min  | before `main` |
+| `full`  | unit + the quick QEMU scenarios (provoked faults included) | minutes  | before merging into `main` (`--all`)    |
 
 ```bash
 cargo xtask test                    # unit + smoke (default)
+cargo xtask test --level release    # also the slow scenarios: composing a version
 cargo xtask test --level unit       # host only
-cargo xtask test --all              # everything: mandatory towards main
+cargo xtask test --all              # every quick scenario: by area on a branch
 cargo xtask test --all --jobs 8     # 8 QEMU scenarios at a time (see "Parallel runs")
 cargo xtask test --area boot        # QEMU scenarios of one area (with --all to include the full ones)
 cargo xtask test --list             # list scenarios and which ones the filter selects
@@ -83,7 +85,7 @@ A file `tests/qemu/<area>_<name>.toml`:
 ```toml
 name = "area.name"              # unique; only [a-z0-9._-]; also the directory under build/scenarios/
 description = "one line"
-level = "smoke" | "full"
+level = "smoke" | "full" | "release"   # release: 15 s or more, before main only
 areas = ["boot", "memory"]      # to filter with --area
 cmdline = "qemu_exit ..."       # written to aricodeos/cmdline.txt, with " selftest" appended (below)
 selftest = true                 # default: init also runs its test clients (they write to the test disk and talk to

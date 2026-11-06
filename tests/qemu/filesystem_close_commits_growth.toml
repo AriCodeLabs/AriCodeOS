@@ -4,7 +4,7 @@
 # then. On the next boot the file holds what was written.
 name = "filesystem.close_commits_growth"
 description = "a file written and closed without flush survives a power cut right after the close"
-level = "full"
+level = "release"
 areas = ["filesystem", "apps"]
 timeout_secs = 120
 

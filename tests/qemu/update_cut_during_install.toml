@@ -5,7 +5,7 @@
 # again in full and the third boot tries and confirms B.
 name = "update.cut_during_install"
 description = "power cut during installation: A stays active, the update is repeated and B is confirmed"
-level = "full"
+level = "release"
 areas = ["update", "boot", "init", "shell"]
 timeout_secs = 120
 

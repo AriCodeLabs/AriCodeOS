@@ -4,7 +4,7 @@
 # after a reboot 2 is still there and installing again does nothing.
 name = "apps.update"
 description = "installer: updates an installed package from pkgs/, rejects a bad signature and the version persists across reboot"
-level = "full"
+level = "release"
 areas = ["apps", "sandbox", "update", "shell"]
 install = ["examples/hello_ext"]
 packages = ["examples/hello_ext:2", "examples/hello_ext:3:corrupt"]

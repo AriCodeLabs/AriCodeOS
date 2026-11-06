@@ -10,7 +10,7 @@
 # asks too, and is left at that, so home/a still holds `zq`.
 name = "usb.desktop_editor"
 description = "the desktop editor writes a file in the owner's home/ folder"
-level = "full"
+level = "release"
 areas = ["usb", "apps", "gui", "fs"]
 cmdline = "qemu_exit shell"
 selftest = false

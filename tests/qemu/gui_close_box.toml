@@ -9,7 +9,7 @@
 # pointer starts at the centre of the 1280x800 screen.
 name = "gui.close_box"
 description = "the close box asks a window's program to close, and closes a hung one's window at the second click"
-level = "full"
+level = "release"
 areas = ["gui"]
 cmdline = "qemu_exit gui shell"
 install = ["examples/gui_demo"]

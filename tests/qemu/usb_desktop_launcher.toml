@@ -9,7 +9,7 @@
 # launcher's close box then ends the session.
 name = "usb.desktop_launcher"
 description = "the desktop launcher lists the window apps, opens one from the keyboard and leaves on a click"
-level = "full"
+level = "release"
 areas = ["usb", "apps", "gui"]
 cmdline = "qemu_exit shell"
 selftest = false

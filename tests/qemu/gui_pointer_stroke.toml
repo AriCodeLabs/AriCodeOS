@@ -10,7 +10,7 @@
 # move was dropped on the way.
 name = "gui.pointer_stroke"
 description = "a touchpad-rate stroke is followed without lag or loss while other input devices are idle"
-level = "full"
+level = "release"
 areas = ["gui", "input", "pointer"]
 cmdline = "qemu_exit gui shell"
 no_virtio_input = true

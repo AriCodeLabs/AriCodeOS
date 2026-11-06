@@ -8,7 +8,7 @@
 # at (80, 100), 640 wide: its close box is at (704, 80), 16x16.
 name = "usb.desktop_editor_es"
 description = "the desktop editor takes ñ, accents and the euro sign from a Spanish keyboard"
-level = "full"
+level = "release"
 areas = ["usb", "apps", "gui", "input"]
 cmdline = "qemu_exit shell kbd=es"
 selftest = false
