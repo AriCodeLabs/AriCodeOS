@@ -8,7 +8,7 @@
 //! atomically. Tab walks the name, Open, Save and the text; Ctrl+L or Esc goes
 //! back to the name.
 //! Opening over unsaved changes, or saving over another file than the one
-//! opened, takes a second press. It opens plain text only: a file that is not
+//! opened, asks first. It opens plain text only: a file that is not
 //! UTF-8 or holds control characters would not come back from it byte for
 //! byte, so it is refused and left alone. Built on the toolkit (ADR 0078,
 //! stage 2).
@@ -20,13 +20,14 @@
 
 extern crate alloc;
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use aricode_rt::sys::fs::{FsClient, FsError};
 use aricode_rt::sys::window::{wants, Event, Window};
 use aricode_rt::sys::{self, kind, permissions};
 use aricode_sync::SpinLock;
-use aricode_ui::{Action, Fill, Id, Space, Stack, Style, Theme, Tone, Ui};
+use aricode_ui::{Action, Dialog, Fill, Id, Space, Stack, Style, Theme, Tone, Ui};
 
 const W: u32 = 640;
 const H: u32 = 448;
@@ -52,7 +53,7 @@ fn is_plain(bytes: &[u8]) -> Option<&str> {
         .then_some(text)
 }
 
-/// What a second press confirms.
+/// What a question on show is about.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Confirm {
     /// Open, throwing the unsaved changes away.
@@ -79,10 +80,9 @@ struct Editor {
     /// That file did not exist when it was opened and was not saved yet:
     /// if someone made it since, saving over it asks first (audit, L2).
     loaded_new: bool,
-    /// The action a first press asked to confirm, and for which name.
-    armed: Option<(Confirm, [u8; 26])>,
-    /// This event was a press of what `armed` asks about.
-    asked: bool,
+    /// The question on show.
+    confirm: Option<Confirm>,
+    question: Dialog,
 }
 
 impl Editor {
@@ -125,25 +125,19 @@ impl Editor {
         Some(n)
     }
 
-    /// Whether this is the second press of `what` for `name`; the first
-    /// one only arms it.
-    fn confirmed(&mut self, what: Confirm, name: [u8; 26]) -> bool {
-        self.asked = true;
-        if self.armed == Some((what, name)) {
-            self.armed = None;
-            return true;
-        }
-        self.armed = Some((what, name));
-        false
+    fn ask(&mut self, what: Confirm, question: &str, yes: &str) {
+        self.confirm = Some(what);
+        self.ui.ask(&self.question, question, yes);
+        say(&[b"asks: ", question.as_bytes()]);
     }
 
-    /// The owner clicked the close box: whether to close now. Unsaved
-    /// changes ask first; a second click discards them (ADR 0077).
+    /// The owner clicked the close box: whether to close now. Unsaved changes ask first
+    /// (ADR 0077); a second click answers that.
     fn close_asked(&mut self) -> bool {
-        if !self.changed || self.confirmed(Confirm::Close, [0; 26]) {
+        if !self.changed || self.confirm == Some(Confirm::Close) {
             return true;
         }
-        self.set_status(true, &[b"unsaved changes: close again to discard them"]);
+        self.ask(Confirm::Close, "Close without saving the changes?", "Close");
         false
     }
 
@@ -154,13 +148,12 @@ impl Editor {
         self.ui.set_text(self.name, name_of(&loaded));
     }
 
-    fn open(&mut self) {
+    fn open(&mut self, answered: bool) {
         let Some(buf) = self.named() else { return };
         let name = name_of(&buf);
-        // Unsaved changes are never thrown away on one press (audit of the
-        // editor, M2).
-        if self.changed && !self.confirmed(Confirm::Discard, buf) {
-            return self.set_status(true, &[b"unsaved changes: Open again to discard them"]);
+        // Unsaved changes are never thrown away unasked (audit of the editor, M2).
+        if self.changed && !answered {
+            return self.ask(Confirm::Discard, "Discard the unsaved changes?", "Discard");
         }
         let fd = match self.fs.open(name) {
             Ok(fd) => fd,
@@ -230,22 +223,17 @@ impl Editor {
         );
     }
 
-    fn save(&mut self) {
+    fn save(&mut self, answered: bool) {
         let Some(buf) = self.named() else { return };
         let name = name_of(&buf);
         let mut created = false;
         let fd = match self.fs.open(name) {
-            // Another file of that name is replaced only on a second press
+            // Another file of that name is replaced only when the owner says so
             // (audit of the editor, M1).
-            Ok(fd)
-                if (buf != self.loaded || self.loaded_new)
-                    && !self.confirmed(Confirm::Replace, buf) =>
-            {
+            Ok(fd) if (buf != self.loaded || self.loaded_new) && !answered => {
                 let _ = self.fs.close(fd);
-                return self.set_status(
-                    true,
-                    &[name.as_bytes(), b" exists: Save again to replace it"],
-                );
+                let question = format!("{name} exists. Replace it?");
+                return self.ask(Confirm::Replace, &question, "Replace");
             }
             Ok(fd) => fd,
             Err(FsError::Status(aricode_proto::fs::Status::NotFound)) => {
@@ -321,6 +309,7 @@ fn build(fs: FsClient, dark: bool) -> Editor {
     );
     ui.set_root(root);
     ui.focus(name);
+    let question = ui.dialog("Yes", "Cancel");
     Editor {
         fs,
         ui,
@@ -333,8 +322,8 @@ fn build(fs: FsClient, dark: bool) -> Editor {
         changed: false,
         loaded: [0; 26],
         loaded_new: false,
-        armed: None,
-        asked: false,
+        confirm: None,
+        question,
     }
 }
 
@@ -395,8 +384,6 @@ fn main(_arg: u64) -> u64 {
             // The compositor is gone: so is the desktop.
             Err(_) => return 5,
         };
-        let inputs = ed.ui.inputs();
-        ed.asked = false;
         match event {
             Event::Close if ed.close_asked() => {
                 say(&[b"closed"]);
@@ -417,13 +404,29 @@ fn main(_arg: u64) -> u64 {
                         ed.set_changed(true);
                     }
                 }
-                Action::Shortcut(b's') => ed.save(),
-                Action::Shortcut(b'o') => ed.open(),
-                Action::Submitted(_) => ed.open(),
-                Action::Pressed(id) if id == ed.open => ed.open(),
-                Action::Pressed(id) if id == ed.save => ed.save(),
-                // Esc is known only with the key after it: Ctrl+L goes to the
-                // name at once (audit of the editor, L4).
+                Action::Pressed(id) if id == ed.question.no => {
+                    ed.confirm = None;
+                    ed.ui.answered();
+                }
+                Action::Pressed(id) if id == ed.question.yes => {
+                    let what = ed.confirm.take();
+                    ed.ui.answered();
+                    match what {
+                        Some(Confirm::Discard) => ed.open(true),
+                        Some(Confirm::Replace) => ed.save(true),
+                        Some(Confirm::Close) => {
+                            say(&[b"closed"]);
+                            let _ = win.close();
+                            return 0;
+                        }
+                        None => {}
+                    }
+                }
+                Action::Shortcut(b's') => ed.save(false),
+                Action::Shortcut(b'o') => ed.open(false),
+                Action::Submitted(_) => ed.open(false),
+                Action::Pressed(id) if id == ed.open => ed.open(false),
+                Action::Pressed(id) if id == ed.save => ed.save(false),
                 Action::Shortcut(b'l') | Action::Cancel => ed.ui.focus(ed.name),
                 Action::Copied => {
                     if let Some(text) = ed.ui.take_copied() {
@@ -450,11 +453,6 @@ fn main(_arg: u64) -> u64 {
                 },
                 _ => {}
             }
-        }
-        // Anything else the owner does takes back a question: only the same press twice
-        // in a row answers it (audit of ADR 0078, stage 2, M4).
-        if !ed.asked && ed.ui.inputs() != inputs {
-            ed.armed = None;
         }
         ed.show(&mut win);
     }

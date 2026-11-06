@@ -268,6 +268,17 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    /// Darkens or tints what is in the clip: `amount` of 256 of `color` over it.
+    pub fn shade(&mut self, color: Color, amount: u32) {
+        let r = self.clip;
+        for y in r.y..r.bottom() {
+            let row = y as usize * self.stride as usize;
+            for px in &mut self.pixels[row + r.x as usize..row + r.right() as usize] {
+                *px = blend(*px, color, amount);
+            }
+        }
+    }
+
     /// A filled circle within `r`, edges smoothed by 4x4 samples.
     pub fn circle(&mut self, r: &Rect, color: Color) {
         if !r.intersects(&self.clip) {

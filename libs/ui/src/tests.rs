@@ -883,21 +883,115 @@ fn the_thumb_of_a_very_long_text_does_not_overflow() {
     assert!(to > 0 && to <= s.furthest(2000));
 }
 
-#[test]
-fn inputs_count_what_the_owner_does_not_the_bytes() {
+/// A form with a question ready.
+fn asking() -> (Form, Dialog) {
     let mut f = form();
+    let d = f.ui.dialog("Delete", "Cancel");
+    f.same_as_full_paint();
+    (f, d)
+}
+
+#[test]
+fn a_dialog_takes_the_keys_and_gives_them_back() {
+    let (mut f, d) = asking();
     f.ui.focus(f.list);
-    let n = f.ui.inputs();
-    // Delete is four bytes and one key.
-    f.keys(b"\x1b[3~");
-    assert_eq!(f.ui.inputs(), n + 1);
-    // A click counts at its release, when a button answers.
-    let r = f.rect(f.cancel);
-    let (x, y) = (r.x + 2, r.y + 2);
-    f.ui.handle(Event::Click { x, y, button: LEFT });
-    assert_eq!(f.ui.inputs(), n + 1);
-    f.ui.handle(Event::Release { x, y, button: LEFT });
-    assert_eq!(f.ui.inputs(), n + 2);
-    f.ui.handle(Event::Motion { x, y, buttons: 0 });
-    assert_eq!(f.ui.inputs(), n + 2);
+    f.ui.ask(&d, "Delete it?", "Delete");
+    assert!(f.ui.asking());
+    assert_eq!(
+        f.ui.focused(),
+        Some(d.no),
+        "the keys start on the safe answer"
+    );
+    f.same_as_full_paint();
+    // Tab stays inside, on its two answers.
+    f.keys(b"\t");
+    assert_eq!(f.ui.focused(), Some(d.yes));
+    f.keys(b"\t");
+    assert_eq!(f.ui.focused(), Some(d.no));
+    f.same_as_full_paint();
+    // Keys for the window behind go nowhere; Enter answers what has the focus.
+    f.keys(b"\x1b[B");
+    assert_eq!(f.ui.selected(f.list), Some(0));
+    f.actions();
+    f.keys(&[0x13]);
+    assert_eq!(f.actions(), [], "no shortcut behind a question");
+    f.keys(b"\r");
+    assert_eq!(f.actions(), [Action::Pressed(d.no)]);
+    f.ui.answered();
+    assert!(!f.ui.asking());
+    assert_eq!(f.ui.focused(), Some(f.list));
+    f.same_as_full_paint();
+}
+
+#[test]
+fn nothing_behind_a_dialog_can_be_clicked() {
+    let (mut f, d) = asking();
+    f.ui.ask(&d, "Delete it?", "Delete");
+    f.paint();
+    f.click(f.cancel);
+    f.click(f.ok);
+    assert_eq!(f.actions(), []);
+    // Outside its card: nothing either, and it stays.
+    f.ui.handle(Event::Click {
+        x: 1,
+        y: 1,
+        button: LEFT,
+    });
+    f.ui.handle(Event::Release {
+        x: 1,
+        y: 1,
+        button: LEFT,
+    });
+    assert_eq!(f.actions(), []);
+    assert!(f.ui.asking());
+    f.click(d.yes);
+    assert_eq!(f.actions(), [Action::Pressed(d.yes)]);
+}
+
+#[test]
+fn a_held_key_does_not_answer_a_dialog_and_esc_says_no() {
+    let (mut f, d) = asking();
+    f.ui.ask(&d, "Delete it?", "Delete");
+    f.paint();
+    let code = |code, state| Event::KeyCode {
+        code,
+        state,
+        mods: 0,
+    };
+    f.ui.handle(code(111, KeyState::Repeated));
+    f.keys(b"\r ");
+    assert_eq!(f.actions(), [], "held");
+    // Esc answers at once, without waiting for the key after it, and only once.
+    f.ui.handle(code(1, KeyState::Pressed));
+    assert_eq!(f.actions(), [Action::Pressed(d.no)]);
+    f.keys(&[0x1b]);
+    f.ui.handle(code(1, KeyState::Released));
+    f.ui.handle(code(30, KeyState::Pressed));
+    f.keys(b"a");
+    assert_eq!(f.actions(), []);
+}
+
+#[test]
+fn a_dialog_paints_what_a_full_paint_does_and_fits_a_small_window() {
+    let (mut f, d) = asking();
+    f.ui.ask(
+        &d,
+        "A question long enough to need more than one line in this card, surely.",
+        "Do it",
+    );
+    f.same_as_full_paint();
+    assert!(f.rect(d.yes).bottom() < H as i32);
+    // What changes behind it is painted under it.
+    f.ui.set_text(f.title, "Another title");
+    f.same_as_full_paint();
+    f.ui.answered();
+    f.same_as_full_paint();
+    let mut small = Ui::new(Theme::light(), 100, 60);
+    let d = small.dialog("Yes", "No");
+    let label = small.label("x", Style::Body, Tone::Primary);
+    small.set_root(label);
+    small.ask(&d, "Fits?", "Yes");
+    let mut pixels = vec![0; 100 * 60];
+    let mut c = Canvas::new(&mut pixels, 100, 60, 100).unwrap();
+    small.paint_all(&mut c);
 }

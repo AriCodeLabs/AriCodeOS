@@ -102,6 +102,11 @@ pub struct Theme {
     pub field_min: i32,
     /// A list's height before it is given more: rows.
     pub list_rows: i32,
+    /// A dialog's width, when the window has room.
+    pub dialog_w: i32,
+    /// How much black lies over a window behind a dialog, and its shadow: of 256.
+    pub scrim: u32,
+    pub dialog_shadow: u32,
     /// Inside a button or a field, on each side.
     pub control_pad: i32,
     pub thumb_w: i32,
@@ -153,6 +158,9 @@ impl Theme {
             button_min: 64,
             field_min: 160,
             list_rows: 3,
+            dialog_w: 380,
+            scrim: 64,
+            dialog_shadow: 77,
             control_pad: 10,
             thumb_w: 6,
             thumb_min: 20,

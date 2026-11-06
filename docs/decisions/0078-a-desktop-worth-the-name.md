@@ -526,15 +526,23 @@ The clipboard's rules held. What it found was in the programs, and it was worth 
   and the refresh selected the next file, so it emptied `home/` at about 15 files a second. Holding
   Enter on "Leave the desktop" left. The old programs had this too. The toolkit now knows a repeat
   from a press: a repeat edits and moves, and opens, presses, confirms and shortcuts nothing.
-- **High, typing on a focused Open:** two spaces discarded unsaved text. A two-press question now
-  ends at anything else the owner does (`Ui::inputs`), not only at some of it. Two spaces in a row
-  on that button still answer it, and modal dialogs will end that.
+- **High, typing on a focused Open:** two spaces discarded unsaved text. Questions are modal
+  dialogs now, not "press again": see below.
 - **Medium:** Ctrl+X took the text before the clipboard had it (now it waits); a long line stopped
   drawing at 160 glyphs (the limit is gone, and lines past 32767 px measure right); a status line
   moved a view the owner had scrolled, without painting it.
 - **Low:** a CRLF is one line end for the caret; a held Ctrl+V reads once; refusals are logged per
   reason; a paste that does not fit says so.
 
-**Still to do in this stage:** menus and dialogs. `ui.*` figures in `perf` are not measured yet.
+### Dialogs
+
+A question is a modal dialog: nothing behind it takes the pointer, the keys or a shortcut. The keys
+start on the answer that changes nothing, a held key answers nothing, and Esc says no at once: with
+key codes, the toolkit no longer waits for the key after it to tell Esc from a sequence. A second
+click on the close box still answers the question the first one asked. The editor, the files and
+the launcher ask this way. The "press again" questions are gone.
+
+**Still to do in this stage:** `ui.*` figures in `perf` are not measured yet. Menus move to stage
+3, with the menu bar that uses them: built now, nothing would call them.
 
 Next: those, then the shell (stage 3).

@@ -20,7 +20,7 @@ use alloc::vec::Vec;
 use aricode_rt::sys::launch::{self, LaunchError, Status};
 use aricode_rt::sys::window::{wants, Event, Window};
 use aricode_rt::sys::{self, kind, permissions, Handle};
-use aricode_ui::{Action, Fill, Id, Space, Stack, Style, Theme, Tone, Ui};
+use aricode_ui::{Action, Dialog, Fill, Id, Space, Stack, Style, Theme, Tone, Ui};
 
 const W: u32 = 320;
 const H: u32 = 360;
@@ -45,6 +45,9 @@ struct Launcher {
     leave: Id,
     /// The last outcome. Above the buttons, so that growing it moves none of them.
     status: Id,
+    /// Leaving ends every app the launcher started, unsaved text included: it asks
+    /// first (audit of ADR 0077, M1).
+    leaving: Dialog,
 }
 
 impl Launcher {
@@ -69,6 +72,7 @@ impl Launcher {
         );
         ui.set_root(root);
         ui.focus(list);
+        let leaving = ui.dialog("Leave", "Stay");
         Self {
             ui,
             list,
@@ -76,6 +80,7 @@ impl Launcher {
             refresh,
             leave,
             status,
+            leaving,
         }
     }
 
@@ -147,6 +152,12 @@ impl Launcher {
         }
     }
 
+    fn ask_to_leave(&mut self) {
+        let question = "Leave the desktop? Open applications close with it.";
+        self.ui.ask(&self.leaving, question, "Leave");
+        say(&[b"asks to leave the desktop"]);
+    }
+
     fn show(&mut self, win: &mut Window) {
         let frame = self.ui.paint(&mut win.canvas());
         if !frame.is_empty() {
@@ -186,9 +197,6 @@ fn main(_arg: u64) -> u64 {
         return 3;
     }
     say(&[b"ready"]);
-    // Leaving ends every app the launcher started, unsaved text included:
-    // the first press only arms it (audit of ADR 0077, M1).
-    let mut leave_armed = false;
     'running: loop {
         let event = match win.poll(1000) {
             Ok(Some(e)) => e,
@@ -196,10 +204,10 @@ fn main(_arg: u64) -> u64 {
             // The compositor is gone: so is the desktop.
             Err(_) => return 4,
         };
-        let inputs = l.ui.inputs();
-        let mut leave = false;
         match event {
-            Event::Close => leave = true,
+            // A second click on the close box answers the question it asked.
+            Event::Close if l.ui.asking() => break 'running,
+            Event::Close => l.ask_to_leave(),
             Event::Configure { width, height } => {
                 let _ = l.ui.configure(width, height, |ui| {
                     win.resize(hw, width, height, |c| ui.paint_all(c))
@@ -209,36 +217,14 @@ fn main(_arg: u64) -> u64 {
         }
         while let Some(action) = l.ui.next_action() {
             match action {
-                Action::Pressed(id) if id == l.leave => leave = true,
-                Action::Pressed(id) if id == l.open => {
-                    leave_armed = false;
-                    l.open(apps);
-                }
-                Action::Pressed(id) if id == l.refresh => {
-                    leave_armed = false;
-                    l.refresh(apps);
-                }
-                Action::Activated(..) => {
-                    leave_armed = false;
-                    l.open(apps);
-                }
-                _ => leave_armed = false,
+                Action::Pressed(id) if id == l.leaving.yes => break 'running,
+                Action::Pressed(id) if id == l.leaving.no => l.ui.answered(),
+                Action::Pressed(id) if id == l.leave => l.ask_to_leave(),
+                Action::Pressed(id) if id == l.open => l.open(apps),
+                Action::Pressed(id) if id == l.refresh => l.refresh(apps),
+                Action::Activated(..) => l.open(apps),
+                _ => {}
             }
-        }
-        // Whatever else the owner does, the question was not answered: only the same
-        // press twice in a row leaves (audit of ADR 0078, stage 2, M3).
-        if !leave && l.ui.inputs() != inputs {
-            leave_armed = false;
-        }
-        if leave {
-            if leave_armed {
-                break 'running;
-            }
-            leave_armed = true;
-            l.set_status(
-                true,
-                &[b"again to leave the desktop: open apps close with it"],
-            );
         }
         l.show(&mut win);
     }
