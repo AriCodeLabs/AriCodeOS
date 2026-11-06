@@ -542,7 +542,25 @@ key codes, the toolkit no longer waits for the key after it to tell Esc from a s
 click on the close box still answers the question the first one asked. The editor, the files and
 the launcher ask this way. The "press again" questions are gone.
 
-**Still to do in this stage:** `ui.*` figures in `perf` are not measured yet. Menus move to stage
-3, with the menu bar that uses them: built now, nothing would call them.
+### What it costs
+
+`cargo test --release -p aricode-ui -- --ignored --nocapture ui_figures`, on the build host (Ryzen),
+at 1366x768. These compare builds; the laptop's processor pays more. They are not yet in `cargo
+xtask perf`, which measures inside QEMU, where software emulation hides this kind of cost.
+
+| Figure | Time |
+|---|---|
+| A glyph, not yet cached | 32 us |
+| The same, cached | 0.3 us |
+| A line of 60 characters | 14 us |
+| A control's rounded body | 0.4 us |
+| A window's shadow, 720x400 | 96 us |
+| A layout of a small form | 4 us |
+| A full repaint of that form | 244 us |
+| Pressing a button, painted | 2.6 us |
+| A key in a field, painted | 12 us |
+| Typing and deleting a key in 64 KiB of text, painted | 700 us |
+
+Menus move to stage 3, with the menu bar that uses them: built now, nothing would call them.
 
 Next: those, then the shell (stage 3).

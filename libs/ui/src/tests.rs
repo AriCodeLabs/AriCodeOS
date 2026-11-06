@@ -995,3 +995,94 @@ fn a_dialog_paints_what_a_full_paint_does_and_fits_a_small_window() {
     let mut c = Canvas::new(&mut pixels, 100, 60, 100).unwrap();
     small.paint_all(&mut c);
 }
+
+/// The `ui.*` figures of ADR 0078, on the host: `cargo test --release -p aricode-ui --
+/// --ignored --nocapture ui_figures`. They compare builds on one machine, and say what
+/// grew; a program on the target pays what its processor pays.
+#[test]
+#[ignore]
+fn ui_figures() {
+    use aricode_text::{Face, Typesetter, INTER_REGULAR};
+    use std::time::Instant;
+    const FACE: Face = Face(INTER_REGULAR);
+    fn figure(name: &str, runs: u32, mut work: impl FnMut()) {
+        let start = Instant::now();
+        for _ in 0..runs {
+            work();
+        }
+        let each = start.elapsed().as_nanos() as f64 / f64::from(runs) / 1000.0;
+        std::println!("ui.{name}: {each:.1} us");
+    }
+    const SW: u32 = 1366;
+    const SH: u32 = 768;
+    let mut pixels = vec![0u32; (SW * SH) as usize];
+
+    let mut canvas = Canvas::new(&mut pixels, SW, SH, SW).unwrap();
+    figure("glyph_cold", 50, || {
+        let mut text = Typesetter::new();
+        text.draw(&mut canvas, (FACE, 13), "g", (10, 20), 0);
+    });
+    let mut text = Typesetter::new();
+    text.draw(&mut canvas, (FACE, 13), "g", (10, 20), 0);
+    figure("glyph_warm", 1000, || {
+        text.draw(&mut canvas, (FACE, 13), "g", (10, 20), 0);
+    });
+    let line = "The quick brown fox jumps over the lazy dog, again and again";
+    figure("line", 1000, || {
+        text.draw(&mut canvas, (FACE, 13), line, (10, 40), 0);
+    });
+    let frame = Rect::new(100, 100, 720, 400);
+    figure("shadow", 200, || canvas.window_shadow(&frame, 77));
+    let button = Rect::new(100, 100, 80, 22);
+    figure("rounded_control", 1000, || canvas.rounded(&button, 6, 0));
+
+    let mut ui = Ui::new(Theme::light(), SW, SH);
+    let title = ui.label("Files", Style::Headline, Tone::Primary);
+    let field = ui.field(64, "Name");
+    let list = ui.list();
+    ui.set_flex(list, 1);
+    let rows: Vec<String> = (0..64).map(|i| std::format!("file-{i}\t{i}")).collect();
+    ui.set_rows(list, rows.iter().map(String::as_str));
+    let spacer = ui.spacer();
+    let cancel = ui.button("Cancel");
+    let ok = ui.default_button("Open");
+    let buttons = ui.stack(Stack::row(), &[spacer, cancel, ok]);
+    let root = ui.stack(
+        Stack::column().pad(Space::Margin).fill(Fill::Window),
+        &[title, field, list, buttons],
+    );
+    ui.set_root(root);
+    ui.focus(field);
+    ui.paint_all(&mut canvas);
+    figure("layout", 200, || {
+        ui.layout();
+        ui.damage.clear();
+    });
+    figure("full_repaint", 50, || ui.paint_all(&mut canvas));
+    figure("button_press", 500, || {
+        ui.handle(Event::Click {
+            x: 0,
+            y: 0,
+            button: LEFT,
+        });
+        ui.dirty(ok);
+        ui.paint(&mut canvas);
+    });
+    figure("key_in_a_field", 200, || {
+        ui.handle(Event::Key(b'a'));
+        ui.handle(Event::Key(0x7F));
+        ui.paint(&mut canvas);
+    });
+    let area = ui.area(64 * 1024);
+    ui.set_root(area);
+    ui.focus(area);
+    let text_64k = "A line of text for the editor.\n".repeat(2100);
+    ui.set_text(area, &text_64k);
+    ui.paint_all(&mut canvas);
+    figure("key_in_64k_of_text", 200, || {
+        ui.handle(Event::Key(b'a'));
+        ui.paint(&mut canvas);
+        ui.handle(Event::Key(0x7F));
+        ui.paint(&mut canvas);
+    });
+}
