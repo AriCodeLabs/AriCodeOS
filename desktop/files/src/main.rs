@@ -255,8 +255,8 @@ impl Files {
 }
 
 /// The window's widgets, and the folder they show.
-fn build(fs: FsClient) -> Files {
-    let mut ui = Ui::new(Theme::light(), W, H);
+fn build(fs: FsClient, dark: bool) -> Files {
+    let mut ui = Ui::new(Theme::of(dark), W, H);
     let title = ui.label("home/", Style::Headline, Tone::Primary);
     let list = ui.list();
     ui.set_flex(list, 1);
@@ -313,12 +313,12 @@ fn main(_arg: u64) -> u64 {
         say(&[b"cannot reach home/"]);
         return 2;
     };
-    let wanted = wants::POINTER | wants::KEY_CODES | wants::RESIZE;
+    let wanted = wants::POINTER | wants::KEY_CODES | wants::RESIZE | wants::APPEARANCE;
     let Ok(mut win) = Window::create_wanting(session, hw, W, H, "Files", wanted) else {
         say(&[b"could not create its window"]);
         return 3;
     };
-    let mut f = build(fs);
+    let mut f = build(fs, win.starts_dark());
     if f.refresh(None) {
         f.say_count();
     }
@@ -334,6 +334,8 @@ fn main(_arg: u64) -> u64 {
             // The compositor is gone: so is the desktop.
             Err(_) => return 5,
         };
+        let inputs = f.ui.inputs();
+        let mut deleting = false;
         match event {
             // Nothing to save: it closes at once (ADR 0077).
             Event::Close => {
@@ -351,16 +353,46 @@ fn main(_arg: u64) -> u64 {
         while let Some(action) = f.ui.next_action() {
             match action {
                 Action::Selected(..) => f.arm(None),
-                Action::DeleteRow(..) => f.delete(),
+                Action::DeleteRow(..) => {
+                    deleting = true;
+                    f.delete();
+                }
                 Action::Submitted(_) => f.create(),
                 Action::Shortcut(b'r') => f.rename(),
                 Action::Cancel => f.ui.focus(f.list),
                 Action::Pressed(id) if id == f.new => f.create(),
                 Action::Pressed(id) if id == f.rename => f.rename(),
-                Action::Pressed(id) if id == f.delete => f.delete(),
+                Action::Pressed(id) if id == f.delete => {
+                    deleting = true;
+                    f.delete();
+                }
                 Action::Pressed(id) if id == f.refresh && f.refresh(None) => f.say_count(),
+                Action::Copied => {
+                    if let Some(text) = f.ui.take_copied() {
+                        if win.clipboard_set(hw, &text).is_err() {
+                            f.set_status(true, &[b"could not copy"]);
+                        }
+                    }
+                }
+                Action::Cut(id) => {
+                    if let Some(text) = f.ui.take_copied() {
+                        match win.clipboard_set(hw, &text) {
+                            Ok(()) => f.ui.cut_done(id),
+                            Err(_) => f.set_status(true, &[b"could not cut: the text stays"]),
+                        }
+                    }
+                }
+                Action::Paste(id) => match win.clipboard_get(hw, |text| f.ui.paste(id, text)) {
+                    Ok(true) => {}
+                    Ok(false) => f.set_status(true, &[b"only part of it fits in a name"]),
+                    Err(_) => f.set_status(true, &[b"could not paste"]),
+                },
                 _ => {}
             }
+        }
+        // Anything else the owner does takes back a first Delete (audit of ADR 0078).
+        if !deleting && f.ui.inputs() != inputs {
+            f.arm(None);
         }
         f.show(&mut win);
     }

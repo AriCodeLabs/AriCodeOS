@@ -151,6 +151,35 @@ fn events(session: Handle, hw: Handle) -> u64 {
                 }
                 sys::print(b"gui_demo D: presented a part\n");
             }
+            // The clipboard (ADR 0078): copying with the focus works, and reading
+            // only as the answer to the owner's Ctrl+V, once.
+            Event::Key(b'c') => {
+                let copied = win.clipboard_set(hw, "demo text").is_ok();
+                sys::print(if copied {
+                    b"gui_demo D: copied\n" as &[u8]
+                } else {
+                    b"gui_demo D: copying was refused\n"
+                });
+                let read = win.clipboard_get(hw, |_| ());
+                sys::print(if read.is_err() {
+                    b"gui_demo D: the clipboard stays closed without Ctrl+V\n" as &[u8]
+                } else {
+                    b"gui_demo D: the clipboard was open without Ctrl+V\n"
+                });
+            }
+            Event::Key(0x16) => {
+                let same = win.clipboard_get(hw, |text| text == "demo text");
+                sys::print(if same == Ok(true) {
+                    b"gui_demo D: pasted what was copied\n" as &[u8]
+                } else {
+                    b"gui_demo D: the paste failed\n"
+                });
+                sys::print(if win.clipboard_get(hw, |_| ()).is_err() {
+                    b"gui_demo D: one read for one press\n" as &[u8]
+                } else {
+                    b"gui_demo D: a second read for one press\n"
+                });
+            }
             Event::Key(b'q') => {
                 sys::print(if repeats > 1 {
                     b"gui_demo D: the key repeated\n" as &[u8]

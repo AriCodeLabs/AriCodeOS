@@ -5,7 +5,8 @@
 //! capability: a directory session of fsd on that folder, so names are
 //! plain, `notes.txt`). The file name goes in the field at the top; Open
 //! (or Enter there, or Ctrl+O) reads it, Save (or Ctrl+S) replaces it
-//! atomically. Tab moves from the name to the text, Ctrl+L or Esc back.
+//! atomically. Tab walks the name, Open, Save and the text; Ctrl+L or Esc goes
+//! back to the name.
 //! Opening over unsaved changes, or saving over another file than the one
 //! opened, takes a second press. It opens plain text only: a file that is not
 //! UTF-8 or holds control characters would not come back from it byte for
@@ -80,6 +81,8 @@ struct Editor {
     loaded_new: bool,
     /// The action a first press asked to confirm, and for which name.
     armed: Option<(Confirm, [u8; 26])>,
+    /// This event was a press of what `armed` asks about.
+    asked: bool,
 }
 
 impl Editor {
@@ -125,6 +128,7 @@ impl Editor {
     /// Whether this is the second press of `what` for `name`; the first
     /// one only arms it.
     fn confirmed(&mut self, what: Confirm, name: [u8; 26]) -> bool {
+        self.asked = true;
         if self.armed == Some((what, name)) {
             self.armed = None;
             return true;
@@ -141,12 +145,6 @@ impl Editor {
         }
         self.set_status(true, &[b"unsaved changes: close again to discard them"]);
         false
-    }
-
-    fn disarm_close(&mut self) {
-        if matches!(self.armed, Some((Confirm::Close, _))) {
-            self.armed = None;
-        }
     }
 
     /// The name field shows the file the text belongs to again, after an
@@ -304,8 +302,8 @@ impl Editor {
 }
 
 /// The window's widgets, and the folder they work in.
-fn build(fs: FsClient) -> Editor {
-    let mut ui = Ui::new(Theme::light(), W, H);
+fn build(fs: FsClient, dark: bool) -> Editor {
+    let mut ui = Ui::new(Theme::of(dark), W, H);
     let name = ui.field(26, "File name");
     ui.set_flex(name, 1);
     let open = ui.button("Open");
@@ -336,6 +334,7 @@ fn build(fs: FsClient) -> Editor {
         loaded: [0; 26],
         loaded_new: false,
         armed: None,
+        asked: false,
     }
 }
 
@@ -377,12 +376,12 @@ fn main(_arg: u64) -> u64 {
     };
     // SAFETY: a new mapping of whole pages, never unmapped, used by nothing else.
     unsafe { aricode_rt::extend_heap(heap as usize, MORE_HEAP) };
-    let wanted = wants::POINTER | wants::KEY_CODES | wants::RESIZE;
+    let wanted = wants::POINTER | wants::KEY_CODES | wants::RESIZE | wants::APPEARANCE;
     let Ok(mut win) = Window::create_wanting(session, hw, W, H, "Editor", wanted) else {
         say(&[b"could not create its window"]);
         return 3;
     };
-    let mut ed = build(fs);
+    let mut ed = build(fs, win.starts_dark());
     ed.set_status(false, &[b"files in home/; type a name and press Enter"]);
     let frame = ed.ui.paint(&mut win.canvas());
     if frame.is_empty() || win.present().is_err() {
@@ -396,12 +395,8 @@ fn main(_arg: u64) -> u64 {
             // The compositor is gone: so is the desktop.
             Err(_) => return 5,
         };
-        // A key or a click, anything but a second click on the close box,
-        // disarms it (audit of ADR 0077, L6).
-        if matches!(event, Event::Key(_) | Event::Click { .. }) {
-            ed.disarm_close();
-        }
-        let focus = ed.ui.focused();
+        let inputs = ed.ui.inputs();
+        ed.asked = false;
         match event {
             Event::Close if ed.close_asked() => {
                 say(&[b"closed"]);
@@ -415,14 +410,9 @@ fn main(_arg: u64) -> u64 {
             }
             event => ed.ui.handle(event),
         }
-        // Moving to another control disarms a confirmation.
-        if ed.ui.focused() != focus {
-            ed.armed = None;
-        }
         while let Some(action) = ed.ui.next_action() {
             match action {
                 Action::Edited(id) => {
-                    ed.armed = None;
                     if id == ed.text {
                         ed.set_changed(true);
                     }
@@ -434,12 +424,37 @@ fn main(_arg: u64) -> u64 {
                 Action::Pressed(id) if id == ed.save => ed.save(),
                 // Esc is known only with the key after it: Ctrl+L goes to the
                 // name at once (audit of the editor, L4).
-                Action::Shortcut(b'l') | Action::Cancel => {
-                    ed.armed = None;
-                    ed.ui.focus(ed.name);
+                Action::Shortcut(b'l') | Action::Cancel => ed.ui.focus(ed.name),
+                Action::Copied => {
+                    if let Some(text) = ed.ui.take_copied() {
+                        let mut b = [0u8; 20];
+                        let n = aricode_rt::fmt_u64(text.len() as u64, &mut b);
+                        match win.clipboard_set(hw, &text) {
+                            Ok(()) => say(&[b"copied ", n, b" bytes"]),
+                            Err(_) => ed.set_status(true, &[b"could not copy ", n, b" bytes"]),
+                        }
+                    }
                 }
+                Action::Cut(id) => {
+                    if let Some(text) = ed.ui.take_copied() {
+                        match win.clipboard_set(hw, &text) {
+                            Ok(()) => ed.ui.cut_done(id),
+                            Err(_) => ed.set_status(true, &[b"could not cut: the text stays"]),
+                        }
+                    }
+                }
+                Action::Paste(id) => match win.clipboard_get(hw, |text| ed.ui.paste(id, text)) {
+                    Ok(true) => {}
+                    Ok(false) => ed.set_status(true, &[b"only part of it fits here"]),
+                    Err(_) => ed.set_status(true, &[b"could not paste"]),
+                },
                 _ => {}
             }
+        }
+        // Anything else the owner does takes back a question: only the same press twice
+        // in a row answers it (audit of ADR 0078, stage 2, M4).
+        if !ed.asked && ed.ui.inputs() != inputs {
+            ed.armed = None;
         }
         ed.show(&mut win);
     }

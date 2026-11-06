@@ -48,8 +48,8 @@ struct Launcher {
 }
 
 impl Launcher {
-    fn new() -> Self {
-        let mut ui = Ui::new(Theme::light(), W, H);
+    fn new(dark: bool) -> Self {
+        let mut ui = Ui::new(Theme::of(dark), W, H);
         let title = ui.label("Applications", Style::Headline, Tone::Primary);
         let list = ui.list();
         ui.set_flex(list, 1);
@@ -171,12 +171,12 @@ fn main(_arg: u64) -> u64 {
         say(&[b"started without a window, the launch endpoint or HARDWARE"]);
         return 1;
     };
-    let wanted = wants::POINTER | wants::KEY_CODES | wants::RESIZE;
+    let wanted = wants::POINTER | wants::KEY_CODES | wants::RESIZE | wants::APPEARANCE;
     let Ok(mut win) = Window::create_wanting(session, hw, W, H, "Launcher", wanted) else {
         say(&[b"could not create its window"]);
         return 2;
     };
-    let mut l = Launcher::new();
+    let mut l = Launcher::new(win.starts_dark());
     l.refresh(apps);
     for i in 0..l.ui.list_len(l.list) {
         say(&[b"offers ", l.ui.row(l.list, i).as_bytes()]);
@@ -196,6 +196,7 @@ fn main(_arg: u64) -> u64 {
             // The compositor is gone: so is the desktop.
             Err(_) => return 4,
         };
+        let inputs = l.ui.inputs();
         let mut leave = false;
         match event {
             Event::Close => leave = true,
@@ -223,6 +224,11 @@ fn main(_arg: u64) -> u64 {
                 }
                 _ => leave_armed = false,
             }
+        }
+        // Whatever else the owner does, the question was not answered: only the same
+        // press twice in a row leaves (audit of ADR 0078, stage 2, M3).
+        if !leave && l.ui.inputs() != inputs {
+            leave_armed = false;
         }
         if leave {
             if leave_armed {

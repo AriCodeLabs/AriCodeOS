@@ -2770,8 +2770,12 @@ impl Broker {
         if req.op == Op::SetSession && (req.item != Item::Session || req.value > 1) {
             return refuse(b"a change other than the session's");
         }
+        if req.op == Op::SetAppearance && (req.item != Item::Appearance || req.value > 1) {
+            return refuse(b"an appearance that does not exist");
+        }
         let mut text = alloc::string::String::new();
         let net = self.net;
+        let comp = self.compositor;
         let status = match self.fs.as_mut() {
             None => {
                 text.push_str("no file service");
@@ -2781,6 +2785,11 @@ impl Broker {
                 (Op::Get, Item::Session) => session_text(fs, &mut text),
                 (Op::SetSession, _) if req.value == 0 => set_session(fs, Session::Shell, &mut text),
                 (Op::SetSession, _) => set_session(fs, Session::Desktop, &mut text),
+                (Op::Get, Item::Appearance) => {
+                    text.push_str(if appearance_dark(fs) { "dark" } else { "light" });
+                    Status::Ok
+                }
+                (Op::SetAppearance, _) => set_appearance(fs, comp, req.value == 1, &mut text),
                 (Op::Get, Item::UpdateSource) => sources_text(fs, &mut text),
                 (Op::Get, Item::Address) => match net {
                     Some(net) => address_text(net, &mut text),
@@ -3321,6 +3330,38 @@ fn session_text(
 
 /// Chooses the session from the next boot for the desktop's settings,
 /// said and logged as the shell's `session` does.
+/// The file that keeps how the desktop looks: `dark`, or anything else for light.
+const APPEARANCE_FILE: &str = "appearance";
+
+fn appearance_dark(fs: &mut FsClient) -> bool {
+    let mut buf = [0u8; 16];
+    matches!(read_small(fs, APPEARANCE_FILE, &mut buf), Ok(Some(n)) if &buf[..n] == b"dark")
+}
+
+/// Keeps the owner's choice and shows it at once. A choice that cannot be kept is not
+/// shown: it would be gone at the next boot, against what the owner was told.
+fn set_appearance(
+    fs: &mut FsClient,
+    compositor: Option<Handle>,
+    dark: bool,
+    text: &mut alloc::string::String,
+) -> aricode_proto::settings::Status {
+    use aricode_proto::settings::Status;
+    let name = if dark { "dark" } else { "light" };
+    if update_index::client::save(fs, APPEARANCE_FILE, name.as_bytes()).is_err() {
+        text.push_str("the appearance file cannot be saved");
+        return Status::Failed;
+    }
+    if let Some(compositor) = compositor {
+        if sys::window::set_appearance(compositor, dark).is_err() {
+            text.push_str("saved; the desktop did not answer: from the next boot");
+            return Status::Failed;
+        }
+    }
+    text.push_str(name);
+    Status::Ok
+}
+
 fn set_session(
     fs: &mut FsClient,
     chosen: Session,
@@ -4299,6 +4340,12 @@ fn main(arg: u64) -> u64 {
             match run_gui(gui_eps) {
                 Ok(g) => {
                     services |= SERVICE_GUI;
+                    // The owner's choice, before any window opens.
+                    if fs_client.as_mut().is_some_and(appearance_dark)
+                        && sys::window::set_appearance(g.endpoint, true).is_err()
+                    {
+                        say(b"the compositor did not take the appearance");
+                    }
                     gui = Some(g);
                     say(b"desktop session: compositor started");
                 }

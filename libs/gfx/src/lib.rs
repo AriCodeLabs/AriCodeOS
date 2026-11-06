@@ -510,6 +510,26 @@ impl Theme {
         shadow_active: 77,
         shadow_inactive: 38,
     };
+
+    /// The dark theme of ADR 0078: the frame on #323232, over a darker desktop.
+    pub const DARK: Self = Self {
+        desktop: rgb(0x2A, 0x35, 0x41),
+        window: rgb(0x32, 0x32, 0x32),
+        title_active: rgb(0xE6, 0xE6, 0xE6),
+        title_inactive: rgb(0x8C, 0x8C, 0x8C),
+        circle_off: rgb(0x55, 0x55, 0x55),
+        shadow_active: 110,
+        shadow_inactive: 60,
+        ..Self::LIGHT
+    };
+
+    pub const fn of(dark: bool) -> Self {
+        if dark {
+            Self::DARK
+        } else {
+            Self::LIGHT
+        }
+    }
 }
 
 impl Default for Theme {
@@ -1274,6 +1294,41 @@ pub const MAX_DAMAGE: usize = 8;
 /// (numerator, denominator) become the whole screen.
 pub const FULL_SCREEN_FRACTION: (u64, u64) = (1, 2);
 
+/// Who may read the clipboard now: what the owner copied may be a password, so a program
+/// reads it only with the focus and only when the owner pressed Ctrl+V in it, once for
+/// each press. No program can watch the clipboard from behind, nor take it unasked.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct PasteGrant(Option<u32>);
+
+/// The byte a window gets for Ctrl+V.
+const CTRL_V: u8 = 0x16;
+
+impl PasteGrant {
+    /// A key went to the focused window as these bytes; `held` when it repeats on its
+    /// own, which is not a press. A key with no bytes (a release, a modifier) changes
+    /// nothing.
+    pub fn on_key(&mut self, focus: u32, bytes: &[u8], held: bool) {
+        if bytes.is_empty() {
+            return;
+        }
+        self.0 = (bytes == [CTRL_V] && !held).then_some(focus);
+    }
+
+    /// The focus moved.
+    pub fn on_focus_change(&mut self) {
+        self.0 = None;
+    }
+
+    /// Whether `window` may read now; this uses up the press.
+    pub fn take(&mut self, window: u32, focus: Option<u32>) -> bool {
+        let granted = self.0 == Some(window) && focus == Some(window);
+        if granted {
+            self.0 = None;
+        }
+        granted
+    }
+}
+
 /// The screen areas to recompose and flush: at most [`MAX_DAMAGE`]
 /// disjoint rectangles inside the screen. A rectangle that overlaps one
 /// already kept is merged with it (their bounding box); when the set is
@@ -1396,6 +1451,33 @@ impl<'a> Iterator for RevIter<'a> {
 mod tests {
     extern crate std;
     use super::*;
+
+    #[test]
+    fn only_a_press_in_the_focused_window_opens_the_clipboard() {
+        let mut g = PasteGrant::default();
+        // Nothing pressed: nobody reads.
+        assert!(!g.take(1, Some(1)));
+        // A press in window 1 is for window 1, once.
+        g.on_key(1, &[CTRL_V], false);
+        assert!(!g.take(2, Some(1)), "another window");
+        assert!(!g.take(1, Some(2)), "it has lost the focus");
+        assert!(g.take(1, Some(1)));
+        assert!(!g.take(1, Some(1)), "one read for one press");
+        // Letting the keys go keeps it until it is read; another key ends it.
+        g.on_key(1, &[CTRL_V], false);
+        g.on_key(1, &[], false);
+        assert!(g.take(1, Some(1)));
+        // Holding the key is one press, not one for each repeat.
+        g.on_key(1, &[CTRL_V], true);
+        assert!(!g.take(1, Some(1)));
+        g.on_key(1, &[CTRL_V], false);
+        g.on_key(1, b"x", false);
+        assert!(!g.take(1, Some(1)));
+        // Moving away ends it, even coming back.
+        g.on_key(1, &[CTRL_V], false);
+        g.on_focus_change();
+        assert!(!g.take(1, Some(1)));
+    }
 
     #[test]
     fn the_frame_has_three_circles_on_its_left_and_a_title_bar() {

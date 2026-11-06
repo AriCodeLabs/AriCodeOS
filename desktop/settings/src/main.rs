@@ -29,6 +29,7 @@ const H: u32 = 400;
 /// The lines of facts: system, keyboard, network, updates, session, driver keys.
 const FACTS: usize = 6;
 const CHOICES: [&str; 2] = ["Text console", "Desktop"];
+const LOOKS: [&str; 2] = ["Light", "Dark"];
 
 fn say(parts: &[&[u8]]) {
     sys::print(b"settings: ");
@@ -54,6 +55,7 @@ struct Settings {
     facts: [Id; FACTS],
     status: Id,
     choice: Id,
+    look: Id,
     refresh: Id,
 }
 
@@ -157,6 +159,9 @@ impl Settings {
             5,
             &[b"Driver keys: none (signed driver packages are not built yet)"],
         );
+        let (known, look) = self.ask(Op::Get, Item::Appearance, 0);
+        let chosen = known.then_some(if look == "dark" { 1 } else { 0 });
+        self.ui.select(self.look, chosen);
     }
 
     /// Chooses the selected session from the next boot.
@@ -181,6 +186,16 @@ impl Settings {
         }
     }
 
+    /// Chooses how the desktop looks: init keeps it and tells the compositor, which
+    /// tells every window, this one included.
+    fn apply_look(&mut self, look: usize) {
+        let (ok, text) = self.ask(Op::SetAppearance, Item::Appearance, look as u8);
+        self.ui.set_text(self.status, &text);
+        let tone = if ok { Tone::Secondary } else { Tone::Error };
+        self.ui.set_tone(self.status, tone);
+        say(&[b"appearance: ", text.as_bytes()]);
+    }
+
     fn show(&mut self, win: &mut Window) {
         let frame = self.ui.paint(&mut win.canvas());
         if !frame.is_empty() {
@@ -190,8 +205,8 @@ impl Settings {
 }
 
 /// The window's widgets.
-fn build(system: Handle, settings: Handle) -> Settings {
-    let mut ui = Ui::new(Theme::light(), W, H);
+fn build(system: Handle, settings: Handle, dark: bool) -> Settings {
+    let mut ui = Ui::new(Theme::of(dark), W, H);
     let facts: [Id; FACTS] = core::array::from_fn(|_| ui.paragraph("", Style::Body, Tone::Primary));
     let card = ui.stack(
         Stack::column().pad(Space::Control).card(Fill::Content),
@@ -209,11 +224,20 @@ fn build(system: Handle, settings: Handle) -> Settings {
     ui.set_min(choice, 240, 0);
     let refresh = ui.button("Refresh");
     let spacer = ui.spacer();
-    let row = ui.stack(Stack::row().align(Align::Start), &[choice, refresh, spacer]);
+    let boot = ui.stack(Stack::column(), &[heading, choice]);
+    let look_heading = ui.label("Appearance:", Style::Callout, Tone::Secondary);
+    let look = ui.list();
+    ui.set_rows(look, LOOKS);
+    ui.set_min(look, 160, 0);
+    let appearance = ui.stack(Stack::column(), &[look_heading, look]);
+    let row = ui.stack(
+        Stack::row().align(Align::Start).gap(Space::Group),
+        &[boot, appearance, refresh, spacer],
+    );
     let status = ui.paragraph("", Style::Callout, Tone::Secondary);
     let root = ui.stack(
         Stack::column().pad(Space::Margin).fill(Fill::Window),
-        &[view, heading, row, status],
+        &[view, row, status],
     );
     ui.set_root(root);
     ui.focus(choice);
@@ -224,6 +248,7 @@ fn build(system: Handle, settings: Handle) -> Settings {
         facts,
         status,
         choice,
+        look,
         refresh,
     }
 }
@@ -247,12 +272,12 @@ fn main(_arg: u64) -> u64 {
         say(&[b"started without a window, the settings endpoint, SYSTEM or HARDWARE"]);
         return 1;
     };
-    let wanted = wants::POINTER | wants::KEY_CODES | wants::RESIZE;
+    let wanted = wants::POINTER | wants::KEY_CODES | wants::RESIZE | wants::APPEARANCE;
     let Ok(mut win) = Window::create_wanting(session, hw, W, H, "Settings", wanted) else {
         say(&[b"could not create its window"]);
         return 2;
     };
-    let mut s = build(system, settings);
+    let mut s = build(system, settings, win.starts_dark());
     s.refresh();
     let frame = s.ui.paint(&mut win.canvas());
     if frame.is_empty() || win.present().is_err() {
@@ -296,6 +321,7 @@ fn main(_arg: u64) -> u64 {
         while let Some(action) = s.ui.next_action() {
             match action {
                 Action::Activated(id, _) if id == s.choice => s.apply(),
+                Action::Activated(id, look) if id == s.look => s.apply_look(look),
                 Action::Pressed(id) if id == s.refresh => s.refresh(),
                 _ => {}
             }
