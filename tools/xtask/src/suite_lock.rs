@@ -20,11 +20,13 @@
 //! Rust opens files close-on-exec, so QEMU and other children never inherit
 //! the descriptor.
 //!
-//! A suite that has to wait also holds a shared `flock` on `suite.lock.waiting`
-//! while it waits. The CI container's passes look at that between scenarios
-//! ([`someone_waits`]) and step aside, so a branch's short test waits for the
-//! scenarios already running, not for a whole pass (the owner's rule: slow tests
-//! must not get in a feature's way). A waiter that dies leaves nothing behind.
+//! A suite that has to wait also holds an exclusive `flock` on
+//! `suite.lock.waiting` while it waits. The CI container's passes look at that
+//! with a shared one between scenarios ([`someone_waits`]) and step aside, so a
+//! branch's short test waits for the scenarios already running, not for a whole
+//! pass (the owner's rule: slow tests must not get in a feature's way). A waiter
+//! that dies leaves nothing behind. Lookers share: many look at once, and a child
+//! just forked, which holds a looker's lock until it execs, is no waiter.
 
 use crate::Result;
 use std::fs::{File, OpenOptions, TryLockError};
@@ -151,16 +153,7 @@ pub fn lock_file(path: &Path, details: &str, waiting: impl FnOnce(&str)) -> Resu
             } else {
                 &holder
             });
-            // Says so for as long as it waits; without it the wait only takes longer.
-            let _waiting = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(waiting_path(path))
-                .and_then(|f| f.lock_shared().map(|()| f));
-            file.lock()
-                .map_err(|e| format!("{}: {e}", path.display()))?;
+            wait_saying_so(&file, path).map_err(|e| format!("{}: {e}", path.display()))?;
         }
         Err(TryLockError::Error(e)) => return Err(format!("{}: {e}", path.display())),
     }
@@ -192,12 +185,33 @@ pub fn someone_waits() -> bool {
 }
 
 fn waits_for(lock: &Path) -> bool {
-    // The look itself holds the file for a moment, exclusively: two threads of a pass
-    // looking at once would each take the other for a waiter.
-    static LOOKING: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _one_at_a_time = LOOKING.lock().unwrap_or_else(|e| e.into_inner());
     File::open(waiting_path(lock))
-        .is_ok_and(|f| matches!(f.try_lock(), Err(TryLockError::WouldBlock)))
+        .is_ok_and(|f| matches!(f.try_lock_shared(), Err(TryLockError::WouldBlock)))
+}
+
+/// Waits for `file`'s lock, holding the waiting file meanwhile. That one may be busy for
+/// a moment, with a look or with another waiter that may have gone by the next try.
+fn wait_saying_so(file: &File, lock: &Path) -> std::io::Result<()> {
+    let mut saying = None;
+    let waiting = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(waiting_path(lock));
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(()),
+            Err(TryLockError::WouldBlock) => {}
+            Err(TryLockError::Error(e)) => return Err(e),
+        }
+        if saying.is_none() {
+            if let Ok(w) = &waiting {
+                saying = w.try_lock().ok();
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 }
 
 /// Who holds the lock: process, machine (the container id inside one),
