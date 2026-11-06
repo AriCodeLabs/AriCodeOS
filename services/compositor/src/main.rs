@@ -9,9 +9,13 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
+use alloc::vec::Vec;
 use aricode_cmdline::{keys, CmdLine};
 use aricode_gfx::{
-    resized, snap_at, snap_content, Canvas, Damage, Desktop, Hit, PixelMasks, Rect, Scene, Window,
+    resized, snap_at, snap_content, Canvas, Damage, Desktop, Hit, Labels, PixelMasks, Rect, Scene,
+    Window,
 };
 use aricode_input::{
     EscapeChord, KeyRepeat, Keyboard, Layout, BTN_LEFT, EV_KEY, EV_REL, REL_WHEEL, REL_X, REL_Y,
@@ -22,6 +26,7 @@ use aricode_proto::window::{mods, wants, Event, KeyState, Op, Reply, Request, St
 use aricode_rt::sys::input::{DriverInstance, InputClient, InputError};
 use aricode_rt::sys::{self, abi, Handle};
 use aricode_rt::{fmt_hex, fmt_u64};
+use aricode_text::{Face, Typesetter, INTER_SEMIBOLD};
 
 const SERVICE: Handle = Handle(0x0001_0004);
 const FRAMEBUFFER: Handle = Handle(0x0001_0005);
@@ -313,6 +318,30 @@ struct Pointer {
     buttons: u8,
 }
 
+/// Title bars in Inter, semibold 13 (ADR 0078).
+struct TitleFont(Typesetter);
+
+impl TitleFont {
+    const FACE: Face = Face(INTER_SEMIBOLD);
+    const SIZE: u32 = 13;
+}
+
+impl Labels for TitleFont {
+    fn width(&mut self, text: &str) -> i32 {
+        self.0.width(Self::FACE, Self::SIZE, text)
+    }
+    fn draw(&mut self, canvas: &mut Canvas, text: &str, x: i32, middle: i32, color: u32) {
+        // The cap height's middle on the bar's: 13 px Inter has caps of about 9.
+        self.0.draw(
+            canvas,
+            (Self::FACE, Self::SIZE),
+            text,
+            (x, middle + 5),
+            color,
+        );
+    }
+}
+
 /// The owner dragging a window's title bar or an edge.
 #[derive(Clone, Copy)]
 struct Drag {
@@ -336,9 +365,11 @@ struct Switching {
 struct Compositor {
     screen: Screen,
     desktop: Desktop,
-    contents: [Option<Content>; MAX_WINDOWS],
+    /// On the heap: with their event queues, they would take 6 KB of the stack.
+    contents: Vec<Option<Content>>,
     keys: Keys,
     pointer: Pointer,
+    labels: TitleFont,
     switching: Option<Switching>,
     /// Ctrl+Alt+Backspace: the owner asks for the text console (ADR 0074).
     escape: EscapeChord,
@@ -1379,8 +1410,9 @@ impl Compositor {
         let contents = &self.contents;
         let desktop = &self.desktop;
         let mut screen = self.screen.canvas();
+        let labels = &mut self.labels;
         for r in self.damage.rects() {
-            desktop.compose_region(&mut screen, r, |w: &Window, out: &mut Canvas| {
+            desktop.compose_labeled(&mut screen, r, labels, |w: &Window, out: &mut Canvas| {
                 let Some(c) = contents.iter().flatten().find(|c| c.id == w.id) else {
                     return;
                 };
@@ -1484,7 +1516,7 @@ fn main(inputs: u64) -> u64 {
         damage: Damage::full(desktop.screen),
         desktop,
         screen,
-        contents: [const { None }; MAX_WINDOWS],
+        contents: (0..MAX_WINDOWS).map(|_| None).collect(),
         keys: Keys {
             keyboard,
             repeat: KeyRepeat::new(),
@@ -1492,6 +1524,7 @@ fn main(inputs: u64) -> u64 {
             lost: false,
         },
         pointer: Pointer::default(),
+        labels: TitleFont(Typesetter::new()),
         switching: None,
         escape: EscapeChord::new(),
         last_key_ms: None,
