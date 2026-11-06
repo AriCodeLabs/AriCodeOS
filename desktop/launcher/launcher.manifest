@@ -1,5 +1,7 @@
 # The desktop's launcher (ADR 0074): a window, and the broker's launch
 # endpoint, which starts installed applications with their own manifests.
+# A resize holds two buffers for a moment, so a window near the size of the
+# screen needs all of the quota.
 name = launcher
 caps = window, launch
-memory = 1M
+memory = 8M

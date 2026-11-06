@@ -72,7 +72,6 @@ name = "aricode-gfx"
 version = "0.18.0"
 dependencies = [
  "aricode-fb-console",
- "aricode-input",
 ]
 
 [[package]]
@@ -86,13 +85,6 @@ version = "0.18.0"
 [[package]]
 name = "aricode-http"
 version = "0.18.0"
-
-[[package]]
-name = "aricode-input"
-version = "0.18.0"
-dependencies = [
- "aricode-abi",
-]
 
 [[package]]
 name = "aricode-net"

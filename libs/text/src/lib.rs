@@ -146,6 +146,20 @@ impl Typesetter {
         (x + 0xFFFF) >> 16
     }
 
+    /// Walks `text` once: `at` gets each character's byte offset and where it starts in
+    /// pixels, rounded, then `text.len()` and where the line ends. What a caret or a
+    /// wrapped line needs, without measuring every prefix.
+    pub fn offsets(&self, face: Face, size: u32, text: &str, mut at: impl FnMut(usize, i32)) {
+        let mut chars = text.char_indices();
+        layout(face, size, text, |glyph, x| {
+            let offset = match glyph {
+                Some(_) => chars.next().map_or(text.len(), |(i, _)| i),
+                None => text.len(),
+            };
+            at(offset, (x + 0x8000) >> 16);
+        });
+    }
+
     /// Draws `text` with its baseline at `at.1`, starting at `at.0`, in `color`, within
     /// `canvas`'s clip.
     pub fn draw(

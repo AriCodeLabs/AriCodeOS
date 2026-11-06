@@ -6,7 +6,8 @@
 //! reads, and draws that text in its window with the console's text grid
 //! (`aricode-fb-console`), which understands what the shell's line editor
 //! sends. The shell is the owner's own; the terminal only carries bytes.
-//! When the shell ends (`exit`), the terminal closes.
+//! When the shell ends (`exit`), the terminal closes. The owner can resize its
+//! window: the text stays, cut to what fits.
 //!
 //! Handles, in the broker's order: its compositor session, the terminal
 //! endpoint (both endpoints, send only) and `HARDWARE`.
@@ -15,7 +16,7 @@
 
 use aricode_fb_console::{Console, Rgb, Surface, Utf8Stream};
 use aricode_proto::session;
-use aricode_rt::sys::window::{self, Event, Window};
+use aricode_rt::sys::window::{self, wants, Event, Window};
 use aricode_rt::sys::{self, abi, kind, permissions, Error, Handle};
 use aricode_sync::SpinLock;
 use aricode_text::{Face, Typesetter, JETBRAINS_MONO};
@@ -43,11 +44,11 @@ struct Screen(Window, Typesetter);
 
 impl Surface for Screen {
     fn width(&self) -> usize {
-        W as usize
+        self.0.size().0 as usize
     }
 
     fn height(&self) -> usize {
-        H as usize
+        self.0.size().1 as usize
     }
 
     fn put(&mut self, x: usize, y: usize, color: Rgb) {
@@ -86,9 +87,10 @@ impl Surface for Screen {
     }
 
     fn fill_rows(&mut self, y: usize, rows: usize, color: Rgb) {
+        let width = self.0.size().0;
         let mut c = self.0.canvas();
         c.fill_rect(
-            &aricode_gfx::Rect::new(0, y as i32, W, rows as u32),
+            &aricode_gfx::Rect::new(0, y as i32, width, rows as u32),
             encode(color),
         );
     }
@@ -259,7 +261,33 @@ fn send_key(shell: &Shell, b: u8, said_full: &mut bool) {
     }
 }
 
-fn run(shell: &Shell) -> End {
+/// The owner wants the window at this size. Its new buffer shows the background for a
+/// frame at most: the console paints its text next. On a refused size it stays as it was.
+fn resize(hw: Handle, width: u32, height: u32) {
+    let mut console = CONSOLE.lock();
+    let Some(mut screen) = console.detach() else {
+        return;
+    };
+    let bg = encode(Console::<Screen>::DEFAULT_BG);
+    let answer = screen.0.resize(hw, width, height, |c| c.fill(bg));
+    console.resize_keeping(screen);
+    console.redraw(usize::MAX);
+    drop(console);
+    present();
+    let mut w = [0u8; 20];
+    let mut h = [0u8; 20];
+    sys::print(if answer.is_ok() {
+        b"terminal: window "
+    } else {
+        b"terminal: could not take "
+    });
+    sys::print(aricode_rt::fmt_u64(width as u64, &mut w));
+    sys::print(b"x");
+    sys::print(aricode_rt::fmt_u64(height as u64, &mut h));
+    sys::print(b"\n");
+}
+
+fn run(shell: &Shell, hw: Handle) -> End {
     let start = || CONSOLE.lock().surface().map(|s| s.0.start_poll(POLL_MS));
     let Some(Ok(mut pending)) = start() else {
         return End::Window;
@@ -290,6 +318,7 @@ fn run(shell: &Shell) -> End {
                 match window::poll_reply(&msg[..n]) {
                     Ok(Some(Event::Key(b))) => send_key(shell, b, &mut said_full),
                     Ok(Some(Event::Close)) => return End::Closed,
+                    Ok(Some(Event::Configure { width, height })) => resize(hw, width, height),
                     Ok(Some(_)) => {}
                     Ok(None) => {
                         // The poll's deadline: blink, and take whatever
@@ -335,7 +364,7 @@ fn main(_arg: u64) -> u64 {
         say(b"started without a window, the terminal endpoint or HARDWARE");
         return 1;
     };
-    let Ok(win) = Window::create(session, hw, W, H, "Terminal") else {
+    let Ok(win) = Window::create_wanting(session, hw, W, H, "Terminal", wants::RESIZE) else {
         say(b"could not create its window");
         return 2;
     };
@@ -352,7 +381,7 @@ fn main(_arg: u64) -> u64 {
     };
     present();
     say(b"shell started");
-    let end = run(&shell);
+    let end = run(&shell, hw);
     // Closing the input tells the shell to end, if it has not.
     let _ = sys::ipc_send(shell.input, &[], &[], 100);
     let _ = sys::handle_close(shell.input);

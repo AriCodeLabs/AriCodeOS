@@ -241,6 +241,9 @@ pub struct HostInput {
     pub drag: Option<(i32, i32)>,
     /// A key held for this many ms, before `keys` are typed.
     pub hold_key: Option<(String, u64)>,
+    /// A picture of the screen, kept as `NAME.ppm` in the scenario's directory:
+    /// taken after `wait_ms` and before anything is sent.
+    pub screendump: Option<String>,
     /// A pause after the marker, before anything is sent (ms): a stage
     /// that must come a while after the one before it (ADR 0077).
     #[serde(default)]

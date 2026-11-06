@@ -31,6 +31,7 @@ key_delay_ms = 100
 
 [[host_input_then]]
 marker = "editor: saved a (2 bytes)"
+screendump = "editor"
 keys = ["x", "ctrl+l", "b", "ret"]
 key_delay_ms = 100
 
