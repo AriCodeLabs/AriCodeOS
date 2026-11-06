@@ -1,6 +1,7 @@
 # The desktop's settings (ADR 0074): a window, the system's information,
-# and what init tells it and changes for it (the session). Its 720x400
-# window takes most of 2 MiB.
+# and what init tells it and changes for it (the session). A resize holds
+# two buffers for a moment, so a window near the size of the screen needs
+# all of the quota.
 name = settings
 caps = system, window, settings
-memory = 2M
+memory = 8M

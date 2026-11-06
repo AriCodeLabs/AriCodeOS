@@ -21,20 +21,22 @@ timeout_secs = 120
 
 [host_input]
 marker = "launcher: ready"
+wait_ms = 1000
+screendump = "launcher"
 keys = ["down", "up", "ret"]
 key_delay_ms = 100
 
-# "Leave the desktop" at (220, 268) in the launcher's content, which the
+# "Leave the desktop" at (220, 307) in the launcher's content, which the
 # first window has at (40, 68); the pointer starts at the screen's centre.
 [[host_input_then]]
 marker = "gui_demo A: window closed"
-mouse_rel = [-380, -64]
+mouse_rel = [-380, -25]
 click = "left"
 
 # The launcher's close circle at (48, 48), 12x12: its frame starts at (40, 40).
 [[host_input_then]]
 marker = "launcher: again to leave the desktop"
-mouse_rel = [-206, -282]
+mouse_rel = [-206, -321]
 click = "left"
 
 [expect]

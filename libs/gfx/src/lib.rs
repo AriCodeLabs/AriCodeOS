@@ -12,8 +12,6 @@
 use aricode_fb_console::char_glyph;
 use aricode_fb_console::font::GLYPH_WIDTH;
 
-pub mod widgets;
-
 /// Color `0x00RRGGBB`.
 pub type Color = u32;
 
@@ -220,6 +218,54 @@ impl<'a> Canvas<'a> {
         }
         let middle = (r.h as i32 - 2 * rows).max(0) as u32;
         self.fill_rect(&Rect::new(r.x, r.y + rows, r.w, middle), color);
+    }
+
+    /// `r` with corners of any `radius`, edges smoothed by 4x4 samples: what controls
+    /// are drawn with. Windows have their own, cheaper [`round_rect`](Self::round_rect).
+    pub fn rounded(&mut self, r: &Rect, radius: i32, color: Color) {
+        if !r.intersects(&self.clip) {
+            return;
+        }
+        let radius = radius.clamp(0, r.w.min(r.h) as i32 / 2);
+        let (w, h) = (r.w as i32, r.h as i32);
+        self.fill_rect(
+            &Rect::new(r.x, r.y + radius, r.w, (h - 2 * radius) as u32),
+            color,
+        );
+        let across = (w - 2 * radius) as u32;
+        self.fill_rect(&Rect::new(r.x + radius, r.y, across, radius as u32), color);
+        self.fill_rect(
+            &Rect::new(r.x + radius, r.bottom() - radius, across, radius as u32),
+            color,
+        );
+        // Eighths of a pixel from the corner circle's centre.
+        let q = radius * 8;
+        for y in 0..radius {
+            for x in 0..radius {
+                let mut inside = 0;
+                for sy in 0..4 {
+                    for sx in 0..4 {
+                        let dx = q - (x * 8 + sx * 2 + 1);
+                        let dy = q - (y * 8 + sy * 2 + 1);
+                        if dx * dx + dy * dy <= q * q {
+                            inside += 1;
+                        }
+                    }
+                }
+                if inside == 0 {
+                    continue;
+                }
+                let (right, bottom) = (r.right() - 1 - x, r.bottom() - 1 - y);
+                for (px, py) in [
+                    (r.x + x, r.y + y),
+                    (right, r.y + y),
+                    (r.x + x, bottom),
+                    (right, bottom),
+                ] {
+                    self.blend_pixel(px, py, color, inside * 16);
+                }
+            }
+        }
     }
 
     /// A filled circle within `r`, edges smoothed by 4x4 samples.

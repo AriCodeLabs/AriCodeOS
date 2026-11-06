@@ -24,6 +24,8 @@ keys = ["ret"]
 
 [[host_input_then]]
 marker = "settings: ready"
+wait_ms = 1000
+screendump = "settings"
 keys = ["up", "ret"]
 key_delay_ms = 100
 

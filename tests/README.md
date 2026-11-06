@@ -173,6 +173,7 @@ marker = "INPUT_READY"
 keys = ["h", "o", "l", "a", "ret"]   # QEMU qcode names, press and release on kbd0; "shift+dot" holds the modifiers while the key is pressed
 mouse_rel = [10, -5]            # relative movement on mouse0
 click = "left"                  # button pressed and released; result in "[host] QMP: ..."
+screendump = "name"             # a picture of the screen, build/scenarios/<scenario>/name.ppm, before anything of this stage is sent
 key_delay_ms = 30               # minimum pause after each key event (default 0)
 echo_prompt = "ari> "           # the guest prints this before each line and echoes typed characters: each line waits for it and each
                                 # key but the last for its echo (10 s of QEMU running at most, a thermal pause not counted, then
