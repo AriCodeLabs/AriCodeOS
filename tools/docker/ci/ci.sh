@@ -25,9 +25,11 @@
 # runs holding the host's suite lock (ARICODEOS_SUITE_LOCK, the host's
 # $HOME/.cache/aricodeos-lock mounted at /run/aricodeos-lock), and inherits
 # it (ARICODEOS_SUITE_LOCK_HELD). The lock is let go between the passes,
-# with a pause for a waiter to take it: a branch's test waits for one pass,
-# not for both. Without the mount the run fails instead of testing beside
-# another suite.
+# with a pause for a waiter to take it. A suite that starts meanwhile does not
+# wait for a whole pass either: the pass looks between scenarios, steps aside
+# once those running are done (exit 75), and comes back to the ones it had not
+# run (ARICODEOS_SUITE_YIELD). So slow scenarios never get in a branch's way.
+# Without the mount the run fails instead of testing beside another suite.
 #
 # The repository is public and fetched over https: no credentials.
 set -u
@@ -123,9 +125,13 @@ step() {
     log "$name: $*"
     t0=$(date +%s)
     # The lock's descriptor stays with this script, not with QEMU.
-    (cd "$src" && nice -n 10 "$@" 9>&-) >"$dir/$name.log" 2>&1
+    (cd "$src" && nice -n 10 "$@" 9>&-) >>"$dir/$name.log" 2>&1
     status=$?
     t=$(( $(date +%s) - t0 ))
+    if [ $status -eq 75 ]; then
+        log "$name: stepped aside for another suite after $((t / 60))m$((t % 60))s"
+        return
+    fi
     if [ $status -eq 0 ]; then result=PASS; else result=FAIL; failed_steps=$((failed_steps + 1)); fi
     printf '%-12s %s  %dm%02ds  %s\n' "$name" "$result" $((t / 60)) $((t % 60)) "$*" >>"$dir/steps.txt"
     log "$name: $result in $((t / 60))m$((t % 60))s"
@@ -148,14 +154,20 @@ pass() {
     pass_name=$1
     pass_suite=$2
     shift 2
-    if lock_suites "$pass_suite"; then
+    export ARICODEOS_SUITE_YIELD="$dir/$pass_name.progress"
+    while :; do
+        if ! lock_suites "$pass_suite"; then
+            printf '%-12s %s  %s\n' "$pass_name" FAIL "host suite lock unavailable (container log)" >>"$dir/steps.txt"
+            failed_steps=$((failed_steps + 1))
+            break
+        fi
         step "$pass_name" "$@"
-        collect "$pass_name"
         unlock_suites
-    else
-        printf '%-12s %s  %s\n' "$pass_name" FAIL "host suite lock unavailable (container log)" >>"$dir/steps.txt"
-        failed_steps=$((failed_steps + 1))
-    fi
+        [ $status -eq 75 ] || break
+        sleep "$between"
+    done
+    unset ARICODEOS_SUITE_YIELD
+    collect "$pass_name"
 }
 
 run_once() {

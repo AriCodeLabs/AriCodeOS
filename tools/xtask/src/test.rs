@@ -40,7 +40,7 @@ pub fn run(cli: &Cli, release: bool) -> Result {
     };
 
     let all = scenario::load_all()?;
-    let selected = match cli.value("--only") {
+    let mut selected = match cli.value("--only") {
         Some(names) => scenario::by_name(&all, names)?,
         None => scenario::select(&all, level, &areas)?,
     };
@@ -95,10 +95,24 @@ pub fn run(cli: &Cli, release: bool) -> Result {
         }
     };
 
+    // A pass that steps aside for another suite (the CI container) comes back to
+    // what it had not run.
+    let progress = std::env::var("ARICODEOS_SUITE_YIELD")
+        .ok()
+        .filter(|p| !p.is_empty());
+    let earlier = progress
+        .as_ref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .unwrap_or_default();
+    let (ran, mut failed) = earlier_outcomes(&earlier);
+    selected.retain(|s| !ran.contains(&s.name.as_str()));
+
     // Unit level: always, even when filtering by area (a feature may want
     // only its QEMU scenarios; unit tests are still cheap and run anyway).
-    println!("[xtask] unit tests (host)");
-    build::unit_tests()?;
+    if earlier.is_empty() {
+        println!("[xtask] unit tests (host)");
+        build::unit_tests()?;
+    }
     if level == Level::Unit {
         return Ok(());
     }
@@ -112,22 +126,44 @@ pub fn run(cli: &Cli, release: bool) -> Result {
         selected.len()
     );
     let start = Instant::now();
-    let mut failed = Vec::new();
     let mut busy = Duration::ZERO;
-    parallel::run_ordered(
+    let result = parallel::run_ordered(
         &order,
         jobs,
         |i| selected[i].serial,
-        |i| run_scenario(&base, selected[i], cpus_override),
+        |i| {
+            if progress.is_some() && suite_lock::someone_waits() {
+                return Err(String::from(STEPPED_ASIDE));
+            }
+            run_scenario(&base, selected[i], cpus_override)
+        },
         |i, outcome| {
             print!("{}", outcome.report);
             let _ = std::io::Write::flush(&mut std::io::stdout());
             busy += outcome.elapsed;
+            let name = &selected[i].name;
             if !outcome.ok {
-                failed.push(selected[i].name.clone());
+                failed.push(name.clone());
+            }
+            if let Some(path) = &progress {
+                let word = if outcome.ok { "PASS" } else { "FAIL" };
+                let line = format!("{word} {name}\n");
+                let written = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+                if let Err(e) = written {
+                    println!("[xtask] {path}: {e}: this scenario will run again");
+                }
             }
         },
-    )?;
+    );
+    if matches!(&result, Err(e) if e == STEPPED_ASIDE) {
+        println!("[xtask] another suite is waiting: stepping aside");
+        std::process::exit(EXIT_STEPPED_ASIDE);
+    }
+    result?;
     println!(
         "[xtask] QEMU wall clock {}, {} of scenario time",
         minutes(start.elapsed()),
@@ -143,6 +179,26 @@ pub fn run(cli: &Cli, release: bool) -> Result {
     } else {
         Err(format!("failed scenarios: {}", failed.join(", ")))
     }
+}
+
+/// The answer of a scenario not started because another suite is waiting.
+const STEPPED_ASIDE: &str = "stepped aside";
+/// What the CI script looks for: come back to the rest later (`EX_TEMPFAIL`).
+const EXIT_STEPPED_ASIDE: i32 = 75;
+
+/// What a pass that stepped aside had already run: the names, and those that failed.
+fn earlier_outcomes(text: &str) -> (Vec<&str>, Vec<String>) {
+    let mut ran = Vec::new();
+    let mut failed = Vec::new();
+    for line in text.lines() {
+        if let Some((word, name)) = line.split_once(' ') {
+            ran.push(name);
+            if word == "FAIL" {
+                failed.push(String::from(name));
+            }
+        }
+    }
+    (ran, failed)
 }
 
 /// `1m05s`.
@@ -977,4 +1033,18 @@ fn https_servers(dir: &std::path::Path, ports: (u16, u16, u16)) -> Result<(Https
         }
     }
     Ok((servers, ca))
+}
+
+#[cfg(test)]
+mod stepping_aside {
+    use super::earlier_outcomes;
+
+    #[test]
+    fn a_pass_comes_back_to_what_it_had_not_run() {
+        let (ran, failed) = earlier_outcomes("PASS a\nFAIL b\nPASS c\n");
+        assert_eq!(ran, ["a", "b", "c"]);
+        assert_eq!(failed, ["b"], "a failure stays one when it comes back");
+        let (ran, failed) = earlier_outcomes("");
+        assert!(ran.is_empty() && failed.is_empty());
+    }
 }

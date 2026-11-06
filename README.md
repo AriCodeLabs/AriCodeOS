@@ -138,10 +138,10 @@ another branch and `--jobs N` overrides the concurrency. The suites run one
 after another, at nice 10, and `--cpus`, `--memory` and `--cpu-shares` keep
 the container from taking the machine: the runner sizes its jobs from them
 (10 CPUs give 10 jobs, 6 for the `--cpus 4` pass), so development goes on
-beside it. Each of its two test passes runs holding the suite lock, let go
-between them: a suite started meanwhile on the host or in another container
-waits for the current pass, and the CI waits for it, so nobody has to stop
-the container by hand. A failure in its report is an
+beside it. Each of its two test passes runs holding the suite lock, and steps
+aside for a suite started meanwhile on the host or in another container: that
+suite waits only for the scenarios already running, the pass comes back to the
+rest when it ends, and nobody has to stop the container by hand. A failure in its report is an
 incident (`docs/WORKFLOW.md`).
 
 To try the system without building it, `tools/docker/try/Dockerfile` packs
