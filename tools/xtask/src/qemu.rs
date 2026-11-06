@@ -280,6 +280,10 @@ pub struct InputProbe<'a> {
     /// `count` moves of (dx, dy), one every `every_ms` (`HostInput`).
     pub mouse_steps: Option<(u32, i32, i32, u64)>,
     pub click: Option<&'a str>,
+    /// The left button down, a move by (dx, dy), and up.
+    pub drag: Option<(i32, i32)>,
+    /// A key held for this many ms.
+    pub hold_key: Option<(&'a str, u64)>,
     /// Pause after the marker before anything is sent (ms).
     pub wait_ms: u64,
     /// Minimum pause after each key event (ms); none by default.
@@ -356,6 +360,8 @@ struct Pointing {
     rel: Option<(i32, i32)>,
     steps: Option<(u32, i32, i32, u64)>,
     click: Option<String>,
+    drag: Option<(i32, i32)>,
+    hold_key: Option<(String, u64)>,
 }
 
 fn run_input_probe(
@@ -418,6 +424,29 @@ fn run_input_probe(
                     )],
                 )?;
             }
+        }
+        if let Some((dx, dy)) = pointing.drag {
+            let button = |down: bool| {
+                format!(r#"{{"type":"btn","data":{{"down":{down},"button":"left"}}}}"#)
+            };
+            let rel = |axis: &str, v: i32| {
+                format!(r#"{{"type":"rel","data":{{"axis":"{axis}","value":{v}}}}}"#)
+            };
+            step(&mut qmp, &[button(true)])?;
+            std::thread::sleep(Duration::from_millis(100));
+            step(&mut qmp, &[rel("x", dx), rel("y", dy)])?;
+            std::thread::sleep(Duration::from_millis(100));
+            step(&mut qmp, &[button(false)])?;
+        }
+        if let Some((key, ms)) = &pointing.hold_key {
+            let key_event = |down: bool| {
+                format!(
+                    r#"{{"type":"key","data":{{"down":{down},"key":{{"type":"qcode","data":"{key}"}}}}}}"#
+                )
+            };
+            step(&mut qmp, &[key_event(true)])?;
+            std::thread::sleep(Duration::from_millis(*ms));
+            step(&mut qmp, &[key_event(false)])?;
         }
         std::thread::sleep(Duration::from_millis(100));
         // Without an echo to follow, every key is only paced by the delay.
@@ -1608,6 +1637,8 @@ pub fn run_headless(
                     rel: p.mouse_rel,
                     steps: p.mouse_steps,
                     click: p.click.map(String::from),
+                    drag: p.drag,
+                    hold_key: p.hold_key.map(|(k, ms)| (k.to_string(), ms)),
                 };
                 let wait = Duration::from_millis(p.wait_ms);
                 let delay = Duration::from_millis(p.key_delay_ms);

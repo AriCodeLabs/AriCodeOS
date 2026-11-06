@@ -6,7 +6,8 @@
 use crate::{self as sys, rights, rpc, Error, Handle};
 use aricode_gfx::Canvas;
 pub use aricode_proto::window::Event;
-use aricode_proto::window::{Op, Reply, Request, Status};
+pub use aricode_proto::window::{mods, wants, DamageRect, KeyState};
+use aricode_proto::window::{Op, Reply, Request, Status, MAX_DAMAGE};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowError {
@@ -35,6 +36,19 @@ impl Window {
         height: u32,
         title: &str,
     ) -> Result<Self, WindowError> {
+        Self::create_wanting(service, hardware, width, height, title, 0)
+    }
+
+    /// As [`create`](Self::create), asking for the events in `events`
+    /// ([`wants`]).
+    pub fn create_wanting(
+        service: Handle,
+        hardware: Handle,
+        width: u32,
+        height: u32,
+        title: &str,
+        events: u32,
+    ) -> Result<Self, WindowError> {
         if width == 0 || height == 0 {
             return Err(WindowError::Invalid);
         }
@@ -46,6 +60,7 @@ impl Window {
             .ok_or(WindowError::Invalid)?;
         req.width = width;
         req.height = height;
+        req.events = events;
         let mut w = Self {
             service,
             id: 0,
@@ -110,6 +125,58 @@ impl Window {
     /// the last `present` reaches the screen with its next frame (ADR 0046).
     pub fn present(&self) -> Result<(), WindowError> {
         self.call(self.request(Op::Present), false).map(|_| ())
+    }
+
+    /// As [`present`](Self::present), for what changed: at most
+    /// [`MAX_DAMAGE`] rectangles reach the compositor; more mean all of it.
+    pub fn present_rects(&self, rects: &[DamageRect]) -> Result<(), WindowError> {
+        let mut req = self.request(Op::Present);
+        if rects.len() <= MAX_DAMAGE {
+            req.damage[..rects.len()].copy_from_slice(rects);
+            req.damage_len = rects.len() as u8;
+        }
+        self.call(req, false).map(|_| ())
+    }
+
+    /// Gives the content a new size, in a new buffer, blank until painted. The
+    /// old buffer goes once the compositor lets it go: for this call, the
+    /// program's quota must hold both.
+    pub fn resize(&mut self, hardware: Handle, width: u32, height: u32) -> Result<(), WindowError> {
+        if width == 0 || height == 0 {
+            return Err(WindowError::Invalid);
+        }
+        let dma =
+            sys::dma_alloc(hardware, width as u64 * height as u64 * 4).map_err(WindowError::Ipc)?;
+        let pixels = match sys::mmio_map(dma) {
+            Ok(p) => p,
+            Err(e) => {
+                let _ = sys::handle_close(dma);
+                return Err(WindowError::Ipc(e));
+            }
+        };
+        let old = (self.dma, self.pixels, self.width, self.height);
+        (self.dma, self.pixels, self.width, self.height) = (dma, pixels, width, height);
+        self.canvas().fill(0);
+        let mut req = self.request(Op::Resize);
+        req.width = width;
+        req.height = height;
+        match self.call(req, true) {
+            Ok(_) => {
+                let _ = sys::mmio_unmap(old.1);
+                let _ = sys::handle_close(old.0);
+                Ok(())
+            }
+            Err(e) => {
+                let _ = sys::mmio_unmap(pixels);
+                let _ = sys::handle_close(dma);
+                (self.dma, self.pixels, self.width, self.height) = old;
+                Err(e)
+            }
+        }
+    }
+
+    pub fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
     }
 
     /// Next event, or `None` if the deadline expires.

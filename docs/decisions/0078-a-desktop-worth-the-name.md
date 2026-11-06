@@ -299,7 +299,63 @@ The EDID reads correctly; the GOP lists two 4:3 modes on a 16:9 panel. The
 owner chose a driver built from Intel's manuals over any BIOS change, because
 a BIOS setting helps one machine: ADR 0079, to come.
 
-### Audit
+### The DMA quota
+
+The quota bounds live buffers now: a buffer's charge goes back with its frames,
+without a lock, whoever held it last. A closed buffer whose frames a mapping
+keeps stays charged. `memory.dma_lifetime` checks it: 32 allocations and frees
+within a quota of two pages.
+
+An independent review of the refund found no high findings. It moved the frees
+of `handle_close` and a failed `dma_alloc` out of the process table's lock, and
+asked for a case with a charged buffer outliving its handle: step 5 of the self
+test.
+
+### The window protocol and key repeat
+
+The wire format grew compatibly, so the protocol number stays and the 0.18 apps
+run unchanged:
+- `Create` carries what the window wants (`wants::POINTER`, `wants::KEY_CODES`).
+  A program built before sends zero there and gets exactly the events it knows.
+- With them: `Motion`, `Release`, `Enter`, `Leave`, `Wheel` and `KeyCode`. A button
+  pressed on a window holds the pointer's events until it is released, wherever
+  the pointer goes. Queued motion and wheel events merge, so a program that falls
+  behind keeps its keys.
+- `Present` can name up to 5 rectangles; none means all of it.
+- `Resize` changes the content's buffer. `Configure`, the compositor asking a
+  program to resize, comes in stage 1 with the frame that needs it.
+
+Key repeat is in software: 500 ms, then every 33 ms, the same on every keyboard.
+A USB keyboard sends a key once, and a PS/2 one repeats by itself, at its own
+rate; both are now ignored in favour of this. The console does not use it yet.
+
+`gui.window_events` checks all of this through QEMU's mouse and keyboard, with new
+runner options `drag` and `hold_key`.
+
+An independent review of the protocol found no high findings, but found that
+`gui.window_events` passed without its last stage (incident 0059). All fixed:
+- `Enter`, `Leave`, `Motion` and `Wheel` are about the content, not the frame.
+- A PS/2 keyboard repeats a held key as a new press. Its driver now says it is a
+  repeat, so a held Shift floods nothing and Caps does not toggle.
+- The driver's queue gives up motion before keys: a lost release would repeat a
+  key for ever. The compositor's queues keep releases and focus over motion.
+- While a button pressed on a window is held, every button goes to that window,
+  and a program hears the release of what it saw pressed.
+- A driver's lost releases also clear the buttons, the grab and the escape chord.
+- A change of focus tells the old window its keys went up, and the new one never
+  hears the release of a key pressed elsewhere.
+- A held dead key does not repeat; a resize keeps the close box on screen; damage
+  on a window showing the same buffer at another width repaints all of it.
+
+Known limit: if `Resize`'s answer is lost in a timeout, the compositor may hold the
+new buffer while the program draws on the old one, until its next resize.
+
+### Still open in stage 0
+
+The `ui.*` figures of `perf` measure what stage 1 brings (glyphs, shapes, layout),
+so they come with it.
+
+### Audit of the first three items
 
 An independent read-only review found no high findings. All of these are
 fixed:

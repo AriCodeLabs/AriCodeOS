@@ -4,7 +4,8 @@
 //! paints its window and listens for events. `arg` = 0 (Demo A) or 1 (Demo
 //! B, created 300 ms later so it ends up on top), or 2 (Demo C, which never
 //! reads its events: the compositor closes its window for it at the second
-//! click on its close box, ADR 0077). The broker grants what
+//! click on its close box, ADR 0077), or 3 (Demo D, the window protocol's
+//! events, `events` below). The broker grants what
 //! its manifest asks for: its compositor session (WRITE, ADR 0052) and
 //! `HARDWARE` for the window's buffer. Demo B also checks that Demo A's
 //! window is out of its reach and leaves without closing its own: the
@@ -14,7 +15,7 @@
 
 use aricode_gfx::{rgb, Rect};
 use aricode_proto::window::{Op, Reply, Request, Status};
-use aricode_rt::sys::window::{Event, Window, WindowError};
+use aricode_rt::sys::window::{wants, DamageRect, Event, KeyState, Window, WindowError};
 use aricode_rt::sys::{self, kind, permissions, rpc, Handle};
 
 fn num_i32(v: i32) {
@@ -42,6 +43,115 @@ fn ask(session: Handle, op: Op, id: u32) -> Option<Status> {
     Reply::decode(&msg[..len]).map(|r| r.status)
 }
 
+/// Mode 3, window protocol checks (ADR 0078, stage 0): a window that asks for
+/// every event says each kind the first time it comes. `r` resizes it, `d`
+/// presents part of it, and `q` ends it.
+fn events(session: Handle, hw: Handle) -> u64 {
+    let wanted = wants::POINTER | wants::KEY_CODES;
+    let Ok(mut win) = Window::create_wanting(session, hw, 400, 300, "Demo D", wanted) else {
+        return 1;
+    };
+    win.canvas().fill(rgb(0x60, 0x40, 0xa0));
+    if win.present().is_err() {
+        return 2;
+    }
+    sys::print(b"gui_demo D: window presented\n");
+    let say = |seen: &mut u32, bit: u32, text: &[u8]| {
+        if *seen & bit == 0 {
+            *seen |= bit;
+            sys::print(b"gui_demo D: ");
+            sys::print(text);
+            sys::print(b"\n");
+        }
+    };
+    let mut seen = 0;
+    let mut repeats = 0;
+    let mut leaves = 0;
+    for _ in 0..200 {
+        let ev = match win.poll(100) {
+            Ok(Some(ev)) => ev,
+            Ok(None) => continue,
+            Err(_) => return 3,
+        };
+        match ev {
+            Event::Enter { .. } => say(&mut seen, 1, b"enter"),
+            Event::Leave => {
+                leaves += 1;
+                say(
+                    &mut seen,
+                    if leaves == 1 { 2 } else { 2048 },
+                    if leaves == 1 { b"leave 1" } else { b"leave 2" },
+                );
+            }
+            Event::Motion { buttons: 0, .. } => say(&mut seen, 4, b"motion"),
+            Event::Motion { buttons: 1, x, .. } if x < 0 => {
+                say(&mut seen, 1024, b"motion outside it, left held");
+            }
+            Event::Release { button: 1, .. } => say(&mut seen, 16, b"release of the left button"),
+            Event::Wheel { delta, .. } if delta != 0 => say(&mut seen, 32, b"wheel"),
+            Event::KeyCode {
+                state: KeyState::Released,
+                code: 30,
+                ..
+            } => say(&mut seen, 64, b"key code released"),
+            Event::KeyCode {
+                state: KeyState::Pressed,
+                code: 30,
+                ..
+            } => say(&mut seen, 128, b"key code pressed"),
+            Event::KeyCode {
+                state: KeyState::Repeated,
+                ..
+            } => {
+                repeats += 1;
+                say(&mut seen, 256, b"key code repeated");
+            }
+            Event::KeyCode {
+                state: KeyState::Pressed,
+                code: 48,
+                mods,
+            } if mods & aricode_rt::sys::window::mods::SHIFT != 0 => {
+                say(&mut seen, 512, b"key code with shift");
+            }
+            Event::Key(b'r') => {
+                if win.resize(hw, 500, 350).is_err() {
+                    return 4;
+                }
+                win.canvas().fill(rgb(0x20, 0x80, 0x80));
+                let drawn = win.present().is_ok() && win.size() == (500, 350);
+                sys::print(if drawn {
+                    b"gui_demo D: resized to 500x350\n" as &[u8]
+                } else {
+                    b"gui_demo D: the resize failed\n"
+                });
+            }
+            Event::Key(b'd') => {
+                let part = DamageRect {
+                    x: 10,
+                    y: 10,
+                    width: 20,
+                    height: 20,
+                };
+                if win.present_rects(&[part]).is_err() {
+                    return 5;
+                }
+                sys::print(b"gui_demo D: presented a part\n");
+            }
+            Event::Key(b'q') => {
+                sys::print(if repeats > 1 {
+                    b"gui_demo D: the key repeated\n" as &[u8]
+                } else {
+                    b"gui_demo D: the key did not repeat\n"
+                });
+                sys::print(b"gui_demo D: done\n");
+                return 0;
+            }
+            _ => {}
+        }
+    }
+    0
+}
+
 fn main(index: u64) -> u64 {
     let (mut session, mut hw) = (None, None);
     permissions::granted(|h, _| {
@@ -55,6 +165,9 @@ fn main(index: u64) -> u64 {
         sys::print(b"gui_demo: started without a compositor session\n");
         return 6;
     };
+    if index == 3 {
+        return events(session, hw);
+    }
     let (name, title, color) = if index == 0 {
         (b"gui_demo A" as &[u8], "Demo A", rgb(0xc0, 0x40, 0x40))
     } else if index == 2 {
@@ -146,6 +259,18 @@ fn main(index: u64) -> u64 {
                     b": focus lost\n"
                 });
                 idle = 0;
+            }
+            // None of these without asking: it asked for nothing.
+            Ok(Some(
+                Event::Motion { .. }
+                | Event::Release { .. }
+                | Event::Enter { .. }
+                | Event::Leave
+                | Event::Wheel { .. }
+                | Event::KeyCode { .. },
+            )) => {
+                sys::print(name);
+                sys::print(b": an event it did not ask for\n");
             }
             Ok(Some(_)) => {}
             Ok(None) => idle += 1,

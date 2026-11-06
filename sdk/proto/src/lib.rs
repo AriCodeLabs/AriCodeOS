@@ -1124,6 +1124,48 @@ pub mod window {
     pub const MAX_TITLE: usize = 24;
     /// Maximum window size (pixels per side).
     pub const MAX_SIDE: u32 = 4096;
+    /// Rectangles a `Present` can name.
+    pub const MAX_DAMAGE: usize = 5;
+
+    /// What a window asks for beyond the events every window gets, in
+    /// [`Request::events`] of `Create` (ADR 0078, stage 0). The wire format
+    /// grew compatibly: a program built before these sends zero there and gets
+    /// exactly the events it knows.
+    pub mod wants {
+        /// `Motion`, `Release`, `Enter`, `Leave` and `Wheel`.
+        pub const POINTER: u32 = 1;
+        /// `KeyCode`, for each key, beside the `Key` bytes.
+        pub const KEY_CODES: u32 = 2;
+    }
+
+    /// The modifiers in `Event::KeyCode`. The numbers are those of
+    /// `aricode_input::mods`.
+    pub mod mods {
+        pub const SHIFT: u8 = 1;
+        pub const CTRL: u8 = 2;
+        pub const ALT: u8 = 4;
+        pub const ALTGR: u8 = 8;
+        pub const CAPS: u8 = 16;
+    }
+
+    /// The part of a window's content that changed.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct DamageRect {
+        pub x: u16,
+        pub y: u16,
+        pub width: u16,
+        pub height: u16,
+    }
+
+    /// What happened to a key.
+    #[repr(u8)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum KeyState {
+        Released = 0,
+        Pressed = 1,
+        /// Held: the compositor's own repeat.
+        Repeated = 2,
+    }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Op {
@@ -1146,6 +1188,9 @@ pub mod window {
         /// id) has exited; its endpoint and windows close now, whoever else
         /// still holds its send side (ADR 0052).
         Detach = 6,
+        /// The window's content becomes `width`x`height`, in a new buffer;
+        /// handles `[reply, buffer]`, as `Create`. The old buffer is released.
+        Resize = 7,
     }
 
     /// Request (64 bytes).
@@ -1158,6 +1203,11 @@ pub mod window {
         pub timeout_ms: u32,
         pub title: [u8; MAX_TITLE],
         pub title_len: u8,
+        /// `Create`: the [`wants`] of the window.
+        pub events: u32,
+        /// `Present`: what changed; none means the whole content.
+        pub damage: [DamageRect; MAX_DAMAGE],
+        pub damage_len: u8,
     }
 
     impl Request {
@@ -1172,6 +1222,14 @@ pub mod window {
                 timeout_ms: 0,
                 title: [0; MAX_TITLE],
                 title_len: 0,
+                events: 0,
+                damage: [DamageRect {
+                    x: 0,
+                    y: 0,
+                    width: 0,
+                    height: 0,
+                }; MAX_DAMAGE],
+                damage_len: 0,
             }
         }
 
@@ -1194,12 +1252,29 @@ pub mod window {
             b[0] = PROTOCOL;
             b[1] = VERSION;
             b[2] = self.op as u8;
-            b[3] = self.title_len;
             b[4..8].copy_from_slice(&self.window.to_le_bytes());
             b[8..12].copy_from_slice(&self.width.to_le_bytes());
             b[12..16].copy_from_slice(&self.height.to_le_bytes());
             b[16..20].copy_from_slice(&self.timeout_ms.to_le_bytes());
-            b[24..48].copy_from_slice(&self.title);
+            b[20..24].copy_from_slice(&self.events.to_le_bytes());
+            if self.op == Op::Present {
+                // The title's place, and the rest of the message: a `Present`
+                // has no title.
+                let n = (self.damage_len as usize).min(MAX_DAMAGE);
+                b[3] = n as u8;
+                for (r, c) in self.damage[..n]
+                    .iter()
+                    .zip(b[24..64].as_chunks_mut::<8>().0)
+                {
+                    c[0..2].copy_from_slice(&r.x.to_le_bytes());
+                    c[2..4].copy_from_slice(&r.y.to_le_bytes());
+                    c[4..6].copy_from_slice(&r.width.to_le_bytes());
+                    c[6..8].copy_from_slice(&r.height.to_le_bytes());
+                }
+            } else {
+                b[3] = self.title_len;
+                b[24..48].copy_from_slice(&self.title);
+            }
             b
         }
 
@@ -1214,19 +1289,31 @@ pub mod window {
                 4 => Op::Close,
                 5 => Op::Attach,
                 6 => Op::Detach,
+                7 => Op::Resize,
                 _ => return None,
             };
-            let mut title = [0u8; MAX_TITLE];
-            title.copy_from_slice(&b[24..48]);
-            Some(Self {
-                op,
-                window: u32::from_le_bytes(b[4..8].try_into().ok()?),
-                width: u32::from_le_bytes(b[8..12].try_into().ok()?),
-                height: u32::from_le_bytes(b[12..16].try_into().ok()?),
-                timeout_ms: u32::from_le_bytes(b[16..20].try_into().ok()?),
-                title,
-                title_len: b[3].min(MAX_TITLE as u8),
-            })
+            let mut req = Self::new(op);
+            req.window = u32::from_le_bytes(b[4..8].try_into().ok()?);
+            req.width = u32::from_le_bytes(b[8..12].try_into().ok()?);
+            req.height = u32::from_le_bytes(b[12..16].try_into().ok()?);
+            req.timeout_ms = u32::from_le_bytes(b[16..20].try_into().ok()?);
+            req.events = u32::from_le_bytes(b[20..24].try_into().ok()?);
+            if op == Op::Present {
+                let n = (b[3] as usize).min(MAX_DAMAGE);
+                req.damage_len = n as u8;
+                for (r, c) in req.damage[..n].iter_mut().zip(b[24..64].as_chunks::<8>().0) {
+                    *r = DamageRect {
+                        x: u16::from_le_bytes([c[0], c[1]]),
+                        y: u16::from_le_bytes([c[2], c[3]]),
+                        width: u16::from_le_bytes([c[4], c[5]]),
+                        height: u16::from_le_bytes([c[6], c[7]]),
+                    };
+                }
+            } else {
+                req.title.copy_from_slice(&b[24..48]);
+                req.title_len = b[3].min(MAX_TITLE as u8);
+            }
+            Some(req)
         }
     }
 
@@ -1256,6 +1343,26 @@ pub mod window {
         /// or asks first (unsaved changes). One that never takes this
         /// event has its window closed for it at the next click (ADR 0077).
         Close,
+        /// [`wants::POINTER`]: the pointer moved over the window, or anywhere
+        /// while a button pressed on it is held. Coordinates in the content.
+        Motion { x: i32, y: i32, buttons: u8 },
+        /// [`wants::POINTER`]: a button pressed on this window was released,
+        /// wherever the pointer is now.
+        Release { x: i32, y: i32, button: u8 },
+        /// [`wants::POINTER`]: the pointer came over the content.
+        Enter { x: i32, y: i32 },
+        /// [`wants::POINTER`]: the pointer left the content.
+        Leave,
+        /// [`wants::POINTER`]: the wheel, over the content; positive away from
+        /// the user.
+        Wheel { x: i32, y: i32, delta: i32 },
+        /// [`wants::KEY_CODES`]: a key (evdev code) of the focused window, with
+        /// the [`mods`] held after it.
+        KeyCode {
+            code: u16,
+            state: KeyState,
+            mods: u8,
+        },
     }
 
     /// Reply (32 bytes): status, value and optional event.
@@ -1314,6 +1421,36 @@ pub mod window {
                     b[16] = f as u8;
                 }
                 Some(Event::Close) => b[3] = 4,
+                Some(Event::Motion { x, y, buttons }) => {
+                    b[3] = 5;
+                    b[16..20].copy_from_slice(&x.to_le_bytes());
+                    b[20..24].copy_from_slice(&y.to_le_bytes());
+                    b[24] = buttons;
+                }
+                Some(Event::Release { x, y, button }) => {
+                    b[3] = 6;
+                    b[16..20].copy_from_slice(&x.to_le_bytes());
+                    b[20..24].copy_from_slice(&y.to_le_bytes());
+                    b[24] = button;
+                }
+                Some(Event::Enter { x, y }) => {
+                    b[3] = 7;
+                    b[16..20].copy_from_slice(&x.to_le_bytes());
+                    b[20..24].copy_from_slice(&y.to_le_bytes());
+                }
+                Some(Event::Leave) => b[3] = 8,
+                Some(Event::Wheel { x, y, delta }) => {
+                    b[3] = 9;
+                    b[16..20].copy_from_slice(&x.to_le_bytes());
+                    b[20..24].copy_from_slice(&y.to_le_bytes());
+                    b[24..28].copy_from_slice(&delta.to_le_bytes());
+                }
+                Some(Event::KeyCode { code, state, mods }) => {
+                    b[3] = 10;
+                    b[16..18].copy_from_slice(&code.to_le_bytes());
+                    b[18] = state as u8;
+                    b[19] = mods;
+                }
             }
             b
         }
@@ -1341,6 +1478,36 @@ pub mod window {
                 }),
                 3 => Some(Event::Focus(b[16] != 0)),
                 4 => Some(Event::Close),
+                5 => Some(Event::Motion {
+                    x: i32::from_le_bytes(b[16..20].try_into().ok()?),
+                    y: i32::from_le_bytes(b[20..24].try_into().ok()?),
+                    buttons: b[24],
+                }),
+                6 => Some(Event::Release {
+                    x: i32::from_le_bytes(b[16..20].try_into().ok()?),
+                    y: i32::from_le_bytes(b[20..24].try_into().ok()?),
+                    button: b[24],
+                }),
+                7 => Some(Event::Enter {
+                    x: i32::from_le_bytes(b[16..20].try_into().ok()?),
+                    y: i32::from_le_bytes(b[20..24].try_into().ok()?),
+                }),
+                8 => Some(Event::Leave),
+                9 => Some(Event::Wheel {
+                    x: i32::from_le_bytes(b[16..20].try_into().ok()?),
+                    y: i32::from_le_bytes(b[20..24].try_into().ok()?),
+                    delta: i32::from_le_bytes(b[24..28].try_into().ok()?),
+                }),
+                10 => Some(Event::KeyCode {
+                    code: u16::from_le_bytes([b[16], b[17]]),
+                    state: match b[18] {
+                        0 => KeyState::Released,
+                        1 => KeyState::Pressed,
+                        2 => KeyState::Repeated,
+                        _ => return None,
+                    },
+                    mods: b[19],
+                }),
                 _ => return None,
             };
             Some(Self {
@@ -2370,6 +2537,91 @@ pub mod status {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn window_requests_grew_compatibly() {
+            use crate::window::*;
+            // What a program built before these fields sends decodes as asking for
+            // nothing new, and a `Create` keeps its title.
+            let old = Request::new(Op::Create).with_title("Editor").unwrap();
+            let back = Request::decode(&old.encode()).unwrap();
+            assert_eq!(back.events, 0);
+            assert_eq!(back.title_str(), "Editor");
+            let mut req = old;
+            req.events = wants::POINTER | wants::KEY_CODES;
+            let back = Request::decode(&req.encode()).unwrap();
+            assert_eq!(back.events, wants::POINTER | wants::KEY_CODES);
+            assert_eq!(back.title_str(), "Editor");
+            // A `Present` has no title: the whole list of damage fits.
+            let mut req = Request::new(Op::Present);
+            let last = DamageRect {
+                x: 1,
+                y: 2,
+                width: 3,
+                height: 4,
+            };
+            req.damage[MAX_DAMAGE - 1] = last;
+            req.damage_len = MAX_DAMAGE as u8;
+            assert_eq!(Request::decode(&req.encode()).unwrap(), req);
+            // A count past the list is cut, never trusted.
+            let mut b = req.encode();
+            b[3] = 200;
+            assert_eq!(Request::decode(&b).unwrap().damage_len as usize, MAX_DAMAGE);
+            assert_eq!(
+                Request::decode(&Request::new(Op::Resize).encode())
+                    .unwrap()
+                    .op,
+                Op::Resize
+            );
+        }
+
+        #[test]
+        fn window_events_round_trip() {
+            use crate::window::*;
+            for event in [
+                Event::Key(b'a'),
+                Event::Click {
+                    x: -1,
+                    y: 2,
+                    button: 3,
+                },
+                Event::Focus(true),
+                Event::Close,
+                Event::Motion {
+                    x: -5,
+                    y: 600,
+                    buttons: 5,
+                },
+                Event::Release {
+                    x: 7,
+                    y: -8,
+                    button: 2,
+                },
+                Event::Enter { x: 1, y: 2 },
+                Event::Leave,
+                Event::Wheel {
+                    x: 1,
+                    y: 2,
+                    delta: -3,
+                },
+                Event::KeyCode {
+                    code: 0x1FF,
+                    state: KeyState::Repeated,
+                    mods: mods::SHIFT | mods::CTRL,
+                },
+            ] {
+                let reply = Reply::event(event);
+                assert_eq!(Reply::decode(&reply.encode()), Some(reply), "{event:?}");
+            }
+            let mut b = Reply::event(Event::KeyCode {
+                code: 1,
+                state: KeyState::Pressed,
+                mods: 0,
+            })
+            .encode();
+            b[18] = 9;
+            assert_eq!(Reply::decode(&b), None, "an unknown key state");
+        }
 
         #[test]
         fn status_round_trip() {

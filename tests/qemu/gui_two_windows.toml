@@ -54,7 +54,7 @@ serial_contains = [
     "[host] QMP: 6 input events sent",
     "ARICODEOS_SHUTDOWN",
 ]
-serial_absent = [
+serial_absent = ["an event it did not ask for", 
     "KERNEL PANIC",
     "USER STACK OVERFLOW",
     "gui_demo A: key",

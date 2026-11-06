@@ -619,6 +619,8 @@ pub fn run_scenario(
                 mouse_steps: h.mouse_steps,
                 wait_ms: h.wait_ms,
                 click: h.click.as_deref(),
+                drag: h.drag,
+                hold_key: h.hold_key.as_ref().map(|(k, ms)| (k.as_str(), *ms)),
                 key_delay_ms: h.key_delay_ms,
                 echo_prompt: h.echo_prompt.as_deref(),
             })
@@ -740,6 +742,14 @@ pub fn run_scenario(
             let needle = format!("host key {}", aricode_ssh::fingerprint(&public));
             if !cap.serial.contains(&needle) {
                 problems.push(format!("{prefix}missing '{needle}' (the moved host key)"));
+            }
+        }
+        // A stage that never came sent nothing, so what follows proves nothing.
+        // Its line also quotes the marker, which would satisfy a search for
+        // that text (incident 0059).
+        for needle in ["[host] QMP: marker '", "[host] flood: marker '"] {
+            if let Some(line) = cap.serial.lines().find(|l| l.contains(needle)) {
+                problems.push(format!("{prefix}{line}"));
             }
         }
         if let Some(i) = scenario::first_out_of_order(&cap.serial, &expect.serial_order) {

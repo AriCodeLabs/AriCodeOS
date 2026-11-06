@@ -29,7 +29,13 @@ pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
         nr::THREAD_GET_TID => Ok(scheduler::current_tid().0 as u64),
         nr::ABI_VERSION => Ok(ABI_VERSION as u64),
         nr::HANDLE_CLOSE => {
-            let r = with_handles(|t| t.remove(h).map(|_| 0).map_err(abi_error));
+            // The last handle of a DMA buffer frees it, page by page: outside
+            // the lock of the process table (audit of the quota refund).
+            let removed = with_handles(|t| t.remove(h).map_err(abi_error));
+            let r = removed.map(|object| {
+                drop(object);
+                0
+            });
             process::settle_lingering();
             r
         }
@@ -971,15 +977,15 @@ fn dma_alloc(h: Handle, len: u64) -> Result<u64, Error> {
     // Process quota (set by its launcher): the size rounded up to pages is
     // charged, since that is what gets allocated.
     let charge = len.next_multiple_of(4096);
-    if !process::charge_dma(charge) {
+    let Ok(charge) = process::charge_dma(charge) else {
         process::record_event(aricode_abi::sysinfo::EventKind::DmaQuota, len, "dma_alloc");
         return Err(Error::Limit);
-    }
-    // Only a buffer the process gets stays charged: every failure below
-    // gives the charge back (incident 0047). The buffer itself goes with
-    // the error (its drop leaves the IOMMU domains and frees the frames).
-    let granted = (|| {
-        let dma = crate::hw::dma_alloc(len).map_err(|e| {
+    };
+    // Only a buffer the process gets stays charged: on every failure below
+    // the charge goes back with the buffer (incident 0047), whose drop also
+    // leaves the IOMMU domains and frees the frames.
+    (|| {
+        let dma = crate::hw::dma_alloc(len, Some(charge)).map_err(|e| {
             warn!("dma_alloc: {e} ({len} bytes)");
             Error::Limit
         })?;
@@ -993,10 +999,7 @@ fn dma_alloc(h: Handle, len: u64) -> Result<u64, Error> {
             .union(Rights::WRITE)
             .union(Rights::DUPLICATE)
             .union(Rights::TRANSFER);
-        with_handles(|t| insert(t, dma, rights).map(|h| h.0 as u64))
-    })();
-    if granted.is_err() {
-        process::refund_dma(charge);
-    }
-    granted
+        // A refused buffer goes with `dma`, outside the table's lock.
+        with_handles(|t| insert(t, dma.clone(), rights).map(|h| h.0 as u64))
+    })()
 }

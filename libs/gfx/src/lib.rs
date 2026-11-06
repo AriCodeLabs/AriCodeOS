@@ -538,6 +538,25 @@ impl Desktop {
         true
     }
 
+    /// Gives a window's content a new size. Its corner stays unless that would
+    /// put its right side or its close box off the screen.
+    pub fn resize(&mut self, id: u32, w: u32, h: u32) -> bool {
+        let (screen_w, screen_h) = (self.screen.w as i32, self.screen.h as i32);
+        match self.windows.iter_mut().flatten().find(|win| win.id == id) {
+            Some(win) if w != 0 && h != 0 => {
+                win.content.w = w;
+                win.content.h = h;
+                let (left, top) = (BORDER as i32, (TITLE_H + BORDER) as i32);
+                let fit =
+                    |room: i32, side: u32, low: i32| (room - side as i32 - BORDER as i32).max(low);
+                win.content.x = win.content.x.min(fit(screen_w, w, left));
+                win.content.y = win.content.y.min(fit(screen_h, h, top));
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// What the composition depends on, besides the window contents.
     pub fn scene(&self) -> Scene {
         let mut windows = [None; MAX_WINDOWS];
@@ -810,6 +829,28 @@ impl<'a> Iterator for RevIter<'a> {
 mod tests {
     extern crate std;
     use super::*;
+
+    #[test]
+    fn a_resized_window_keeps_its_corner() {
+        let mut d = Desktop::new(800, 600);
+        let id = d.create(100, 50, "w").unwrap();
+        let corner = (d.get(id).unwrap().content.x, d.get(id).unwrap().content.y);
+        assert!(d.resize(id, 300, 200));
+        let c = d.get(id).unwrap().content;
+        assert_eq!((c.x, c.y, c.w, c.h), (corner.0, corner.1, 300, 200));
+        assert!(!d.resize(id, 0, 200));
+        // Too far right and down for its new size: it moves back on screen.
+        assert!(d.resize(id, 790, 590));
+        let c = d.get(id).unwrap().content;
+        // Right side at 800 - BORDER; the title bar stays below the top.
+        assert_eq!((c.x, c.y), (8, (TITLE_H + BORDER) as i32));
+        let c = Rect::new(100, 100, 0, 0);
+        let moved = d.move_window(id, c.x, c.y) && d.resize(id, 750, 500);
+        assert!(moved);
+        let c = d.get(id).unwrap().content;
+        assert!(c.right() + BORDER as i32 <= 800 && c.bottom() + BORDER as i32 <= 600);
+        assert!(!d.resize(id + 1, 10, 10));
+    }
 
     #[test]
     fn pixel_masks_place_each_channel() {

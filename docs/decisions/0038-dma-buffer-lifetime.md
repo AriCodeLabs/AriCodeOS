@@ -99,9 +99,10 @@ pieces:
 ## Security and accounting
 
 - **Who pays for pinned frames.** A buffer's frames stay charged to the
-  process that allocated it: `dma_alloc` charges its quota cumulatively and
-  never refunds (Phase 28), so a buffer that outlives its client through a
-  server's mapping costs nobody anything new.
+  process that allocated it, however long they live: a buffer that outlives
+  its client through a server's mapping costs nobody anything new. The charge
+  was cumulative and never refunded until ADR 0078 (stage 0); now it goes back
+  with the frames, so resizing a window does not exhaust the quota.
 - **Bound on what a server pins.** The DMA bytes a process keeps mapped
   (`Process::dma_mapped`, own and foreign buffers) count against its quota
   when it has one: `mmio_map` beyond it is refused with `Limit` and a

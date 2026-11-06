@@ -14,5 +14,5 @@ timeout_secs = 40
 
 [expect]
 exit = 33
-serial_contains = ["dma lifetime selftest ok (4 frames kept by a mapping after the last handle, freed on reap and on mmio_unmap; mapping beyond the quota refused; failed allocations refunded)", "dropped the last mapping of a DMA buffer it had no handle to (16 KiB at", "ARICODEOS_KERNEL_READY"]
+serial_contains = ["dma_refund: freed buffers gave their quota back ok", "dma lifetime selftest ok (4 frames kept by a mapping after the last handle, freed on reap and on mmio_unmap; mapping beyond the quota refused; failed allocations refunded)", "dropped the last mapping of a DMA buffer it had no handle to (16 KiB at", "ARICODEOS_KERNEL_READY"]
 serial_absent = ["KERNEL PANIC", "PMM considers free"]

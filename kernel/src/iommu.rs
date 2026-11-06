@@ -735,7 +735,7 @@ pub fn selftest() {
     // device read into it, unmaps it (the device still reaches it while the
     // handle is held), closes the handle and tries again, which must fault
     // and leave the 0xA5 it wrote (audit 2026-10-25 C, L11).
-    let client = crate::hw::dma_alloc(4096).expect("client buffer");
+    let client = crate::hw::dma_alloc(4096, None).expect("client buffer");
     let client_phys = match &client.kind {
         ObjectKind::Dma(d) => d.region.phys,
         _ => unreachable!("dma_alloc makes DMA objects"),

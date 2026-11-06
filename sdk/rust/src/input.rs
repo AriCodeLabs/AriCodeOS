@@ -171,6 +171,8 @@ impl InputClient {
 
 /// Events an input driver keeps for its client.
 pub const QUEUE_LEN: usize = 128;
+/// The evdev kind of a key or button event.
+const EV_KEY: u16 = 1;
 
 /// An input driver's side of the service (ADR 0013): the events received
 /// and not yet read, and the one read waiting for them.
@@ -217,6 +219,16 @@ impl EventQueue {
     pub fn push(&mut self, ev: Event, at: u64) -> bool {
         let full = self.len == QUEUE_LEN;
         if full {
+            // Motion goes first: the next report says where the pointer is,
+            // but nothing says again that a key was released, and a lost
+            // release would repeat that key for ever.
+            let at = |i: usize| (self.head + i) % QUEUE_LEN;
+            let lost = (0..self.len)
+                .find(|&i| self.buf[at(i)].0.kind != EV_KEY)
+                .unwrap_or(0);
+            for i in (0..lost).rev() {
+                self.buf[at(i + 1)] = self.buf[at(i)];
+            }
             self.head = (self.head + 1) % QUEUE_LEN;
             self.len -= 1;
             self.dropped += 1;
@@ -420,6 +432,28 @@ mod tests {
         q.read_with(Handle(9), 10_000, 7, &mut next.send());
         assert_eq!(next.got[0], (9, Status::Ok, 2));
         assert_eq!(q.len, 0);
+    }
+
+    #[test]
+    fn a_full_queue_gives_up_motion_before_keys() {
+        let mut q = EventQueue::new();
+        assert!(!q.push(key(1), 0));
+        let motion = Event {
+            kind: 2,
+            code: 0,
+            value: 5,
+        };
+        assert!(!q.push(motion, 0));
+        for c in 2..QUEUE_LEN as u16 {
+            assert!(!q.push(key(c), 0));
+        }
+        assert!(q.push(key(999), 1));
+        assert_eq!(q.dropped(), 1);
+        assert_eq!(q.len, QUEUE_LEN);
+        let queued = |i: usize| q.buf[(q.head + i) % QUEUE_LEN].0;
+        assert_eq!(queued(0), key(1), "the oldest key stays");
+        assert_eq!(queued(1), key(2), "the motion is gone");
+        assert_eq!(queued(QUEUE_LEN - 1), key(999));
     }
 
     #[test]

@@ -1287,9 +1287,9 @@ latter briefly to add the region.
   `CONSOLE_FIRST` flag (the first handle becomes a session console, ADR
   0047); the process stores the quota
   (`dma_quota`, `dma_used`) and `dma_alloc` charges the size rounded up to a
-  page, returning `Limit` when it is exceeded. The quota is cumulative: what was
-  reserved is not returned on free (DMA buffers live as long as the
-  process); an allocation that fails after the charge gives it back
+  page, returning `Limit` when it is exceeded. The quota bounds live buffers: a buffer's
+  charge goes back with its frames, whoever held it last (ADR 0078, stage 0),
+  and an allocation that fails after the charge gives it back
   (incident 0047). The DMA a process keeps mapped (its own buffers and those of
   clients) is also bounded by the quota: `mmio_map` beyond it returns
   `Limit` (ADR 0038).

@@ -11,10 +11,12 @@
 
 use aricode_cmdline::{keys, CmdLine};
 use aricode_gfx::{Canvas, Damage, Desktop, Hit, PixelMasks, Rect, Scene, Window};
-use aricode_input::{EscapeChord, Keyboard, Layout, BTN_LEFT, EV_KEY, EV_REL, REL_X, REL_Y};
+use aricode_input::{
+    EscapeChord, KeyRepeat, Keyboard, Layout, BTN_LEFT, EV_KEY, EV_REL, REL_WHEEL, REL_X, REL_Y,
+};
 use aricode_proto::input::Status as InputStatus;
 use aricode_proto::input::MAX_EVENTS;
-use aricode_proto::window::{Event, Op, Reply, Request, Status, MAX_SIDE};
+use aricode_proto::window::{wants, Event, KeyState, Op, Reply, Request, Status, MAX_SIDE};
 use aricode_rt::sys::input::{DriverInstance, InputClient, InputError};
 use aricode_rt::sys::{self, abi, Handle};
 use aricode_rt::{fmt_hex, fmt_u64};
@@ -30,7 +32,8 @@ const RETRY_MS: u64 = 50;
 /// Input services: up to four USB or virtio ones and the PS/2 one (ADR 0075).
 const MAX_INPUTS: usize = 5;
 const MAX_WINDOWS: usize = aricode_gfx::MAX_WINDOWS;
-const QUEUE: usize = 8;
+const QUEUE: usize = 32;
+const _: () = assert!(aricode_input::mods::CAPS == aricode_proto::window::mods::CAPS);
 /// Client sessions (ADR 0052): one per program the broker launches with
 /// `window`.
 const MAX_SESSIONS: usize = 8;
@@ -176,6 +179,8 @@ struct Content {
     events: [Option<Event>; QUEUE],
     count: usize,
     pending: Option<(Handle, u64)>,
+    /// What it asked for beyond the basic events (`wants`).
+    wants: u32,
     /// When a request to close was handed to the client, queued or as the
     /// answer to its poll (ms since boot), while it has not polled since:
     /// it has not come back from it (ADR 0077, audit L4).
@@ -186,9 +191,34 @@ impl Content {
     /// Queues `ev`; when full, the oldest event goes, never a request to
     /// close (audit of ADR 0077, M3).
     fn push(&mut self, ev: Event) {
+        // The pointer's latest position and the wheel's sum say the same as
+        // many events: a program that falls behind does not lose its keys.
+        if let Some(last) = self.count.checked_sub(1).map(|i| &mut self.events[i]) {
+            match (last, ev) {
+                (Some(Event::Motion { .. }), Event::Motion { x, y, buttons }) => {
+                    self.events[self.count - 1] = Some(Event::Motion { x, y, buttons });
+                    return;
+                }
+                (Some(Event::Wheel { delta: sum, .. }), Event::Wheel { x, y, delta }) => {
+                    let delta = sum.saturating_add(delta);
+                    self.events[self.count - 1] = Some(Event::Wheel { x, y, delta });
+                    return;
+                }
+                _ => {}
+            }
+        }
         if self.count == QUEUE {
+            // Motion can go: the next says where the pointer is. What says a
+            // thing once stays as long as anything else can go.
+            let once = |e: &Option<Event>| {
+                matches!(
+                    e,
+                    Some(Event::Close | Event::Release { .. } | Event::Focus(_) | Event::Leave)
+                )
+            };
             let drop = (0..QUEUE)
-                .find(|&i| self.events[i] != Some(Event::Close))
+                .find(|&i| !once(&self.events[i]))
+                .or((0..QUEUE).find(|&i| self.events[i] != Some(Event::Close)))
                 .unwrap_or(0);
             self.events.copy_within(drop + 1..QUEUE, drop);
             self.count -= 1;
@@ -224,11 +254,47 @@ fn answer_with(reply_to: Handle, reply: Reply, handle: Handle) {
     let _ = sys::handle_close(reply_to);
 }
 
+/// The keyboard and what repeats it: a device's lost releases must stop both.
+struct Keys {
+    keyboard: Keyboard,
+    repeat: KeyRepeat,
+    /// Keys the focused window saw pressed and not released: a change of focus
+    /// tells it, and a release of any other key is not its concern.
+    down: [Option<u16>; 8],
+    /// A device's releases were lost: the compositor forgets what is held too.
+    lost: bool,
+}
+
+impl Keys {
+    fn release_held(&mut self) {
+        self.keyboard.release_modifiers();
+        self.repeat.stop();
+        self.lost = true;
+    }
+}
+
+/// The pointer as windows see it (ADR 0078, stage 0).
+#[derive(Default)]
+struct Pointer {
+    /// It moved since windows were last told.
+    moved: bool,
+    /// The window whose content it is over.
+    inside: Option<u32>,
+    /// The window a held button was pressed on: it gets the motion and the
+    /// presses and releases wherever the pointer goes.
+    grab: Option<u32>,
+    /// The held buttons it saw pressed, and so will see released.
+    grabbed: u8,
+    /// Buttons held, bit 0 = left.
+    buttons: u8,
+}
+
 struct Compositor {
     screen: Screen,
     desktop: Desktop,
     contents: [Option<Content>; MAX_WINDOWS],
-    keyboard: Keyboard,
+    keys: Keys,
+    pointer: Pointer,
     /// Ctrl+Alt+Backspace: the owner asks for the text console (ADR 0074).
     escape: EscapeChord,
     /// When a key was last pressed (ms since boot): a window opened after
@@ -378,6 +444,210 @@ impl Compositor {
         self.refocus();
     }
 
+    /// `deliver` if the window asked for this kind of event.
+    fn deliver_wanted(&mut self, id: u32, want: u32, ev: Event) {
+        if self.content(id).is_some_and(|c| c.wants & want != 0) {
+            self.deliver(id, ev);
+        }
+    }
+
+    /// A point of the screen in the content of window `id`.
+    fn in_content(&self, id: u32, px: i32, py: i32) -> Option<(i32, i32)> {
+        let w = self.desktop.get(id)?;
+        Some((px - w.content.x, py - w.content.y))
+    }
+
+    /// The window whose content is at a point of the screen: not its frame.
+    fn content_at(&self, px: i32, py: i32) -> Option<u32> {
+        match self.desktop.hit(px, py) {
+            Hit::Window { id, .. } => self
+                .desktop
+                .get(id)
+                .filter(|w| w.content.contains(px, py))
+                .map(|w| w.id),
+            _ => None,
+        }
+    }
+
+    /// Tells windows where the pointer went, once per round: moving it makes
+    /// two device events, one per axis, and one motion says it all.
+    fn flush_pointer(&mut self) {
+        if !core::mem::take(&mut self.pointer.moved) {
+            return;
+        }
+        let (px, py) = self.desktop.pointer;
+        let under = self.pointer.grab.or_else(|| self.content_at(px, py));
+        if under != self.pointer.inside {
+            if let Some(old) = self.pointer.inside {
+                self.deliver_wanted(old, wants::POINTER, Event::Leave);
+            }
+            if let Some((id, (x, y))) = under.and_then(|i| Some((i, self.in_content(i, px, py)?))) {
+                self.deliver_wanted(id, wants::POINTER, Event::Enter { x, y });
+            }
+            self.pointer.inside = under;
+        }
+        if let Some((id, (x, y))) = under.and_then(|i| Some((i, self.in_content(i, px, py)?))) {
+            let buttons = self.pointer.buttons;
+            self.deliver_wanted(id, wants::POINTER, Event::Motion { x, y, buttons });
+        }
+    }
+
+    /// A button. While one pressed on a window is held, every button goes to
+    /// that window: a program that saw a press sees its release.
+    fn on_button(&mut self, code: u16, pressed: bool, at: u64) {
+        self.flush_pointer();
+        let number = (code - BTN_LEFT) as u8 + 1;
+        let bit = 1u8 << (code - BTN_LEFT);
+        let (px, py) = self.desktop.pointer;
+        if !pressed {
+            self.pointer.buttons &= !bit;
+            if let Some(id) = self
+                .pointer
+                .grab
+                .filter(|_| self.pointer.grabbed & bit != 0)
+            {
+                self.pointer.grabbed &= !bit;
+                if let Some((x, y)) = self.in_content(id, px, py) {
+                    let release = Event::Release {
+                        x,
+                        y,
+                        button: number,
+                    };
+                    self.deliver_wanted(id, wants::POINTER, release);
+                }
+                if self.pointer.grabbed == 0 {
+                    self.pointer.grab = None;
+                    self.pointer.moved = true;
+                }
+            }
+            return;
+        }
+        self.pointer.buttons |= bit;
+        let target = if let Some(id) = self.pointer.grab {
+            self.in_content(id, px, py).map(|(x, y)| (id, x, y))
+        } else {
+            match self.desktop.hit(px, py) {
+                Hit::Window { id, x, y } => Some((id, x, y)),
+                Hit::Close { id } if code == BTN_LEFT => {
+                    self.ask_close(id, at);
+                    None
+                }
+                // Another button on the box is a click on the window, as
+                // before the box (audit of ADR 0077, L7).
+                Hit::Close { id } => self.in_content(id, px, py).map(|(x, y)| (id, x, y)),
+                Hit::Desktop => None,
+            }
+        };
+        if let Some((id, x, y)) = target {
+            self.pointer.grab = Some(id);
+            self.pointer.grabbed |= bit;
+            self.set_focus(id);
+            self.deliver(
+                id,
+                Event::Click {
+                    x,
+                    y,
+                    button: number,
+                },
+            );
+        }
+    }
+
+    /// A device's releases were lost: nothing is held any more, and the window
+    /// that had a key or a button down is told.
+    fn after_lost_input(&mut self) {
+        if !core::mem::take(&mut self.keys.lost) {
+            return;
+        }
+        self.escape.reset();
+        self.release_keys_of_focus();
+        let (px, py) = self.desktop.pointer;
+        if let Some(id) = self.pointer.grab.take() {
+            if let Some((x, y)) = self.in_content(id, px, py) {
+                let grabbed = self.pointer.grabbed;
+                for button in (0..3).filter(|b| grabbed & (1 << b) != 0) {
+                    let release = Event::Release {
+                        x,
+                        y,
+                        button: button + 1,
+                    };
+                    self.deliver_wanted(id, wants::POINTER, release);
+                }
+            }
+        }
+        self.pointer.buttons = 0;
+        self.pointer.grabbed = 0;
+        self.pointer.moved = true;
+    }
+
+    /// The focused window hears the release of every key it saw go down.
+    fn release_keys_of_focus(&mut self) {
+        let down = core::mem::take(&mut self.keys.down);
+        let Some(id) = self.desktop.focus else {
+            return;
+        };
+        let mods = self.keys.keyboard.modifiers();
+        for code in down.into_iter().flatten() {
+            let state = KeyState::Released;
+            self.deliver_wanted(id, wants::KEY_CODES, Event::KeyCode { code, state, mods });
+        }
+    }
+
+    /// Repeats the key held, when it is due. A dead key waits for the next
+    /// key instead of alternating between nothing and its accent.
+    fn repeat_keys(&mut self, now_ms: u64) {
+        if self.keys.keyboard.dead_pending() {
+            return;
+        }
+        if let Some(code) = self.keys.repeat.due(now_ms) {
+            self.on_key(
+                aricode_input::Event {
+                    kind: EV_KEY,
+                    code,
+                    value: 1,
+                },
+                KeyState::Repeated,
+            );
+        }
+    }
+
+    /// A key, to the focused window: its code if it asked, then its bytes.
+    fn on_key(&mut self, ev: aricode_input::Event, state: KeyState) {
+        let bytes = self.keys.keyboard.feed(ev);
+        let Some(id) = self.desktop.focus else {
+            return;
+        };
+        let mods = self.keys.keyboard.modifiers();
+        let code = ev.code;
+        let down = &mut self.keys.down;
+        let told = match state {
+            KeyState::Pressed => {
+                // Past the slots, no release will come for it: a window needs
+                // only know that a few are down.
+                if let Some(slot) = down.iter_mut().find(|d| d.is_none()) {
+                    *slot = Some(code);
+                }
+                true
+            }
+            KeyState::Repeated => down.contains(&Some(code)),
+            // A key pressed for another window is not this one's to release.
+            KeyState::Released => match down.iter_mut().find(|d| **d == Some(code)) {
+                Some(slot) => {
+                    *slot = None;
+                    true
+                }
+                None => false,
+            },
+        };
+        if told {
+            self.deliver_wanted(id, wants::KEY_CODES, Event::KeyCode { code, state, mods });
+        }
+        // Each byte of the key (editing keys are escape sequences).
+        for &ch in bytes.as_slice() {
+            self.deliver(id, Event::Key(ch));
+        }
+    }
+
     fn deliver(&mut self, id: u32, ev: Event) {
         let Some(c) = self.content(id) else { return };
         if let Some((reply_to, _)) = c.pending.take() {
@@ -426,6 +696,7 @@ impl Compositor {
         frame
             .into_iter()
             .chain(polls)
+            .chain(self.keys.repeat.next_due())
             .chain(self.late.next_due())
             .fold(sweep, u64::min)
             .saturating_sub(now_ms)
@@ -528,6 +799,9 @@ impl Compositor {
         if self.desktop.focus == Some(id) {
             return;
         }
+        // The key held was for the window that had the focus.
+        self.keys.repeat.stop();
+        self.release_keys_of_focus();
         if let Some(old) = self.desktop.focus {
             self.deliver(old, Event::Focus(false));
         }
@@ -541,47 +815,28 @@ impl Compositor {
             let (dx, dy) = match ev.code {
                 REL_X => (ev.value as i32, 0),
                 REL_Y => (0, ev.value as i32),
+                REL_WHEEL => {
+                    self.flush_pointer();
+                    let (px, py) = self.desktop.pointer;
+                    let over = self.content_at(px, py);
+                    if let Some((id, (x, y))) =
+                        over.and_then(|i| Some((i, self.in_content(i, px, py)?)))
+                    {
+                        let delta = ev.value as i32;
+                        self.deliver_wanted(id, wants::POINTER, Event::Wheel { x, y, delta });
+                    }
+                    return;
+                }
                 _ => return,
             };
             self.desktop.move_pointer(dx, dy);
+            self.pointer.moved = true;
             return;
         }
         if ev.kind == EV_KEY && (BTN_LEFT..=BTN_LEFT + 2).contains(&ev.code) {
-            if ev.value != 1 {
-                return;
-            }
-            let (px, py) = self.desktop.pointer;
-            match self.desktop.hit(px, py) {
-                Hit::Window { id, x, y } => {
-                    self.set_focus(id);
-                    self.deliver(
-                        id,
-                        Event::Click {
-                            x,
-                            y,
-                            button: (ev.code - BTN_LEFT) as u8 + 1,
-                        },
-                    );
-                }
-                Hit::Close { id } if ev.code == BTN_LEFT => self.ask_close(id, at),
-                // Another button on the box is a click on the window, as
-                // before the box (audit of ADR 0077, L7).
-                Hit::Close { id } => {
-                    let Some(w) = self.desktop.get(id) else {
-                        return;
-                    };
-                    let (x, y) = (px - w.content.x, py - w.content.y);
-                    self.set_focus(id);
-                    self.deliver(
-                        id,
-                        Event::Click {
-                            x,
-                            y,
-                            button: (ev.code - BTN_LEFT) as u8 + 1,
-                        },
-                    );
-                }
-                Hit::Desktop => {}
+            // Pressed, or released; a device's repeat says nothing.
+            if ev.value <= 1 {
+                self.on_button(ev.code, ev.value == 1, at);
             }
             return;
         }
@@ -592,15 +847,18 @@ impl Compositor {
             say(b"Ctrl+Alt+Backspace: the owner asked for the text console; leaving");
             sys::process_exit(0);
         }
-        if ev.kind == EV_KEY && ev.value == 1 {
+        if ev.kind != EV_KEY || !self.keys.repeat.follow(&ev, at) {
+            return;
+        }
+        if ev.value == 1 {
             self.last_key_ms = Some(at);
         }
-        // Each byte of the key (editing keys are escape sequences).
-        for &ch in self.keyboard.feed(ev).as_slice() {
-            if let Some(id) = self.desktop.focus {
-                self.deliver(id, Event::Key(ch));
-            }
-        }
+        let state = if ev.value == 1 {
+            KeyState::Pressed
+        } else {
+            KeyState::Released
+        };
+        self.on_key(ev, state);
     }
 
     fn handle(
@@ -669,6 +927,7 @@ impl Compositor {
                     events: [None; QUEUE],
                     count: 0,
                     pending: None,
+                    wants: req.events,
                     close_waiting: None,
                 });
                 sys::print(b"compositor: window ");
@@ -699,17 +958,34 @@ impl Compositor {
                 }
             }
             Op::Present => {
-                let Some(virt) = self.owned(req.window, owner).map(|c| c.virt) else {
+                let Some((virt, width)) = self.owned(req.window, owner).map(|c| (c.virt, c.width))
+                else {
                     return answer(reply_to, Reply::status(Status::BadWindow));
                 };
                 // Every window on that buffer shows the new pixels.
                 for c in self.contents.iter().flatten().filter(|c| c.virt == virt) {
-                    if let Some(w) = self.desktop.get(c.id) {
+                    let Some(w) = self.desktop.get(c.id) else {
+                        continue;
+                    };
+                    // The rectangles are in the presenter's rows: a window that
+                    // shows the same buffer at another width shows them elsewhere.
+                    if req.damage_len == 0 || c.width != width {
                         self.damage.add(&w.content);
+                        continue;
+                    }
+                    for d in &req.damage[..req.damage_len as usize] {
+                        let at = Rect::new(
+                            w.content.x + d.x as i32,
+                            w.content.y + d.y as i32,
+                            d.width as u32,
+                            d.height as u32,
+                        );
+                        self.damage.add(&at.intersect(&w.content));
                     }
                 }
                 answer(reply_to, Reply::ok(0));
             }
+            Op::Resize => self.resize(req, owner, reply_to, buf),
             Op::Poll => {
                 let Some(c) = self.owned(req.window, owner) else {
                     return answer(reply_to, Reply::status(Status::BadWindow));
@@ -744,6 +1020,47 @@ impl Compositor {
                 answer(reply_to, Reply::ok(0));
             }
         }
+    }
+
+    /// `Op::Resize`: the same checks as `Create`, and only then the old buffer
+    /// goes, so a refused request leaves the window as it was.
+    fn resize(&mut self, req: Request, owner: usize, reply_to: Handle, buf: Option<Handle>) {
+        if self.owned(req.window, owner).is_none() {
+            return answer(reply_to, Reply::status(Status::BadWindow));
+        }
+        let Some(buf) = buf else {
+            return answer(reply_to, Reply::status(Status::BadHandles));
+        };
+        if sys::dma_phys(buf).is_err() {
+            return answer(reply_to, Reply::status(Status::BadHandles));
+        }
+        if req.width == 0 || req.height == 0 || req.width > MAX_SIDE || req.height > MAX_SIDE {
+            return answer(reply_to, Reply::status(Status::Invalid));
+        }
+        let needed = req.width as u64 * req.height as u64 * 4;
+        if sys::region_len(buf).map_or(true, |len| len < needed) {
+            return answer(reply_to, Reply::status(Status::BadHandles));
+        }
+        let Ok(virt) = sys::mmio_map(buf) else {
+            return answer(reply_to, Reply::status(Status::BadHandles));
+        };
+        if let Some(w) = self.desktop.get(req.window) {
+            let old = w.frame();
+            self.damage.add(&old);
+        }
+        self.desktop.resize(req.window, req.width, req.height);
+        if let Some(w) = self.desktop.get(req.window) {
+            let new = w.frame();
+            self.damage.add(&new);
+        }
+        let Some(c) = self.content(req.window) else {
+            return answer(reply_to, Reply::status(Status::BadWindow));
+        };
+        let old = core::mem::replace(&mut c.virt, virt);
+        c.width = req.width;
+        c.height = req.height;
+        self.unmap_unused(old);
+        answer(reply_to, Reply::ok(0));
     }
 
     /// Unmaps a content buffer no window shows any more. The mapping is
@@ -887,7 +1204,13 @@ fn main(inputs: u64) -> u64 {
         desktop,
         screen,
         contents: [const { None }; MAX_WINDOWS],
-        keyboard,
+        keys: Keys {
+            keyboard,
+            repeat: KeyRepeat::new(),
+            down: [None; 8],
+            lost: false,
+        },
+        pointer: Pointer::default(),
         escape: EscapeChord::new(),
         last_key_ms: None,
         next_frame_ms: 0,
@@ -930,19 +1253,22 @@ fn main(inputs: u64) -> u64 {
         }
         // Every reply already there, in time order (a mouse click must
         // precede the key that came after it).
-        inputs.collect(&mut comp.keyboard, t);
+        inputs.collect(&mut comp.keys, t);
         let handled = inputs.take();
         for (at, ev) in handled {
             comp.on_input(*ev, *at);
         }
         comp.account_late(handled.iter().map(|(at, _)| *at), now(SYSTEM));
         inputs.clear();
+        comp.after_lost_input();
+        comp.flush_pointer();
+        comp.repeat_keys(t);
         comp.expire(t);
         comp.compose(t);
         // Sleep until a request, a device's events or the next deadline,
         // whichever comes first (incident 0058: reading the devices in
         // turn, each with its own wait, left the pointer behind the hand).
-        inputs.start_reads(&mut comp.keyboard, t);
+        inputs.start_reads(&mut comp.keys, t);
         let t = now(SYSTEM);
         let wait = comp.next_deadline(t).min(inputs.next_retry(t));
         let (mut eps, owners, n_eps) = comp.endpoints();
@@ -959,13 +1285,7 @@ fn main(inputs: u64) -> u64 {
             }
             Ok((which, n, nh)) => {
                 let at = now(SYSTEM);
-                inputs.finish(
-                    which - n_eps,
-                    &msg[..n],
-                    &handles[..nh],
-                    &mut comp.keyboard,
-                    at,
-                );
+                inputs.finish(which - n_eps, &msg[..n], &handles[..nh], &mut comp.keys, at);
             }
             Err(sys::Error::Timeout) => {}
             // A wait that fails at once (a member revoked) would spin the
@@ -1034,7 +1354,7 @@ impl Inputs {
     /// A read outstanding on every device that has none and is not
     /// waiting out a pause. A device whose endpoint nobody receives on any
     /// more is given up (ADR 0030).
-    fn start_reads(&mut self, keyboard: &mut Keyboard, now_ms: u64) {
+    fn start_reads(&mut self, keys: &mut Keys, now_ms: u64) {
         for d in 0..MAX_INPUTS {
             let Some(dev) = &self.devices[d] else {
                 continue;
@@ -1052,7 +1372,7 @@ impl Inputs {
                     num(d as u64);
                     sys::print(b" is gone; dropping it\n");
                     // Its releases are lost: no modifier stays held.
-                    keyboard.release_modifiers();
+                    keys.release_held();
                     self.devices[d] = None;
                 }
                 Err(_) => self.retry_at[d] = now_ms + RETRY_MS,
@@ -1091,7 +1411,7 @@ impl Inputs {
     /// there is taken, and a read whose driver died holding it (its reply
     /// endpoint closed, which a wait on several endpoints does not report
     /// while others are open, ADR 0036) is started again after a pause.
-    fn collect(&mut self, keyboard: &mut Keyboard, now_ms: u64) {
+    fn collect(&mut self, keys: &mut Keys, now_ms: u64) {
         let mut msg = [0u8; aricode_proto::input::Reply::LEN];
         let mut none = [Handle(0); sys::abi::IPC_MAX_HANDLES];
         for d in 0..MAX_INPUTS {
@@ -1099,13 +1419,13 @@ impl Inputs {
                 continue;
             };
             match sys::ipc_receive(reply, &mut msg, &mut none, 0) {
-                Ok((n, nh)) => self.take_reply(d, &msg[..n], &none[..nh], keyboard, now_ms),
+                Ok((n, nh)) => self.take_reply(d, &msg[..n], &none[..nh], keys, now_ms),
                 Err(sys::Error::PeerClosed) => {
                     let _ = sys::handle_close(reply);
                     self.pending[d] = None;
                     // The driver is relaunched on the same endpoint; the
                     // keys it held were never released.
-                    keyboard.release_modifiers();
+                    keys.release_held();
                     self.retry_at[d] = now_ms + RETRY_MS;
                 }
                 // Alive but holding the read far past its time: given up
@@ -1114,7 +1434,7 @@ impl Inputs {
                 Err(_) if now_ms.saturating_sub(self.started[d]) > READ_MS as u64 + HUNG_MS => {
                     let _ = sys::handle_close(reply);
                     self.pending[d] = None;
-                    keyboard.release_modifiers();
+                    keys.release_held();
                     self.retry_at[d] = now_ms + RETRY_MS;
                     sys::print(b"compositor: input device ");
                     num(d as u64);
@@ -1126,16 +1446,9 @@ impl Inputs {
     }
 
     /// The reply the wait received, from the `i`-th outstanding read.
-    fn finish(
-        &mut self,
-        i: usize,
-        msg: &[u8],
-        handles: &[Handle],
-        keyboard: &mut Keyboard,
-        now_ms: u64,
-    ) {
+    fn finish(&mut self, i: usize, msg: &[u8], handles: &[Handle], keys: &mut Keys, now_ms: u64) {
         if let Some(&d) = self.waiting.get(i) {
-            self.take_reply(d, msg, handles, keyboard, now_ms);
+            self.take_reply(d, msg, handles, keys, now_ms);
         }
     }
 
@@ -1144,7 +1457,7 @@ impl Inputs {
         d: usize,
         msg: &[u8],
         handles: &[Handle],
-        keyboard: &mut Keyboard,
+        keys: &mut Keys,
         now_ms: u64,
     ) {
         for h in handles {
@@ -1156,7 +1469,7 @@ impl Inputs {
         // Relaunched since its last reply, outside a read of ours too: the
         // keys it held were never released (audit of the file manager, M2).
         if self.instances[d].changed(msg) {
-            keyboard.release_modifiers();
+            keys.release_held();
         }
         let mut events = [aricode_proto::input::Event::default(); MAX_EVENTS];
         let mut times = [0u64; MAX_EVENTS];
