@@ -247,6 +247,11 @@ impl Keyboard {
         }
     }
 
+    /// A dead key waits for the next key: holding it must not repeat.
+    pub const fn dead_pending(&self) -> bool {
+        self.dead.is_some()
+    }
+
     /// The [`mods`] held now.
     pub const fn modifiers(&self) -> u8 {
         let mut m = 0;
@@ -897,6 +902,11 @@ impl KeysDown {
         Self { bits: [0; 4] }
     }
 
+    /// Whether a key is held (key codes from 256 up are not tracked).
+    pub fn is_down(&self, code: u16) -> bool {
+        code < 256 && self.bits[code as usize / 64] & (1u64 << (code % 64)) != 0
+    }
+
     /// Follows one event (key codes from 256 up are not tracked).
     pub fn follow(&mut self, ev: &Event) {
         if ev.kind != EV_KEY || ev.code >= 256 {
@@ -1054,6 +1064,12 @@ impl EscapeChord {
         Self { held: 0 }
     }
 
+    /// Forgets what is held: a device's releases were lost, and a plain
+    /// Backspace must not end the desktop.
+    pub fn reset(&mut self) {
+        self.held = 0;
+    }
+
     /// Follows one event; `true` on the Backspace press made with a Ctrl
     /// and an Alt held.
     pub fn feed(&mut self, ev: Event) -> bool {
@@ -1165,6 +1181,26 @@ mod tests {
         assert!(r.next_due().is_some());
         r.stop();
         assert_eq!(r.due(u64::MAX), None);
+    }
+
+    #[test]
+    fn keys_down_says_what_is_held() {
+        let mut k = KeysDown::new();
+        assert!(!k.is_down(30));
+        k.follow(&key(30, 1));
+        assert!(k.is_down(30));
+        k.follow(&key(30, 0));
+        assert!(!k.is_down(30));
+        assert!(!k.is_down(BTN_LEFT), "not tracked");
+    }
+
+    #[test]
+    fn the_chord_forgets_what_a_lost_release_left_held() {
+        let mut c = EscapeChord::new();
+        c.feed(key(KEY_LEFTCTRL, 1));
+        c.feed(key(KEY_LEFTALT, 1));
+        c.reset();
+        assert!(!c.feed(key(KEY_BACKSPACE, 1)));
     }
 
     #[test]

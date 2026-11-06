@@ -66,6 +66,7 @@ fn events(session: Handle, hw: Handle) -> u64 {
     };
     let mut seen = 0;
     let mut repeats = 0;
+    let mut leaves = 0;
     for _ in 0..200 {
         let ev = match win.poll(100) {
             Ok(Some(ev)) => ev,
@@ -74,9 +75,18 @@ fn events(session: Handle, hw: Handle) -> u64 {
         };
         match ev {
             Event::Enter { .. } => say(&mut seen, 1, b"enter"),
-            Event::Leave => say(&mut seen, 2, b"leave"),
+            Event::Leave => {
+                leaves += 1;
+                say(
+                    &mut seen,
+                    if leaves == 1 { 2 } else { 2048 },
+                    if leaves == 1 { b"leave 1" } else { b"leave 2" },
+                );
+            }
             Event::Motion { buttons: 0, .. } => say(&mut seen, 4, b"motion"),
-            Event::Motion { buttons: 1, .. } => say(&mut seen, 8, b"motion, left held"),
+            Event::Motion { buttons: 1, x, .. } if x < 0 => {
+                say(&mut seen, 1024, b"motion outside it, left held");
+            }
             Event::Release { button: 1, .. } => say(&mut seen, 16, b"release of the left button"),
             Event::Wheel { delta, .. } if delta != 0 => say(&mut seen, 32, b"wheel"),
             Event::KeyCode {
@@ -98,8 +108,8 @@ fn events(session: Handle, hw: Handle) -> u64 {
             }
             Event::KeyCode {
                 state: KeyState::Pressed,
+                code: 48,
                 mods,
-                ..
             } if mods & aricode_rt::sys::window::mods::SHIFT != 0 => {
                 say(&mut seen, 512, b"key code with shift");
             }
@@ -128,9 +138,12 @@ fn events(session: Handle, hw: Handle) -> u64 {
                 sys::print(b"gui_demo D: presented a part\n");
             }
             Event::Key(b'q') => {
-                sys::print(b"gui_demo D: key repeats ");
-                num_i32(repeats);
-                sys::print(b"\n");
+                sys::print(if repeats > 1 {
+                    b"gui_demo D: the key repeated\n" as &[u8]
+                } else {
+                    b"gui_demo D: the key did not repeat\n"
+                });
+                sys::print(b"gui_demo D: done\n");
                 return 0;
             }
             _ => {}
@@ -246,6 +259,18 @@ fn main(index: u64) -> u64 {
                     b": focus lost\n"
                 });
                 idle = 0;
+            }
+            // None of these without asking: it asked for nothing.
+            Ok(Some(
+                Event::Motion { .. }
+                | Event::Release { .. }
+                | Event::Enter { .. }
+                | Event::Leave
+                | Event::Wheel { .. }
+                | Event::KeyCode { .. },
+            )) => {
+                sys::print(name);
+                sys::print(b": an event it did not ask for\n");
             }
             Ok(Some(_)) => {}
             Ok(None) => idle += 1,

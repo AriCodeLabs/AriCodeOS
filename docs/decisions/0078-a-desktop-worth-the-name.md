@@ -332,6 +332,24 @@ rate; both are now ignored in favour of this. The console does not use it yet.
 `gui.window_events` checks all of this through QEMU's mouse and keyboard, with new
 runner options `drag` and `hold_key`.
 
+An independent review of the protocol found no high findings, but found that
+`gui.window_events` passed without its last stage (incident 0059). All fixed:
+- `Enter`, `Leave`, `Motion` and `Wheel` are about the content, not the frame.
+- A PS/2 keyboard repeats a held key as a new press. Its driver now says it is a
+  repeat, so a held Shift floods nothing and Caps does not toggle.
+- The driver's queue gives up motion before keys: a lost release would repeat a
+  key for ever. The compositor's queues keep releases and focus over motion.
+- While a button pressed on a window is held, every button goes to that window,
+  and a program hears the release of what it saw pressed.
+- A driver's lost releases also clear the buttons, the grab and the escape chord.
+- A change of focus tells the old window its keys went up, and the new one never
+  hears the release of a key pressed elsewhere.
+- A held dead key does not repeat; a resize keeps the close box on screen; damage
+  on a window showing the same buffer at another width repaints all of it.
+
+Known limit: if `Resize`'s answer is lost in a timeout, the compositor may hold the
+new buffer while the program draws on the old one, until its next resize.
+
 ### Still open in stage 0
 
 The `ui.*` figures of `perf` measure what stage 1 brings (glyphs, shapes, layout),

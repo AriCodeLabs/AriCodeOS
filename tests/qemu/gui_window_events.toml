@@ -16,12 +16,14 @@ timeout_secs = 120
 marker = "gui_demo D: window presented"
 mouse_rel = [-300, -200]
 
+# The drag leaves the window: the button holds the pointer's events for it.
 [[host_input_then]]
 marker = "gui_demo D: motion"
-drag = [30, 30]
+drag = [-400, 30]
 
 [[host_input_then]]
 marker = "gui_demo D: release of the left button"
+mouse_rel = [200, 0]
 click = "wheel-up"
 
 [[host_input_then]]
@@ -40,12 +42,13 @@ keys = ["d"]
 marker = "gui_demo D: presented a part"
 keys = ["r"]
 
+# Over the desktop, past the frame: leaving the content for the second time.
 [[host_input_then]]
 marker = "gui_demo D: resized to 500x350"
-mouse_rel = [-320, -190]
+mouse_rel = [-190, -220]
 
 [[host_input_then]]
-marker = "gui_demo D: leave"
+marker = "gui_demo D: leave 2"
 keys = ["q"]
 
 [expect]
@@ -53,16 +56,26 @@ exit = 33
 serial_contains = [
     "compositor: window 1 'Demo D' 400x300",
     "gui_demo D: enter",
-    "gui_demo D: motion, left held",
+    "gui_demo D: motion outside it, left held",
+    "gui_demo D: leave 1",
     "gui_demo D: key code pressed",
     "gui_demo D: key code repeated",
+    "gui_demo D: the key repeated",
+    # The 20x20 part, alone.
+    "flushed 400 px in 1 rect(s)",
+    # The resized content's colour reached the screen.
+    "= 0x208080",
+    "gui_demo D: done",
     "ARICODEOS_SHUTDOWN",
 ]
-serial_absent = ["KERNEL PANIC", "the resize failed", "gui_demo D: key repeats 0\n"]
+serial_absent = ["KERNEL PANIC", "the resize failed", "the key did not repeat"]
 serial_order = [
+    "gui_demo D: motion outside it, left held",
+    "gui_demo D: release of the left button",
     "gui_demo D: key code pressed",
     "gui_demo D: key code repeated",
     "gui_demo D: key code released",
     "gui_demo D: resized to 500x350",
-    "gui_demo D: leave",
+    "gui_demo D: leave 2",
+    "gui_demo D: done",
 ]

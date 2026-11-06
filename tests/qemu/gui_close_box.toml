@@ -47,7 +47,7 @@ serial_contains = [
     "gui_demo C: its window was closed for it",
     "ARICODEOS_SHUTDOWN",
 ]
-serial_absent = ["KERNEL PANIC", "gui_demo C: its window is still open"]
+serial_absent = ["an event it did not ask for", "KERNEL PANIC", "gui_demo C: its window is still open"]
 serial_order = [
     "gui_demo A: asked to close; closing",
     "compositor: window 1 asked to close",

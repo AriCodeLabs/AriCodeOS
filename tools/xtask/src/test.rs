@@ -744,6 +744,14 @@ pub fn run_scenario(
                 problems.push(format!("{prefix}missing '{needle}' (the moved host key)"));
             }
         }
+        // A stage that never came sent nothing, so what follows proves nothing.
+        // Its line also quotes the marker, which would satisfy a search for
+        // that text (incident 0059).
+        for needle in ["[host] QMP: marker '", "[host] flood: marker '"] {
+            if let Some(line) = cap.serial.lines().find(|l| l.contains(needle)) {
+                problems.push(format!("{prefix}{line}"));
+            }
+        }
         if let Some(i) = scenario::first_out_of_order(&cap.serial, &expect.serial_order) {
             problems.push(format!(
                 "{prefix}'{}' not found after the texts before it in serial_order",
