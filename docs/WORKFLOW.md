@@ -38,6 +38,12 @@ git branch -d feature/f04-gdt-idt
 
 ## Publishing a version
 
+What the reference laptop uses stays out of a published image: no `--authorized-key`,
+no `--dev-source`, no LAN source, and no temporary measurement or probe
+(`docs/hardware.md`, "The reference laptop is a test machine"). A version is not done
+until its GitHub release and its container image, `ghcr.io/aricodelabs/aricodeos`, are
+both out.
+
 ```bash
 git checkout develop && cargo xtask check && cargo xtask test
 git checkout main

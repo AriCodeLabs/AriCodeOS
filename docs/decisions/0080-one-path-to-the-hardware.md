@@ -1,8 +1,9 @@
 # ADR 0080: One path from programs to the hardware
 
 - **Date:** 2026-11-06
-- **Status:** Proposed. Design research only: no kernel or driver code was
-  written, nothing was built, nothing ran on the laptop.
+- **Status:** Accepted as the direction on 2026-11-06, with the owner's choices
+  below. The research behind it wrote no kernel or driver code, built nothing and
+  ran nothing on the laptop.
 
 ## The goal, and the short answer
 
@@ -30,6 +31,26 @@ brands do not matter.
 Labels: **[M]** measured or counted by this study; **[D]** documented by a
 primary source that was read; **[S]** seen only through a search summary;
 **[I]** inferred here.
+
+## The owner's choices (2026-11-06)
+
+- **One interface as the base, tunable above it, with no hardcoding:** "hardcoding is
+  always where everyone fights". Limits, queue sizes, timeouts and policies are
+  parameters with defaults that a program or the owner can change and read back,
+  never constants a user must patch. What hardware fixes (register layouts, a
+  manual's restrictions) stays in tables, by family.
+- **Debian on the laptop for reference runs: yes.** It is a test machine, and anything
+  may be installed on it. Nothing from it reaches production, and no data on it may
+  endanger other machines: see `docs/hardware.md`, "The reference laptop is a test
+  machine".
+- **Graphics tests as needed, always with a thermal watch,** and always compare: if
+  another system does better, find out why and improve ours, for more speed at no
+  more resource use.
+- **The robot is open:** a drone, an arm, a printer or a toy. So the control interface
+  must not assume one. The first target is a simulated arm; a real device follows.
+- **Second GPU target:** tests run on what is at hand; a machine bought for it is still
+  to be decided.
+- The rest of the table below stands as recommended, open to revision.
 
 ## Decisions for the owner
 
