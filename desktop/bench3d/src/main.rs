@@ -1,6 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 // SPDX-License-Identifier: Apache-2.0
-//! bench3d: the graphics benchmark of ADR 0080. Thirteen scenes, of the kinds glmark2
+//! bench3d: the graphics benchmark of ADR 0080. Sixteen scenes, of the kinds glmark2
 //! has (geometry, textures, shading, 2D effects, a desktop, heavy scenes), drawn in its
 //! window while it measures them, with the frame rate, the frame time and the
 //! processor's temperature on screen.
@@ -26,9 +26,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use aricode_cmdline::{keys, CmdLine};
 use aricode_gfx::{rgb, Canvas, Rect};
-use aricode_render3d::effects::convolve;
+use aricode_render3d::effects::{self, convolve};
 use aricode_render3d::{
-    draw, Camera, Filter, Light, Mat4, Material, Mesh, Shading, Stats, Target, Texture, Vec3,
+    draw, draw_shadowed, Camera, Filter, Light, Mat4, Material, Mesh, Shading, ShadowMap, Stats,
+    Target, Texture, Vec3,
 };
 use aricode_rt::sys::window::{wants, Event, KeyState, Window};
 use aricode_rt::sys::{self, abi, kind, permissions, Handle};
@@ -74,11 +75,17 @@ enum Kind {
     Terrain,
     /// Many small lit spheres.
     Objects,
+    /// Objects on the ground, their shadows cast by a light going round them at this
+    /// many radians a second: the light's depth drawn again each frame, and each pixel
+    /// asking it.
+    Shadow(f32),
+    /// A Julia set, its constant moving: a loop and a branch for every pixel.
+    Fractal,
     /// Hills, objects and textures together.
     Everything,
 }
 
-const SCENES: [(&str, Kind); 13] = [
+const SCENES: [(&str, Kind); 16] = [
     ("geometry", Kind::Geometry),
     ("geometry-dense", Kind::DenseGeometry),
     ("texture-nearest", Kind::Texture(Filter::Nearest)),
@@ -91,8 +98,14 @@ const SCENES: [(&str, Kind); 13] = [
     ("desktop", Kind::Desktop),
     ("terrain", Kind::Terrain),
     ("objects", Kind::Objects),
+    ("shadow-slow", Kind::Shadow(0.6)),
+    ("shadow-fast", Kind::Shadow(6.0)),
+    ("fractal", Kind::Fractal),
     ("everything", Kind::Everything),
 ];
+/// The side of the shadow scenes' map, held in the effects' picture meanwhile.
+const SHADOW_MAP: usize = 512;
+const _: () = assert!(SHADOW_MAP * SHADOW_MAP <= W * H);
 
 struct Assets {
     torus: Mesh,
@@ -100,10 +113,13 @@ struct Assets {
     small_sphere: Mesh,
     cube: Mesh,
     terrain: Mesh,
+    /// Flat ground for the shadows to fall on.
+    ground: Mesh,
     textures: [Texture; 4],
     texture_us: u64,
     depth: Vec<u16>,
-    /// A frame to filter, for the 2D effects.
+    /// A frame to filter, for the 2D effects, made when such a scene starts; the
+    /// shadow scenes keep their map in it.
     picture: Vec<u32>,
 }
 
@@ -191,6 +207,18 @@ fn frame(kind: Kind, t: f32, a: &mut Assets, pixels: &mut [u32]) -> Stats {
                 *value = libm::expf(-d / (size as f32));
             }
             convolve(&a.picture, pixels, (W, H, W), &kernel[..size * size], size);
+            return stats;
+        }
+        Kind::Fractal => {
+            // Round the spirals of the set near -0.77 + 0.19i, zooming in and out.
+            let c = (
+                -0.77 + 0.03 * libm::cosf(t * 0.6),
+                0.19 + 0.03 * libm::sinf(t * 0.8),
+            );
+            let view = ((0.0, 0.0), 1.8 + 0.5 * libm::sinf(t * 0.5));
+            let colours = effects::palette(t * 0.1);
+            effects::julia(pixels, (W, H, W), c, view, 128, &colours);
+            stats.pixels = (W * H) as u64;
             return stats;
         }
         Kind::Desktop => {
@@ -344,7 +372,55 @@ fn frame(kind: Kind, t: f32, a: &mut Assets, pixels: &mut [u32]) -> Stats {
                 );
             }
         }
-        Kind::Effect(_) | Kind::Desktop => {}
+        Kind::Shadow(speed) => {
+            let angle = t * speed;
+            let light = Light {
+                direction: Vec3::new(0.8 * libm::cosf(angle), 0.9, 0.8 * libm::sinf(angle))
+                    .normalized(),
+                ambient: 0.2,
+            };
+            let cam = camera(Vec3::new(0.0, 6.5, -11.0), Vec3::new(0.0, 0.8, 0.0));
+            let torus = Mat4::translate(Vec3::new(0.0, 1.9, 0.0))
+                * Mat4::rotate_y(t * 0.4)
+                * Mat4::rotate_x(1.2);
+            let cube = Mat4::translate(Vec3::new(3.2, 0.8, 1.0)) * Mat4::scale(0.8);
+            let sphere = Mat4::translate(Vec3::new(-3.0, 1.2, -0.5)) * Mat4::scale(0.75);
+            // It fits the picture (checked when built), so this never returns early.
+            let Some(mut map) = ShadowMap::new(
+                &mut a.picture,
+                SHADOW_MAP,
+                &light,
+                Vec3::new(0.0, 1.0, 0.0),
+                7.5,
+            ) else {
+                return stats;
+            };
+            for (mesh, model) in [(&a.torus, &torus), (&a.cube, &cube), (&a.sphere, &sphere)] {
+                map.cast(mesh, model);
+            }
+            let textured = |i: usize, shading, shininess| Material {
+                texture: Some((&a.textures[i], Filter::Mipmap)),
+                shininess,
+                ..material(shading, [1.0, 1.0, 1.0])
+            };
+            let copper = Material {
+                shininess: 32.0,
+                ..material(Shading::Phong, [0.85, 0.45, 0.25])
+            };
+            for (mesh, model, m) in [
+                (
+                    &a.ground,
+                    &Mat4::IDENTITY,
+                    textured(1, Shading::Gouraud, 0.0),
+                ),
+                (&a.torus, &torus, copper),
+                (&a.cube, &cube, textured(0, Shading::Flat, 0.0)),
+                (&a.sphere, &sphere, textured(3, Shading::Phong, 24.0)),
+            ] {
+                stats += draw_shadowed(&mut target, mesh, model, &cam, &light, &m, &map);
+            }
+        }
+        Kind::Effect(_) | Kind::Desktop | Kind::Fractal => {}
     }
     stats
 }
@@ -560,12 +636,14 @@ fn assets(hw: Handle, system: Handle) -> Option<(Assets, Vec<u32>, Vec<u32>)> {
     let textures = materials::make()?;
     let texture_us = now_us(system) - texture_start;
     let terrain = Mesh::terrain(120.0, 96, 4.0)?;
-    let mut a = Assets {
+    let ground = Mesh::terrain(24.0, 16, 0.0)?;
+    let a = Assets {
         torus: Mesh::torus(1.3, 0.5, 64, 32)?,
         sphere: Mesh::sphere(1.6, 64, 128)?,
         small_sphere: Mesh::sphere(0.6, 12, 24)?,
         cube: Mesh::cube()?,
         terrain,
+        ground,
         textures,
         texture_us,
         depth,
@@ -577,10 +655,6 @@ fn assets(hw: Handle, system: Handle) -> Option<(Assets, Vec<u32>, Vec<u32>)> {
     // hinting/scratch and small HUD/results strings. Fail here, before any scene.
     let reserve = buffer(256 * 1024, 0u8)?;
     drop(reserve);
-    // The picture the 2D effects filter: a frame of the heaviest scene.
-    let mut picture = core::mem::take(&mut a.picture);
-    frame(Kind::Everything, 1.0, &mut a, &mut picture);
-    a.picture = picture;
     Some((a, back, samples))
 }
 
@@ -634,6 +708,13 @@ fn main(arg: u64) -> u64 {
         if quick == 0 && app.cool_down(name).is_err() {
             break;
         }
+        if let Kind::Effect(_) = kind {
+            // What the 2D effects filter: a frame of the heaviest scene, made outside
+            // the measured frames, since the shadow scenes use the same memory.
+            let mut picture = core::mem::take(&mut a.picture);
+            frame(Kind::Everything, 1.0, &mut a, &mut picture);
+            a.picture = picture;
+        }
         let Ok(mut out) = app.run(name, kind, &mut a, quick) else {
             say("stopped by the owner");
             break;
@@ -646,8 +727,8 @@ fn main(arg: u64) -> u64 {
         app.samples.clear();
         if quick > 0
             && matches!(
-                kind,
-                Kind::Texture(Filter::Linear) | Kind::Objects | Kind::Everything
+                name,
+                "texture-linear" | "objects" | "shadow-fast" | "fractal" | "everything"
             )
         {
             // Outside the measured frames: let the compositor and QMP snapshot

@@ -17,9 +17,11 @@ pub mod effects;
 pub mod math;
 pub mod mesh;
 pub mod raster;
+pub mod shadow;
 pub mod texture;
 
 pub use math::{Mat4, Vec3};
 pub use mesh::{Mesh, Vertex};
-pub use raster::{draw, Camera, Light, Material, Shading, Stats, Target};
+pub use raster::{draw, draw_shadowed, Camera, Light, Material, Shading, Stats, Target};
+pub use shadow::ShadowMap;
 pub use texture::{Filter, Texture};
