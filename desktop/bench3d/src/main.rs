@@ -26,13 +26,15 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use aricode_cmdline::{keys, CmdLine};
 use aricode_gfx::{rgb, Canvas, Rect};
-use aricode_render3d::effects::{self, convolve};
+use aricode_render3d::effects::{self, convolve_rows};
 use aricode_render3d::{
     draw, draw_shadowed, Camera, Filter, Light, Mat4, Material, Mesh, Shading, ShadowMap, Stats,
     Target, Texture, Vec3,
 };
 use aricode_rt::sys::window::{wants, Event, KeyState, Window};
 use aricode_rt::sys::{self, abi, kind, permissions, Handle};
+use aricode_rt::thread::Pool;
+use aricode_sync::SpinLock;
 use aricode_text::{Face, Typesetter, INTER_REGULAR, INTER_SEMIBOLD};
 
 const W: usize = 800;
@@ -149,7 +151,7 @@ fn temperature(system: Handle) -> Option<(u32, u32)> {
 }
 
 /// The line that names a run, as ADR 0080's format asks: build and processors.
-fn header(system: Handle, double: bool) -> String {
+fn header(system: Handle, double: bool, threads: usize) -> String {
     let mut args = [0u8; sys::CMDLINE_MAX];
     let line = sys::cmdline(system, &mut args).ok().map(CmdLine::new);
     let build = line.as_ref().map_or(String::from("unknown"), |l| {
@@ -161,13 +163,18 @@ fn header(system: Handle, double: bool) -> String {
             _ => String::from("esp"),
         }
     });
-    let mut cpus = [0u8; 8];
-    let n = match sys::system_info(system, abi::sysinfo::CPUS, &mut cpus) {
-        Ok(8) => u64::from_le_bytes(cpus),
-        _ => 0,
-    };
+    let n = cpus(system);
     // `machine` waits for the firmware's model in `diag` (SMBIOS): until then, unknown.
-    format!("# machine=unknown build={build} clock=tsc cpus={n} scene=bench3d size={W}x{H} renderer=cpu textures=v2 present={}", if double { "double" } else { "single" })
+    format!("# machine=unknown build={build} clock=tsc cpus={n} scene=bench3d size={W}x{H} renderer=cpu threads={threads} textures=v2 present={}", if double { "double" } else { "single" })
+}
+
+/// The processors this machine runs, 1 if it does not say.
+fn cpus(system: Handle) -> usize {
+    let mut b = [0u8; 8];
+    match sys::system_info(system, abi::sysinfo::CPUS, &mut b) {
+        Ok(8) => (u64::from_le_bytes(b) as usize).max(1),
+        _ => 1,
+    }
 }
 
 fn camera(eye: Vec3, at: Vec3) -> Camera {
@@ -194,7 +201,7 @@ fn material(shading: Shading, color: [f32; 3]) -> Material<'static> {
 
 /// One frame of a scene at `t` seconds into it, onto `pixels`: the frame being drawn,
 /// never the window's buffer, which the compositor may read at any moment.
-fn frame(kind: Kind, t: f32, a: &mut Assets, pixels: &mut [u32]) -> Stats {
+fn frame(kind: Kind, t: f32, a: &mut Assets, pixels: &mut [u32], pool: &mut Pool) -> Stats {
     const SKY: u32 = 0x182030;
     let mut stats = Stats::default();
     match kind {
@@ -206,7 +213,11 @@ fn frame(kind: Kind, t: f32, a: &mut Assets, pixels: &mut [u32]) -> Stats {
                 let d = (x - c) * (x - c) + (y - c) * (y - c);
                 *value = libm::expf(-d / (size as f32));
             }
-            convolve(&a.picture, pixels, (W, H, W), &kernel[..size * size], size);
+            let picture = &a.picture;
+            let kernel = &kernel[..size * size];
+            in_bands(pixels, pool, &|rows, band| {
+                convolve_rows(picture, band, (W, H, W), rows, kernel, size);
+            });
             return stats;
         }
         Kind::Fractal => {
@@ -217,7 +228,9 @@ fn frame(kind: Kind, t: f32, a: &mut Assets, pixels: &mut [u32]) -> Stats {
             );
             let view = ((0.0, 0.0), 1.8 + 0.5 * libm::sinf(t * 0.5));
             let colours = effects::palette(t * 0.1);
-            effects::julia(pixels, (W, H, W), c, view, 128, &colours);
+            in_bands(pixels, pool, &|rows, band| {
+                effects::julia_rows(band, (W, H, W), rows, c, view, 128, &colours);
+            });
             stats.pixels = (W * H) as u64;
             return stats;
         }
@@ -240,20 +253,125 @@ fn frame(kind: Kind, t: f32, a: &mut Assets, pixels: &mut [u32]) -> Stats {
         }
         _ => {}
     }
-    let mut target = Target {
-        color: pixels,
-        depth: &mut a.depth,
-        width: W,
-        height: H,
-        stride: W,
+    // Out of the assets while the bands share them: each band has its rows of the
+    // depth buffer, and the shadow scenes' map lives in the picture.
+    let mut depth = core::mem::take(&mut a.depth);
+    let mut picture = core::mem::take(&mut a.picture);
+    let shadow = match kind {
+        Kind::Shadow(speed) => {
+            let sc = ShadowScene::at(t, speed);
+            // It fits the picture (checked when built), so this is always `Some`.
+            ShadowMap::new(
+                &mut picture,
+                SHADOW_MAP,
+                &sc.light,
+                Vec3::new(0.0, 1.0, 0.0),
+                7.5,
+            )
+            .map(|mut map| {
+                for (mesh, model) in [
+                    (&a.torus, &sc.torus),
+                    (&a.cube, &sc.cube),
+                    (&a.sphere, &sc.sphere),
+                ] {
+                    map.cast(mesh, model);
+                }
+                (map, sc)
+            })
+        }
+        _ => None,
     };
-    target.clear(SKY);
+    let scene_assets: &Assets = a;
+    let parts = pool.size();
+    let rows = H.div_ceil(parts);
+    let bands: Vec<SpinLock<Band>> = pixels
+        .chunks_mut(rows * W)
+        .zip(depth.chunks_mut(rows * W))
+        .map(|(c, d)| SpinLock::new((c, d, Stats::default())))
+        .collect();
+    pool.run(bands.len(), &|b| {
+        // Each band's lock is only ever taken by the thread drawing it.
+        let mut band = bands[b].lock();
+        let (color, depth, stats) = &mut *band;
+        let lines = b * rows..((b + 1) * rows).min(H);
+        let mut target = Target::band(color, depth, (W, H, W), lines);
+        target.clear(SKY);
+        *stats = scene(kind, t, scene_assets, &mut target, shadow.as_ref());
+    });
+    // Every band drew every triangle it was given: the triangles once, the pixels
+    // of all.
+    let mut stats = Stats::default();
+    for band in &bands {
+        let s = band.lock().2;
+        stats.triangles = stats.triangles.max(s.triangles);
+        stats.pixels += s.pixels;
+    }
+    // The bands borrow `depth` until they go; the map's borrow of `picture` ends
+    // with its last use above.
+    drop(bands);
+    a.depth = depth;
+    a.picture = picture;
+    stats
+}
+
+/// A band's rows of the picture and of the depth buffer, and what drawing it did.
+type Band<'a> = (&'a mut [u32], &'a mut [u16], Stats);
+
+/// Where the shadow scenes' light and objects are at `t`.
+struct ShadowScene {
+    light: Light,
+    torus: Mat4,
+    cube: Mat4,
+    sphere: Mat4,
+}
+
+impl ShadowScene {
+    fn at(t: f32, speed: f32) -> Self {
+        let angle = t * speed;
+        Self {
+            light: Light {
+                direction: Vec3::new(0.8 * libm::cosf(angle), 0.9, 0.8 * libm::sinf(angle))
+                    .normalized(),
+                ambient: 0.2,
+            },
+            torus: Mat4::translate(Vec3::new(0.0, 1.9, 0.0))
+                * Mat4::rotate_y(t * 0.4)
+                * Mat4::rotate_x(1.2),
+            cube: Mat4::translate(Vec3::new(3.2, 0.8, 1.0)) * Mat4::scale(0.8),
+            sphere: Mat4::translate(Vec3::new(-3.0, 1.2, -0.5)) * Mat4::scale(0.75),
+        }
+    }
+}
+
+/// `draw(rows, band)` for each band of `pixels`, one band per thread of `pool`.
+fn in_bands(
+    pixels: &mut [u32],
+    pool: &mut Pool,
+    draw: &(dyn Fn(core::ops::Range<usize>, &mut [u32]) + Sync),
+) {
+    let rows = H.div_ceil(pool.size());
+    let bands: Vec<SpinLock<&mut [u32]>> = pixels.chunks_mut(rows * W).map(SpinLock::new).collect();
+    pool.run(bands.len(), &|b| {
+        let mut band = bands[b].lock();
+        draw(b * rows..((b + 1) * rows).min(H), &mut band);
+    });
+}
+
+/// A 3D scene at `t` onto `target`, a band or the whole picture.
+fn scene(
+    kind: Kind,
+    t: f32,
+    a: &Assets,
+    target: &mut Target,
+    shadow: Option<&(ShadowMap, ShadowScene)>,
+) -> Stats {
+    let mut stats = Stats::default();
     let spin = Mat4::rotate_y(t * 0.9) * Mat4::rotate_x(t * 0.6);
     let near = camera(Vec3::new(0.0, 0.8, -4.2), Vec3::default());
     match kind {
         Kind::Geometry => {
             stats += draw(
-                &mut target,
+                target,
                 &a.torus,
                 &spin,
                 &near,
@@ -263,7 +381,7 @@ fn frame(kind: Kind, t: f32, a: &mut Assets, pixels: &mut [u32]) -> Stats {
         }
         Kind::DenseGeometry => {
             stats += draw(
-                &mut target,
+                target,
                 &a.sphere,
                 &spin,
                 &near,
@@ -277,7 +395,7 @@ fn frame(kind: Kind, t: f32, a: &mut Assets, pixels: &mut [u32]) -> Stats {
                 ..material(Shading::Flat, [1.0, 1.0, 1.0])
             };
             stats += draw(
-                &mut target,
+                target,
                 &a.cube,
                 &(Mat4::scale(1.2) * spin),
                 &near,
@@ -290,7 +408,7 @@ fn frame(kind: Kind, t: f32, a: &mut Assets, pixels: &mut [u32]) -> Stats {
                 shininess: 32.0,
                 ..material(shading, [0.9, 0.35, 0.2])
             };
-            stats += draw(&mut target, &a.torus, &spin, &near, &LIGHT, &m);
+            stats += draw(target, &a.torus, &spin, &near, &LIGHT, &m);
         }
         Kind::Corridor => {
             let cam = camera(
@@ -305,7 +423,7 @@ fn frame(kind: Kind, t: f32, a: &mut Assets, pixels: &mut [u32]) -> Stats {
                 for side in [-2.5f32, 2.5] {
                     let at = Vec3::new(side, 0.5, i as f32 * 4.0);
                     stats += draw(
-                        &mut target,
+                        target,
                         &a.cube,
                         &(Mat4::translate(at) * Mat4::rotate_y(t + i as f32)),
                         &cam,
@@ -319,7 +437,7 @@ fn frame(kind: Kind, t: f32, a: &mut Assets, pixels: &mut [u32]) -> Stats {
             let z = t * 4.0;
             let cam = camera(Vec3::new(0.0, 6.0, -30.0 + z), Vec3::new(0.0, 0.0, z));
             stats += draw(
-                &mut target,
+                target,
                 &a.terrain,
                 &Mat4::translate(Vec3::new(0.0, -2.0, 0.0)),
                 &cam,
@@ -342,7 +460,7 @@ fn frame(kind: Kind, t: f32, a: &mut Assets, pixels: &mut [u32]) -> Stats {
                         z - 10.0 + (i % 3) as f32 * 6.0,
                     );
                     stats += draw(
-                        &mut target,
+                        target,
                         &a.small_sphere,
                         &(Mat4::translate(at) * Mat4::scale(1.4)),
                         &cam,
@@ -363,7 +481,7 @@ fn frame(kind: Kind, t: f32, a: &mut Assets, pixels: &mut [u32]) -> Stats {
                 let (x, z) = ((i % 8) as f32 - 3.5, (i / 8) as f32 - 3.5);
                 let at = Vec3::new(x * 2.0, libm::sinf(t * 2.0 + x + z) * 0.5, z * 2.0);
                 stats += draw(
-                    &mut target,
+                    target,
                     &a.small_sphere,
                     &(Mat4::translate(at) * Mat4::scale(0.7)),
                     &cam,
@@ -372,32 +490,10 @@ fn frame(kind: Kind, t: f32, a: &mut Assets, pixels: &mut [u32]) -> Stats {
                 );
             }
         }
-        Kind::Shadow(speed) => {
-            let angle = t * speed;
-            let light = Light {
-                direction: Vec3::new(0.8 * libm::cosf(angle), 0.9, 0.8 * libm::sinf(angle))
-                    .normalized(),
-                ambient: 0.2,
-            };
-            let cam = camera(Vec3::new(0.0, 6.5, -11.0), Vec3::new(0.0, 0.8, 0.0));
-            let torus = Mat4::translate(Vec3::new(0.0, 1.9, 0.0))
-                * Mat4::rotate_y(t * 0.4)
-                * Mat4::rotate_x(1.2);
-            let cube = Mat4::translate(Vec3::new(3.2, 0.8, 1.0)) * Mat4::scale(0.8);
-            let sphere = Mat4::translate(Vec3::new(-3.0, 1.2, -0.5)) * Mat4::scale(0.75);
-            // It fits the picture (checked when built), so this never returns early.
-            let Some(mut map) = ShadowMap::new(
-                &mut a.picture,
-                SHADOW_MAP,
-                &light,
-                Vec3::new(0.0, 1.0, 0.0),
-                7.5,
-            ) else {
+        Kind::Shadow(_) => {
+            let Some((map, sc)) = shadow else {
                 return stats;
             };
-            for (mesh, model) in [(&a.torus, &torus), (&a.cube, &cube), (&a.sphere, &sphere)] {
-                map.cast(mesh, model);
-            }
             let textured = |i: usize, shading, shininess| Material {
                 texture: Some((&a.textures[i], Filter::Mipmap)),
                 shininess,
@@ -407,17 +503,18 @@ fn frame(kind: Kind, t: f32, a: &mut Assets, pixels: &mut [u32]) -> Stats {
                 shininess: 32.0,
                 ..material(Shading::Phong, [0.85, 0.45, 0.25])
             };
+            let cam = camera(Vec3::new(0.0, 6.5, -11.0), Vec3::new(0.0, 0.8, 0.0));
             for (mesh, model, m) in [
                 (
                     &a.ground,
                     &Mat4::IDENTITY,
                     textured(1, Shading::Gouraud, 0.0),
                 ),
-                (&a.torus, &torus, copper),
-                (&a.cube, &cube, textured(0, Shading::Flat, 0.0)),
-                (&a.sphere, &sphere, textured(3, Shading::Phong, 24.0)),
+                (&a.torus, &sc.torus, copper),
+                (&a.cube, &sc.cube, textured(0, Shading::Flat, 0.0)),
+                (&a.sphere, &sc.sphere, textured(3, Shading::Phong, 24.0)),
             ] {
-                stats += draw_shadowed(&mut target, mesh, model, &cam, &light, &m, &map);
+                stats += draw_shadowed(target, mesh, model, &cam, &sc.light, &m, map);
             }
         }
         Kind::Effect(_) | Kind::Desktop | Kind::Fractal => {}
@@ -470,6 +567,9 @@ struct App {
     system: Handle,
     text: Typesetter,
     samples: Vec<u32>,
+    /// Threads that draw a frame's bands with the main one (ADR 0082): one for
+    /// each other processor.
+    pool: Pool,
 }
 
 /// The owner asked to stop: the close box or Esc.
@@ -563,7 +663,7 @@ impl App {
         loop {
             let f0 = now_us(self.system);
             let t = (f0 - start) as f32 / 1e6;
-            let stats = frame(kind, t, a, self.win.canvas().pixels);
+            let stats = frame(kind, t, a, self.win.canvas().pixels, &mut self.pool);
             out.stats += stats;
             let n = out.frames.len() as u64;
             let elapsed = (f0 - start).max(1);
@@ -691,6 +791,7 @@ fn main(arg: u64) -> u64 {
         system,
         text: Typesetter::new(),
         samples,
+        pool: Pool::new(cpus(system).saturating_sub(1)),
     };
     say(&format!(
         "startup_us={} texture_us={} heap_free_bytes={} dma_free_kib={SPARE_KIB}",
@@ -699,7 +800,7 @@ fn main(arg: u64) -> u64 {
         aricode_rt::heap_stats().free
     ));
     let quick = arg;
-    let head = header(system, double);
+    let head = header(system, double, app.pool.size());
     sys::print(head.as_bytes());
     sys::print(b"\n");
     let mut results: Vec<(&str, u64, bool)> = Vec::new();
@@ -711,7 +812,7 @@ fn main(arg: u64) -> u64 {
             // What the 2D effects filter: a frame of the heaviest scene, made outside
             // the measured frames, since the shadow scenes use the same memory.
             let mut picture = core::mem::take(&mut a.picture);
-            frame(Kind::Everything, 1.0, &mut a, &mut picture);
+            frame(Kind::Everything, 1.0, &mut a, &mut picture, &mut app.pool);
             a.picture = picture;
         }
         let Ok(mut out) = app.run(name, kind, &mut a, quick) else {

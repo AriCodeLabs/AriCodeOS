@@ -19,6 +19,7 @@ bench = false
 aricode-rt = { path = "../../sdk/runtime" }
 aricode-gfx = { path = "../../libs/gfx" }
 aricode-render3d = { path = "../../libs/render3d" }
+aricode-sync = { path = "../../libs/sync" }
 aricode-text = { path = "../../libs/text" }
 aricode-cmdline = { path = "../../libs/cmdline" }
 aricode-proto = { path = "../../sdk/proto" }

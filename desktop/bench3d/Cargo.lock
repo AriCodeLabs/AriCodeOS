@@ -298,6 +298,7 @@ dependencies = [
  "aricode-proto",
  "aricode-render3d",
  "aricode-rt",
+ "aricode-sync",
  "aricode-text",
  "libm",
 ]

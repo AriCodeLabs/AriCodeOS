@@ -7,6 +7,9 @@ name = "gui.bench3d"
 description = "the graphics benchmark draws each of its scenes and logs them"
 level = "release"
 areas = ["gui", "apps"]
+# Two processors: the frames are drawn in two bands, one on a pool thread
+# (ADR 0082), and the pictures caught must still be whole.
+cpus = 2
 cmdline = "qemu_exit gui shell gui_trace"
 install = ["desktop/bench3d"]
 stdin = ["run bench3d 3", "sleep 500", "shutdown"]
@@ -37,7 +40,7 @@ exit = 33
 serial_contains = [
     "compositor: window 1 'Bench3D' 800x600",
     "# machine=unknown build=",
-    "renderer=cpu textures=v2 present=double",
+    "renderer=cpu threads=2 textures=v2 present=double",
     "heap_free_bytes=",
     "bench3d.geometry us ",
     "bench3d.texture-mipmap us ",
