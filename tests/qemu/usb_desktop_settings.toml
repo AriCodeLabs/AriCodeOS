@@ -47,6 +47,7 @@ serial_contains = [
     "processor(s), up ",
     "settings: Keyboard: us",
     "settings: Network: ",
+    "compositor: network 10.0.2.15",
     "settings: Updates: none yet (update add URL in the shell)",
     "settings: Boots into: desktop",
     "AriInit: the desktop's settings chose session = shell",

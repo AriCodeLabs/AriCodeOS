@@ -615,7 +615,7 @@ pub enum MenuHit {
 /// A running program's place in the dock: its window and rectangle.
 pub type Dock = [Option<(u32, Rect)>; MAX_WINDOWS];
 /// The longest text the bar shows at its right end, in bytes.
-pub const STATUS_MAX: usize = 32;
+pub const STATUS_MAX: usize = 48;
 
 /// A minute since the Unix epoch, already in the owner's time, as the bar shows it:
 /// `Fri 6 Nov  23:40`, in `out`. How many bytes.
@@ -705,6 +705,9 @@ pub struct Theme {
     pub menu_text_pad: i32,
     pub menu_accent: Color,
     pub menu_accent_ink: Color,
+    /// A notice, under the bar at the right.
+    pub notice_size: (u32, u32),
+    pub notice_margin: i32,
 }
 
 impl Theme {
@@ -738,6 +741,8 @@ impl Theme {
         menu_text_pad: 12,
         menu_accent: rgb(0x1E, 0x6E, 0xF4),
         menu_accent_ink: rgb(0xFF, 0xFF, 0xFF),
+        notice_size: (380, 36),
+        notice_margin: 12,
     };
 
     /// The dark theme of ADR 0078: the frame on #323232, over a darker desktop.
@@ -967,6 +972,10 @@ pub struct Window {
     pub resizable: bool,
     /// Where it was before the zoom button filled the screen.
     pub restore: Option<Rect>,
+    /// The program's name from its signed manifest, as init told it. What the bar and the
+    /// dock show: its title is whatever the program says.
+    program: [u8; MENU_LABEL],
+    program_len: u8,
 }
 
 impl Window {
@@ -1012,6 +1021,15 @@ impl Window {
             f.w + 2 * SHADOW as u32,
             f.h + 2 * SHADOW as u32,
         )
+    }
+
+    /// What the bar and the dock call it: its program's name if init told it, as a
+    /// name reads, or else its own title, for what no manifest names.
+    pub fn panel_name(&self) -> &str {
+        if self.program_len == 0 {
+            return self.title_str();
+        }
+        core::str::from_utf8(&self.program[..self.program_len as usize]).unwrap_or("")
     }
 
     /// Full frame: border and title bar.
@@ -1077,6 +1095,8 @@ fn band_edges(frame: &Rect, x: i32, y: i32) -> u8 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hit {
     Desktop,
+    /// A notice on show: a click takes it away.
+    Notice,
     /// The bar at the top, or the dock around its places: nothing below takes the click.
     Panel,
     /// A running program's place in the dock.
@@ -1142,6 +1162,8 @@ pub struct Desktop {
     next_id: u32,
     status: [u8; STATUS_MAX],
     status_len: u8,
+    notice: [u8; STATUS_MAX],
+    notice_len: u8,
     pub theme: Theme,
 }
 
@@ -1157,6 +1179,8 @@ impl Desktop {
             next_id: 1,
             status: [0; STATUS_MAX],
             status_len: 0,
+            notice: [0; STATUS_MAX],
+            notice_len: 0,
             theme: Theme::LIGHT,
         }
     }
@@ -1190,6 +1214,8 @@ impl Desktop {
             hidden: false,
             resizable: false,
             restore: None,
+            program: [0; MENU_LABEL],
+            program_len: 0,
         });
         self.order[self.count] = slot as u8;
         self.count += 1;
@@ -1249,6 +1275,9 @@ impl Desktop {
 
     /// Topmost window under `(x, y)` (frame included).
     pub fn hit(&self, x: i32, y: i32) -> Hit {
+        if self.notice_len > 0 && self.notice_box().contains(x, y) {
+            return Hit::Notice;
+        }
         let (dock, places) = self.dock();
         if let Some((id, _)) = places.iter().flatten().find(|(_, p)| p.contains(x, y)) {
             return Hit::Dock { id: *id };
@@ -1371,10 +1400,16 @@ impl Desktop {
         let name = self
             .focus
             .and_then(|id| self.get(id))
-            .map_or(0, |w| labels.width(w.title_str()));
+            .map_or(0, |w| labels.width(w.panel_name()));
         let mut x = t.bar_margin + name + t.menu_gap / 2;
+        // A title that would reach the clock is not shown, and cannot be clicked: the
+        // bar's right end says what only the system says.
+        let limit = self.screen.w as i32 - t.bar_margin * 2 - labels.width(self.status_str());
         for (i, rect) in rects.iter_mut().enumerate().take(menus.count()) {
             let w = labels.width(menus.menus[i].title.text()) + t.menu_gap;
+            if x + w > limit {
+                break;
+            }
             *rect = Rect::new(x, 0, w as u32, t.bar_h);
             x += w;
         }
@@ -1396,7 +1431,7 @@ impl Desktop {
         }
         let w = wide + 2 * (t.menu_pad + t.menu_text_pad);
         let h = m.count as i32 * t.menu_row_h + 2 * t.menu_pad;
-        let x = self.menu_titles(menus, labels)[menu].x;
+        let x = self.menu_titles(menus, labels)[menu].x.max(t.bar_margin);
         // On the screen, also for the rightmost title on a small one.
         let x = x.min(self.screen.w as i32 - w).max(0);
         Rect::new(x, t.bar_h as i32, w as u32, h as u32)
@@ -1448,13 +1483,17 @@ impl Desktop {
         let titles = self.menu_titles(menus, labels);
         let middle = t.bar_h as i32 / 2;
         for (i, rect) in titles[..menus.count()].iter().enumerate() {
+            if rect.is_empty() {
+                continue;
+            }
             let on = open.is_some_and(|o| o.menu == i);
             if on {
                 out.fill_rect(rect, t.menu_accent);
             }
             let ink = if on { t.menu_accent_ink } else { t.bar_ink };
             let x = rect.x + t.menu_gap / 2;
-            labels.draw(out, menus.menus[i].title.text(), x, middle, ink);
+            let mut inside = out.clipped(rect);
+            labels.draw(&mut inside, menus.menus[i].title.text(), x, middle, ink);
         }
         let Some(open) = open else { return };
         let area = self.menu_box(menus, labels, open.menu);
@@ -1475,6 +1514,37 @@ impl Desktop {
             let right = row.right() - t.menu_text_pad - labels.width(keys);
             labels.draw(&mut inside, keys, right, mid, ink);
         }
+    }
+
+    /// The window's program, from its manifest: see [`Window::panel_name`].
+    pub fn set_program(&mut self, id: u32, name: &[u8]) {
+        if let Some(w) = self.windows.iter_mut().flatten().find(|w| w.id == id) {
+            let n = name.len().min(MENU_LABEL);
+            w.program[..n].copy_from_slice(&name[..n]);
+            w.program[..n]
+                .iter_mut()
+                .take(1)
+                .for_each(|b| *b = b.to_ascii_uppercase());
+            w.program_len = n as u8;
+        }
+    }
+
+    /// Shows a notice, or takes it away with an empty text. The compositor's own: no
+    /// program writes here, so what one says can be believed.
+    pub fn set_notice(&mut self, text: &str) {
+        let n = text.floor_char_boundary(self.notice.len());
+        self.notice = [0; STATUS_MAX];
+        self.notice[..n].copy_from_slice(&text.as_bytes()[..n]);
+        self.notice_len = n as u8;
+    }
+
+    /// Where a notice goes: under the bar, at the right, and on a small screen.
+    fn notice_box(&self) -> Rect {
+        let t = &self.theme;
+        let (w, h) = t.notice_size;
+        let w = w.min(self.screen.w);
+        let x = (self.screen.w as i32 - w as i32 - t.notice_margin).max(0);
+        Rect::new(x, t.bar_h as i32 + t.notice_margin, w, h)
     }
 
     /// What the bar says at its right end: the clock.
@@ -1511,11 +1581,14 @@ impl Desktop {
     /// put its right side or its close box off the screen.
     pub fn resize(&mut self, id: u32, w: u32, h: u32) -> bool {
         let (screen_w, screen_h) = (self.screen.w as i32, self.screen.h as i32);
+        let bar_h = self.theme.bar_h;
         match self.windows.iter_mut().flatten().find(|win| win.id == id) {
             Some(win) if w != 0 && h != 0 => {
                 win.content.w = w;
                 win.content.h = h;
-                let (left, top) = (BORDER as i32, (TITLE_H + BORDER) as i32);
+                let left = BORDER as i32;
+                // Under the bar its close box would be out of reach (ADR 0077).
+                let top = (bar_h + TITLE_H + BORDER) as i32;
                 let fit =
                     |room: i32, side: u32, low: i32| (room - side as i32 - BORDER as i32).max(low);
                 win.content.x = win.content.x.min(fit(screen_w, w, left));
@@ -1540,6 +1613,8 @@ impl Desktop {
             bar: self.bar(),
             dock: self.dock().0,
             status: self.status,
+            notice: self.notice,
+            notice_at: self.notice_box(),
         }
     }
 
@@ -1668,8 +1743,16 @@ impl Desktop {
                 // Short of the clock: a long title never covers the time.
                 let room = Rect::new(0, 0, (at - t.bar_margin).max(0) as u32, bar.h);
                 let mut inside = out.clipped(&room);
-                labels.draw(&mut inside, w.title_str(), t.bar_margin, middle, t.bar_ink);
+                labels.draw(&mut inside, w.panel_name(), t.bar_margin, middle, t.bar_ink);
             }
+        }
+        if self.notice_len > 0 {
+            let place = self.notice_box();
+            out.rounded(&place, RADIUS, t.bar);
+            let text = core::str::from_utf8(&self.notice[..self.notice_len as usize]).unwrap_or("");
+            let mut inside = out.clipped(&place);
+            let middle = place.y + place.h as i32 / 2;
+            labels.draw(&mut inside, text, place.x + t.bar_margin, middle, t.bar_ink);
         }
         let (dock, places) = self.dock();
         if !dock.intersects(clip) {
@@ -1687,10 +1770,10 @@ impl Desktop {
                 t.dock_ink
             };
             let mut inside = out.clipped(place);
-            let name = labels.width(w.title_str());
+            let name = labels.width(w.panel_name());
             let x = place.x + (place.w as i32 - name).max(0) / 2;
             let middle = place.y + place.h as i32 / 2;
-            labels.draw(&mut inside, w.title_str(), x, middle, ink);
+            labels.draw(&mut inside, w.panel_name(), x, middle, ink);
         }
     }
 }
@@ -1709,6 +1792,8 @@ pub struct Scene {
     bar: Rect,
     dock: Rect,
     status: [u8; STATUS_MAX],
+    notice: [u8; STATUS_MAX],
+    notice_at: Rect,
 }
 
 impl Scene {
@@ -1748,6 +1833,10 @@ impl Scene {
         if !same_for_panels {
             damage.add(&self.dock);
             damage.add(&newer.dock);
+        }
+        if self.notice != newer.notice {
+            damage.add(&self.notice_at);
+            damage.add(&newer.notice_at);
         }
         let focused = |s: &Scene, id: u32| s.focus == Some(id);
         for old in self.iter() {
@@ -2122,6 +2211,67 @@ mod tests {
     }
 
     #[test]
+    fn a_notice_shows_marks_its_place_and_a_click_finds_it() {
+        let mut d = Desktop::new(800, 600);
+        let at = d.notice_box();
+        assert_eq!(d.hit(at.x + 1, at.y + 1), Hit::Desktop, "none on show");
+        let before = d.scene();
+        d.set_notice("Hot");
+        assert_eq!(d.hit(at.x + 1, at.y + 1), Hit::Notice);
+        let mut damage = Damage::new(Rect::new(0, 0, 800, 600));
+        before.damage(&d.scene(), &mut damage);
+        assert_eq!(damage.rects(), [at]);
+        // On a screen narrower than a notice it stays on the screen.
+        let small = Desktop::new(200, 100);
+        assert_eq!(small.notice_box().x, 0);
+        assert_eq!(small.notice_box().w, 200);
+    }
+
+    #[test]
+    fn menu_titles_never_reach_the_clock() {
+        let mut d = Desktop::new(300, 200);
+        d.create(10, 10, "App").unwrap();
+        d.set_status("Sat 7 Nov  00:30");
+        let mut m = Menus::default();
+        for i in 0..MAX_MENUS {
+            assert!(m.add(i, "A rather long menu title", 0));
+        }
+        let mut l = CellLabels;
+        let limit = 300 - 2 * d.theme.bar_margin - l.width("Sat 7 Nov  00:30");
+        for r in d.menu_titles(&m, &mut l) {
+            assert!(r.is_empty() || r.right() <= limit, "{r:?}");
+        }
+        // One that is not shown cannot be clicked.
+        assert_eq!(d.menu_at(&m, &mut l, None, 299, 5), MenuHit::None);
+    }
+
+    #[test]
+    fn a_window_cannot_size_its_title_bar_under_the_bar() {
+        let mut d = Desktop::new(800, 600);
+        let a = d.create(100, 100, "A").unwrap();
+        assert!(d.resize(a, 800, 600));
+        let t = d.theme;
+        assert_eq!(d.get(a).unwrap().frame().y, t.bar_h as i32);
+        let close = d.get(a).unwrap().close_box().unwrap();
+        let (x, y) = (close.x + 2, close.y + 2);
+        assert_eq!(d.hit(x, y), Hit::Close { id: a });
+    }
+
+    #[test]
+    fn the_panels_name_a_program_by_its_manifest_not_its_title() {
+        let mut d = Desktop::new(800, 600);
+        let a = d.create(100, 100, "Settings").unwrap();
+        assert_eq!(
+            d.get(a).unwrap().panel_name(),
+            "Settings",
+            "no manifest known"
+        );
+        d.set_program(a, b"pista");
+        assert_eq!(d.get(a).unwrap().panel_name(), "Pista");
+        assert_eq!(d.get(a).unwrap().title_str(), "Settings");
+    }
+
+    #[test]
     fn a_new_status_marks_the_bar_only() {
         let mut d = Desktop::new(800, 600);
         let before = d.scene();
@@ -2318,7 +2468,7 @@ mod tests {
         assert!(d.resize(id, 790, 590));
         let c = d.get(id).unwrap().content;
         // Its right side at the screen's; the title bar stays below the top.
-        assert_eq!((c.x, c.y), (10, TITLE_H as i32));
+        assert_eq!((c.x, c.y), (10, Theme::LIGHT.bar_h as i32 + TITLE_H as i32));
         let c = Rect::new(100, 100, 0, 0);
         let moved = d.move_window(id, c.x, c.y) && d.resize(id, 750, 500);
         assert!(moved);

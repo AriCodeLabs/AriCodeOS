@@ -811,6 +811,10 @@ fn report_network_address(net_service: Handle, wait_ms: u64) {
 
 /// Bound of each wait (send, reply) of a network health request.
 const NET_CALL_MS: u64 = 250;
+/// How often the desktop's bar is told the network's address.
+const NETWORK_REPORT_MS: u64 = 5000;
+/// And after a service did not answer.
+const NETWORK_RETRY_MS: u64 = 30_000;
 /// Pause between network health requests while DHCP is pending.
 const NET_POLL_MS: u64 = 20;
 /// How long the health check waits for DHCP on virtio-net, where QEMU's
@@ -1827,6 +1831,7 @@ fn run_shell(
         broker.serve_one(20, sup);
         broker.serve_apps();
         broker.serve_settings();
+        broker.report_network();
         // The session ends with its launcher or with its compositor (audit
         // of phase B, M1): with the compositor gone and nothing done, the
         // input services would have no reader. The compositor is looked at
@@ -2166,6 +2171,9 @@ struct Broker {
     running: [Option<Running>; MAX_RUNNING + DESKTOP_SLOTS],
     /// The installed applications the launcher may offer, as last listed.
     offered: Offered,
+    /// When the bar is next told the network's address, and what it was told last.
+    network_due: Option<u64>,
+    network_said: alloc::string::String,
     /// Where `terminal` holders ask for session shells (ADR 0074 phase C).
     terminals: Sessions,
     /// Where `settings` holders ask (ADR 0074 phase C).
@@ -2344,6 +2352,8 @@ impl Broker {
             compositor,
             running: [None; MAX_RUNNING + DESKTOP_SLOTS],
             offered: Offered::new(),
+            network_due: None,
+            network_said: alloc::string::String::new(),
             terminals: Sessions {
                 endpoint: sys::endpoint_create()?,
                 children: [None; MAX_SESSIONS],
@@ -2740,6 +2750,41 @@ impl Broker {
     /// for, and the one change it may make, the session. It never reaches
     /// a file itself; a change is said on the console and logged in the
     /// install history, as from the shell.
+    /// Tells the bar the network's address, every few seconds and when it changes. The
+    /// compositor holds no network capability, and needs none for this. Each try costs
+    /// init at most `NET_CALL_MS` twice for each service, and one that does not answer
+    /// is asked again less often: nothing else stops for the bar.
+    fn report_network(&mut self) {
+        let (Some(compositor), Some(net)) = (self.compositor, self.net) else {
+            return;
+        };
+        let now = sys::time::uptime_ms(SYSTEM).unwrap_or(0);
+        if self.network_due.is_some_and(|due| now < due) {
+            return;
+        }
+        let mut text = alloc::string::String::new();
+        address_text(net, &mut text);
+        let mut answered = !text.starts_with("the network service");
+        // The bar has room for an address; the long reasons are in the settings.
+        if !text.starts_with(|c: char| c.is_ascii_digit()) {
+            text = alloc::string::String::from("no network");
+        }
+        if text != self.network_said {
+            if sys::window::set_network(compositor, &text, NET_CALL_MS).is_ok() {
+                self.network_said = text;
+            } else {
+                answered = false;
+            }
+        }
+        let wait = if answered {
+            NETWORK_REPORT_MS
+        } else {
+            NETWORK_RETRY_MS
+        };
+        // From now, after the calls: a slow answer never makes them back to back.
+        self.network_due = Some(sys::time::uptime_ms(SYSTEM).unwrap_or(now) + wait);
+    }
+
     fn serve_settings(&mut self) {
         use aricode_proto::settings::{Item, Op, Reply, Request, Status};
         let mut msg = [0u8; Request::LEN];
@@ -3131,7 +3176,7 @@ impl Broker {
             };
             // A session of its own (ADR 0052): its windows are its alone and
             // close when it is gone. Same rights as before: send only.
-            let session = match sys::window::attach(comp) {
+            let session = match sys::window::attach(comp, name) {
                 Ok((h, id)) => {
                     window = Some(WindowSession {
                         compositor: comp,

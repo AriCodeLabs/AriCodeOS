@@ -567,13 +567,16 @@ Menus move to stage 3, with the menu bar that uses them: built now, nothing woul
 
 The launcher searches as the owner types, and Enter opens the first match.
 
-**The dock** at the bottom shows every running program, in the order they opened. A click brings
-one forward, or minimizes it if it is already there, which replaces the row of minimized windows of
-stage 1. Windows that fit themselves (zoom, snap) stop at the bar and the dock, and sizes come from
+**The dock** at the bottom shows every running program, each in a place it keeps. A click brings
+one forward, or minimizes it if it is already in front, which replaces the row of minimized windows
+of stage 1. Windows that fit themselves (zoom, snap) stop at the bar and the dock, and sizes come from
 the theme.
 
 **The bar** at the top names the program with the keys and shows the date and time. The compositor
-draws both, so a program cannot paint over them or pretend to be another. Nothing shows if the
+draws both, and they name a program by its signed manifest, as init told the compositor when it
+made the session. So a program cannot paint over them or call itself another there: its own title
+bar still says what it likes, and nothing here can stop a window from looking like anything inside
+its content. Nothing shows if the
 kernel could not read the real-time clock.
 
 **The clock's zone** is a whole number of hours from UTC, chosen in settings and kept in the file
@@ -590,9 +593,47 @@ never reaches the program. `aricode_ui::EDIT_MENU` is the Edit menu, which does 
 
 Choosing the row named exactly `Paste` opens the clipboard once, as Ctrl+V does. It rests on the
 owner reading that word: a program cannot get the clipboard from a row with any other name, but it
-could name a row Paste and do something else with that one read. The name is the compromise; the
-rule stays that nothing reads the clipboard without the owner's act.
+could name a row Paste and do something else with that one read. So a menu cannot change while it is
+open, and a click chooses only the row marked as under the pointer, and only if the press was on the
+menus: a row cannot be slid under a click the owner meant for something else. The name is the
+compromise; the rule stays that nothing reads the clipboard without the owner's act.
 
-To come in this stage: the network in the bar, notifications, and the manifests' names and icons.
+Titles stop short of the clock, and one that does not fit is not shown, in a program with long or
+many titles. Its rows are still reached with F10 and the arrows.
+
+**The network** shows in the bar, beside the clock. Init reads the address every 5 s and tells the
+compositor when it changes, so the compositor still holds no network capability. With the network
+service or the compositor hung that costs init half a second for each of them, and one that does not
+answer is asked every 30 s instead. Init has no check that a service it reads this way is alive, so
+a hung network service stays hung, as it did before this.
+
+**Notices** show under the bar and go after 8 s, or at a click. Only the compositor writes them, so
+what one says can be believed. It warns once when the processor comes within 10 C of where it slows
+itself, and again only after it has cooled 5 C more. Programs have no way to post one yet: nothing
+needs it, and it would bring questions of spam and spoofing to answer when something does.
+
+**Not done, on purpose: names and icons in the manifests.** The manifest's parser refuses a key it
+does not know, and so a package with a new line cannot be installed by an older system, including a
+0.18 updating itself. A `title` must first be accepted by a released system, and used by packages
+only in a later one, as `--all-machines-0.18` already does for profiles. Icons need vector paths
+that the compositor or the launcher would parse from packages: to be studied with their audit.
 
 Next: those, then the shell (stage 3).
+
+### The audit of this stage
+
+No panic and no bound broken. Its high finding, and what else was fixed:
+
+- **High:** a program could add Paste rows to a menu already open, under a pointer it knew had
+  stopped, without them being drawn, and the owner's next click chose one. Now see above.
+- **Medium:** a key that closed a menu went on to the program as if pressed anew, so holding Enter on
+  Open started programs until the slots filled; titles could overprint the clock; a program could
+  size its window so the bar covered its close box; a menu stayed on screen after its program died;
+  a hung compositor could hold init for 10 s at a time.
+- **Low:** a window closing no longer closes the menu of another; nothing but the left button goes
+  through an open menu; the heat is looked at also without a real-time clock; a dock click brings a
+  covered window forward; line breaks in a title do not make lines in the log; the glyph cache counts
+  what each entry costs.
+
+**Left as it was:** `Resize` still prints a line each time, with no limit, so a program can fill the
+log, as it could before this stage.

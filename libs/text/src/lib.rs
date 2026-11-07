@@ -198,11 +198,12 @@ impl Typesetter {
             return self.glyphs.get(i);
         }
         let glyph = self.render(face, size, id, sub)?;
-        if self.bytes + glyph.coverage.len() > CACHE_BYTES {
+        let cost = glyph.coverage.len() + core::mem::size_of::<Glyph>();
+        if self.bytes + cost > CACHE_BYTES {
             self.glyphs.clear();
             self.bytes = 0;
         }
-        self.bytes += glyph.coverage.len();
+        self.bytes += cost;
         self.glyphs.push(glyph);
         self.glyphs.last()
     }
