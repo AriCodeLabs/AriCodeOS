@@ -65,3 +65,16 @@ them (ADR 0038); a quota per process set by its launcher from the manifest.
   itself still comes from its reserve (ADR 0049), and an allocation of the kernel's own can
   still find the machine full, as before.
 - `diag` shows each process's quota use as now.
+
+## Measured
+
+- **QEMU** (`memory.big`, 512 MiB): making a 64 MiB object took no frame; touching 1,024
+  of its pages took 1,056 frames (the pages and 32 page tables); letting it go gave all
+  back but those 32 tables, which the process's address range keeps for its next mapping
+  (ADR 0038); a call wrote into a page nobody had touched; the heap grew to 40 MiB, five
+  times the old limit; 300 MiB was refused though the manifest asked for 1 GiB, since half
+  of QEMU's memory is about 240 MiB. With the ceiling removed on purpose, the scenario
+  fails at that step.
+- **The laptop** (dev build 44): `gpu_probe` filled and copied into a memory object of
+  scattered pages mapped for the GPU, with every pixel right and the same figures as with
+  a DMA buffer.
