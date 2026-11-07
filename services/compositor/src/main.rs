@@ -47,6 +47,8 @@ const MAX_WINDOWS: usize = aricode_gfx::MAX_WINDOWS;
 /// evdev codes the desktop itself answers to.
 /// How long a notice stays, unless a click takes it first.
 const NOTICE_MS: u64 = 8000;
+/// How often the processor's heat is looked at.
+const HEAT_EVERY_MS: u64 = 60_000;
 /// The processor's heat is said this many degrees before it slows itself, and again only
 /// after it has been this many more degrees below that.
 const HEAT_WARNING_C: u32 = 10;
@@ -88,6 +90,15 @@ const FORCE_CLOSE_MS: u64 = 2000;
 /// and recorded in the kernel event ring as `gui input late`, at most once
 /// a second, so `diag` shows it.
 const LATE_MS: u64 = 50;
+
+/// A program's words, as one line: a line break in a title makes no line of the log.
+fn print_text(text: &str) {
+    for c in text.chars() {
+        let mut one = [0u8; 4];
+        let shown = if c.is_control() { '?' } else { c };
+        sys::print(shown.encode_utf8(&mut one).as_bytes());
+    }
+}
 
 fn say(msg: &[u8]) {
     sys::print(b"compositor: ");
@@ -327,6 +338,8 @@ impl Keys {
 /// The pointer as windows see it (ADR 0078, stage 0).
 #[derive(Default)]
 struct Pointer {
+    /// The left button went down on the menus.
+    menu_pressed: bool,
     /// It moved since windows were last told.
     moved: bool,
     /// The window whose content it is over.
@@ -421,6 +434,8 @@ struct Compositor {
     network_len: usize,
     /// When the notice on show goes.
     notice_until: Option<u64>,
+    /// When the processor's heat is next looked at.
+    heat_due_ms: u64,
     /// The processor's heat was said, and has not cooled since.
     heat_said: bool,
     screen: Screen,
@@ -467,6 +482,9 @@ struct Session {
     made_ms: u64,
     /// It has opened a window already.
     opened: bool,
+    /// Its program's name, from init: from its signed manifest.
+    program: [u8; aricode_proto::window::MAX_TITLE],
+    program_len: u8,
 }
 
 impl Compositor {
@@ -483,7 +501,7 @@ impl Compositor {
 
     /// `Attach`: a new session endpoint; the compositor keeps its receive
     /// side, the client gets the send side and init the id.
-    fn attach(&mut self, reply_to: Handle, now_ms: u64) {
+    fn attach(&mut self, req: &Request, reply_to: Handle, now_ms: u64) {
         if self.sessions.iter().all(Option::is_some) {
             // Clients that died since the last sweep free their slots first.
             self.reap_gone(now_ms);
@@ -501,6 +519,8 @@ impl Compositor {
             id,
             made_ms: now_ms,
             opened: false,
+            program: req.title,
+            program_len: req.title_len,
         });
         answer_with(reply_to, Reply::ok(id as u64), send);
     }
@@ -550,6 +570,17 @@ impl Compositor {
         let Some(s) = self.sessions[slot].take() else {
             return;
         };
+        // While the focus still names it: a dead program's menu leaves nothing on screen.
+        let focus = self.desktop.focus;
+        let held = focus.is_some_and(|id| {
+            self.contents
+                .iter()
+                .flatten()
+                .any(|c| c.id == id && c.owner == slot + 1)
+        });
+        if held {
+            self.close_menu();
+        }
         let _ = sys::handle_close(s.endpoint);
         let mut closed_windows = 0;
         for i in 0..self.contents.len() {
@@ -615,7 +646,9 @@ impl Compositor {
         if self.pointer.drag.is_some() {
             return self.continue_drag(px, py);
         }
-        self.menu_hover(px, py);
+        if self.menu_open.is_some() {
+            return self.menu_hover(px, py);
+        }
         let under = self.pointer.grab.or_else(|| self.content_at(px, py));
         if under != self.pointer.inside {
             if let Some(old) = self.pointer.inside {
@@ -801,6 +834,8 @@ impl Compositor {
     fn close_menu(&mut self) {
         if let Some(open) = self.menu_open.take() {
             self.damage_menu(open.menu);
+            // A key still held was the menu's: it does not go on to the program.
+            self.keys.repeat.stop();
         }
     }
 
@@ -833,6 +868,12 @@ impl Compositor {
     /// The left button went down: whether the menus took it. A press anywhere else
     /// closes an open menu, and does nothing more.
     fn menu_press(&mut self, x: i32, y: i32) -> bool {
+        let taken = self.menu_press_on(x, y);
+        self.pointer.menu_pressed = taken;
+        taken
+    }
+
+    fn menu_press_on(&mut self, x: i32, y: i32) -> bool {
         match self.menu_under(x, y) {
             MenuHit::Title(menu) => {
                 let same = self.menu_open.is_some_and(|o| o.menu == menu);
@@ -858,13 +899,18 @@ impl Compositor {
     }
 
     /// The left button came up: on a row of the open menu, that is the choice. So a press
-    /// on a title, a drag and a release choose, as a click on the title and one on a row do.
+    /// on a title, a drag and a release choose, as a click on the title and one on a row
+    /// do. Only a press the menus took counts, and only on a row marked as under the
+    /// pointer, which the owner has been shown.
     fn menu_release(&mut self, x: i32, y: i32) {
-        if self.menu_open.is_none() {
+        if !core::mem::take(&mut self.pointer.menu_pressed) {
             return;
         }
+        let Some(open) = self.menu_open else { return };
         if let MenuHit::Item(menu, item) = self.menu_under(x, y) {
-            self.choose_menu(menu, item);
+            if open.menu == menu && open.item == Some(item) {
+                self.choose_menu(menu, item);
+            }
         }
     }
 
@@ -929,10 +975,11 @@ impl Compositor {
             return true;
         }
         let row = open.item;
+        let pressed = ev.value == 1;
         match ev.code {
-            KEY_ESC | KEY_F10 => self.close_menu(),
-            KEY_ENTER => {
-                if let (Some(item), 1) = (row, ev.value) {
+            KEY_ESC | KEY_F10 if pressed => self.close_menu(),
+            KEY_ENTER if pressed => {
+                if let Some(item) = row {
                     self.choose_menu(open.menu, item);
                 }
             }
@@ -966,7 +1013,7 @@ impl Compositor {
     /// there already.
     fn dock_clicked(&mut self, id: u32) {
         self.pointer.moved = true;
-        if self.desktop.focus == Some(id) {
+        if self.desktop.focus == Some(id) && self.desktop.front() == Some(id) {
             self.hide(id);
             self.refocus();
         } else {
@@ -1023,6 +1070,10 @@ impl Compositor {
         }
         self.pointer.buttons |= bit;
         if code == BTN_LEFT && self.pointer.grab.is_none() && self.menu_press(px, py) {
+            return;
+        }
+        // Nothing goes through an open menu to what is under it.
+        if self.menu_open.is_some() {
             return;
         }
         let target = if let Some(id) = self.pointer.grab {
@@ -1338,7 +1389,12 @@ impl Compositor {
     /// Closes the window of `slot`: a poll waiting on it is answered
     /// `BadWindow`, the buffer goes once no window shows it.
     fn close_window(&mut self, slot: usize) {
-        self.close_menu();
+        let focused = self.contents[slot]
+            .as_ref()
+            .is_some_and(|c| Some(c.id) == self.desktop.focus);
+        if focused {
+            self.close_menu();
+        }
         let Some(closed) = self.contents[slot].take() else {
             return;
         };
@@ -1376,6 +1432,9 @@ impl Compositor {
                 REL_Y => (0, ev.value as i32),
                 REL_WHEEL => {
                     self.flush_pointer();
+                    if self.menu_open.is_some() {
+                        return;
+                    }
                     let (px, py) = self.desktop.pointer;
                     let over = self.content_at(px, py);
                     if let Some((id, (x, y))) =
@@ -1450,7 +1509,7 @@ impl Compositor {
             return answer(reply_to, Reply::status(Status::Invalid));
         }
         match req.op {
-            Op::Attach => self.attach(reply_to, now_ms),
+            Op::Attach => self.attach(&req, reply_to, now_ms),
             Op::Detach => self.detach(reply_to, req.window),
             Op::Appearance => {
                 self.set_appearance(req.width != 0);
@@ -1515,6 +1574,13 @@ impl Compositor {
                     self.unmap_unused(virt);
                     return answer(reply_to, Reply::status(Status::Busy));
                 };
+                // Its program's name, for the bar and the dock, whatever it calls itself.
+                if let Some(Some(session)) = owner.checked_sub(1).map(|i| self.sessions[i]) {
+                    let name = &session.program[..session.program_len as usize];
+                    if !name.is_empty() {
+                        self.desktop.set_program(id, name);
+                    }
+                }
                 self.contents[slot] = Some(Content {
                     id,
                     owner,
@@ -1537,7 +1603,7 @@ impl Compositor {
                 sys::print(b"compositor: window ");
                 num(id as u64);
                 sys::print(b" '");
-                sys::print(req.title_str().as_bytes());
+                print_text(req.title_str());
                 sys::print(b"' ");
                 num(req.width as u64);
                 sys::print(b"x");
@@ -1600,6 +1666,10 @@ impl Compositor {
             }
             Op::Resize => self.resize(req, owner, reply_to, buf),
             Op::MenuAdd => {
+                // What the owner has in front of them does not change under the pointer.
+                if self.menu_open.is_some() && self.desktop.focus == Some(req.window) {
+                    return answer(reply_to, Reply::status(Status::Busy));
+                }
                 let Some(c) = self.owned(req.window, owner) else {
                     return answer(reply_to, Reply::status(Status::BadWindow));
                 };
@@ -1651,12 +1721,15 @@ impl Compositor {
 
     /// What the bar says, when the minute or the network changes: the network, and the
     /// date and time, which are not shown when the kernel could not read the real-time
-    /// clock, since a wrong time is worse than none. Once a minute, the processor's heat
-    /// too.
+    /// clock, since a wrong time is worse than none.
     fn tick_clock(&mut self, now_ms: u64) {
         if self.notice_until.is_some_and(|until| now_ms >= until) {
             self.dismiss_notice();
             say(b"notice gone");
+        }
+        if now_ms >= self.heat_due_ms {
+            self.heat_due_ms = now_ms + HEAT_EVERY_MS;
+            self.watch_heat(now_ms);
         }
         let minute = sys::time::unix_seconds(SYSTEM)
             .map(|u| (u as i64 + i64::from(self.tz_minutes) * 60).div_euclid(60));
@@ -1682,7 +1755,6 @@ impl Compositor {
         }
         self.desktop
             .set_status(core::str::from_utf8(&text[..n]).unwrap_or(""));
-        self.watch_heat(now_ms);
     }
 
     /// Says once when the processor comes near where it slows itself, and again only
@@ -2060,6 +2132,7 @@ fn main(inputs: u64) -> u64 {
         network: [0; aricode_proto::window::MAX_TITLE],
         network_len: 0,
         notice_until: None,
+        heat_due_ms: 0,
         heat_said: false,
         contents: (0..MAX_WINDOWS).map(|_| None).collect(),
         keys: Keys {

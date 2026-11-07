@@ -813,6 +813,8 @@ fn report_network_address(net_service: Handle, wait_ms: u64) {
 const NET_CALL_MS: u64 = 250;
 /// How often the desktop's bar is told the network's address.
 const NETWORK_REPORT_MS: u64 = 5000;
+/// And after a service did not answer.
+const NETWORK_RETRY_MS: u64 = 30_000;
 /// Pause between network health requests while DHCP is pending.
 const NET_POLL_MS: u64 = 20;
 /// How long the health check waits for DHCP on virtio-net, where QEMU's
@@ -2749,8 +2751,9 @@ impl Broker {
     /// a file itself; a change is said on the console and logged in the
     /// install history, as from the shell.
     /// Tells the bar the network's address, every few seconds and when it changes. The
-    /// compositor holds no network capability, and needs none for this. At worst, with
-    /// the network service hung, this costs init `NET_CALL_MS` twice each time.
+    /// compositor holds no network capability, and needs none for this. Each try costs
+    /// init at most `NET_CALL_MS` twice for each service, and one that does not answer
+    /// is asked again less often: nothing else stops for the bar.
     fn report_network(&mut self) {
         let (Some(compositor), Some(net)) = (self.compositor, self.net) else {
             return;
@@ -2759,16 +2762,27 @@ impl Broker {
         if self.network_due.is_some_and(|due| now < due) {
             return;
         }
-        self.network_due = Some(now + NETWORK_REPORT_MS);
         let mut text = alloc::string::String::new();
         address_text(net, &mut text);
+        let mut answered = !text.starts_with("the network service");
         // The bar has room for an address; the long reasons are in the settings.
         if !text.starts_with(|c: char| c.is_ascii_digit()) {
             text = alloc::string::String::from("no network");
         }
-        if text != self.network_said && sys::window::set_network(compositor, &text).is_ok() {
-            self.network_said = text;
+        if text != self.network_said {
+            if sys::window::set_network(compositor, &text, NET_CALL_MS).is_ok() {
+                self.network_said = text;
+            } else {
+                answered = false;
+            }
         }
+        let wait = if answered {
+            NETWORK_REPORT_MS
+        } else {
+            NETWORK_RETRY_MS
+        };
+        // From now, after the calls: a slow answer never makes them back to back.
+        self.network_due = Some(sys::time::uptime_ms(SYSTEM).unwrap_or(now) + wait);
     }
 
     fn serve_settings(&mut self) {
@@ -3162,7 +3176,7 @@ impl Broker {
             };
             // A session of its own (ADR 0052): its windows are its alone and
             // close when it is gone. Same rights as before: send only.
-            let session = match sys::window::attach(comp) {
+            let session = match sys::window::attach(comp, name) {
                 Ok((h, id)) => {
                     window = Some(WindowSession {
                         compositor: comp,

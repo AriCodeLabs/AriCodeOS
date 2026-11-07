@@ -7,7 +7,7 @@ use crate::{self as sys, rights, rpc, Error, Handle};
 use aricode_gfx::Canvas;
 pub use aricode_proto::window::Event;
 pub use aricode_proto::window::{mods, wants, DamageRect, KeyState};
-use aricode_proto::window::{Op, Reply, Request, Status, MAX_CLIPBOARD, MAX_DAMAGE};
+use aricode_proto::window::{Op, Reply, Request, Status, MAX_CLIPBOARD, MAX_DAMAGE, MAX_TITLE};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowError {
@@ -325,24 +325,22 @@ pub fn set_timezone(compositor: Handle, minutes: i32) -> Result<(), WindowError>
 }
 
 /// Init only, over the compositor's main endpoint: what the bar says of the network.
-pub fn set_network(compositor: Handle, text: &str) -> Result<(), WindowError> {
+/// Waits `wait_ms` at most: init does this on its own, in its main loop.
+pub fn set_network(compositor: Handle, text: &str, wait_ms: u64) -> Result<(), WindowError> {
     let req = Request::new(Op::Network)
         .with_title(text)
         .ok_or(WindowError::Invalid)?;
-    main_request(compositor, req)
+    main_request_within(compositor, req, wait_ms)
 }
 
 fn main_request(compositor: Handle, req: Request) -> Result<(), WindowError> {
+    main_request_within(compositor, req, rpc::GRACE_MS)
+}
+
+fn main_request_within(compositor: Handle, req: Request, wait_ms: u64) -> Result<(), WindowError> {
     let mut msg = [0u8; Reply::LEN];
-    let len = rpc::call(
-        compositor,
-        &req.encode(),
-        &[],
-        rpc::GRACE_MS,
-        rpc::GRACE_MS,
-        &mut msg,
-    )
-    .map_err(WindowError::Ipc)?;
+    let len = rpc::call(compositor, &req.encode(), &[], wait_ms, wait_ms, &mut msg)
+        .map_err(WindowError::Ipc)?;
     match Reply::decode(&msg[..len]).map(|r| r.status) {
         Some(Status::Ok) => Ok(()),
         Some(s) => Err(WindowError::Status(s)),
@@ -354,8 +352,14 @@ fn main_request(compositor: Handle, req: Request) -> Result<(), WindowError> {
 /// for one client (ADR 0052); returns its send side (`WRITE`,
 /// transferable) and its id for [`detach`]. Windows created through it are
 /// that client's alone.
-pub fn attach(compositor: Handle) -> Result<(Handle, u32), WindowError> {
-    let req = Request::new(Op::Attach);
+///
+/// `program` is its name from its manifest, which the bar and the dock show for its
+/// windows, whatever titles it gives them.
+pub fn attach(compositor: Handle, program: &str) -> Result<(Handle, u32), WindowError> {
+    let name = program.get(..program.floor_char_boundary(MAX_TITLE));
+    let req = Request::new(Op::Attach)
+        .with_title(name.unwrap_or(""))
+        .ok_or(WindowError::Invalid)?;
     let mut msg = [0u8; Reply::LEN];
     let mut handles = [Handle(0); sys::abi::IPC_MAX_HANDLES];
     let (len, nh) = rpc::call_handles(

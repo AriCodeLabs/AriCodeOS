@@ -65,15 +65,37 @@ fn events(session: Handle, hw: Handle) -> u64 {
         }
     };
     let mut seen = 0;
+    let mut adding = false;
     let mut repeats = 0;
     let mut leaves = 0;
     for _ in 0..600 {
         let ev = match win.poll(100) {
             Ok(Some(ev)) => ev,
-            Ok(None) => continue,
+            Ok(None) => {
+                // While it is on, a row more each time, as a hostile program would add
+                // under the pointer: refused with a menu open (audit of ADR 0078).
+                if adding {
+                    match win.menu_add(0, "Later", 9) {
+                        Ok(()) => {}
+                        Err(WindowError::Status(Status::Busy)) => {
+                            adding = false;
+                            sys::print(b"gui_demo D: a menu stays as it is while open\n");
+                        }
+                        Err(_) => {
+                            adding = false;
+                            sys::print(b"gui_demo D: the row was refused otherwise\n");
+                        }
+                    }
+                }
+                continue;
+            }
             Err(_) => return 3,
         };
         match ev {
+            Event::Key(b'm') => {
+                adding = win.menu_add(0, "Demo", 0).is_ok();
+                sys::print(b"gui_demo D: menu given\n");
+            }
             Event::Focus(true) => sys::print(b"gui_demo D: focus gained\n"),
             Event::Focus(false) => sys::print(b"gui_demo D: focus lost\n"),
             Event::Enter { .. } => say(&mut seen, 1, b"enter"),

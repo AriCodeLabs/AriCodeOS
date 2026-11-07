@@ -58,7 +58,17 @@ keys = ["ctrl+v"]
 
 [[host_input_then]]
 marker = "gui_demo D: one read for one press"
-keys = ["q"]
+keys = ["m"]
+
+# A row added with the menu open is refused, so nothing grows under the pointer.
+[[host_input_then]]
+marker = "gui_demo D: menu given"
+keys = ["f10"]
+
+[[host_input_then]]
+marker = "gui_demo D: a menu stays as it is while open"
+keys = ["esc", "q"]
+key_delay_ms = 100
 
 [expect]
 exit = 33
@@ -77,10 +87,11 @@ serial_contains = [
     "gui_demo D: copied",
     "compositor: window 1 read the clipboard without the owner's Ctrl+V: refused",
     "gui_demo D: pasted what was copied",
+    "gui_demo D: a menu stays as it is while open",
     "gui_demo D: done",
     "ARICODEOS_SHUTDOWN",
 ]
-serial_absent = ["KERNEL PANIC", "the resize failed", "the key did not repeat", "copying was refused", "was open without Ctrl+V", "the paste failed", "a second read"]
+serial_absent = ["KERNEL PANIC", "the resize failed", "the key did not repeat", "copying was refused", "was open without Ctrl+V", "the paste failed", "a second read", "the row was refused otherwise"]
 serial_order = [
     "gui_demo D: motion outside it, left held",
     "gui_demo D: release of the left button",
