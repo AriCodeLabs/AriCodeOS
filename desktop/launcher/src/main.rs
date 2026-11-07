@@ -21,10 +21,10 @@ use alloc::vec::Vec;
 use aricode_rt::sys::launch::{self, LaunchError, Status};
 use aricode_rt::sys::window::{wants, Event, Window};
 use aricode_rt::sys::{self, kind, permissions, Handle};
-use aricode_ui::{Action, Dialog, Fill, Id, Space, Stack, Style, Theme, Tone, Ui};
+use aricode_ui::{Action, Dialog, Fill, Id, ListIcons, Space, Stack, Style, Theme, Tone, Ui};
 
-const W: u32 = 320;
-const H: u32 = 360;
+const W: u32 = 400;
+const H: u32 = 420;
 /// The numbers of its menu.
 const MENU_OPEN: u32 = 1;
 const MENU_REFRESH: u32 = 2;
@@ -32,6 +32,12 @@ const MENU_LEAVE: u32 = 3;
 /// Applications listed at most (the broker offers 16).
 const MAX_APPS: usize = 16;
 const NAME_MAX: usize = 32;
+
+fn launcher_theme(dark: bool) -> Theme {
+    let mut theme = Theme::of(dark);
+    theme.row_h = 32;
+    theme
+}
 
 fn say(parts: &[&[u8]]) {
     sys::print(b"launcher: ");
@@ -46,6 +52,7 @@ struct Launcher {
     ui: Ui,
     /// What is typed narrows the list.
     search: Id,
+    empty: Id,
     /// Every application offered; the list shows those that match.
     names: Vec<String>,
     list: Id,
@@ -61,23 +68,33 @@ struct Launcher {
 
 impl Launcher {
     fn new(dark: bool) -> Self {
-        let mut ui = Ui::new(Theme::of(dark), W, H);
+        let mut ui = Ui::new(launcher_theme(dark), W, H);
+        let title = ui.label("Applications", Style::Title2, Tone::Primary);
         let search = ui.field(NAME_MAX, "Search applications");
         let list = ui.list();
+        ui.set_list_icons(list, ListIcons::Applications);
+        let empty = ui.paragraph(
+            "No matching applications. Try another search.",
+            Style::Body,
+            Tone::Secondary,
+        );
+        ui.set_hidden(empty, true);
         ui.set_flex(list, 1);
         let status = ui.paragraph("", Style::Callout, Tone::Secondary);
         let open = ui.default_button("Open");
         let refresh = ui.button("Refresh");
         let leave = ui.button("Leave the desktop");
-        let buttons = ui.stack(Stack::row(), &[open, refresh, leave]);
+        let spacer = ui.spacer();
+        let buttons = ui.stack(Stack::row(), &[open, refresh, spacer]);
+        let exit = ui.stack(Stack::row(), &[leave]);
         let hint = ui.label(
-            "Type to search; Enter opens; Ctrl+Alt+Backspace leaves",
+            "Type to search · Enter to open",
             Style::Subheadline,
             Tone::Secondary,
         );
         let root = ui.stack(
             Stack::column().pad(Space::Margin).fill(Fill::Window),
-            &[search, list, status, buttons, hint],
+            &[title, search, list, empty, status, buttons, exit, hint],
         );
         ui.set_root(root);
         ui.focus(search);
@@ -85,6 +102,7 @@ impl Launcher {
         Self {
             ui,
             search,
+            empty,
             names: Vec::new(),
             list,
             open,
@@ -154,6 +172,16 @@ impl Launcher {
         self.ui.set_rows(self.list, rows);
         let first = (self.ui.list_len(self.list) > 0).then_some(0);
         self.ui.select(self.list, first);
+        self.ui.set_enabled(self.open, first.is_some());
+        self.ui.set_hidden(self.empty, first.is_some());
+        self.ui.set_text(
+            self.empty,
+            if self.names.is_empty() {
+                "No applications installed yet."
+            } else {
+                "No matching applications. Try another search."
+            },
+        );
     }
 
     /// Starts the selected application.
@@ -244,6 +272,7 @@ fn main(_arg: u64) -> u64 {
             Err(_) => return 4,
         };
         match event {
+            Event::Appearance { dark } => l.ui.set_theme(launcher_theme(dark)),
             // A second click on the close box answers the question it asked.
             Event::Close if l.ui.asking() => break 'running,
             Event::Close => l.ask_to_leave(),

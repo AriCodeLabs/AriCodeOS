@@ -23,12 +23,22 @@ pub mod theme;
 use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
+pub use aricode_gfx::icons::Icon;
 use aricode_gfx::{Canvas, Damage, Rect};
 use aricode_input::term::{Key, KeyDecoder};
 use aricode_proto::window::{mods, DamageRect, Event, KeyState};
 use aricode_text::Typesetter;
 use edit::TextEdit;
 pub use theme::{Fill, Space, Style, Theme, Tone, Type};
+
+/// Optional artwork for a list; row strings and activation indices stay unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ListIcons {
+    #[default]
+    None,
+    Applications,
+    Documents,
+}
 
 /// The window system's left button.
 const LEFT: u8 = 1;
@@ -230,6 +240,7 @@ enum Kind {
         scroll: i32,
     },
     List {
+        icons: ListIcons,
         rows: Vec<String>,
         selected: Option<usize>,
         scroll: Scroller,
@@ -618,6 +629,7 @@ impl Ui {
 
     pub fn list(&mut self) -> Id {
         self.add(Kind::List {
+            icons: ListIcons::None,
             rows: Vec::new(),
             selected: None,
             scroll: Scroller::default(),
@@ -801,6 +813,16 @@ impl Ui {
             self.reveal_selected(id);
             self.dirty(id);
             self.needs_layout = true;
+        }
+    }
+
+    /// Adds shared native artwork without changing row values or keyboard behaviour.
+    pub fn set_list_icons(&mut self, id: Id, mode: ListIcons) {
+        if let Kind::List { icons, .. } = &mut self.node_mut(id).kind {
+            if *icons != mode {
+                *icons = mode;
+                self.dirty(id);
+            }
         }
     }
 
@@ -1332,6 +1354,7 @@ impl Ui {
                 rows,
                 selected,
                 scroll,
+                ..
             } => {
                 let thumb = scroll.thumb(&rect, &theme).filter(|t| t.contains(x, y));
                 if let Some(t) = thumb {
@@ -2087,6 +2110,7 @@ impl Ui {
                 rows,
                 selected,
                 scroll,
+                icons,
             } => {
                 c.rounded(&r, t.card_radius, t.content);
                 let mut view = c.clipped(&r);
@@ -2110,10 +2134,38 @@ impl Ui {
                         t.primary
                     };
                     let baseline = baseline_in(text, ty, y, row_h);
-                    let at = (r.x + t.control_pad, baseline);
+                    let mut x = r.x + t.control_pad;
                     // After a tab: a second column, against the right edge.
                     let (name, detail) = row.split_once('\t').unwrap_or((row, ""));
-                    text.draw(&mut view, (ty.face, ty.size), name, at, ink);
+                    let name = if *icons != ListIcons::None {
+                        let icon = if *icons == ListIcons::Applications {
+                            Icon::application(name)
+                        } else {
+                            Icon::Document
+                        };
+                        let size = t.list_icon.min(row_h.max(0) as u32);
+                        icon.draw(
+                            &mut view,
+                            Rect::new(x, y + (row_h - size as i32) / 2, size, size),
+                        );
+                        x += size as i32 + t.control_gap;
+                        if *icons == ListIcons::Applications {
+                            Icon::application_name(name)
+                        } else {
+                            name
+                        }
+                    } else {
+                        name
+                    };
+                    // Keep a long name out of the size column and the scroll thumb.
+                    let detail_width = text.width(ty.face, ty.size, detail);
+                    let right = r.right()
+                        - t.margin
+                        - detail_width
+                        - if detail.is_empty() { 0 } else { t.control_gap };
+                    let mut name_view =
+                        view.clipped(&Rect::new(x, y, (right - x).max(0) as u32, row_h as u32));
+                    text.draw(&mut name_view, (ty.face, ty.size), name, (x, baseline), ink);
                     if !detail.is_empty() {
                         let width = text.width(ty.face, ty.size, detail);
                         let at = (r.right() - t.margin - width, baseline);
