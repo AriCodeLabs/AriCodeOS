@@ -15,7 +15,7 @@ use alloc::vec::Vec;
 use aricode_cmdline::{keys, CmdLine};
 use aricode_gfx::{
     resized, snap_at, snap_content, Canvas, Damage, Desktop, Hit, Labels, PasteGrant, PixelMasks,
-    Rect, Scene, Window,
+    Rect, Scene, Window, STATUS_MAX,
 };
 use aricode_input::{
     EscapeChord, KeyRepeat, Keyboard, Layout, BTN_LEFT, EV_KEY, EV_REL, REL_WHEEL, REL_X, REL_Y,
@@ -394,6 +394,9 @@ enum ClipboardRefusal {
 struct Compositor {
     paste_grant: PasteGrant,
     dark: bool,
+    /// Minutes from UTC of the owner's clock, and the minute the bar shows.
+    tz_minutes: i32,
+    clock_minute: Option<i64>,
     screen: Screen,
     desktop: Desktop,
     /// On the heap: with their event queues, they would take 6 KB of the stack.
@@ -659,13 +662,14 @@ impl Compositor {
             return;
         }
         let screen = self.desktop.screen;
+        let work = self.desktop.work();
         let resizable = self.desktop.get(d.id).is_some_and(|w| w.resizable);
         if let Some(snap) = snap_at(px, py, screen.w, screen.h).filter(|_| resizable) {
             // Where to go back to is where it was first, not the last snap.
             if self.desktop.get(d.id).is_some_and(|w| w.restore.is_none()) {
                 self.desktop.set_restore(d.id, Some(d.start));
             }
-            self.place(d.id, snap_content(snap, screen.w, screen.h));
+            self.place(d.id, snap_content(snap, &work));
         }
     }
 
@@ -674,7 +678,7 @@ impl Compositor {
         let Some(w) = self.desktop.get(id).copied() else {
             return;
         };
-        let screen = self.desktop.screen;
+        let work = self.desktop.work();
         match w.restore.filter(|_| w.resizable) {
             Some(back) => {
                 self.desktop.set_restore(id, None);
@@ -682,7 +686,7 @@ impl Compositor {
             }
             None if w.resizable => {
                 self.desktop.set_restore(id, Some(w.content));
-                let full = snap_content(aricode_gfx::Snap::Full, screen.w, screen.h);
+                let full = snap_content(aricode_gfx::Snap::Full, &work);
                 self.place(id, full);
             }
             None => {}
@@ -741,6 +745,19 @@ impl Compositor {
         self.set_focus(id);
     }
 
+    /// A program's place in the dock: brings it to the front, or minimizes it if it is
+    /// there already.
+    fn dock_clicked(&mut self, id: u32) {
+        self.pointer.moved = true;
+        if self.desktop.focus == Some(id) {
+            self.hide(id);
+            self.refocus();
+        } else {
+            self.desktop.set_hidden(id, false);
+            self.set_focus(id);
+        }
+    }
+
     /// Minimizes a window: it hears that it lost the focus and that its keys went up,
     /// and the one below takes the focus.
     fn hide(&mut self, id: u32) {
@@ -792,10 +809,8 @@ impl Compositor {
             let left = code == BTN_LEFT;
             match self.desktop.hit(px, py) {
                 Hit::Window { id, x, y } => Some((id, x, y)),
-                Hit::Shelf { id } if left => {
-                    self.desktop.set_hidden(id, false);
-                    self.set_focus(id);
-                    self.pointer.moved = true;
+                Hit::Dock { id } if left => {
+                    self.dock_clicked(id);
                     None
                 }
                 Hit::Close { id } if left => {
@@ -1186,7 +1201,12 @@ impl Compositor {
     ) {
         // The main endpoint (init, the broker) only makes and ends
         // sessions; windows live in sessions, which can do neither.
-        if (owner == MAIN) != matches!(req.op, Op::Attach | Op::Detach | Op::Appearance) {
+        if (owner == MAIN)
+            != matches!(
+                req.op,
+                Op::Attach | Op::Detach | Op::Appearance | Op::Timezone
+            )
+        {
             return answer(reply_to, Reply::status(Status::Invalid));
         }
         match req.op {
@@ -1194,6 +1214,12 @@ impl Compositor {
             Op::Detach => self.detach(reply_to, req.window),
             Op::Appearance => {
                 self.set_appearance(req.width != 0);
+                answer(reply_to, Reply::ok(0));
+            }
+            Op::Timezone => {
+                // Whatever init says, within what clocks do.
+                self.tz_minutes = (req.width as i32).clamp(-14 * 60, 14 * 60);
+                self.clock_minute = None;
                 answer(reply_to, Reply::ok(0));
             }
             Op::Create => {
@@ -1355,6 +1381,22 @@ impl Compositor {
                 self.close_window(slot);
                 answer(reply_to, Reply::ok(0));
             }
+        }
+    }
+
+    /// The bar's clock, when the minute changes. Nothing is shown when the kernel could
+    /// not read the real-time clock: a wrong time is worse than none.
+    fn tick_clock(&mut self) {
+        let Some(unix) = sys::time::unix_seconds(SYSTEM) else {
+            return;
+        };
+        let minute = (unix as i64 + i64::from(self.tz_minutes) * 60).div_euclid(60);
+        if self.clock_minute != Some(minute) {
+            self.clock_minute = Some(minute);
+            let mut text = [0u8; STATUS_MAX];
+            let n = aricode_gfx::clock_text(minute, &mut text);
+            self.desktop
+                .set_status(core::str::from_utf8(&text[..n]).unwrap_or(""));
         }
     }
 
@@ -1678,6 +1720,8 @@ fn main(inputs: u64) -> u64 {
         screen,
         paste_grant: PasteGrant::default(),
         dark: false,
+        tz_minutes: 0,
+        clock_minute: None,
         contents: (0..MAX_WINDOWS).map(|_| None).collect(),
         keys: Keys {
             keyboard,
@@ -1741,6 +1785,7 @@ fn main(inputs: u64) -> u64 {
         comp.flush_pointer();
         comp.repeat_keys(t);
         comp.expire(t);
+        comp.tick_clock();
         comp.compose(t);
         // Sleep until a request, a device's events or the next deadline,
         // whichever comes first (incident 0058: reading the devices in

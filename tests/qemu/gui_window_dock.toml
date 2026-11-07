@@ -1,8 +1,9 @@
 # A minimized window comes back with the pointer alone (ADR 0078): its minimize circle
 # is at (68, 48) and the pointer starts at the centre of the 1280x800 screen. The window
-# leaves a place with its title at the bottom, centred, and a click there brings it back.
-name = "gui.window_shelf"
-description = "a minimized window has a place at the bottom of the screen that brings it back"
+# keeps its place in the dock, at the bottom in the centre, and a click there brings it
+# back; a click on the place of the window in front minimizes it.
+name = "gui.window_dock"
+description = "the dock shows the running programs, brings one back and minimizes it"
 level = "full"
 areas = ["gui"]
 cmdline = "qemu_exit gui shell"
@@ -18,16 +19,25 @@ click = "left"
 [[host_input_then]]
 marker = "gui_demo D: focus lost"
 wait_ms = 200
-screendump = "shelf"
+screendump = "dock"
 mouse_rel = [572, 726]
 click = "left"
 
 [[host_input_then]]
 marker = "gui_demo D: focus gained"
+click = "left"
+
+[[host_input_then]]
+marker = "gui_demo D: focus lost"
+click = "left"
+
+[[host_input_then]]
+marker = "gui_demo D: focus gained"
+wait_ms = 200
 keys = ["q"]
 
 [expect]
 exit = 33
 serial_contains = ["gui_demo D: focus lost", "gui_demo D: done", "ARICODEOS_SHUTDOWN"]
-serial_order = ["gui_demo D: focus lost", "gui_demo D: focus gained", "gui_demo D: done"]
+serial_order = ["gui_demo D: focus lost", "gui_demo D: focus gained", "gui_demo D: focus lost", "gui_demo D: focus gained", "gui_demo D: done"]
 serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW"]

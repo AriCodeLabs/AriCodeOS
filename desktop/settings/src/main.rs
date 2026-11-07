@@ -16,6 +16,7 @@
 
 extern crate alloc;
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use aricode_cmdline::{keys, CmdLine};
@@ -39,6 +40,15 @@ fn say(parts: &[&[u8]]) {
     sys::print(b"\n");
 }
 
+/// A zone's name, as init says it: `UTC`, `UTC+1`, `UTC-5`.
+fn zone_name(hours: i32) -> String {
+    if hours == 0 {
+        String::from("UTC")
+    } else {
+        format!("UTC{hours:+}")
+    }
+}
+
 /// The parts of a line, as text.
 fn line(parts: &[&[u8]]) -> String {
     let mut text = Vec::new();
@@ -56,6 +66,7 @@ struct Settings {
     status: Id,
     choice: Id,
     look: Id,
+    zone: Id,
     refresh: Id,
 }
 
@@ -162,6 +173,10 @@ impl Settings {
         let (known, look) = self.ask(Op::Get, Item::Appearance, 0);
         let chosen = known.then_some(if look == "dark" { 1 } else { 0 });
         self.ui.select(self.look, chosen);
+        let (known, zone) = self.ask(Op::Get, Item::Timezone, 0);
+        let row = (-12..=14).find(|&h| zone_name(h) == zone);
+        let chosen = row.filter(|_| known).map(|h| (h + 12) as usize);
+        self.ui.select(self.zone, chosen);
     }
 
     /// Chooses the selected session from the next boot.
@@ -196,6 +211,15 @@ impl Settings {
         say(&[b"appearance: ", text.as_bytes()]);
     }
 
+    /// Chooses the clock's zone: init keeps it and tells the compositor.
+    fn apply_zone(&mut self, row: usize) {
+        let (ok, text) = self.ask(Op::SetTimezone, Item::Timezone, row as u8);
+        self.ui.set_text(self.status, &text);
+        let tone = if ok { Tone::Secondary } else { Tone::Error };
+        self.ui.set_tone(self.status, tone);
+        say(&[b"clock: ", text.as_bytes()]);
+    }
+
     fn show(&mut self, win: &mut Window) {
         let frame = self.ui.paint(&mut win.canvas());
         if !frame.is_empty() {
@@ -221,7 +245,7 @@ fn build(system: Handle, settings: Handle, dark: bool) -> Settings {
     );
     let choice = ui.list();
     ui.set_rows(choice, CHOICES);
-    ui.set_min(choice, 240, 0);
+    ui.set_min(choice, 200, 0);
     let refresh = ui.button("Refresh");
     let spacer = ui.spacer();
     let boot = ui.stack(Stack::column(), &[heading, choice]);
@@ -230,9 +254,15 @@ fn build(system: Handle, settings: Handle, dark: bool) -> Settings {
     ui.set_rows(look, LOOKS);
     ui.set_min(look, 160, 0);
     let appearance = ui.stack(Stack::column(), &[look_heading, look]);
+    let zone_heading = ui.label("Clock:", Style::Callout, Tone::Secondary);
+    let zone = ui.list();
+    let names: [String; 27] = core::array::from_fn(|i| zone_name(i as i32 - 12));
+    ui.set_rows(zone, names.iter().map(String::as_str));
+    ui.set_min(zone, 110, 0);
+    let clock = ui.stack(Stack::column(), &[zone_heading, zone]);
     let row = ui.stack(
         Stack::row().align(Align::Start).gap(Space::Group),
-        &[boot, appearance, refresh, spacer],
+        &[boot, appearance, clock, refresh, spacer],
     );
     let status = ui.paragraph("", Style::Callout, Tone::Secondary);
     let root = ui.stack(
@@ -249,6 +279,7 @@ fn build(system: Handle, settings: Handle, dark: bool) -> Settings {
         status,
         choice,
         look,
+        zone,
         refresh,
     }
 }
@@ -322,6 +353,7 @@ fn main(_arg: u64) -> u64 {
             match action {
                 Action::Activated(id, _) if id == s.choice => s.apply(),
                 Action::Activated(id, look) if id == s.look => s.apply_look(look),
+                Action::Activated(id, row) if id == s.zone => s.apply_zone(row),
                 Action::Pressed(id) if id == s.refresh => s.refresh(),
                 _ => {}
             }
