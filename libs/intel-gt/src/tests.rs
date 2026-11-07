@@ -249,3 +249,268 @@ fn the_frequency_is_asked_with_rps_off_and_within_the_limits() {
         }
     }
 }
+
+mod blitter {
+    extern crate std;
+    use crate::cmd::{self, BlitError, Rect, Surface};
+    use crate::fake::{self, Bank, Ticks};
+    use crate::gtt::Layout;
+    use crate::power::Forcewake;
+    use crate::regs::{self, bcs, masked_on};
+    use crate::ring::{self, Ring, REQUEST_DWORDS, SEQNO_INDEX};
+    use crate::{Refusal, Timeouts};
+
+    const SCREEN: Surface = Surface {
+        address: 0x10_0000,
+        pitch: 1376 * 4,
+        width: 1366,
+        height: 768,
+    };
+
+    #[test]
+    fn blits_encode_as_linux_builds_them() {
+        let r = Rect {
+            x1: 10,
+            y1: 20,
+            x2: 110,
+            y2: 70,
+        };
+        let f = cmd::fill(&SCREEN, &r, 0x00FF_8000).unwrap();
+        // Linux: XY_COLOR_BLT_CMD | BLT_WRITE_RGBA | (6 - 2); BLT_DEPTH_32 |
+        // BLT_ROP_COLOR_COPY | pitch.
+        assert_eq!(f[0], (2 << 29 | 0x50 << 22) | (1 << 21 | 1 << 20) | 4);
+        assert_eq!(f[1], 3 << 24 | 0xF0 << 16 | 5504);
+        assert_eq!(
+            f[2..],
+            [20 << 16 | 10, 70 << 16 | 110, 0x10_0000, 0x00FF_8000]
+        );
+        let src = Surface {
+            address: 0x80_0000,
+            ..SCREEN
+        };
+        let c = cmd::copy(&SCREEN, 5, 6, &src, &r).unwrap();
+        assert_eq!(c[0], (2 << 29 | 0x53 << 22) | (1 << 21 | 1 << 20) | 6);
+        assert_eq!(c[1], 3 << 24 | 0xCC << 16 | 5504);
+        assert_eq!(
+            c[2..],
+            [
+                6 << 16 | 5,
+                56 << 16 | 105,
+                0x10_0000,
+                20 << 16 | 10,
+                5504,
+                0x80_0000
+            ]
+        );
+    }
+
+    #[test]
+    fn blits_outside_the_rules_are_refused() {
+        let r = Rect {
+            x1: 0,
+            y1: 0,
+            x2: 8,
+            y2: 8,
+        };
+        let bad = |s: Surface| cmd::fill(&s, &r, 0).err();
+        assert_eq!(
+            bad(Surface {
+                pitch: 5502,
+                ..SCREEN
+            }),
+            Some(BlitError::Pitch)
+        );
+        assert_eq!(
+            bad(Surface {
+                pitch: 40_000,
+                ..SCREEN
+            }),
+            Some(BlitError::Pitch)
+        );
+        assert_eq!(
+            bad(Surface {
+                address: 2,
+                ..SCREEN
+            }),
+            Some(BlitError::Address)
+        );
+        assert_eq!(
+            bad(Surface {
+                width: 1377,
+                ..SCREEN
+            }),
+            Some(BlitError::Rect)
+        );
+        assert_eq!(
+            bad(Surface {
+                address: 0xFFFF_0000,
+                ..SCREEN
+            }),
+            Some(BlitError::TooLarge)
+        );
+        let empty = Rect {
+            x1: 3,
+            y1: 0,
+            x2: 3,
+            y2: 8,
+        };
+        assert_eq!(cmd::fill(&SCREEN, &empty, 0).err(), Some(BlitError::Rect));
+        let past = Rect {
+            x1: 0,
+            y1: 760,
+            x2: 8,
+            y2: 769,
+        };
+        assert_eq!(cmd::fill(&SCREEN, &past, 0).err(), Some(BlitError::Rect));
+        assert_eq!(
+            cmd::copy(&SCREEN, 1360, 0, &SCREEN, &r).err(),
+            Some(BlitError::Rect)
+        );
+        // Within one surface: allowed only with a pitch of whole 64 bytes.
+        assert!(cmd::copy(&SCREEN, 100, 100, &SCREEN, &r).is_ok());
+        let odd = Surface {
+            pitch: 1367 * 4,
+            ..SCREEN
+        };
+        assert_eq!(
+            cmd::copy(&odd, 100, 100, &odd, &r).err(),
+            Some(BlitError::Overlap)
+        );
+        let near = Surface {
+            address: SCREEN.address + 4096,
+            ..SCREEN
+        };
+        assert_eq!(
+            cmd::copy(&SCREEN, 0, 0, &near, &r).err(),
+            Some(BlitError::Overlap)
+        );
+    }
+
+    #[test]
+    fn a_request_runs_the_batch_non_secure_then_stores_its_number() {
+        let mut mem = [0xDEAD_BEEFu32; 1024];
+        let mut ring = Ring::new(1);
+        let tail = ring.request(&mut mem, 0, 0x40_0000, 7).unwrap();
+        assert_eq!(tail as usize, REQUEST_DWORDS * 4);
+        assert_eq!(tail % 8, 0, "TAIL moves in quadwords");
+        // First the TLB, so a page unmapped since the last batch is gone.
+        assert_eq!(mem[0], 0x26 << 23 | 1 | 1 << 21 | 1 << 18 | 1 << 14);
+        assert_eq!(mem[1], (0x80 * 4) | (1 << 2));
+        assert_eq!(&mem[2..4], &[0, 0]);
+        let m = &mem[4..];
+        assert_eq!(m[0], 0x31 << 23 | 1 << 8);
+        assert_eq!(m[1], 0x40_0000);
+        assert_eq!(m[2], 0x26 << 23 | 1 | 1 << 21 | 1 << 18 | 1 << 14);
+        assert_eq!(m[3], (SEQNO_INDEX * 4) | (1 << 2));
+        assert_eq!(m[4], 7);
+        assert_eq!(&m[5..8], &[0x21 << 23 | 1, SEQNO_INDEX * 4, 7]);
+        assert_eq!(&mem[REQUEST_DWORDS - 2..REQUEST_DWORDS], &[0x02 << 23, 0]);
+        assert_eq!(mem[REQUEST_DWORDS], 0xDEAD_BEEF, "nothing past the request");
+    }
+
+    #[test]
+    fn the_ring_waits_for_room_and_wraps_with_no_ops() {
+        let mut mem = [0u32; 1024];
+        let mut ring = Ring::new(1);
+        let per = (REQUEST_DWORDS * 4) as u32;
+        // With the engine still at 0, the ring takes what fits less the gap.
+        let mut n = 0;
+        while ring.request(&mut mem, 0, 0x1000, n).is_some() {
+            n += 1;
+        }
+        assert_eq!(n, (4096 - 64) / per);
+        // Once the engine has consumed it all, the next wraps to 0.
+        let head = ring.tail();
+        mem.fill(0xAAAA_AAAA);
+        let tail = ring.request(&mut mem, head, 0x2000, 99).unwrap();
+        assert_eq!(tail, per);
+        assert_eq!(mem[5], 0x2000);
+        assert!(mem[(head / 4) as usize..].iter().all(|&w| w == cmd::NOOP));
+        assert!(ring::passed(5, 5) && ring::passed(6, 5) && !ring::passed(4, 5));
+        assert!(ring::passed(2, u32::MAX), "numbers wrap");
+    }
+
+    fn started() -> (Bank, Forcewake, Layout) {
+        let mut bank = Bank::probed();
+        let clock = Ticks::new();
+        let fw = Forcewake::init(&mut bank, &clock, Timeouts::default()).unwrap();
+        let layout = Layout::new(fake::FIRMWARE_RUN, fake::ENTRIES, 4).unwrap();
+        (bank, fw, layout)
+    }
+
+    #[test]
+    fn the_blitter_starts_on_an_empty_ring_in_the_ppgtt() {
+        let (mut bank, fw, layout) = started();
+        let clock = Ticks::new();
+        let mut ring = Ring::new(4);
+        {
+            let mut awake = fw.hold(&mut bank, &clock).unwrap();
+            ring::prepare(&mut awake);
+            ring::start(&mut awake, &clock, &Timeouts::default(), &layout, &mut ring).unwrap();
+        }
+        assert_eq!(bank.get(bcs::HWS_PGA), layout.status * 4096);
+        assert_eq!(bank.get(bcs::START), layout.ring * 4096);
+        assert_eq!(bank.get(bcs::CTL), 3 << 12 | 1);
+        assert_eq!(bank.get(bcs::PP_DIR_BASE), layout.pp_dir_base());
+        assert_eq!(bank.get(bcs::PP_DIR_DCLV), 0xFFFF_FFFF);
+        assert_eq!(bank.get(bcs::MODE) & bcs::PPGTT_ENABLE, bcs::PPGTT_ENABLE);
+        assert_eq!(bank.get(bcs::MI_MODE) & bcs::MODE_STOP, 0);
+        assert_eq!(bank.get(bcs::HWSTAM), !0);
+        assert_eq!(bank.get(regs::RCS_GFX_MODE) & 0x2800, 0x2800);
+        assert_eq!(bank.writes_to(bcs::INSTPM), [masked_on(1 << 9 | 1 << 5)]);
+        // The ring is turned on last but one, after its start and head.
+        let order: std::vec::Vec<u32> = bank.writes.iter().map(|w| w.0).collect();
+        let pos = |r| order.iter().rposition(|&o| o == r).unwrap();
+        assert!(pos(bcs::START) < pos(bcs::CTL) && pos(bcs::PP_DIR_BASE) < pos(bcs::CTL));
+        assert!(pos(bcs::CTL) < pos(bcs::MI_MODE));
+    }
+
+    #[test]
+    fn a_ring_that_will_not_take_its_head_is_not_started() {
+        let (mut bank, fw, layout) = started();
+        let clock = Ticks::new();
+        bank.regs.insert(bcs::HEAD, 0x40);
+        bank.stuck_head = true;
+        let mut ring = Ring::new(4);
+        let mut awake = fw.hold(&mut bank, &clock).unwrap();
+        let r = ring::start(&mut awake, &clock, &Timeouts::default(), &layout, &mut ring);
+        assert_eq!(r, Err(Refusal::RingRunning));
+        drop(awake);
+        assert_eq!(bank.get(bcs::CTL) & 1, 0, "never turned on");
+    }
+
+    #[test]
+    fn a_reset_stops_the_engine_and_resets_its_domain_twice() {
+        let (mut bank, fw, _) = started();
+        let clock = Ticks::new();
+        {
+            let mut awake = fw.hold(&mut bank, &clock).unwrap();
+            ring::reset(&mut awake, &clock, &Timeouts::default()).unwrap();
+        }
+        assert_eq!(bank.writes_to(regs::GDRST), [regs::GDRST_BLITTER; 2]);
+        assert_eq!(bank.get(bcs::CTL), 0);
+        let (mut bank, fw, _) = started();
+        bank.completes = false;
+        let mut awake = fw.hold(&mut bank, &clock).unwrap();
+        assert_eq!(
+            ring::reset(&mut awake, &clock, &Timeouts::default()),
+            Err(Refusal::Timeout)
+        );
+    }
+}
+
+#[test]
+fn the_directory_lives_in_the_tables_own_slots() {
+    use crate::ppgtt;
+    let mut bank = Bank::probed();
+    let layout = Layout::new(fake::FIRMWARE_RUN, fake::ENTRIES, 4).unwrap();
+    let pde = ppgtt::directory_entry(0x1_2345_6000).unwrap();
+    assert_eq!(pde, 0x2345_6011, "no cache bits");
+    assert_eq!(ppgtt::directory_entry(0x1234), None);
+    assert_eq!(ppgtt::set_directory(&mut bank, &layout, 511, pde), Some(()));
+    assert_eq!(bank.gtt[(layout.directory + 511) as usize], pde);
+    assert_eq!(ppgtt::set_directory(&mut bank, &layout, 512, pde), None);
+    assert_eq!(ppgtt::split(0x0040_3000), (1, 3));
+    assert_eq!(ppgtt::split(0x7FFF_F000), (511, 1023));
+    assert_eq!(ppgtt::SIZE, 2 << 30);
+}

@@ -15,9 +15,12 @@
 
 #![no_std]
 
+pub mod cmd;
 pub mod gtt;
 pub mod power;
+pub mod ppgtt;
 pub mod regs;
+pub mod ring;
 
 /// Access to BAR 0 of the graphics device: registers, then from
 /// [`regs::GTT`] the global GTT.

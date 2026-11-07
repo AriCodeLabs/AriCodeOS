@@ -62,6 +62,10 @@ pub struct Bank {
     pub writes: Vec<(u32, u32)>,
     /// Acks follow requests (false: they never come).
     pub acks: bool,
+    /// Self-clearing bits clear (false: a reset or flush never ends).
+    pub completes: bool,
+    /// The head ignores writes (a ring that will not take its head).
+    pub stuck_head: bool,
     pub ecobus: u32,
 }
 
@@ -86,6 +90,8 @@ impl Bank {
             gtt,
             writes: Vec::new(),
             acks: true,
+            completes: true,
+            stuck_head: false,
             ecobus: ECOBUS_AWAKE,
         }
     }
@@ -135,6 +141,15 @@ impl Regs for Bank {
             value & 1
         } else {
             value
+        };
+        if offset == bcs::HEAD && self.stuck_head {
+            return;
+        }
+        // A synchronizing flush and a reset end at once, if they end.
+        let new = match offset {
+            bcs::INSTPM if self.completes => new & !bcs::INSTPM_SYNC_FLUSH,
+            regs::GDRST if self.completes => 0,
+            _ => new,
         };
         self.regs.insert(offset, new);
         let ack = match offset {
