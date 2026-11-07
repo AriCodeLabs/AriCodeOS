@@ -1,8 +1,8 @@
 # A window of the toolkit follows its frame (ADR 0078, stage 2). The launcher opens
 # the settings; a click on its zoom circle, at (134, 94) on the screen with the
-# pointer starting at its centre, asks the program for the whole screen: it answers
+# pointer starting at its centre, asks the program for the space between the bar and the dock: it answers
 # with a buffer of that size, and its controls move with it. A click on the circle,
-# now at (54, 14), goes back.
+# now at (54, 38), goes back.
 name = "usb.desktop_resize"
 description = "a toolkit window takes the size the owner asks and goes back"
 level = "release"
@@ -26,18 +26,18 @@ mouse_rel = [-506, -306]
 click = "left"
 
 [[host_input_then]]
-marker = "settings: window 1280x772"
+marker = "settings: window 1280x696"
 wait_ms = 500
 screendump = "zoomed"
-mouse_rel = [-80, -80]
+mouse_rel = [-80, -56]
 click = "left"
 
 [expect]
 exit = 33
 serial_contains = [
-    "settings: window 1280x772",
+    "settings: window 1280x696",
     "settings: window 720x400",
     "ARICODEOS_SHUTDOWN",
 ]
-serial_order = ["settings: window 1280x772", "settings: window 720x400"]
+serial_order = ["settings: window 1280x696", "settings: window 720x400"]
 serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "settings: could not take"]

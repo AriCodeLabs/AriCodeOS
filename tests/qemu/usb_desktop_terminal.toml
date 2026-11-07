@@ -6,7 +6,7 @@
 # ends the shell and closes the terminal, which says how much text it
 # showed. (The echo is in the window, not on serial, so the keys are only
 # paced: a few, within QEMU's queue.) Before that, its zoom circle asks for the
-# whole screen, and the text stays.
+# space between the bar and the dock, and the text stays.
 name = "usb.desktop_terminal"
 description = "the desktop terminal runs the owner's shell in a window"
 level = "release"
@@ -30,7 +30,7 @@ mouse_rel = [-506, -306]
 click = "left"
 
 [[host_input_then]]
-marker = "terminal: window 1280x772"
+marker = "terminal: window 1280x696"
 wait_ms = 500
 screendump = "zoomed"
 keys = ["e", "x", "i", "t", "ret"]
@@ -43,7 +43,7 @@ serial_contains = [
     "AriInit: launch terminal from AriFS (apps/terminal.aripkg version 1",
     "with manifest [window terminal]",
     "terminal: shell started",
-    "terminal: window 1280x772",
+    "terminal: window 1280x696",
     "terminal: the shell ended; closing (",
     "bytes of the shell's text shown)",
     "ARICODEOS_SHUTDOWN",

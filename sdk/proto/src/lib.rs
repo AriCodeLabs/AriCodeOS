@@ -1208,6 +1208,9 @@ pub mod window {
         /// Main endpoint only (init): the desktop becomes dark (`width` 1) or light
         /// (`width` 0).
         Appearance = 10,
+        /// Main endpoint only (init): the owner's clock is `width` minutes from UTC, a
+        /// signed value.
+        Timezone = 11,
     }
 
     /// Request (64 bytes).
@@ -1310,6 +1313,7 @@ pub mod window {
                 8 => Op::ClipboardSet,
                 9 => Op::ClipboardGet,
                 10 => Op::Appearance,
+                11 => Op::Timezone,
                 _ => return None,
             };
             let mut req = Self::new(op);
@@ -1827,6 +1831,9 @@ pub mod settings {
         /// Chooses how the desktop looks, at once and from then on: `value` 0
         /// light, 1 dark.
         SetAppearance = 3,
+        /// The clock's distance from UTC: `value` hours plus 12, so 0 is UTC-12 and 26
+        /// is UTC+14.
+        SetTimezone = 4,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1839,6 +1846,8 @@ pub mod settings {
         Address = 3,
         /// How the desktop looks: `light` or `dark`.
         Appearance = 4,
+        /// The clock's zone: `UTC+1`.
+        Timezone = 5,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1872,6 +1881,7 @@ pub mod settings {
                 1 => Op::Get,
                 2 => Op::SetSession,
                 3 => Op::SetAppearance,
+                4 => Op::SetTimezone,
                 _ => return None,
             };
             let item = match b[3] {
@@ -1879,6 +1889,7 @@ pub mod settings {
                 2 => Item::UpdateSource,
                 3 => Item::Address,
                 4 => Item::Appearance,
+                5 => Item::Timezone,
                 _ => return None,
             };
             Some(Self {
@@ -1976,7 +1987,7 @@ mod tests {
             value: 1,
         };
         assert_eq!(Request::decode(&req.encode()), Some(req));
-        assert_eq!(Request::decode(&[9, 1, 4, 1, 0, 0, 0, 0]), None);
+        assert_eq!(Request::decode(&[9, 1, 5, 1, 0, 0, 0, 0]), None);
         assert_eq!(Request::decode(&[9, 1, 1, 7, 0, 0, 0, 0]), None);
         let r = Reply::new(Status::Ok, b"session: desktop");
         let d = Reply::decode(&r.encode()).unwrap();
