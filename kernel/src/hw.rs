@@ -513,7 +513,8 @@ pub fn dma_alloc(len: u64, charge: Option<DmaCharge>) -> Result<ObjectRef, &'sta
     let frames = len.div_ceil(FRAME_SIZE) as usize;
     // Frames promised to memory objects are theirs (ADR 0084).
     let first = pmm::with(|p| {
-        if p.stats().free_frames < promised() + frames {
+        if p.stats().free_frames < promised() + frames + crate::user::process::KERNEL_RESERVE_FRAMES
+        {
             return None;
         }
         p.allocate_contiguous(frames, 1)
@@ -703,33 +704,75 @@ pub fn promised() -> usize {
     PROMISED.load(Ordering::Relaxed)
 }
 
+/// Frames a promise always leaves free beyond the kernel's reserve, for the
+/// kernel's own growth (its heap, kernel stacks, IOMMU tables), which does
+/// not count promises (audit of ADR 0084, H1): 16 MiB, or 1/64 of the
+/// machine if more.
+fn kernel_headroom() -> usize {
+    (pmm::stats().usable_frames / 64).max(4096)
+}
+
+/// Page entries one table frame holds.
+const ENTRIES: usize = (FRAME_SIZE / 4) as usize;
+/// Frame numbers are kept in 32 bits: frames from 16 TiB up are refused.
+const FRAME_LIMIT: u64 = 1 << 44;
+/// Objects of more pages than this are freed by the `reclaim` thread, in
+/// batches, never all at once where interrupts are off (audit M1).
+const INLINE_FREE_PAGES: usize = 2048;
+/// Frames freed per hold of the PMM's lock.
+const FREE_BATCH: usize = 512;
+
+struct MemPages {
+    /// Frames holding the page table: entry `i` is the frame number of
+    /// page `i`, 0 while not taken. Outside the kernel heap (audit H2).
+    tables: alloc::vec::Vec<u64>,
+    /// Pages taken so far.
+    backed: usize,
+}
+
+impl MemPages {
+    fn entry(&mut self, index: usize) -> &mut u32 {
+        let table = crate::memory::phys::phys_to_virt(self.tables[index / ENTRIES]) as *mut u32;
+        // SAFETY: a table frame of this object, reachable through the physical
+        // map, `ENTRIES` entries long; `&mut self` gives exclusivity.
+        unsafe { &mut *table.add(index % ENTRIES) }
+    }
+}
+
 /// A memory object (ADR 0084): pages that need not be contiguous, each taken
 /// from the PMM and zeroed when first touched, out of frames promised when
 /// the object was made. Its frames go back when the last handle or mapping
 /// of it does (ADR 0038). Not for devices: it has no physical address.
 pub struct MemObject {
-    /// The frame number of each page, 0 while not taken.
-    pages: IrqLock<alloc::vec::Vec<u32>>,
-    /// Dropped after `drop` returned the frames.
+    inner: IrqLock<MemPages>,
+    pages: usize,
+    /// Dropped after `drop` handed the frames back.
     _charge: Option<DmaCharge>,
 }
 
 impl MemObject {
     pub fn len(&self) -> u64 {
-        self.pages.lock().len() as u64 * FRAME_SIZE
+        self.pages as u64 * FRAME_SIZE
     }
 
     /// The frame of page `index`, taken and zeroed now if it was not yet.
     /// `None` past the end, or if no frame could be had (only if a promise
-    /// was broken, which the PMM's accounting prevents).
+    /// was broken).
     pub fn page(&self, index: usize) -> Option<u64> {
-        let mut pages = self.pages.lock();
-        let slot = pages.get_mut(index)?;
-        if *slot != 0 {
-            return Some(*slot as u64 * FRAME_SIZE);
+        if index >= self.pages {
+            return None;
+        }
+        let mut inner = self.inner.lock();
+        let slot = *inner.entry(index);
+        if slot != 0 {
+            return Some(slot as u64 * FRAME_SIZE);
         }
         let frame = pmm::with(|p| {
             let f = p.allocate()?;
+            if f.addr() >= FRAME_LIMIT {
+                p.free(f).expect("frame just taken");
+                return None;
+            }
             PROMISED.fetch_sub(1, Ordering::Relaxed);
             Some(f)
         })?;
@@ -741,38 +784,87 @@ impl MemObject {
                 FRAME_SIZE as usize,
             )
         };
-        *slot = (frame.addr() / FRAME_SIZE) as u32;
+        *inner.entry(index) = (frame.addr() / FRAME_SIZE) as u32;
+        inner.backed += 1;
         Some(frame.addr())
-    }
-
-    /// Every page's frame, taking those not taken yet: for a device that
-    /// needs them all at once (the GPU, ADR 0083).
-    pub fn all_pages(&self) -> Option<alloc::vec::Vec<u64>> {
-        let count = self.pages.lock().len();
-        (0..count).map(|i| self.page(i)).collect()
     }
 }
 
 impl Drop for MemObject {
     fn drop(&mut self) {
-        let pages = core::mem::take(self.pages.get_mut());
-        pmm::with(|p| {
-            let mut unpromise = 0;
-            for &n in &pages {
-                if n == 0 {
-                    unpromise += 1;
-                } else {
-                    p.free(Frame::from_addr(n as u64 * FRAME_SIZE))
-                        .expect("memory object frame");
-                }
-            }
-            PROMISED.fetch_sub(unpromise, Ordering::Relaxed);
-        });
+        let inner = core::mem::replace(
+            self.inner.get_mut(),
+            MemPages {
+                tables: alloc::vec::Vec::new(),
+                backed: 0,
+            },
+        );
+        // The promise of the pages never taken goes back at once.
+        let unbacked = self.pages - inner.backed;
+        pmm::with(|_| PROMISED.fetch_sub(unbacked, Ordering::Relaxed));
+        if self.pages <= INLINE_FREE_PAGES {
+            free_pages(inner, self.pages);
+        } else {
+            RECLAIM.lock().push((inner, self.pages));
+        }
     }
 }
 
-/// Makes a memory object of `len` bytes (whole pages), promising its pages
-/// out of the free ones beyond `reserve` frames; nothing is taken yet.
+/// Every frame of `inner`'s `pages` pages, then its tables, back to the PMM,
+/// `FREE_BATCH` at a time.
+fn free_pages(mut inner: MemPages, pages: usize) {
+    let mut batch = [0u64; FREE_BATCH];
+    let mut n = 0;
+    let flush = |batch: &[u64]| {
+        pmm::with(|p| {
+            for &f in batch {
+                p.free(Frame::from_addr(f)).expect("memory object frame");
+            }
+        })
+    };
+    for i in 0..pages {
+        let e = *inner.entry(i);
+        if e != 0 {
+            batch[n] = e as u64 * FRAME_SIZE;
+            n += 1;
+            if n == FREE_BATCH {
+                flush(&batch);
+                n = 0;
+            }
+        }
+    }
+    flush(&batch[..n]);
+    for chunk in inner.tables.chunks(FREE_BATCH) {
+        flush(chunk);
+    }
+}
+
+/// Large objects waiting for the `reclaim` thread.
+static RECLAIM: IrqLock<alloc::vec::Vec<(MemPages, usize)>> = IrqLock::new(alloc::vec::Vec::new());
+
+/// Starts the thread that frees large memory objects (audit M1).
+pub fn start_reclaim() {
+    if let Err(e) = crate::task::scheduler::spawn("reclaim", reclaim_thread, 0) {
+        warn!("hw: no reclaim thread ({e}): large memory objects are freed where they are dropped");
+    }
+}
+
+extern "C" fn reclaim_thread(_arg: usize) {
+    loop {
+        crate::task::scheduler::sleep_ms(10);
+        loop {
+            let next = RECLAIM.lock().pop();
+            let Some((inner, pages)) = next else {
+                break;
+            };
+            free_pages(inner, pages);
+        }
+    }
+}
+
+/// Makes a memory object of `len` bytes (whole pages): its page table is
+/// taken now, its pages promised out of the free frames beyond `reserve`
+/// and the kernel's headroom; no page is taken yet.
 pub fn mem_alloc(
     len: u64,
     reserve: usize,
@@ -782,24 +874,41 @@ pub fn mem_alloc(
         return Err("hw: invalid memory object size");
     }
     let pages = usize::try_from(len / FRAME_SIZE).map_err(|_| "hw: memory object too large")?;
-    if pages > u32::MAX as usize {
-        return Err("hw: memory object too large");
-    }
-    let mut table = alloc::vec::Vec::new();
-    table
-        .try_reserve_exact(pages)
-        .map_err(|_| "hw: no kernel memory for the page table")?;
-    table.resize(pages, 0u32);
-    pmm::with(|p| {
+    let table_frames = pages.div_ceil(ENTRIES);
+    let headroom = reserve + kernel_headroom();
+    let mut tables = alloc::vec::Vec::new();
+    tables
+        .try_reserve_exact(table_frames)
+        .map_err(|_| "hw: no kernel memory")?;
+    let taken = pmm::with(|p| {
         let promised = PROMISED.load(Ordering::Relaxed);
-        if p.stats().free_frames < promised.saturating_add(pages).saturating_add(reserve) {
+        let need = promised
+            .saturating_add(pages)
+            .saturating_add(table_frames)
+            .saturating_add(headroom);
+        if p.stats().free_frames < need {
             return Err("hw: the memory cannot be promised");
+        }
+        for _ in 0..table_frames {
+            tables.push(p.allocate().expect("counted above").addr());
         }
         PROMISED.store(promised + pages, Ordering::Relaxed);
         Ok(())
-    })?;
+    });
+    taken?;
+    for &t in &tables {
+        // SAFETY: table frames just taken, reachable through the physical map.
+        unsafe {
+            core::ptr::write_bytes(
+                crate::memory::phys::phys_to_virt(t) as *mut u8,
+                0,
+                FRAME_SIZE as usize,
+            )
+        };
+    }
     Ok(KernelObject::new(ObjectKind::Mem(MemObject {
-        pages: IrqLock::new(table),
+        inner: IrqLock::new(MemPages { tables, backed: 0 }),
+        pages,
         _charge: charge,
     })))
 }

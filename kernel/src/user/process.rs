@@ -75,7 +75,7 @@ pub struct Process {
     /// alive, ADR 0038); bounded by `dma_quota` when there is one.
     dma_mapped: u64,
     /// `None` once the address space has been freed.
-    mapper: Option<Mapper<vmm::PmmFrames, OffsetMap>>,
+    mapper: Option<Mapper<vmm::UserFrames, OffsetMap>>,
     pub entry: u64,
     pub status: Option<ExitStatus>,
     /// Limit of DMA memory (bytes) the process's live buffers can take;
@@ -134,6 +134,10 @@ pub struct Process {
 /// allocations (its heap, page tables, the kill path itself) still find
 /// memory. 1 MiB.
 pub const KERNEL_RESERVE_FRAMES: usize = 256;
+
+/// Foreign mappings (MMIO, DMA, memory objects) a process may hold at once:
+/// each costs the kernel memory no quota pays for (audit of ADR 0084, H2).
+const MAX_FOREIGN: usize = 512;
 
 /// What [`back_on_demand`] did with a page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -426,7 +430,7 @@ fn spawn_full(
         p
     };
     let mut m =
-        Mapper::new(vmm::PmmFrames, OffsetMap(phys::offset())).map_err(|_| "process: pml4")?;
+        Mapper::new(vmm::UserFrames, OffsetMap(phys::offset())).map_err(|_| "process: pml4")?;
     let kernel_root = vmm::with(|k| k.root_phys());
     // SAFETY: the kernel PML4 is valid and reachable through the physical map.
     unsafe { m.share_kernel_half(kernel_root) };
@@ -522,7 +526,7 @@ fn spawn_full(
 /// error the caller frees the address space; a frame taken but not mapped
 /// goes back here.
 fn map_image(
-    m: &mut Mapper<vmm::PmmFrames, OffsetMap>,
+    m: &mut Mapper<vmm::UserFrames, OffsetMap>,
     elf: &aricode_elf::Elf,
 ) -> Result<Vec<(u64, u64, u64)>, &'static str> {
     let mut on_demand = Vec::new();
@@ -611,7 +615,7 @@ fn free_frame(frame: Frame) {
 /// Frees a process address space: every frame of its user half (pages
 /// and page tables) and its root; the kernel half is shared, never freed.
 /// Returns how many frames went back.
-fn free_address_space(mut m: Mapper<vmm::PmmFrames, OffsetMap>) -> usize {
+fn free_address_space(mut m: Mapper<vmm::UserFrames, OffsetMap>) -> usize {
     let mut frames = Vec::new();
     m.free_user_half(|f| frames.push(f));
     frames.push(m.into_root_frame());
@@ -962,9 +966,7 @@ pub fn release_address_space(pid: u32) {
         // reference was this mapping is freed when the entry is dropped,
         // once the page tables no longer point at it.
         for f in &foreign {
-            for page in (f.virt..f.virt + f.span).step_by(PAGE_SIZE as usize) {
-                let _ = m.unmap_4k(page);
-            }
+            unmap_entry(&mut m, f);
         }
         let n = free_address_space(m);
         log::debug!("user: address space of process {pid} freed ({n} frames)");
@@ -1551,7 +1553,7 @@ pub fn snapshot() -> Vec<aricode_abi::sysinfo::ProcessEntry> {
 /// The stack probes compilers emit for large frames touch every page they
 /// pass, so a deep call is seen even if it wrote little.
 /// The scan is `aricode_x86_paging::stack_touched`, tested on the host.
-fn stack_touched(m: &Mapper<vmm::PmmFrames, OffsetMap>) -> u64 {
+fn stack_touched(m: &Mapper<vmm::UserFrames, OffsetMap>) -> u64 {
     aricode_x86_paging::stack_touched(USER_STACK_TOP - USER_STACK_SIZE, USER_STACK_TOP, |page| {
         m.translate(page).map(|(_, flags)| flags)
     })
@@ -1740,6 +1742,9 @@ pub fn map_foreign(
         record_event(aricode_abi::sysinfo::EventKind::DmaQuota, span, "mmio_map");
         return Err(aricode_abi::Error::Limit);
     }
+    if p.foreign.len() >= MAX_FOREIGN || p.foreign.try_reserve(1).is_err() {
+        return Err(aricode_abi::Error::Limit);
+    }
     // The MMIO/DMA area is above the user stack (8 MiB) and reaches the
     // end of user space.
     let virt = p.mmio_ranges.alloc(span).ok_or(aricode_abi::Error::Limit)?;
@@ -1786,6 +1791,19 @@ pub fn map_foreign(
     })
 }
 
+/// Clears the page table entries of foreign mapping `f`: a memory object's
+/// only where present, without walking the rest of a range that may be huge
+/// (audit M1); an MMIO or DMA mapping's, all of them mapped at once.
+fn unmap_entry(m: &mut Mapper<vmm::UserFrames, OffsetMap>, f: &Foreign) {
+    if f.mem.is_some() {
+        m.unmap_present_4k(f.virt, f.span, |_| {});
+    } else {
+        for page in (f.virt..f.virt + f.span).step_by(PAGE_SIZE as usize) {
+            let _ = m.unmap_4k(page);
+        }
+    }
+}
+
 /// Maps memory object `mem` into the current process (ADR 0084): an address
 /// range only; each page is mapped when first touched (`back_memory_page`).
 /// Mapping the same object again returns the mapping it has.
@@ -1808,7 +1826,28 @@ pub fn map_memory(mem: crate::object::ObjectRef) -> Result<Mapped, aricode_abi::
             screen: false,
         });
     }
+    if p.foreign.len() >= MAX_FOREIGN || p.foreign.try_reserve(1).is_err() {
+        return Err(aricode_abi::Error::Limit);
+    }
+    // What a process keeps mapped stays on its account, whoever made it
+    // (ADR 0038; audit of ADR 0084, M2).
+    if p.dma_quota != 0 && p.dma_mapped.saturating_add(span) > p.dma_quota {
+        drop(procs);
+        record_event(aricode_abi::sysinfo::EventKind::DmaQuota, span, "mmio_map");
+        return Err(aricode_abi::Error::Limit);
+    }
     let virt = p.mmio_ranges.alloc(span).ok_or(aricode_abi::Error::Limit)?;
+    // Its page tables now, so a first touch needs only the promised page
+    // (audit H1).
+    let prepared = p
+        .mapper
+        .as_mut()
+        .map(|m| m.prepare_4k(virt, span, true).is_ok());
+    if prepared != Some(true) {
+        p.mmio_ranges.free(virt, span);
+        return Err(aricode_abi::Error::Limit);
+    }
+    p.dma_mapped += span;
     p.foreign.push(Foreign {
         virt,
         phys: 0,
@@ -1832,6 +1871,38 @@ static APP_MAX_PCT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU6
 /// Sets the share of usable memory one process may hold, 1 to 100.
 pub fn set_app_max_pct(pct: u64) {
     APP_MAX_PCT.store(pct.clamp(1, 100), core::sync::atomic::Ordering::Relaxed);
+}
+
+/// What a process without a quota (the system's own services) may hold in
+/// memory objects, in MiB (`mem.service_max_mib`, audit of ADR 0084, H3):
+/// their runtime heap grows by them, and a service must not be able to take
+/// the machine.
+static SERVICE_MAX_MIB: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(64);
+
+pub fn set_service_max_mib(mib: u64) {
+    SERVICE_MAX_MIB.store(mib.max(1), core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Charges `len` bytes of memory objects to the current process: within its
+/// quota, or for a process without one, within the services' share.
+pub fn charge_memory(len: u64) -> Result<crate::hw::DmaCharge, ()> {
+    use core::sync::atomic::Ordering;
+    let pid = current_pid().ok_or(())?;
+    let mut procs = PROCESSES.lock();
+    let p = procs.get_mut(&pid).ok_or(())?;
+    let quota = match p.dma_quota {
+        0 => SERVICE_MAX_MIB
+            .load(Ordering::Relaxed)
+            .saturating_mul(1024 * 1024),
+        q => q,
+    };
+    p.dma_used
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+            let new = used.saturating_add(len);
+            (new <= quota).then_some(new)
+        })
+        .map_err(|_| ())?;
+    Ok(crate::hw::DmaCharge::new(p.dma_used.clone(), len))
 }
 
 /// The memory quota a process asked for, as granted: at most its share of
@@ -1965,16 +2036,14 @@ pub fn unmap_foreign(virt: u64) -> Result<(), aricode_abi::Error> {
             .ok_or(aricode_abi::Error::Invalid)?;
         let m = p.mapper.as_mut().ok_or(aricode_abi::Error::Fault)?;
         let f = p.foreign.swap_remove(i);
-        for page in (f.virt..f.virt + f.span).step_by(PAGE_SIZE as usize) {
-            let _ = m.unmap_4k(page);
-        }
+        unmap_entry(m, &f);
         let screen_back =
             if f.dma.is_none() && f.mem.is_none() && crate::framebuffer::overlaps(f.phys, f.span) {
                 crate::console::screen_release(pid.0, Some(f.virt))
             } else {
                 None
             };
-        if f.dma.is_some() {
+        if f.dma.is_some() || f.mem.is_some() {
             p.dma_mapped -= f.span;
         }
         // Its devices stop reaching a client buffer with the mapping, not

@@ -119,6 +119,9 @@ pub mod keys {
     /// 100, one application may hold at most, whatever its manifest asks; 50
     /// by default (ADR 0084, the owner's choice).
     pub const MEM_APP_MAX_PCT: &str = "mem.app_max_pct";
+    /// `mem.service_max_mib=N`: what one of the system's own services, which
+    /// have no quota, may hold in memory objects; 64 by default (ADR 0084).
+    pub const MEM_SERVICE_MAX_MIB: &str = "mem.service_max_mib";
     /// `thermal_off=DEGREES`: the CPU temperature at which the kernel's watch powers
     /// the machine off; `0` never does. By default 3 degrees below the CPU's limit.
     pub const THERMAL_OFF: &str = "thermal_off";

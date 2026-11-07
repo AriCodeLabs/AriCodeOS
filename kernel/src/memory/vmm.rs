@@ -39,6 +39,28 @@ impl FrameAlloc for PmmFrames {
 
 pub type KernelMapper = Mapper<PmmFrames, OffsetMap>;
 
+/// Frames for a process's page tables: never the kernel's reserve nor
+/// frames promised to memory objects (ADR 0084, audit H1), so a program's
+/// mappings cannot take what was promised to another.
+pub struct UserFrames;
+
+impl FrameAlloc for UserFrames {
+    fn alloc_frame(&mut self) -> Option<u64> {
+        pmm::with(|p| {
+            let floor = crate::user::process::KERNEL_RESERVE_FRAMES + crate::hw::promised();
+            if p.stats().free_frames <= floor {
+                return None;
+            }
+            p.allocate()
+        })
+        .map(Frame::addr)
+    }
+}
+
+/// Above this many pages a local flush reloads CR3 instead of invalidating
+/// page by page (audit of ADR 0084, M1), as the other CPUs already do.
+const INVLPG_MAX: u64 = 64;
+
 static VMM: IrqLock<Option<KernelMapper>> = IrqLock::new(None);
 
 extern "C" {
@@ -199,15 +221,23 @@ pub fn flush_user_range(virt: u64, len: u64) {
     use crate::arch::x86_64::smp;
     // This CPU and the list of the others from one and the same CPU.
     let (ids, n) = crate::sync::without_interrupts(|| {
-        for page in (virt..virt + len).step_by(PAGE_SIZE as usize) {
-            // SAFETY: invalidation of a TLB entry; no memory effects.
-            unsafe {
-                core::arch::asm!("invlpg [{}]", in(reg) page, options(nostack, preserves_flags))
-            };
-        }
         let cr3: u64;
         // SAFETY: read of CR3.
         unsafe { core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack)) };
+        if len / PAGE_SIZE > INVLPG_MAX {
+            // SAFETY: writing back the same CR3 drops every non-global entry
+            // of this address space; the kernel's are global.
+            unsafe {
+                core::arch::asm!("mov cr3, {}", in(reg) cr3, options(nostack, preserves_flags))
+            };
+        } else {
+            for page in (virt..virt + len).step_by(PAGE_SIZE as usize) {
+                // SAFETY: invalidation of a TLB entry; no memory effects.
+                unsafe {
+                    core::arch::asm!("invlpg [{}]", in(reg) page, options(nostack, preserves_flags))
+                };
+            }
+        }
         smp::others_running(cr3)
     });
     smp::flush_user_range_on(&ids[..n], virt, len);

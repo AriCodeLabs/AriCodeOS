@@ -132,10 +132,21 @@ mod user_heap {
                 let want = layout
                     .size()
                     .saturating_add(layout.align())
-                    .saturating_add(GROW_SLACK);
-                let size = want.max(GROW_MIN).next_multiple_of(4096);
-                let Ok(mem) = crate::sys::mem_create(size as u64) else {
-                    return core::ptr::null_mut();
+                    .saturating_add(GROW_SLACK)
+                    .next_multiple_of(4096);
+                // At least `GROW_MIN`; just what is needed if a small quota
+                // has no room for that.
+                let mut size = want.max(GROW_MIN);
+                let mem = match crate::sys::mem_create(size as u64) {
+                    Ok(m) => m,
+                    Err(_) if size > want => {
+                        size = want;
+                        match crate::sys::mem_create(size as u64) {
+                            Ok(m) => m,
+                            Err(_) => return core::ptr::null_mut(),
+                        }
+                    }
+                    Err(_) => return core::ptr::null_mut(),
                 };
                 let mapped = crate::sys::mmio_map(mem);
                 let _ = crate::sys::handle_close(mem);

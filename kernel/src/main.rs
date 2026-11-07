@@ -176,6 +176,7 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
 
     task::init();
     console::start_cursor_thread();
+    hw::start_reclaim();
     arch::x86_64::thermal::start_watch(cmdline.get(keys::THERMAL_OFF).and_then(|v| v.parse().ok()));
     if cmdline.get(keys::SMP) == Some("off") {
         info!("smp: disabled on the command line (smp=off); 1 CPU");
@@ -214,6 +215,12 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
         .and_then(|v| v.parse().ok())
     {
         user::process::set_app_max_pct(pct);
+    }
+    if let Some(mib) = cmdline
+        .get(keys::MEM_SERVICE_MAX_MIB)
+        .and_then(|v| v.parse().ok())
+    {
+        user::process::set_service_max_mib(mib);
     }
     gpu::init(
         cmdline.get(keys::GPU) == Some("off"),

@@ -4,9 +4,12 @@
 //! memory until touched, takes about what is touched, gives it back when
 //! let go; the kernel backs a page a call writes into; mapping it twice gives
 //! one mapping; the heap grows past the old 8 MiB; and the quota stops what
-//! is beyond the share of the machine one application may hold. Launched
-//! with `run mem_probe` and `caps = system` (handle 0x10004). Each failing
-//! step returns its number; success = 0.
+//! is beyond the share of the machine one application may hold; many small
+//! mappings stop at a limit, not with the kernel. Launched with `run
+//! mem_probe` and `caps = system` (handle 0x10004). `run mem_probe 1` instead
+//! promises as much of the machine as it is given (`memory.full` lets it have
+//! all) and touches every page: none may fail. Each failing step returns its
+//! number; success = 0.
 #![no_std]
 #![no_main]
 
@@ -35,7 +38,40 @@ fn say(what: &[u8], v: u64) {
     sys::print(b"\n");
 }
 
-fn main(_arg: u64) -> u64 {
+/// The largest object the machine will promise, every page touched and
+/// checked: a promise is kept to the last page (audit of ADR 0084, H1).
+fn fill() -> u64 {
+    let mut size = 1024 * MIB;
+    let mem = loop {
+        match sys::mem_create(size) {
+            Ok(m) => break m,
+            Err(Error::Limit) if size > 8 * MIB => size -= 8 * MIB,
+            Err(_) => return 20,
+        }
+    };
+    say(b"promised MiB: ", size / MIB);
+    let Ok(virt) = sys::mmio_map(mem) else {
+        return 21;
+    };
+    let words = (size / 4) as usize;
+    // SAFETY: the object's mapping, `size` bytes long, this program's alone.
+    let m = unsafe { core::slice::from_raw_parts_mut(virt as *mut u32, words) };
+    let step = (PAGE / 4) as usize;
+    for i in (0..words).step_by(step) {
+        m[i] = i as u32;
+    }
+    if (0..words).step_by(step).any(|i| m[i] != i as u32) {
+        return 22;
+    }
+    say(b"every page touched, MiB: ", size / MIB);
+    sys::print(b"mem_probe: full ok\n");
+    0
+}
+
+fn main(arg: u64) -> u64 {
+    if arg == 1 {
+        return fill();
+    }
     let before = free_frames();
     // 1, 2: made, nothing taken.
     let Ok(mem) = sys::mem_create(64 * MIB) else {
@@ -94,7 +130,16 @@ fn main(_arg: u64) -> u64 {
     let _ = sys::handle_close(again);
     let _ = sys::mmio_unmap(virt);
     let _ = sys::handle_close(mem);
-    let after = free_frames();
+    // A large object goes back through the kernel's `reclaim` thread, in
+    // batches, within moments (audit M1).
+    let mut after = free_frames();
+    for _ in 0..100 {
+        if before.saturating_sub(after) <= 256 {
+            break;
+        }
+        sys::thread_sleep(10);
+        after = free_frames();
+    }
     say(
         b"frames short after letting go: ",
         before.saturating_sub(after),
@@ -129,6 +174,34 @@ fn main(_arg: u64) -> u64 {
         return 10;
     }
     drop(big);
+    // 11: mapping many small objects stops at a limit (audit H2).
+    let mut mapped = 0;
+    let stopped = loop {
+        let Ok(h) = sys::mem_create(PAGE) else {
+            break Err(());
+        };
+        let r = sys::mmio_map(h);
+        let _ = sys::handle_close(h);
+        match r {
+            Ok(_) => mapped += 1,
+            Err(Error::Limit) => break Ok(()),
+            Err(_) => break Err(()),
+        }
+        if mapped > 2000 {
+            break Err(());
+        }
+    };
+    say(b"small mappings before the limit: ", mapped);
+    if stopped.is_err() {
+        return 11;
+    }
+    // 12: its size, from the handle.
+    let Ok(h) = sys::mem_create(3 * PAGE) else {
+        return 12;
+    };
+    if sys::region_len(h) != Ok(3 * PAGE) {
+        return 12;
+    }
     sys::print(b"mem_probe: ok\n");
     0
 }

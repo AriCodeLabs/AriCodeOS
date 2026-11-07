@@ -604,6 +604,10 @@ pub mod sysinfo {
     /// A [`GpuReport`]: whether the kernel took the GPU's engine and, if not,
     /// why (ADR 0083).
     pub const GPU: u64 = 17;
+    /// One `u64`: frames promised to memory objects and not taken yet (ADR
+    /// 0084). They count as free in [`MEMORY`] but no allocation other than
+    /// their objects' own pages can have them.
+    pub const MEMORY_PROMISED: u64 = 18;
 
     /// The state of the GPU's engine ([`GPU`]).
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

@@ -74,6 +74,7 @@ pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
         nr::REGION_LEN => with_handles(|t| match lookup(t, h, Rights::READ)?.kind {
             ObjectKind::Mmio(ref r) => Ok(r.len),
             ObjectKind::Dma(ref d) => Ok(d.region.len),
+            ObjectKind::Mem(ref m) => Ok(m.len()),
             _ => Err(Error::Invalid),
         }),
         nr::DMA_ALLOC => dma_alloc(h, frame.rsi),
@@ -344,6 +345,7 @@ fn system_info(h: Handle, kind: u64, ptr: u64, len: u64) -> Result<u64, Error> {
             None => return Err(Error::NotFound),
         },
         sysinfo::GPU => crate::gpu::report().encode().to_vec(),
+        sysinfo::MEMORY_PROMISED => (crate::hw::promised() as u64).to_le_bytes().to_vec(),
         sysinfo::DISPLAY => match crate::framebuffer::abi_display() {
             Some(d) => d.encode().to_vec(),
             None => return Err(Error::NotFound),
@@ -1065,7 +1067,7 @@ fn mem_create(len: u64) -> Result<u64, Error> {
     if len == 0 || !len.is_multiple_of(4096) {
         return Err(Error::Invalid);
     }
-    let Ok(charge) = process::charge_dma(len) else {
+    let Ok(charge) = process::charge_memory(len) else {
         process::record_event(aricode_abi::sysinfo::EventKind::DmaQuota, len, "mem_create");
         return Err(Error::Limit);
     };
