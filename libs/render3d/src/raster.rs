@@ -233,8 +233,33 @@ fn draw_with(
             lit,
         }
     };
+    let rows = target.rows();
+    let height = target.height as f32;
     for tri in mesh.indices.as_chunks::<3>().0 {
         stats.triangles += 1;
+        // Rows first, from the corners' positions alone: a triangle wholly above or
+        // below the rows drawn (a band, or the picture) is passed over before any
+        // corner is lit. It would have drawn nothing here, so the picture is the
+        // same; a corner behind the camera leaves it to the clipping below.
+        let mut span = (f32::MAX, f32::MIN);
+        let mut seen = true;
+        for &i in tri {
+            let Some(v) = mesh.vertices.get(i as usize) else {
+                return stats;
+            };
+            let [_, y, _, w] = mvp.transform(v.pos, 1.0);
+            if w <= 1e-6 {
+                seen = false;
+                break;
+            }
+            let sy = (0.5 - y / w * 0.5) * height;
+            span = (span.0.min(sy), span.1.max(sy));
+        }
+        // A pixel of margin on each side, for the rounding to sixteenths.
+        if seen && (span.1 < rows.start as f32 - 1.0 || span.0 > rows.end as f32 + 1.0) {
+            stats.culled += 1;
+            continue;
+        }
         let mut corners = [Var::default(); 3];
         for (c, &i) in corners.iter_mut().zip(tri) {
             match mesh.vertices.get(i as usize) {

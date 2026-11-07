@@ -12,15 +12,32 @@ pub fn convolve(
     kernel: &[f32],
     size: usize,
 ) {
+    convolve_rows(src, dst, (width, height, stride), 0..height, kernel, size);
+}
+
+/// As [`convolve`], for rows `rows` only, which `dst` holds from its start: bands of
+/// one picture, each on its own thread, give the picture `convolve` gives.
+pub fn convolve_rows(
+    src: &[u32],
+    dst: &mut [u32],
+    (width, height, stride): (usize, usize, usize),
+    rows: core::ops::Range<usize>,
+    kernel: &[f32],
+    size: usize,
+) {
     let need = stride * height;
-    if size.is_multiple_of(2) || kernel.len() != size * size || src.len() < need || dst.len() < need
+    if size.is_multiple_of(2)
+        || kernel.len() != size * size
+        || src.len() < need
+        || rows.end > height
+        || dst.len() < stride * rows.len()
     {
         return;
     }
     let sum: f32 = kernel.iter().sum();
     let scale = if sum.abs() > 1e-6 { 1.0 / sum } else { 1.0 };
     let r = (size / 2) as isize;
-    for y in 0..height {
+    for y in rows.clone() {
         for x in 0..width {
             let mut acc = [0.0f32; 3];
             for ky in 0..size {
@@ -35,7 +52,7 @@ pub fn convolve(
                 }
             }
             let c = acc.map(|v| (v * scale).clamp(0.0, 255.0) as u32);
-            dst[y * stride + x] = c[0] << 16 | c[1] << 8 | c[2];
+            dst[(y - rows.start) * stride + x] = c[0] << 16 | c[1] << 8 | c[2];
         }
     }
 }
@@ -61,18 +78,44 @@ pub fn julia(
     dst: &mut [u32],
     (width, height, stride): (usize, usize, usize),
     c: (f32, f32),
+    view: ((f32, f32), f32),
+    max: u32,
+    colours: &[u32; 64],
+) -> u64 {
+    julia_rows(
+        dst,
+        (width, height, stride),
+        0..height,
+        c,
+        view,
+        max,
+        colours,
+    )
+}
+
+/// As [`julia`], for rows `rows` only, which `dst` holds from its start.
+#[allow(clippy::too_many_arguments)]
+pub fn julia_rows(
+    dst: &mut [u32],
+    (width, height, stride): (usize, usize, usize),
+    rows: core::ops::Range<usize>,
+    c: (f32, f32),
     (centre, scale): ((f32, f32), f32),
     max: u32,
     colours: &[u32; 64],
 ) -> u64 {
-    if height == 0 || width > stride || dst.len() < stride * (height - 1) + width {
+    if rows.is_empty()
+        || rows.end > height
+        || width > stride
+        || dst.len() < stride * (rows.len() - 1) + width
+    {
         return 0;
     }
     let step = scale / height as f32;
     let left = centre.0 - step * width as f32 / 2.0;
     let top = centre.1 + scale / 2.0;
     let mut steps = 0u64;
-    for y in 0..height {
+    for y in rows.clone() {
         let zy0 = top - y as f32 * step;
         for x in 0..width {
             let (mut zx, mut zy) = (left + x as f32 * step, zy0);
@@ -87,7 +130,7 @@ pub fn julia(
                 i += 1;
             }
             steps += u64::from(i);
-            dst[y * stride + x] = if i == max {
+            dst[(y - rows.start) * stride + x] = if i == max {
                 0
             } else {
                 colours[(i % 64) as usize]
@@ -100,6 +143,34 @@ pub fn julia(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bands_give_the_whole_picture() {
+        let (w, h) = (23, 17);
+        let src: alloc::vec::Vec<u32> = (0..w * h)
+            .map(|i| (i as u32).wrapping_mul(2654435761) & 0xffffff)
+            .collect();
+        let kernel = [1.0, 2.0, 1.0, 2.0, 4.0, 2.0, 1.0, 2.0, 1.0];
+        let colours = palette(0.3);
+        let view = ((0.1, -0.2), 2.5);
+        let mut whole = alloc::vec![0u32; w * h];
+        convolve(&src, &mut whole, (w, h, w), &kernel, 3);
+        let mut fractal = alloc::vec![0u32; w * h];
+        julia(&mut fractal, (w, h, w), (-0.77, 0.19), view, 40, &colours);
+        for bands in [2, 3, 5] {
+            let rows = h.div_ceil(bands);
+            let mut out = alloc::vec![0u32; w * h];
+            let mut frac = alloc::vec![0u32; w * h];
+            let chunks = out.chunks_mut(rows * w).zip(frac.chunks_mut(rows * w));
+            for (b, (o, f)) in chunks.enumerate() {
+                let r = b * rows..((b + 1) * rows).min(h);
+                convolve_rows(&src, o, (w, h, w), r.clone(), &kernel, 3);
+                julia_rows(f, (w, h, w), r, (-0.77, 0.19), view, 40, &colours);
+            }
+            assert_eq!(out, whole, "convolve in {bands} bands");
+            assert_eq!(frac, fractal, "julia in {bands} bands");
+        }
+    }
 
     #[test]
     fn julia_of_zero_is_the_unit_disc() {
