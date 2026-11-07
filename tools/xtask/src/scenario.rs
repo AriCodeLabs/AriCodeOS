@@ -239,8 +239,11 @@ pub struct HostInput {
     pub click: Option<String>,
     /// A drag after that: the left button down, a move by (dx, dy), and up.
     pub drag: Option<(i32, i32)>,
-    /// A key held for this many ms, before `keys` are typed.
+    /// A key held for this many ms, after `keys` are typed.
     pub hold_key: Option<(String, u64)>,
+    /// A picture of the screen, kept as `NAME.ppm` in the scenario's directory:
+    /// taken after `wait_ms` and before anything is sent.
+    pub screendump: Option<String>,
     /// A pause after the marker, before anything is sent (ms): a stage
     /// that must come a while after the one before it (ADR 0077).
     #[serde(default)]
@@ -787,6 +790,20 @@ impl Scenario {
     }
 }
 
+/// The scenarios named in `names` (comma-separated), whatever their level: running a
+/// slow one while working on what it covers. A name that does not exist is an error.
+pub fn by_name<'a>(all: &'a [Scenario], names: &str) -> Result<Vec<&'a Scenario>> {
+    names
+        .split(',')
+        .map(|name| {
+            let name = name.trim();
+            all.iter()
+                .find(|s| s.name == name)
+                .ok_or_else(|| format!("--only: no scenario named '{name}'"))
+        })
+        .collect()
+}
+
 /// Selects scenarios by level and areas. For smoke/full, an empty selection
 /// is an error: a mistyped filter must not succeed without booting anything.
 pub fn select<'a>(
@@ -840,6 +857,18 @@ mod tests {
         for bad in ["", "usb\"kbd", "a b", "x}{"] {
             assert!(h(bad).check().is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn only_names_exact_scenarios_of_any_level() {
+        let all = [
+            scenario("a.quick", "full", "\"a\""),
+            scenario("a.slow", "release", "\"a\""),
+        ];
+        let got = by_name(&all, "a.slow, a.quick").unwrap();
+        assert_eq!(got[0].name, "a.slow");
+        assert_eq!(got[1].name, "a.quick");
+        assert!(by_name(&all, "a").is_err(), "a name, not a prefix");
     }
 
     #[test]

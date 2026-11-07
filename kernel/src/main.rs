@@ -175,6 +175,7 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
 
     task::init();
     console::start_cursor_thread();
+    arch::x86_64::thermal::start_watch(cmdline.get(keys::THERMAL_OFF).and_then(|v| v.parse().ok()));
     if cmdline.get(keys::SMP) == Some("off") {
         info!("smp: disabled on the command line (smp=off); 1 CPU");
     } else {

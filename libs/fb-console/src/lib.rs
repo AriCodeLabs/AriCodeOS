@@ -76,6 +76,11 @@ pub trait Surface {
             }
         }
     }
+    /// Draws a cell by its code (`cell_code`): the console's font by default, and a
+    /// surface with a better one draws the character itself.
+    fn cell(&mut self, x: usize, y: usize, code: u8, fg: Rgb, bg: Rgb) {
+        self.glyph(x, y, glyph(code), fg, bg);
+    }
     /// Fills `rows` full pixel rows starting at `y`.
     fn fill_rows(&mut self, y: usize, rows: usize, color: Rgb) {
         for yy in y..(y + rows).min(self.height()) {
@@ -232,6 +237,37 @@ impl<S: Surface> Console<S> {
         self.cursor_col = 0;
         self.cursor_row = 0;
         self.cursor_drawn = None;
+        self.invalidate();
+    }
+
+    /// A window changed size: the text stays, cut to what fits, with the rows up to the
+    /// cursor in view. Nothing is painted yet; [`redraw`](Self::redraw) does that.
+    pub fn resize_keeping(&mut self, surface: S) {
+        let (old_cols, old_rows) = (self.cols, self.rows);
+        let cols = (surface.width() / GLYPH_WIDTH).max(1);
+        let rows = (surface.height() / GLYPH_HEIGHT)
+            .max(1)
+            .min(MAX_CELLS / cols);
+        // `drawn` is no use from here on: it holds the old text meanwhile.
+        let used = old_cols * old_rows;
+        self.drawn[..used].copy_from_slice(&self.cells[..used]);
+        self.cells[..cols * rows].fill(b' ');
+        let above = (self.cursor_row + 1).saturating_sub(rows);
+        for row in 0..rows.min(old_rows.saturating_sub(above)) {
+            let from = (above + row) * old_cols;
+            let take = cols.min(old_cols);
+            self.cells[row * cols..row * cols + take]
+                .copy_from_slice(&self.drawn[from..from + take]);
+        }
+        self.cols = cols;
+        self.rows = rows;
+        self.surface = Some(surface);
+        self.cursor_row -= above;
+        self.cursor_col = self.cursor_col.min(cols - 1);
+        self.cursor_drawn = None;
+        // A range marked for the old grid means nothing in this one.
+        self.dirty_from = 0;
+        self.dirty_to = 0;
         self.invalidate();
     }
 
@@ -505,14 +541,7 @@ impl<S: Surface> Console<S> {
         let Some(surface) = self.surface.as_mut() else {
             return;
         };
-        let glyph = glyph(b);
-        surface.glyph(
-            col * GLYPH_WIDTH,
-            row * GLYPH_HEIGHT,
-            glyph,
-            self.fg,
-            self.bg,
-        );
+        surface.cell(col * GLYPH_WIDTH, row * GLYPH_HEIGHT, b, self.fg, self.bg);
     }
 }
 
@@ -635,6 +664,43 @@ mod tests {
     }
 
     type C = Console<Mem>;
+
+    #[test]
+    fn a_new_size_keeps_the_text_and_the_cursor_in_view() {
+        let mut c = Console::empty();
+        c.attach(Mem::new(80, 80));
+        // Ten columns and five rows.
+        for line in ["one", "two", "three", "four", "five"] {
+            let _ = write!(c, "{line}\n");
+        }
+        // Scrolled: "two" is on top, the cursor on the last row.
+        let _ = write!(c, "ab");
+        let surface = c.detach().unwrap();
+        // Three rows, narrower: the cursor's row stays, what is above goes.
+        c.resize_keeping(Mem::new(32, 48));
+        drop(surface);
+        assert_eq!((c.cols(), c.rows()), (4, 3));
+        assert_eq!(
+            &c.cells[..12],
+            b"four"
+                .iter()
+                .chain(b"five")
+                .chain(b"ab  ")
+                .copied()
+                .collect::<std::vec::Vec<u8>>()
+                .as_slice()
+        );
+        assert_eq!((c.cursor_col, c.cursor_row), (2, 2));
+        assert!(c.redraw(usize::MAX));
+        // Wider and taller: the kept text stays where it was, and more room is below.
+        let _ = c.detach();
+        c.resize_keeping(Mem::new(80, 96));
+        assert_eq!((c.cols(), c.rows()), (10, 6));
+        assert_eq!(&c.cells[..10], b"four      ");
+        assert_eq!(&c.cells[20..30], b"ab        ");
+        assert_eq!(&c.cells[30..40], b"          ");
+        assert_eq!((c.cursor_col, c.cursor_row), (2, 2));
+    }
 
     #[test]
     fn grid_size_and_clear() {

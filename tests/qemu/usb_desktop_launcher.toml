@@ -21,21 +21,22 @@ timeout_secs = 120
 
 [host_input]
 marker = "launcher: ready"
+wait_ms = 1000
+screendump = "launcher"
 keys = ["down", "up", "ret"]
 key_delay_ms = 100
 
-# "Leave the desktop" at (220, 268) in the launcher's content, which the
-# first window has at (40, 60); the pointer starts at the screen's centre.
+# "Leave the desktop" at (85, 367) in the launcher's content, which the
+# first window has at (40, 68); the pointer starts at the screen's centre.
 [[host_input_then]]
 marker = "gui_demo A: window closed"
-mouse_rel = [-380, -72]
+mouse_rel = [-515, 35]
 click = "left"
 
-# The launcher's close box at (344, 40), 16x16: its frame is 324 wide from
-# x = 38, and its top is 40.
+# The launcher's close circle at (48, 48), 12x12: its frame starts at (40, 40).
 [[host_input_then]]
-marker = "launcher: again to leave the desktop"
-mouse_rel = [90, -282]
+marker = "launcher: asks to leave the desktop"
+mouse_rel = [-71, -381]
 click = "left"
 
 [expect]
@@ -50,7 +51,7 @@ serial_contains = [
     "launcher: started gui_demo",
     "gui_demo A: focus gained",
     "gui_demo A: window closed",
-    "launcher: again to leave the desktop: open apps close with it",
+    "launcher: asks to leave the desktop",
     "compositor: window 1 asked to close",
     "launcher: leaving the desktop",
     "AriInit: the desktop ended (its launcher exited with 0): back to the text console",
@@ -61,7 +62,7 @@ serial_order = [
     "launcher: ready",
     "launcher: started gui_demo",
     "gui_demo A: window closed",
-    "launcher: again to leave the desktop",
+    "launcher: asks to leave the desktop",
     "compositor: window 1 asked to close",
     "launcher: leaving the desktop",
     "AriInit: the desktop ended (its launcher exited with 0): back to the text console",

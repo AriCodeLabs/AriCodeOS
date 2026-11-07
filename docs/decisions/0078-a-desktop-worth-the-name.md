@@ -392,3 +392,286 @@ fixed:
 
 **Not tested in QEMU:** the path without PAT, and a `Bitmask` screen, since OVMF
 offers none and scenarios cannot change the CPU model. Host tests cover the masks.
+
+## Stage 1: results so far
+
+### The frame and handling windows
+
+The compositor draws the frame of the look above: a 28 px title bar with its three
+circles on the left and the title centred, 10 px corners with smoothed edges, and the
+shadow from one table, blurred once at build time and used in slices. Colours and the
+shadow's strength are a `Theme`, not constants.
+
+The owner handles windows without the program's help:
+- the title bar moves one;
+- the three circles close, minimize and zoom;
+- a title bar dropped at the screen's edge snaps: sides to halves, corners to quarters,
+  the top to all of it;
+- Alt+Tab brings the next one forward, in the order they had when Alt went down, even a
+  minimized one.
+
+A program that asks (`wants::RESIZE`) can be resized by a band 6 px outside its frame,
+and zoomed or snapped to another size: it gets `Configure`, paints a buffer of that size
+and answers with `Resize`, and the window changes only then, so it is never shown cut.
+While the owner drags, only the latest size counts. The 0.18 apps do not ask yet, so they
+keep their size until they move to the toolkit (stage 2).
+
+`gui.window_manager` checks all of it, in QEMU.
+
+`Present` now takes effect where a window is when the frame is made, not where it was at
+that moment. Before, a window moved away and back within one frame kept its old pixels:
+the host test of damage against full composition found it, once frames could move.
+
+An independent review found no high findings. All fixed:
+- A size asked of a busy program could be applied after the owner had gone back. A place
+  now remembers its size, and only that answer takes it there.
+- Minimizing told the window nothing, and lost its keys' releases.
+- A window that opened without the focus could block Alt+Tab and being raised by a click.
+- A resize could show a black buffer: `Window::resize` now paints first.
+- A window closed during Alt+Tab, a click on a title bar near the top, and an empty
+  window list no longer misbehave; a minimized window Tab goes past is minimized again.
+- Sizes asked of a program stay within what it may answer; a hidden window's Present costs
+  nothing; a queue keeps `Configure`; the shadow skips what the frame covers and fills
+  the corners' notches.
+
+A minimized window has a place at the bottom of the screen, with its title, that a click brings
+back: the way back without a keyboard, ahead of the dock (stage 3). The compositor's handling logic has scenarios but no host tests: it lives in the
+service, and moving it into `libs/gfx` is for when it grows.
+
+### Text
+
+`libs/text` draws Inter 4.1 and JetBrains Mono NL 2.304, subset to Latin (49, 50 and
+24 KB; `libs/text/fonts/`, SIL OFL 1.1), with skrifa's outlines and light hinting.
+Title bars are Inter semibold 13 and the terminal is JetBrains Mono 13. Apps move to it
+with the toolkit (stage 2).
+
+- **Coverage is ours,** not zeno's. zeno keeps 24 KB of working data on the stack even when
+  given the heap, in a program with 64 KB. Ours is the signed-area method of font-rs and
+  fontdue: about 100 lines, nothing on the stack. A host test checks it against zeno on every
+  glyph of the three fonts at four sizes: mean difference 0.44 of 255, worst 24.
+- **Spacing** is the font's advances and its GPOS kerning, on ttf-parser. A host test checks
+  line widths against harfrust, which is not shipped. Ligatures and the rest of OpenType wait
+  until something needs them.
+- **Stack:** read-fonts keeps the autohinter's 16 KB scratch on the stack, with no way to give
+  it the heap. The compositor has an exception of 48 KB of path for this (`cargo xtask
+  stack-check`), used only while a glyph not yet cached is rendered. The terminal does the
+  same work, but that check measures initrd programs, not packages.
+- **Cost:** the stripped compositor is 598 KB. A screen of mixed text fits the cache in 16 KB.
+- **Not done yet:** blending is in sRGB with a slight lift of the coverage instead of the ADR's
+  gamma-correct blend, and 4 pixels per SSE2 instruction. To be measured before it grows.
+
+## Stage 2: results so far
+
+### The toolkit
+
+`libs/ui` holds retained widgets in stacks, with keyboard focus, in about 1900 lines and no
+`dyn`. A program builds its `Ui` once, gives it the window's events, reads back `Action`s and
+presents what `paint` answers. The launcher, the settings, the files and the editor run on it,
+and all four resize: their fixed coordinates are gone. The old `aricode_gfx::widgets` went
+with them.
+
+- **Controls:** labels and paragraphs, buttons, one-line fields and multi-line areas with a
+  selection, lists with a second column, scroll views with a thumb that drags, and the Tab
+  order, with a focus ring and a default button.
+- **Damage:** a change marks its area, and painting walks the whole tree clipped to the marks.
+  No widget has a second way of drawing itself, so a partial paint is the full paint's pixels by
+  construction. A host test checks that after every kind of event, and it found that rounded
+  corners blended twice when nothing cleaned below them.
+- **Tokens:** a widget names a role, never a value. Space, type and colour are one `Theme` value
+  a program can change or replace, which is the owner's rule against hardcoding. Light and dark
+  both exist; choosing one in settings is still to come.
+- **Long text:** an area lays out only the lines that show, so a key costs the same in a 64 KiB
+  file. Lines are not wrapped: a long one scrolls sideways with the caret.
+- **The quota:** a resize holds two buffers for a moment, so the apps ask for 8 MiB, which holds
+  a 1366x768 window going to any smaller one. It is a limit, not what they use: a buffer as
+  large as the screen costs 4.1 MiB only while it is that large. A refused size leaves the
+  window as it was, and says so where a program can.
+
+**Changed for the owner:** the editor opens plain text only. The old one kept bytes that were
+not UTF-8, shown as `?`; on Strings they would not come back as they were, so such a file is
+now refused and left alone (`is not plain text: not opened`), as is one with control characters.
+CRLF and tabs stay.
+
+**Tab now walks every control,** as on other systems, instead of going between a list and a
+field. Shift+Tab goes back, and Esc returns to the list or the name.
+
+The terminal stays on its text grid, and keeps its text across sizes (`Console::resize_keeping`).
+
+### The clipboard
+
+The ADR planned a service with its own capability. It became two requests of the window session
+the compositor already serves, because that needs no new authority and closes more:
+
+- A window copies only while it has the focus.
+- A window reads only with the focus, and once for each Ctrl+V the owner pressed in it. What the
+  owner copied may be a password: no program can watch the clipboard from behind, or take it
+  unasked while it has the focus. The first refusal of each window is logged.
+- 64 KiB of UTF-8 at most, kept outside the compositor's heap, in pages that cost nothing until
+  something is copied. Text coming in is copied once and checked before it replaces what was there.
+
+The price: only the keyboard opens it. A Paste menu item will need its own way to show the owner
+asked, and the terminal has no copy and paste yet, since Ctrl+C and Ctrl+V are the shell's.
+
+### Light and dark
+
+Settings chooses, and init keeps it in the file `appearance`. The compositor changes the frames
+and tells each window that asked, at once, and a new window learns it in the answer to `Create`,
+so its first picture is already right. `usb.desktop_appearance` checks it across a reboot.
+
+### The audit of this stage
+
+The clipboard's rules held. What it found was in the programs, and it was worth having:
+
+- **High, holding a key answered questions:** holding Delete in the files armed and then deleted,
+  and the refresh selected the next file, so it emptied `home/` at about 15 files a second. Holding
+  Enter on "Leave the desktop" left. The old programs had this too. The toolkit now knows a repeat
+  from a press: a repeat edits and moves, and opens, presses, confirms and shortcuts nothing.
+- **High, typing on a focused Open:** two spaces discarded unsaved text. Questions are modal
+  dialogs now, not "press again": see below.
+- **Medium:** Ctrl+X took the text before the clipboard had it (now it waits); a long line stopped
+  drawing at 160 glyphs (the limit is gone, and lines past 32767 px measure right); a status line
+  moved a view the owner had scrolled, without painting it.
+- **Low:** a CRLF is one line end for the caret; a held Ctrl+V reads once; refusals are logged per
+  reason; a paste that does not fit says so.
+
+### Dialogs
+
+A question is a modal dialog: nothing behind it takes the pointer, the keys or a shortcut. The keys
+start on the answer that changes nothing, a held key answers nothing, and Esc says no at once: with
+key codes, the toolkit no longer waits for the key after it to tell Esc from a sequence. A second
+click on the close box still answers the question the first one asked. The editor, the files and
+the launcher ask this way. The "press again" questions are gone.
+
+### What it costs
+
+`cargo test --release -p aricode-ui -- --ignored --nocapture ui_figures`, on the build host (Ryzen),
+at 1366x768. These compare builds; the laptop's processor pays more. They are not yet in `cargo
+xtask perf`, which measures inside QEMU, where software emulation hides this kind of cost.
+
+| Figure | Time |
+|---|---|
+| A glyph, not yet cached | 32 us |
+| The same, cached | 0.3 us |
+| A line of 60 characters | 14 us |
+| A control's rounded body | 0.4 us |
+| A window's shadow, 720x400 | 96 us |
+| A layout of a small form | 4 us |
+| A full repaint of that form | 244 us |
+| Pressing a button, painted | 2.6 us |
+| A key in a field, painted | 12 us |
+| Typing and deleting a key in 64 KiB of text, painted | 700 us |
+
+Menus move to stage 3, with the menu bar that uses them: built now, nothing would call them.
+
+## Stage 3: results so far
+
+The launcher searches as the owner types, and Enter opens the first match.
+
+**The dock** at the bottom shows every running program, each in a place it keeps. A click brings
+one forward, or minimizes it if it is already in front, which replaces the row of minimized windows
+of stage 1. Windows that fit themselves (zoom, snap) stop at the bar and the dock, and sizes come from
+the theme.
+
+**The bar** at the top names the program with the keys and shows the date and time. The compositor
+draws both, and they name a program by its signed manifest, as init told the compositor when it
+made the session. So a program cannot paint over them or call itself another there: its own title
+bar still says what it likes, and nothing here can stop a window from looking like anything inside
+its content. Nothing shows if the
+kernel could not read the real-time clock.
+
+**The clock's zone** is a whole number of hours from UTC, chosen in settings and kept in the file
+`timezone`. It has no summer time, so a place that changes must be chosen again twice a year. On a
+machine that also runs Windows the firmware's clock is usually local time, not UTC, so the right
+choice there is UTC: the kernel's own clock is then off, as it already was for what checks
+certificates. Tying this to real time zones needs their rules on the stick: to decide later.
+
+**The menus.** A program gives text and numbers, within fixed bounds (6 menus of 10 rows), and the
+compositor draws them: a hung program's menus still open, and a program parses nothing of anyone
+else's. They open with the pointer, by click or by press and drag, and with F10, the arrows, Enter
+and Esc, for a machine whose pointer does not work. A key held with a menu open moves in it and
+never reaches the program. `aricode_ui::EDIT_MENU` is the Edit menu, which does what its keys do.
+
+Choosing the row named exactly `Paste` opens the clipboard once, as Ctrl+V does. It rests on the
+owner reading that word: a program cannot get the clipboard from a row with any other name, but it
+could name a row Paste and do something else with that one read. So a menu cannot change while it is
+open, and a click chooses only the row marked as under the pointer, and only if the press was on the
+menus: a row cannot be slid under a click the owner meant for something else. The name is the
+compromise; the rule stays that nothing reads the clipboard without the owner's act.
+
+Titles stop short of the clock, and one that does not fit is not shown, in a program with long or
+many titles. Its rows are still reached with F10 and the arrows.
+
+**The network** shows in the bar, beside the clock. Init reads the address every 5 s and tells the
+compositor when it changes, so the compositor still holds no network capability. With the network
+service or the compositor hung that costs init half a second for each of them, and one that does not
+answer is asked every 30 s instead. Init has no check that a service it reads this way is alive, so
+a hung network service stays hung, as it did before this.
+
+**Notices** show under the bar and go after 8 s, or at a click. Only the compositor writes them, so
+what one says can be believed. It warns once when the processor comes within 10 C of where it slows
+itself, and again only after it has cooled 5 C more. Programs have no way to post one yet: nothing
+needs it, and it would bring questions of spam and spoofing to answer when something does.
+
+**Not done, on purpose: package-supplied names and icons in the manifests.** The manifest's parser refuses a key it
+does not know, and so a package with a new line cannot be installed by an older system, including a
+0.18 updating itself. A `title` must first be accepted by a released system, and used by packages
+only in a later one, as `--all-machines-0.18` already does for profiles. Icons need vector paths
+that the compositor or the launcher would parse from packages: to be studied with their audit.
+
+### Built-in shell artwork (2026-11-07)
+
+The dock, launcher and file list share a small set of original analytic icons in
+`libs/gfx/src/icons.rs`. Known package identifiers select their icon and display
+name; other packages retain their identifier and get a generic application icon.
+The compositor uses the identity init supplied, never the application's window
+title, to select artwork. This adds no manifest keys or wire fields, so existing
+packages remain installable. Package-supplied artwork still needs the compatibility
+and parsing work above.
+
+These shapes use the existing rounded rectangles and circles, plus bounded
+antialiased strokes, without a path parser, image decoder, allocation or new
+dependency. Drawing is clipped and capped at 64 pixels per icon. General paths
+remain a separate decision; this set does not require tiny-skia.
+
+After the owner's visual review, dock places are 44x40 pixels, with a 28-pixel
+icon and a state mark: a line for the active window, a dot for another visible
+window, an outlined dot for a minimized one. Names appear above the dock on hover;
+long names end in an ellipsis. The bubble is bounded by the screen, and scene
+damage covers its old and new locations. Zoom and snap reserve the new dock
+height. The launcher has a heading, 32-pixel application rows, separate
+open/refresh and leave controls, and an explicit empty-search state with Open
+disabled. The toolkit's optional list icons do not change stored row identifiers
+or activation indices; the file manager uses document icons beside its names.
+
+See the [desktop presentation audit](../audits/2026-11-07-desktop-presentation.md)
+for scope, validation and remaining work.
+
+The follow-up [deeper audit](../audits/2026-11-07-desktop-deep-audit.md) found that
+small snapped launchers hid their actions and that secondary list columns could
+displace filenames. The launcher now scrolls when its controls do not fit; lists
+omit the optional detail column when it would squeeze out the name (incident 0062).
+
+The first icon dock used 96x64 places and permanent labels. Although interaction
+tests passed, the owner found it too large: those tests had not assessed its
+proportions. The compact version reduces the painted bar from 72 to 48 pixels
+high, fits eight entries in 388 pixels at 800x600, and returns 24 vertical pixels
+to the work area. `usb.desktop_dock_compact` captures five real applications open
+together; `gui.window_dock` also captures a name while hovered.
+
+### The audit of this stage
+
+No panic and no bound broken. Its high finding, and what else was fixed:
+
+- **High:** a program could add Paste rows to a menu already open, under a pointer it knew had
+  stopped, without them being drawn, and the owner's next click chose one. Now see above.
+- **Medium:** a key that closed a menu went on to the program as if pressed anew, so holding Enter on
+  Open started programs until the slots filled; titles could overprint the clock; a program could
+  size its window so the bar covered its close box; a menu stayed on screen after its program died;
+  a hung compositor could hold init for 10 s at a time.
+- **Low:** a window closing no longer closes the menu of another; nothing but the left button goes
+  through an open menu; the heat is looked at also without a real-time clock; a dock click brings a
+  covered window forward; line breaks in a title do not make lines in the log; the glyph cache counts
+  what each entry costs.
+
+**Left as it was:** `Resize` still prints a line each time, with no limit, so a program can fill the
+log, as it could before this stage.

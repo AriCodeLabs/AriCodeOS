@@ -7,7 +7,7 @@ use crate::{self as sys, rights, rpc, Error, Handle};
 use aricode_gfx::Canvas;
 pub use aricode_proto::window::Event;
 pub use aricode_proto::window::{mods, wants, DamageRect, KeyState};
-use aricode_proto::window::{Op, Reply, Request, Status, MAX_DAMAGE};
+use aricode_proto::window::{Op, Reply, Request, Status, MAX_CLIPBOARD, MAX_DAMAGE, MAX_TITLE};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowError {
@@ -24,6 +24,8 @@ pub struct Window {
     pixels: u64,
     width: u32,
     height: u32,
+    /// The desktop was dark when this opened.
+    dark: bool,
 }
 
 impl Window {
@@ -64,6 +66,7 @@ impl Window {
         let mut w = Self {
             service,
             id: 0,
+            dark: false,
             dma,
             pixels,
             width,
@@ -72,11 +75,18 @@ impl Window {
         w.canvas().fill(0);
         let r = w.call(req, true)?;
         w.id = r.value as u32;
+        w.dark = (r.value >> 32) & 1 != 0;
         Ok(w)
     }
 
     pub fn id(&self) -> u32 {
         self.id
+    }
+
+    /// Whether the desktop was dark when this window opened: what its first picture
+    /// follows. [`wants::APPEARANCE`](super::window::wants) tells of a change after that.
+    pub fn starts_dark(&self) -> bool {
+        self.dark
     }
 
     /// Canvas over the content buffer.
@@ -88,12 +98,16 @@ impl Window {
     }
 
     fn call(&self, req: Request, with_buffer: bool) -> Result<Reply, WindowError> {
+        self.call_with(req, with_buffer.then_some(self.dma))
+    }
+
+    fn call_with(&self, req: Request, buffer: Option<Handle>) -> Result<Reply, WindowError> {
         let mut extra = [Handle(0); 1];
         let mut n = 0;
-        if with_buffer {
+        if let Some(buffer) = buffer {
             // `mmio_map` requires READ|WRITE even though the compositor only reads.
             extra[0] =
-                sys::handle_duplicate(self.dma, rights::READ | rights::WRITE | rights::TRANSFER)
+                sys::handle_duplicate(buffer, rights::READ | rights::WRITE | rights::TRANSFER)
                     .map_err(WindowError::Ipc)?;
             n = 1;
         }
@@ -138,10 +152,82 @@ impl Window {
         self.call(req, false).map(|_| ())
     }
 
-    /// Gives the content a new size, in a new buffer, blank until painted. The
-    /// old buffer goes once the compositor lets it go: for this call, the
-    /// program's quota must hold both.
-    pub fn resize(&mut self, hardware: Handle, width: u32, height: u32) -> Result<(), WindowError> {
+    /// Adds to this window's menus in the bar: `id` 0 names menu `menu`, and any other
+    /// `id` adds an item, told back as `Event::Menu` when the owner chooses it. A tab in
+    /// `label` puts what follows at the row's right end. Menus come in order.
+    pub fn menu_add(&self, menu: u32, label: &str, id: u32) -> Result<(), WindowError> {
+        let mut req = self
+            .request(Op::MenuAdd)
+            .with_title(label)
+            .ok_or(WindowError::Invalid)?;
+        req.width = menu;
+        req.height = id;
+        self.call(req, false).map(|_| ())
+    }
+
+    /// A buffer of `len` bytes for a clipboard request, given to `use_it` mapped.
+    fn with_buffer<R>(
+        hardware: Handle,
+        len: usize,
+        use_it: impl FnOnce(Handle, *mut u8) -> Result<R, WindowError>,
+    ) -> Result<R, WindowError> {
+        let dma = sys::dma_alloc(hardware, len.max(1) as u64).map_err(WindowError::Ipc)?;
+        let result = match sys::mmio_map(dma) {
+            Ok(virt) => {
+                let result = use_it(dma, virt as *mut u8);
+                let _ = sys::mmio_unmap(virt);
+                result
+            }
+            Err(e) => Err(WindowError::Ipc(e)),
+        };
+        let _ = sys::handle_close(dma);
+        result
+    }
+
+    /// The owner's clipboard becomes `text`: what a program does when the owner copies.
+    /// Refused while the window lacks the focus.
+    pub fn clipboard_set(&self, hardware: Handle, text: &str) -> Result<(), WindowError> {
+        if text.len() > MAX_CLIPBOARD {
+            return Err(WindowError::Invalid);
+        }
+        Self::with_buffer(hardware, text.len(), |dma, virt| {
+            // SAFETY: our own new buffer, of at least this many bytes.
+            unsafe { core::ptr::copy_nonoverlapping(text.as_ptr(), virt, text.len()) };
+            let mut req = self.request(Op::ClipboardSet);
+            req.width = text.len() as u32;
+            self.call_with(req, Some(dma)).map(|_| ())
+        })
+    }
+
+    /// Reads the owner's clipboard into `take`, once for each Ctrl+V the owner pressed
+    /// in this window: at any other time it is refused, so call it for that key.
+    pub fn clipboard_get<R>(
+        &self,
+        hardware: Handle,
+        take: impl FnOnce(&str) -> R,
+    ) -> Result<R, WindowError> {
+        Self::with_buffer(hardware, MAX_CLIPBOARD, |dma, virt| {
+            let reply = self.call_with(self.request(Op::ClipboardGet), Some(dma))?;
+            let len = (reply.value as usize).min(MAX_CLIPBOARD);
+            // SAFETY: our own buffer, of `MAX_CLIPBOARD` bytes, and the compositor is done.
+            let bytes = unsafe { core::slice::from_raw_parts(virt, len) };
+            let text = core::str::from_utf8(bytes).map_err(|_| WindowError::Invalid)?;
+            Ok(take(text))
+        })
+    }
+
+    /// Gives the content a new size, in a new buffer that `paint` draws first: the
+    /// compositor shows the new size with its picture, never blank. The old buffer
+    /// goes once the compositor lets it go: for this call, the program's quota must
+    /// hold both. Should the answer be lost in a timeout, the compositor may hold the
+    /// new buffer while this keeps the old one, until the next resize.
+    pub fn resize(
+        &mut self,
+        hardware: Handle,
+        width: u32,
+        height: u32,
+        paint: impl FnOnce(&mut Canvas),
+    ) -> Result<(), WindowError> {
         if width == 0 || height == 0 {
             return Err(WindowError::Invalid);
         }
@@ -156,7 +242,7 @@ impl Window {
         };
         let old = (self.dma, self.pixels, self.width, self.height);
         (self.dma, self.pixels, self.width, self.height) = (dma, pixels, width, height);
-        self.canvas().fill(0);
+        paint(&mut self.canvas());
         let mut req = self.request(Op::Resize);
         req.width = width;
         req.height = height;
@@ -224,12 +310,56 @@ pub fn poll_reply(msg: &[u8]) -> Result<Option<Event>, WindowError> {
     }
 }
 
+/// Init only, over the compositor's main endpoint: the desktop becomes dark or light.
+pub fn set_appearance(compositor: Handle, dark: bool) -> Result<(), WindowError> {
+    let mut req = Request::new(Op::Appearance);
+    req.width = u32::from(dark);
+    main_request(compositor, req)
+}
+
+/// Init only, over the compositor's main endpoint: the clock's minutes from UTC.
+pub fn set_timezone(compositor: Handle, minutes: i32) -> Result<(), WindowError> {
+    let mut req = Request::new(Op::Timezone);
+    req.width = minutes as u32;
+    main_request(compositor, req)
+}
+
+/// Init only, over the compositor's main endpoint: what the bar says of the network.
+/// Waits `wait_ms` at most: init does this on its own, in its main loop.
+pub fn set_network(compositor: Handle, text: &str, wait_ms: u64) -> Result<(), WindowError> {
+    let req = Request::new(Op::Network)
+        .with_title(text)
+        .ok_or(WindowError::Invalid)?;
+    main_request_within(compositor, req, wait_ms)
+}
+
+fn main_request(compositor: Handle, req: Request) -> Result<(), WindowError> {
+    main_request_within(compositor, req, rpc::GRACE_MS)
+}
+
+fn main_request_within(compositor: Handle, req: Request, wait_ms: u64) -> Result<(), WindowError> {
+    let mut msg = [0u8; Reply::LEN];
+    let len = rpc::call(compositor, &req.encode(), &[], wait_ms, wait_ms, &mut msg)
+        .map_err(WindowError::Ipc)?;
+    match Reply::decode(&msg[..len]).map(|r| r.status) {
+        Some(Status::Ok) => Ok(()),
+        Some(s) => Err(WindowError::Status(s)),
+        None => Err(WindowError::Ipc(Error::Invalid)),
+    }
+}
+
 /// Broker and init only, over the compositor's main endpoint: a session
 /// for one client (ADR 0052); returns its send side (`WRITE`,
 /// transferable) and its id for [`detach`]. Windows created through it are
 /// that client's alone.
-pub fn attach(compositor: Handle) -> Result<(Handle, u32), WindowError> {
-    let req = Request::new(Op::Attach);
+///
+/// `program` is its name from its manifest, which the bar and the dock show for its
+/// windows, whatever titles it gives them.
+pub fn attach(compositor: Handle, program: &str) -> Result<(Handle, u32), WindowError> {
+    let name = program.get(..program.floor_char_boundary(MAX_TITLE));
+    let req = Request::new(Op::Attach)
+        .with_title(name.unwrap_or(""))
+        .ok_or(WindowError::Invalid)?;
     let mut msg = [0u8; Reply::LEN];
     let mut handles = [Handle(0); sys::abi::IPC_MAX_HANDLES];
     let (len, nh) = rpc::call_handles(

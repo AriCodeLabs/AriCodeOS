@@ -5,40 +5,39 @@
 //! capability: a directory session of fsd on that folder, so names are
 //! plain, `notes.txt`). The file name goes in the field at the top; Open
 //! (or Enter there, or Ctrl+O) reads it, Save (or Ctrl+S) replaces it
-//! atomically. Tab moves from the name to the text, Ctrl+L back. Opening
-//! over unsaved changes, or saving over another file than the one opened,
-//! takes a second press.
+//! atomically. Tab walks the name, Open, Save and the text; Ctrl+L or Esc goes
+//! back to the name.
+//! Opening over unsaved changes, or saving over another file than the one
+//! opened, asks first. It opens plain text only: a file that is not
+//! UTF-8 or holds control characters would not come back from it byte for
+//! byte, so it is refused and left alone. Built on the toolkit (ADR 0078,
+//! stage 2).
 //!
 //! Handles, in the broker's order: the folder's file session, its
 //! compositor session (both endpoints) and `HARDWARE`.
 #![no_std]
 #![no_main]
 
-use aricode_gfx::widgets::{self, Button, Key, KeyDecoder, TextArea, TextField, PAD, ROW_H};
-use aricode_gfx::Rect;
+extern crate alloc;
+
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
 use aricode_rt::sys::fs::{FsClient, FsError};
-use aricode_rt::sys::window::{Event, Window};
+use aricode_rt::sys::window::{wants, Event, Window};
 use aricode_rt::sys::{self, kind, permissions};
 use aricode_sync::SpinLock;
+use aricode_ui::{Action, Dialog, Fill, Id, Space, Stack, Style, Theme, Tone, Ui, EDIT_MENU};
 
 const W: u32 = 640;
 const H: u32 = 448;
 /// The largest file it edits.
 const MAX_TEXT: usize = 64 * 1024;
-
-const NAME_RECT: Rect = Rect::new(PAD + 40, PAD, 360, ROW_H);
-const OPEN: Button = Button::at(PAD + 408, PAD, "Open");
-const SAVE: Button = Button::at(PAD + 464, PAD, "Save");
-const STATUS_Y: i32 = PAD + ROW_H as i32 + 4;
-const TEXT_RECT: Rect = Rect::new(
-    PAD,
-    STATUS_Y + widgets::LINE_H as i32 + 4,
-    W - 2 * PAD as u32,
-    H - (STATUS_Y as u32 + widgets::LINE_H + 4) - PAD as u32,
-);
-
-/// The text (64 KiB): too large for the stack.
-static TEXT: SpinLock<TextArea<MAX_TEXT>> = SpinLock::new(TextArea::new());
+/// The numbers of its File menu.
+const MENU_OPEN: u32 = 1;
+const MENU_SAVE: u32 = 2;
+/// More for the heap: the text, a copy of it as it is pasted, and the glyphs.
+const MORE_HEAP: usize = 512 * 1024;
 
 fn say(parts: &[&[u8]]) {
     sys::print(b"editor: ");
@@ -48,13 +47,16 @@ fn say(parts: &[&[u8]]) {
     sys::print(b"\n");
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Focus {
-    Name,
-    Text,
+/// Whether this comes back from the editor byte for byte: `text` keeps every line
+/// break and tab, and anything else that is not printable would be changed.
+fn is_plain(bytes: &[u8]) -> Option<&str> {
+    let text = core::str::from_utf8(bytes).ok()?;
+    text.chars()
+        .all(|c| !c.is_control() || matches!(c, '\n' | '\t' | '\r'))
+        .then_some(text)
 }
 
-/// What a second press confirms.
+/// What a question on show is about.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Confirm {
     /// Open, throwing the unsaved changes away.
@@ -67,47 +69,58 @@ enum Confirm {
 
 struct Editor {
     fs: FsClient,
-    name: TextField<26>,
+    ui: Ui,
+    name: Id,
+    open: Id,
+    save: Id,
+    text: Id,
+    status: Id,
+    changed_mark: Id,
+    /// The text differs from what was last read or saved.
+    changed: bool,
     /// The file the text came from or was last saved to (empty: none).
     loaded: [u8; 26],
     /// That file did not exist when it was opened and was not saved yet:
     /// if someone made it since, saving over it asks first (audit, L2).
     loaded_new: bool,
-    /// The action a first press asked to confirm, and for which name.
-    armed: Option<(Confirm, [u8; 26])>,
-    focus: Focus,
-    status: [u8; 80],
-    status_len: usize,
-    error: bool,
+    /// The question on show.
+    confirm: Option<Confirm>,
+    question: Dialog,
 }
 
 impl Editor {
     fn set_status(&mut self, error: bool, parts: &[&[u8]]) {
-        let mut n = 0;
+        let mut text = Vec::new();
         for p in parts {
-            let take = p.len().min(self.status.len() - n);
-            self.status[n..n + take].copy_from_slice(&p[..take]);
-            n += take;
+            text.extend_from_slice(p);
         }
-        self.status_len = n;
-        self.error = error;
+        self.ui
+            .set_text(self.status, &String::from_utf8_lossy(&text));
+        let tone = if error { Tone::Error } else { Tone::Secondary };
+        self.ui.set_tone(self.status, tone);
         say(parts);
+    }
+
+    fn set_changed(&mut self, changed: bool) {
+        self.changed = changed;
+        let mark = if changed { "changed" } else { "" };
+        self.ui.set_text(self.changed_mark, mark);
     }
 
     /// The name typed, if it is one fsd keeps (audit of the editor, L2).
     fn named(&mut self) -> Option<[u8; 26]> {
-        let text = self.name.text();
+        let text = String::from(self.ui.text(self.name));
         if text.is_empty() {
             self.set_status(true, &[b"type a file name first"]);
-            self.focus = Focus::Name;
+            self.ui.focus(self.name);
             return None;
         }
-        if !aricode_proto::fs::valid_plain_name(text, 26) {
+        if !aricode_proto::fs::valid_plain_name(&text, 26) {
             self.set_status(
                 true,
                 &["names: a-z, 0-9, . _ - (no accents or ñ)".as_bytes()],
             );
-            self.focus = Focus::Name;
+            self.ui.focus(self.name);
             return None;
         }
         let mut n = [0u8; 26];
@@ -115,55 +128,44 @@ impl Editor {
         Some(n)
     }
 
-    /// Whether this is the second press of `what` for `name`; the first
-    /// one only arms it.
-    fn confirmed(&mut self, what: Confirm, name: [u8; 26]) -> bool {
-        if self.armed == Some((what, name)) {
-            self.armed = None;
-            return true;
-        }
-        self.armed = Some((what, name));
-        false
+    fn ask(&mut self, what: Confirm, question: &str, yes: &str) {
+        self.confirm = Some(what);
+        self.ui.ask(&self.question, question, yes);
+        say(&[b"asks: ", question.as_bytes()]);
     }
 
-    /// The owner clicked the close box: whether to close now. Unsaved
-    /// changes ask first; a second click discards them (ADR 0077).
+    /// The owner clicked the close box: whether to close now. Unsaved changes ask first
+    /// (ADR 0077); a second click answers that.
     fn close_asked(&mut self) -> bool {
-        if !TEXT.lock().changed() || self.confirmed(Confirm::Close, [0; 26]) {
+        if !self.changed || self.confirm == Some(Confirm::Close) {
             return true;
         }
-        self.set_status(true, &[b"unsaved changes: close again to discard them"]);
+        self.ask(Confirm::Close, "Close without saving the changes?", "Close");
         false
-    }
-
-    fn disarm_close(&mut self) {
-        if matches!(self.armed, Some((Confirm::Close, _))) {
-            self.armed = None;
-        }
     }
 
     /// The name field shows the file the text belongs to again, after an
     /// Open that failed (audit of the editor, M1).
     fn restore_name(&mut self) {
         let loaded = self.loaded;
-        self.name.set(name_of(&loaded));
+        self.ui.set_text(self.name, name_of(&loaded));
     }
 
-    fn open(&mut self) {
+    fn open(&mut self, answered: bool) {
         let Some(buf) = self.named() else { return };
         let name = name_of(&buf);
-        // Unsaved changes are never thrown away on one press (audit of the
-        // editor, M2).
-        if TEXT.lock().changed() && !self.confirmed(Confirm::Discard, buf) {
-            return self.set_status(true, &[b"unsaved changes: Open again to discard them"]);
+        // Unsaved changes are never thrown away unasked (audit of the editor, M2).
+        if self.changed && !answered {
+            return self.ask(Confirm::Discard, "Discard the unsaved changes?", "Discard");
         }
         let fd = match self.fs.open(name) {
             Ok(fd) => fd,
             Err(FsError::Status(aricode_proto::fs::Status::NotFound)) => {
-                TEXT.lock().set(b"");
+                self.ui.set_text(self.text, "");
+                self.set_changed(false);
                 self.loaded = buf;
                 self.loaded_new = true;
-                self.focus = Focus::Text;
+                self.ui.focus(self.text);
                 return self.set_status(
                     false,
                     &[b"new file ", name.as_bytes(), b" (saved with Save)"],
@@ -200,47 +202,41 @@ impl Editor {
             self.set_status(true, &[name.as_bytes(), why]);
             return self.restore_name();
         }
-        // Text that is not UTF-8 is kept and shown as `?` (ADR 0076):
-        // editing near those bytes changes them, so the owner is told.
-        let plain = core::str::from_utf8(&scratch[..loaded]).is_ok();
-        TEXT.lock().set(&scratch[..loaded]);
+        let Some(text) = is_plain(&scratch[..loaded]) else {
+            drop(scratch);
+            self.set_status(true, &[name.as_bytes(), b" is not plain text: not opened"]);
+            return self.restore_name();
+        };
+        self.ui.set_text(self.text, text);
         drop(scratch);
+        self.set_changed(false);
         self.loaded = buf;
         self.loaded_new = false;
-        self.focus = Focus::Text;
+        self.ui.focus(self.text);
         let mut b = [0u8; 20];
         self.set_status(
-            !plain,
+            false,
             &[
                 b"opened ",
                 name.as_bytes(),
                 b" (",
                 aricode_rt::fmt_u64(loaded as u64, &mut b),
-                if plain {
-                    b" bytes)"
-                } else {
-                    b" bytes; not all UTF-8, shown as ?)"
-                },
+                b" bytes)",
             ],
         );
     }
 
-    fn save(&mut self) {
+    fn save(&mut self, answered: bool) {
         let Some(buf) = self.named() else { return };
         let name = name_of(&buf);
         let mut created = false;
         let fd = match self.fs.open(name) {
-            // Another file of that name is replaced only on a second press
+            // Another file of that name is replaced only when the owner says so
             // (audit of the editor, M1).
-            Ok(fd)
-                if (buf != self.loaded || self.loaded_new)
-                    && !self.confirmed(Confirm::Replace, buf) =>
-            {
+            Ok(fd) if (buf != self.loaded || self.loaded_new) && !answered => {
                 let _ = self.fs.close(fd);
-                return self.set_status(
-                    true,
-                    &[name.as_bytes(), b" exists: Save again to replace it"],
-                );
+                let question = format!("{name} exists. Replace it?");
+                return self.ask(Confirm::Replace, &question, "Replace");
             }
             Ok(fd) => fd,
             Err(FsError::Status(aricode_proto::fs::Status::NotFound)) => {
@@ -254,13 +250,11 @@ impl Editor {
             }
             Err(_) => return self.set_status(true, &[b"cannot open ", name.as_bytes()]),
         };
-        let mut text = TEXT.lock();
-        let saved = self.fs.replace(fd, text.text());
-        let len = text.text().len();
+        let saved = self.fs.replace(fd, self.ui.text(self.text).as_bytes());
+        let len = self.ui.text(self.text).len();
         if saved.is_ok() {
-            text.mark_saved();
+            self.set_changed(false);
         }
-        drop(text);
         let _ = self.fs.close(fd);
         // A file made for a save that failed is not left behind empty
         // (audit of the editor, L3).
@@ -290,57 +284,49 @@ impl Editor {
         }
     }
 
-    fn key(&mut self, key: Key) {
-        // Any other key disarms a confirmation; Enter only in the name,
-        // where it opens (in the text it is a change; audit, L1).
-        let confirming = matches!(key, Key::Ctrl(b's' | b'o'))
-            || (key == Key::Enter && self.focus == Focus::Name);
-        if !confirming {
-            self.armed = None;
-        }
-        match (key, self.focus) {
-            (Key::Ctrl(b's'), _) => self.save(),
-            (Key::Ctrl(b'o'), _) => self.open(),
-            // Esc is known only with the key after it: Ctrl+L goes to the
-            // name at once (audit of the editor, L4).
-            (Key::Ctrl(b'l'), _) => self.focus = Focus::Name,
-            (Key::Tab, Focus::Name) => self.focus = Focus::Text,
-            (Key::Escape, Focus::Text) => self.focus = Focus::Name,
-            (Key::Enter, Focus::Name) => self.open(),
-            (k, Focus::Name) => {
-                self.name.key(k);
-            }
-            (k, Focus::Text) => {
-                TEXT.lock().key(k);
-            }
+    fn show(&mut self, win: &mut Window) {
+        let frame = self.ui.paint(&mut win.canvas());
+        if !frame.is_empty() {
+            let _ = win.present_rects(frame.rects());
         }
     }
+}
 
-    fn draw(&self, win: &mut Window) {
-        let mut c = win.canvas();
-        c.fill(widgets::BG);
-        c.text(PAD, PAD + 4, "File", widgets::FG, None);
-        self.name
-            .draw(&mut c, &NAME_RECT, self.focus == Focus::Name);
-        OPEN.draw(&mut c, false);
-        SAVE.draw(&mut c, true);
-        let mut text = TEXT.lock();
-        let mut status = [0u8; 96];
-        let mut n = self.status_len;
-        status[..n].copy_from_slice(&self.status[..n]);
-        if text.changed() {
-            let mark = b"  [changed]";
-            status[n..n + mark.len()].copy_from_slice(mark);
-            n += mark.len();
-        }
-        let color = if self.error {
-            widgets::ERROR
-        } else {
-            widgets::MUTED
-        };
-        let shown = widgets::utf8_prefix(&status[..n]);
-        c.text(PAD, STATUS_Y, shown, color, None);
-        text.draw(&mut c, &TEXT_RECT, self.focus == Focus::Text);
+/// The window's widgets, and the folder they work in.
+fn build(fs: FsClient, dark: bool) -> Editor {
+    let mut ui = Ui::new(Theme::of(dark), W, H);
+    let name = ui.field(26, "File name");
+    ui.set_flex(name, 1);
+    let open = ui.button("Open");
+    let save = ui.default_button("Save");
+    let top = ui.stack(Stack::row(), &[name, open, save]);
+    let status = ui.label("", Style::Callout, Tone::Secondary);
+    ui.set_flex(status, 1);
+    let changed_mark = ui.label("", Style::Callout, Tone::Secondary);
+    let line = ui.stack(Stack::row(), &[status, changed_mark]);
+    let text = ui.area(MAX_TEXT);
+    ui.set_flex(text, 1);
+    let root = ui.stack(
+        Stack::column().pad(Space::Margin).fill(Fill::Window),
+        &[top, line, text],
+    );
+    ui.set_root(root);
+    ui.focus(name);
+    let question = ui.dialog("Yes", "Cancel");
+    Editor {
+        fs,
+        ui,
+        name,
+        open,
+        save,
+        text,
+        status,
+        changed_mark,
+        changed: false,
+        loaded: [0; 26],
+        loaded_new: false,
+        confirm: None,
+        question,
     }
 }
 
@@ -372,28 +358,44 @@ fn main(_arg: u64) -> u64 {
         say(&[b"cannot reach home/"]);
         return 2;
     };
-    let Ok(mut win) = Window::create(session, hw, W, H, "Editor") else {
+    // The window's quota holds this too: it stays for the program's life.
+    let Some(heap) = sys::dma_alloc(hw, MORE_HEAP as u64)
+        .ok()
+        .and_then(|dma| sys::mmio_map(dma).ok())
+    else {
+        say(&[b"no memory for its text"]);
+        return 3;
+    };
+    // SAFETY: a new mapping of whole pages, never unmapped, used by nothing else.
+    unsafe { aricode_rt::extend_heap(heap as usize, MORE_HEAP) };
+    let wanted = wants::POINTER | wants::KEY_CODES | wants::RESIZE | wants::APPEARANCE;
+    let Ok(mut win) = Window::create_wanting(session, hw, W, H, "Editor", wanted) else {
         say(&[b"could not create its window"]);
         return 3;
     };
-    let mut ed = Editor {
-        fs,
-        name: TextField::new(),
-        loaded: [0; 26],
-        loaded_new: false,
-        armed: None,
-        focus: Focus::Name,
-        status: [0; 80],
-        status_len: 0,
-        error: false,
-    };
+    let file = [
+        ("File", 0),
+        ("Open\tCtrl+O", MENU_OPEN),
+        ("Save\tCtrl+S", MENU_SAVE),
+    ];
+    let menus = file
+        .iter()
+        .map(|&(label, id)| win.menu_add(0, label, id))
+        .chain(
+            EDIT_MENU
+                .iter()
+                .map(|&(label, id)| win.menu_add(1, label, id)),
+        );
+    if menus.into_iter().any(|added| added.is_err()) {
+        say(&[b"the bar did not take its menus"]);
+    }
+    let mut ed = build(fs, win.starts_dark());
     ed.set_status(false, &[b"files in home/; type a name and press Enter"]);
-    ed.draw(&mut win);
-    if win.present().is_err() {
+    let frame = ed.ui.paint(&mut win.canvas());
+    if frame.is_empty() || win.present().is_err() {
         return 4;
     }
     say(&[b"ready"]);
-    let mut keys = KeyDecoder::new();
     loop {
         let event = match win.poll(1000) {
             Ok(Some(e)) => e,
@@ -401,37 +403,77 @@ fn main(_arg: u64) -> u64 {
             // The compositor is gone: so is the desktop.
             Err(_) => return 5,
         };
-        // Anything but a second click on the close box disarms it (audit
-        // of ADR 0077, L6).
-        if !matches!(event, Event::Close | Event::Focus(_)) {
-            ed.disarm_close();
-        }
         match event {
-            Event::Key(b) => {
-                for key in keys.feed(b).into_iter().flatten() {
-                    ed.key(key);
-                }
-            }
-            Event::Click { x, y, .. } => {
-                if NAME_RECT.contains(x, y) {
-                    ed.focus = Focus::Name;
-                } else if TEXT_RECT.contains(x, y) {
-                    ed.focus = Focus::Text;
-                } else if OPEN.contains(x, y) {
-                    ed.open();
-                } else if SAVE.contains(x, y) {
-                    ed.save();
-                }
-            }
             Event::Close if ed.close_asked() => {
                 say(&[b"closed"]);
                 let _ = win.close();
                 return 0;
             }
-            _ => {}
+            Event::Configure { width, height } => {
+                let _ = ed.ui.configure(width, height, |ui| {
+                    win.resize(hw, width, height, |c| ui.paint_all(c))
+                });
+            }
+            event => ed.ui.handle(event),
         }
-        ed.draw(&mut win);
-        let _ = win.present();
+        while let Some(action) = ed.ui.next_action() {
+            match action {
+                Action::Edited(id) => {
+                    if id == ed.text {
+                        ed.set_changed(true);
+                    }
+                }
+                Action::Pressed(id) if id == ed.question.no => {
+                    ed.confirm = None;
+                    ed.ui.answered();
+                }
+                Action::Pressed(id) if id == ed.question.yes => {
+                    let what = ed.confirm.take();
+                    ed.ui.answered();
+                    match what {
+                        Some(Confirm::Discard) => ed.open(true),
+                        Some(Confirm::Replace) => ed.save(true),
+                        Some(Confirm::Close) => {
+                            say(&[b"closed"]);
+                            let _ = win.close();
+                            return 0;
+                        }
+                        None => {}
+                    }
+                }
+                Action::Shortcut(b's') | Action::Menu(MENU_SAVE) => ed.save(false),
+                Action::Shortcut(b'o') | Action::Menu(MENU_OPEN) => ed.open(false),
+                Action::Submitted(_) => ed.open(false),
+                Action::Pressed(id) if id == ed.open => ed.open(false),
+                Action::Pressed(id) if id == ed.save => ed.save(false),
+                Action::Shortcut(b'l') | Action::Cancel => ed.ui.focus(ed.name),
+                Action::Copied => {
+                    if let Some(text) = ed.ui.take_copied() {
+                        let mut b = [0u8; 20];
+                        let n = aricode_rt::fmt_u64(text.len() as u64, &mut b);
+                        match win.clipboard_set(hw, &text) {
+                            Ok(()) => say(&[b"copied ", n, b" bytes"]),
+                            Err(_) => ed.set_status(true, &[b"could not copy ", n, b" bytes"]),
+                        }
+                    }
+                }
+                Action::Cut(id) => {
+                    if let Some(text) = ed.ui.take_copied() {
+                        match win.clipboard_set(hw, &text) {
+                            Ok(()) => ed.ui.cut_done(id),
+                            Err(_) => ed.set_status(true, &[b"could not cut: the text stays"]),
+                        }
+                    }
+                }
+                Action::Paste(id) => match win.clipboard_get(hw, |text| ed.ui.paste(id, text)) {
+                    Ok(true) => {}
+                    Ok(false) => ed.set_status(true, &[b"only part of it fits here"]),
+                    Err(_) => ed.set_status(true, &[b"could not paste"]),
+                },
+                _ => {}
+            }
+        }
+        ed.show(&mut win);
     }
 }
 

@@ -4,6 +4,23 @@ Guide for the first boot on the test laptop. The order and the precautions
 follow sections 95 to 97 of the master document: **the internal disk is
 never touched**; AriCodeOS boots from and writes only to its own USB stick.
 
+## The reference laptop is a test machine
+
+The owner's rule (2026-11-06): the reference laptop exists for tests, and anything may
+be installed on it, Debian and Mesa included. Two things must never follow from that:
+
+- **Nothing from it reaches production.** Sticks for it carry the host's SSH key, a
+  development source on this LAN and a fixed host key. Published images are built
+  without them (`docs/WORKFLOW.md`, "Publishing a version"). Reference systems run from
+  their own stick, and their tools and results live outside the repository, in
+  `~/aricode-scratch/`; only figures reach documents.
+- **No data on it may endanger another machine.** It holds no private signing key:
+  the release and development keys stay on the host, which signs what the laptop
+  fetches. The SSH key it trusts is public; the host key on its stick is used by no
+  other machine, and a stick written for it is not given to anyone.
+
+Heavy runs on it get a thermal watch, as on the host.
+
 ## What you need
 
 - An x86-64 laptop with UEFI firmware (UEFI boot, not CSM/legacy) and

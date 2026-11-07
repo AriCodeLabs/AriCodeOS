@@ -1126,6 +1126,8 @@ pub mod window {
     pub const MAX_SIDE: u32 = 4096;
     /// Rectangles a `Present` can name.
     pub const MAX_DAMAGE: usize = 5;
+    /// The most the clipboard holds, in bytes.
+    pub const MAX_CLIPBOARD: usize = 64 * 1024;
 
     /// What a window asks for beyond the events every window gets, in
     /// [`Request::events`] of `Create` (ADR 0078, stage 0). The wire format
@@ -1136,6 +1138,11 @@ pub mod window {
         pub const POINTER: u32 = 1;
         /// `KeyCode`, for each key, beside the `Key` bytes.
         pub const KEY_CODES: u32 = 2;
+        /// The owner may resize it: `Configure`, answered with `Resize`. Without
+        /// this a window keeps the size its program gave it.
+        pub const RESIZE: u32 = 4;
+        /// `Appearance`, when the owner chooses light or dark.
+        pub const APPEARANCE: u32 = 8;
     }
 
     /// The modifiers in `Event::KeyCode`. The numbers are those of
@@ -1191,6 +1198,24 @@ pub mod window {
         /// The window's content becomes `width`x`height`, in a new buffer;
         /// handles `[reply, buffer]`, as `Create`. The old buffer is released.
         Resize = 7,
+        /// The owner's clipboard becomes the `width` bytes of UTF-8 at the start of
+        /// the buffer; handles `[reply, buffer]`. Only the focused window.
+        ClipboardSet = 8,
+        /// The clipboard's text goes to the start of the buffer, of [`MAX_CLIPBOARD`]
+        /// bytes, and `Reply::value` says how many; handles `[reply, buffer]`. Only
+        /// the focused window, once for each Ctrl+V the owner pressed in it.
+        ClipboardGet = 9,
+        /// Main endpoint only (init): the desktop becomes dark (`width` 1) or light
+        /// (`width` 0).
+        Appearance = 10,
+        /// Main endpoint only (init): the owner's clock is `width` minutes from UTC, a
+        /// signed value.
+        Timezone = 11,
+        /// Menu `width` of this window gets an item `title`, which tells its program
+        /// `height` when chosen; a `height` of 0 names the menu. Menus come in order.
+        MenuAdd = 12,
+        /// Main endpoint only (init): the bar shows `title` for the network.
+        Network = 13,
     }
 
     /// Request (64 bytes).
@@ -1290,6 +1315,12 @@ pub mod window {
                 5 => Op::Attach,
                 6 => Op::Detach,
                 7 => Op::Resize,
+                8 => Op::ClipboardSet,
+                9 => Op::ClipboardGet,
+                10 => Op::Appearance,
+                11 => Op::Timezone,
+                12 => Op::MenuAdd,
+                13 => Op::Network,
                 _ => return None,
             };
             let mut req = Self::new(op);
@@ -1326,6 +1357,8 @@ pub mod window {
         BadHandles = 3,
         BadWindow = 4,
         Timeout = 5,
+        /// Not while it lacks the focus, or the owner's press.
+        Denied = 6,
     }
 
     /// Event delivered to a window. More kinds may come: a program matches
@@ -1363,6 +1396,15 @@ pub mod window {
             state: KeyState,
             mods: u8,
         },
+        /// [`wants::RESIZE`]: the owner wants the content at this size. The
+        /// program paints a buffer of it and answers with `Op::Resize`; the
+        /// window changes when it does, so a busy program keeps its picture
+        /// whole. While the owner drags, only the latest counts.
+        Configure { width: u32, height: u32 },
+        /// [`wants::APPEARANCE`]: the owner chose light or dark for the desktop.
+        Appearance { dark: bool },
+        /// The owner chose an item of this window's menus, by the number it was given.
+        Menu { id: u32 },
     }
 
     /// Reply (32 bytes): status, value and optional event.
@@ -1451,6 +1493,19 @@ pub mod window {
                     b[18] = state as u8;
                     b[19] = mods;
                 }
+                Some(Event::Configure { width, height }) => {
+                    b[3] = 11;
+                    b[16..20].copy_from_slice(&width.to_le_bytes());
+                    b[20..24].copy_from_slice(&height.to_le_bytes());
+                }
+                Some(Event::Appearance { dark }) => {
+                    b[3] = 12;
+                    b[16] = dark as u8;
+                }
+                Some(Event::Menu { id }) => {
+                    b[3] = 13;
+                    b[16..20].copy_from_slice(&id.to_le_bytes());
+                }
             }
             b
         }
@@ -1466,6 +1521,7 @@ pub mod window {
                 3 => Status::BadHandles,
                 4 => Status::BadWindow,
                 5 => Status::Timeout,
+                6 => Status::Denied,
                 _ => return None,
             };
             let event = match b[3] {
@@ -1507,6 +1563,14 @@ pub mod window {
                         _ => return None,
                     },
                     mods: b[19],
+                }),
+                12 => Some(Event::Appearance { dark: b[16] != 0 }),
+                13 => Some(Event::Menu {
+                    id: u32::from_le_bytes(b[16..20].try_into().ok()?),
+                }),
+                11 => Some(Event::Configure {
+                    width: u32::from_le_bytes(b[16..20].try_into().ok()?),
+                    height: u32::from_le_bytes(b[20..24].try_into().ok()?),
                 }),
                 _ => return None,
             };
@@ -1780,6 +1844,12 @@ pub mod settings {
         /// Chooses what the machine boots into from the next boot:
         /// `value` 0 the text console, 1 the desktop.
         SetSession = 2,
+        /// Chooses how the desktop looks, at once and from then on: `value` 0
+        /// light, 1 dark.
+        SetAppearance = 3,
+        /// The clock's distance from UTC: `value` hours plus 12, so 0 is UTC-12 and 26
+        /// is UTC+14.
+        SetTimezone = 4,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1790,6 +1860,10 @@ pub mod settings {
         UpdateSource = 2,
         /// The network address.
         Address = 3,
+        /// How the desktop looks: `light` or `dark`.
+        Appearance = 4,
+        /// The clock's zone: `UTC+1`.
+        Timezone = 5,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1822,12 +1896,16 @@ pub mod settings {
             let op = match b[2] {
                 1 => Op::Get,
                 2 => Op::SetSession,
+                3 => Op::SetAppearance,
+                4 => Op::SetTimezone,
                 _ => return None,
             };
             let item = match b[3] {
                 1 => Item::Session,
                 2 => Item::UpdateSource,
                 3 => Item::Address,
+                4 => Item::Appearance,
+                5 => Item::Timezone,
                 _ => return None,
             };
             Some(Self {
@@ -1925,7 +2003,7 @@ mod tests {
             value: 1,
         };
         assert_eq!(Request::decode(&req.encode()), Some(req));
-        assert_eq!(Request::decode(&[9, 1, 3, 1, 0, 0, 0, 0]), None);
+        assert_eq!(Request::decode(&[9, 1, 5, 1, 0, 0, 0, 0]), None);
         assert_eq!(Request::decode(&[9, 1, 1, 7, 0, 0, 0, 0]), None);
         let r = Reply::new(Status::Ok, b"session: desktop");
         let d = Reply::decode(&r.encode()).unwrap();
@@ -2599,6 +2677,13 @@ pub mod status {
                 },
                 Event::Enter { x: 1, y: 2 },
                 Event::Leave,
+                Event::Configure {
+                    width: 800,
+                    height: 600,
+                },
+                Event::Appearance { dark: true },
+                Event::Appearance { dark: false },
+                Event::Menu { id: 0xFFFF_0003 },
                 Event::Wheel {
                     x: 1,
                     y: 2,

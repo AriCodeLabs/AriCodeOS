@@ -1,0 +1,15 @@
+[package]
+name = "aricode-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The desktop's toolkit (ADR 0078): retained widgets, stacks, keyboard focus and damage (no_std)"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+aricode-gfx = { path = "../gfx" }
+aricode-text = { path = "../text" }
+aricode-input = { path = "../input" }
+aricode-proto = { path = "../../sdk/proto" }

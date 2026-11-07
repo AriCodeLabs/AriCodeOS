@@ -5,7 +5,7 @@
 # shell on the console then reads home/a: the editor wrote into the
 # owner's folder, the only files it reaches. Then nothing is lost on one
 # press (audit of the editor, M1 and M2): `x` changes the text, and
-# opening `ab` asks first, a second Enter discards (the text is empty
+# opening `ab` asks first, and Tab and Enter discard (the text is empty
 # then); saving that empty text over `a`, which it did not come from,
 # asks too, and is left at that, so home/a still holds `zq`.
 name = "usb.desktop_editor"
@@ -31,12 +31,14 @@ key_delay_ms = 100
 
 [[host_input_then]]
 marker = "editor: saved a (2 bytes)"
+screendump = "editor"
 keys = ["x", "ctrl+l", "b", "ret"]
 key_delay_ms = 100
 
 [[host_input_then]]
-marker = "editor: unsaved changes: Open again to discard them"
-keys = ["ret"]
+marker = "editor: asks: Discard the unsaved changes?"
+keys = ["tab", "ret"]
+key_delay_ms = 100
 
 [[host_input_then]]
 marker = "editor: new file ab"
@@ -51,14 +53,14 @@ serial_contains = [
     "editor: ready",
     "editor: new file a (saved with Save)",
     "editor: saved a (2 bytes)",
-    "editor: unsaved changes: Open again to discard them",
+    "editor: asks: Discard the unsaved changes?",
     "editor: new file ab (saved with Save)",
-    "editor: a exists: Save again to replace it",
+    "editor: asks: a exists. Replace it?",
     "ARICODEOS_SHUTDOWN",
 ]
 serial_order = [
     "editor: saved a (2 bytes)",
-    "editor: a exists: Save again to replace it",
+    "editor: asks: a exists. Replace it?",
     "ari> cat home/a",
     "zq",
 ]

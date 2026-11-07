@@ -1,0 +1,32 @@
+# The graphics benchmark (ADR 0080) runs on the system: its window opens through the
+# broker, and each of its thirteen scenes draws 3 frames and gives its line in the
+# format of ADR 0080. QEMU's figures say nothing about speed: the reference laptop
+# measures, with the same method as the Linux reference (5 s a scene, below 70 C to
+# start, 90 C to stop).
+name = "gui.bench3d"
+description = "the graphics benchmark draws each of its scenes and logs them"
+level = "release"
+areas = ["gui", "apps"]
+cmdline = "qemu_exit gui shell gui_trace"
+install = ["desktop/bench3d"]
+stdin = ["run bench3d 3", "sleep 500", "shutdown"]
+timeout_secs = 120
+
+[host_input]
+marker = "bench3d.texture-linear us "
+screendump = "scene"
+
+[expect]
+exit = 33
+serial_contains = [
+    "compositor: window 1 'Bench3D' 800x600",
+    "# machine=unknown build=",
+    "bench3d.geometry us ",
+    "bench3d.texture-mipmap us ",
+    "bench3d.effect2d-5x5 us ",
+    "bench3d.desktop us ",
+    "bench3d.everything us ",
+    "bench3d: 13 scenes measured",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "killed by fault", "bench3d: no memory", "bench3d: could not", "bench3d: started without"]

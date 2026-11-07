@@ -1,8 +1,9 @@
 # ADR 0080: One path from programs to the hardware
 
 - **Date:** 2026-11-06
-- **Status:** Proposed. Design research only: no kernel or driver code was
-  written, nothing was built, nothing ran on the laptop.
+- **Status:** Accepted as the direction on 2026-11-06, with the owner's choices
+  below. The research behind it wrote no kernel or driver code, built nothing and
+  ran nothing on the laptop.
 
 ## The goal, and the short answer
 
@@ -30,6 +31,26 @@ brands do not matter.
 Labels: **[M]** measured or counted by this study; **[D]** documented by a
 primary source that was read; **[S]** seen only through a search summary;
 **[I]** inferred here.
+
+## The owner's choices (2026-11-06)
+
+- **One interface as the base, tunable above it, with no hardcoding:** "hardcoding is
+  always where everyone fights". Limits, queue sizes, timeouts and policies are
+  parameters with defaults that a program or the owner can change and read back,
+  never constants a user must patch. What hardware fixes (register layouts, a
+  manual's restrictions) stays in tables, by family.
+- **Debian on the laptop for reference runs: yes.** It is a test machine, and anything
+  may be installed on it. Nothing from it reaches production, and no data on it may
+  endanger other machines: see `docs/hardware.md`, "The reference laptop is a test
+  machine".
+- **Graphics tests as needed, always with a thermal watch,** and always compare: if
+  another system does better, find out why and improve ours, for more speed at no
+  more resource use.
+- **The robot is open:** a drone, an arm, a printer or a toy. So the control interface
+  must not assume one. The first target is a simulated arm; a real device follows.
+- **Second GPU target:** tests run on what is at hand; a machine bought for it is still
+  to be decided.
+- The rest of the table below stands as recommended, open to revision.
 
 ## Decisions for the owner
 
@@ -382,6 +403,43 @@ gpu.submit_to_start ns <p50> <p95> <p99> p999=<v> max=<v> n=<samples>
 
 This also tests the thesis. The `gpu.` submit figure, against Linux's on the same chip, says
 whether a shorter path matters. It may say no.
+
+## 4b. The reference, measured on the laptop (2026-11-07)
+
+The laptop's own Ubuntu 22.04.5 (kernel 6.8.0-138, Mesa 23.2.1: OpenGL 4.2 core and ES 3.0 on
+crocus, Vulkan 1.2 on `hasvk`, which reports conformance 0.0.0.0) was used instead of a Debian live
+stick. The processor is an Intel Core i3-3217U: 2 cores and 4 threads at 1.8 GHz, no turbo. The GPU
+runs from 350 to 1050 MHz.
+
+**Heat comes first.** At full load the package went from 63 to 85 C in 10 s and reached the 90 C
+limit of the thermal watch in 25 s, at 1050 MHz. So every run is scene by scene: glmark2's 33
+default scenes at 800x600, 5 s each, each started below 70 C, under a watch that stops at 90 C. No
+scene was stopped. 5 s scenes are not glmark2's official score; they are ours, to repeat the same
+way.
+
+| Run | Mean of 33 scenes | Peak during scenes | refract | terrain | shadow |
+|---|---|---|---|---|---|
+| On screen, GPU as shipped (350 to 1050 MHz) | 521 fps | 86 to 89 C | 124 | 79 | 335 |
+| On screen, GPU fixed at 650 MHz | 510 fps | 85 to 89 C | 122 | 89 | 333 |
+| Off screen, GPU fixed at 650 MHz | 1374 fps | 60 to 73 C | 109 | 77 | 365 |
+
+**What it says** [M]:
+- **The path to the screen is what limits Linux here, and what heats the machine.** Drawing off
+  screen, the same scenes at the same clock run 2.7 times faster on average (up to 4.4 times for
+  `bump`), and the package stays 15 to 20 C cooler. On screen, each frame goes through Xwayland and
+  the desktop's compositor, which copies it again.
+- **The GPU's clock hardly matters on screen:** 650 MHz gives 98 % of the stock figure.
+- **The heavy scenes are the GPU's own limit:** `refract`, `terrain`, `shadow` and the desktop blur
+  barely change between on screen and off screen. They are the fair comparison for stage D.
+
+**For this design:** a game that shows its frames by having the display scan its buffer directly,
+with no compositor copy, is the largest single gain on this machine, larger than any clock. The
+compositor's software copy stays for windows; a full-screen game presents its own buffer. And the
+engine driver needs control of the GPU's frequency from stage A, or the kernel's thermal watch will
+end a long game on this laptop.
+
+Raw logs, per-second temperatures and the scripts are kept outside the repository, in
+`~/aricode-scratch/gpu-reference/` on the build host.
 
 ## 8. Stages
 

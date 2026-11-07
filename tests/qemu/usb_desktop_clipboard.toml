@@ -1,0 +1,48 @@
+# Copy and paste on the toolkit (ADR 0078): in the editor `zq` is selected and copied,
+# Ctrl+L goes to the name, which holds `a`, and Ctrl+V makes it `azq`. Opening that asks
+# about the unsaved text first, and then says the new file's name: the text went through
+# the compositor and back.
+name = "usb.desktop_clipboard"
+description = "text copied in a toolkit program pastes through the compositor"
+level = "release"
+areas = ["usb", "apps", "gui"]
+cmdline = "qemu_exit shell"
+selftest = false
+disk = "usb-image"
+install = ["desktop/launcher", "desktop/editor"]
+stick_profiles = ["desktop:launcher,editor"]
+stdin = ["sleep 12000", "shutdown"]
+timeout_secs = 120
+
+[host_input]
+marker = "launcher: ready"
+keys = ["ret"]
+
+[[host_input_then]]
+marker = "editor: ready"
+keys = ["a", "ret"]
+key_delay_ms = 100
+
+[[host_input_then]]
+marker = "editor: new file a"
+keys = ["z", "q", "ctrl+a", "ctrl+c"]
+key_delay_ms = 100
+
+[[host_input_then]]
+marker = "editor: copied 2 bytes"
+keys = ["ctrl+l", "ctrl+v", "ret"]
+key_delay_ms = 100
+
+[[host_input_then]]
+marker = "editor: asks: Discard the unsaved changes?"
+keys = ["tab", "ret"]
+key_delay_ms = 100
+
+[expect]
+exit = 33
+serial_contains = [
+    "editor: new file a (saved with Save)",
+    "editor: new file azq (saved with Save)",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "refused"]

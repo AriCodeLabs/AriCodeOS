@@ -38,6 +38,12 @@ git branch -d feature/f04-gdt-idt
 
 ## Publishing a version
 
+What the reference laptop uses stays out of a published image: no `--authorized-key`,
+no `--dev-source`, no LAN source, and no temporary measurement or probe
+(`docs/hardware.md`, "The reference laptop is a test machine"). A version is not done
+until its GitHub release and its container image, `ghcr.io/aricodelabs/aricodeos`, are
+both out.
+
 ```bash
 git checkout develop && cargo xtask check && cargo xtask test
 git checkout main
@@ -122,10 +128,10 @@ composing a version (before main)     cargo xtask check && cargo xtask test --le
 Never rerun a red suite into green: explain the failure first (failure protocol,
 ADR 0028).
 
-The full suite on `develop` runs continuously in the CI container
-(`tools/docker/ci/`, README.md "Docker"); a failure there becomes an
-incident. One suite runs at a time on a machine, the CI container's
-included (stop it first), and test containers get `--cpus 10 --memory 12g
+The release level on `develop` runs continuously in the CI container
+(`tools/docker/ci/`, README.md "Docker"), slow scenarios included; a failure
+there becomes an incident. One suite runs at a time on a machine, the CI
+container's included (the suite lock makes the others wait), and test containers get `--cpus 10 --memory 12g
 --memory-swap 12g` on the reference host so it keeps room and stays cool
 (the runner's default `--jobs` follows those limits). Ports alone would
 allow more: only three test ports are fixed (compiled into the guest's test

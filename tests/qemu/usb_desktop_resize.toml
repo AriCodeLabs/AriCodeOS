@@ -1,0 +1,43 @@
+# A window of the toolkit follows its frame (ADR 0078, stage 2). The launcher opens
+# the settings; a click on its zoom circle, at (134, 94) on the screen with the
+# pointer starting at its centre, asks the program for the space between the bar and the dock: it answers
+# with a buffer of that size, and its controls move with it. A click on the circle,
+# now at (54, 38), goes back.
+name = "usb.desktop_resize"
+description = "a toolkit window takes the size the owner asks and goes back"
+level = "release"
+areas = ["usb", "apps", "gui"]
+cmdline = "qemu_exit shell"
+selftest = false
+disk = "usb-image"
+install = ["desktop/launcher", "desktop/settings"]
+stick_profiles = ["desktop:launcher,settings"]
+stdin = ["sleep 14000", "shutdown"]
+timeout_secs = 120
+
+[host_input]
+marker = "launcher: ready"
+keys = ["ret"]
+
+[[host_input_then]]
+marker = "settings: ready"
+wait_ms = 500
+mouse_rel = [-506, -306]
+click = "left"
+
+[[host_input_then]]
+marker = "settings: window 1280x688"
+wait_ms = 500
+screendump = "zoomed"
+mouse_rel = [-80, -56]
+click = "left"
+
+[expect]
+exit = 33
+serial_contains = [
+    "settings: window 1280x688",
+    "settings: window 720x400",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_order = ["settings: window 1280x688", "settings: window 720x400"]
+serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "settings: could not take"]

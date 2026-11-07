@@ -21,13 +21,15 @@
 # first. --quick runs `check` and the default test level only: it is for
 # trying the container itself.
 #
-# One QEMU suite at a time on the whole host (ADR 0040): the test passes
-# run holding the host's suite lock (ARICODEOS_SUITE_LOCK, the host's
-# $HOME/.cache/aricodeos-lock mounted at /run/aricodeos-lock), taken with
-# flock before the first pass and released after the last one is
-# collected, so no other suite runs between them; the passes inherit it
-# (ARICODEOS_SUITE_LOCK_HELD). Without the mount the run fails instead of
-# testing beside another suite.
+# One QEMU suite at a time on the whole host (ADR 0040): each test pass
+# runs holding the host's suite lock (ARICODEOS_SUITE_LOCK, the host's
+# $HOME/.cache/aricodeos-lock mounted at /run/aricodeos-lock), and inherits
+# it (ARICODEOS_SUITE_LOCK_HELD). The lock is let go between the passes,
+# with a pause for a waiter to take it. A suite that starts meanwhile does not
+# wait for a whole pass either: the pass looks between scenarios, steps aside
+# once those running are done (exit 75), and comes back to the ones it had not
+# run (ARICODEOS_SUITE_YIELD). So slow scenarios never get in a branch's way.
+# Without the mount the run fails instead of testing beside another suite.
 #
 # The repository is public and fetched over https: no credentials.
 set -u
@@ -37,6 +39,11 @@ branch=${ARICODEOS_CI_BRANCH:-develop}
 jobs=${ARICODEOS_CI_JOBS:-}
 interval=${ARICODEOS_CI_INTERVAL:-300}
 pause=${ARICODEOS_CI_PAUSE:-600}
+# Seconds without the lock between two passes, long enough for a waiting
+# suite to wake up and take it.
+between=5
+# Times in a row a pass may step aside without finishing one scenario.
+max_idle=5
 loop=false
 quick=false
 work=/work
@@ -120,9 +127,13 @@ step() {
     log "$name: $*"
     t0=$(date +%s)
     # The lock's descriptor stays with this script, not with QEMU.
-    (cd "$src" && nice -n 10 "$@" 9>&-) >"$dir/$name.log" 2>&1
+    (cd "$src" && nice -n 10 "$@" 9>&-) >>"$dir/$name.log" 2>&1
     status=$?
     t=$(( $(date +%s) - t0 ))
+    if [ $status -eq 75 ]; then
+        log "$name: stepped aside for another suite after $((t / 60))m$((t % 60))s"
+        return
+    fi
     if [ $status -eq 0 ]; then result=PASS; else result=FAIL; failed_steps=$((failed_steps + 1)); fi
     printf '%-12s %s  %dm%02ds  %s\n' "$name" "$result" $((t / 60)) $((t % 60)) "$*" >>"$dir/steps.txt"
     log "$name: $result in $((t / 60))m$((t % 60))s"
@@ -138,6 +149,42 @@ collect() {
         cp "$src/build/scenarios/$scenario"/serial*.log "$src/build/scenarios/$scenario"/qemu-stderr*.log \
             "$dir/failed/$name/$scenario/" 2>/dev/null
     done
+}
+
+# pass NAME SUITE COMMAND...: one test pass under the suite lock.
+pass() {
+    pass_name=$1
+    pass_suite=$2
+    shift 2
+    export ARICODEOS_SUITE_YIELD="$dir/$pass_name.progress"
+    done_before=0
+    idle=0
+    while :; do
+        if ! lock_suites "$pass_suite"; then
+            printf '%-12s %s  %s\n' "$pass_name" FAIL "host suite lock unavailable (container log)" >>"$dir/steps.txt"
+            failed_steps=$((failed_steps + 1))
+            break
+        fi
+        step "$pass_name" "$@"
+        unlock_suites
+        [ $status -eq 75 ] || break
+        # Stepping aside again and again with nothing done means the look is wrong, not
+        # that someone waits: the pass then runs to its end (incident 0061).
+        done_now=$(wc -l <"$ARICODEOS_SUITE_YIELD" 2>/dev/null || echo 0)
+        if [ "$done_now" -gt "$done_before" ]; then
+            idle=0
+        else
+            idle=$((idle + 1))
+        fi
+        done_before=$done_now
+        if [ "$idle" -ge "$max_idle" ]; then
+            log "$pass_name: stepped aside $idle times with nothing done; not stepping aside again"
+            unset ARICODEOS_SUITE_YIELD
+        fi
+        sleep "$between"
+    done
+    unset ARICODEOS_SUITE_YIELD
+    collect "$pass_name"
 }
 
 run_once() {
@@ -160,25 +207,12 @@ run_once() {
     step check cargo xtask check
     if $quick; then
         tests="test"
-        suite="default level"
+        pass test "default level" cargo xtask test "$@"
     else
         tests="test-1cpu test-4cpus"
-        suite="test --all and --all --cpus 4"
-    fi
-    if lock_suites "$suite"; then
-        if $quick; then
-            step test cargo xtask test "$@"
-            collect test
-        else
-            step test-1cpu cargo xtask test --level release "$@"
-            collect test-1cpu
-            step test-4cpus cargo xtask test --level release --cpus 4 "$@"
-            collect test-4cpus
-        fi
-        unlock_suites
-    else
-        printf '%-12s %s  %s\n' lock FAIL "host suite lock unavailable (container log)" >>"$dir/steps.txt"
-        failed_steps=$((failed_steps + 1))
+        pass test-1cpu "release level" cargo xtask test --level release "$@"
+        sleep "$between"
+        pass test-4cpus "release level, 4 CPUs" cargo xtask test --level release --cpus 4 "$@"
     fi
     total=$(( $(date +%s) - run_start ))
     if [ $failed_steps -eq 0 ]; then verdict=PASS; else verdict=FAIL; fi

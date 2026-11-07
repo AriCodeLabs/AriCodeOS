@@ -105,6 +105,9 @@ pub mod keys {
     /// mode and touches nothing: the way back on the rare machine where the
     /// panel's size goes wrong (ADR 0079).
     pub const VIDEO: &str = "video";
+    /// `thermal_off=DEGREES`: the CPU temperature at which the kernel's watch powers
+    /// the machine off; `0` never does. By default 3 degrees below the CPU's limit.
+    pub const THERMAL_OFF: &str = "thermal_off";
     /// `ps2=console`: the PS/2 keyboard and touchpad serve only the kernel
     /// console; while a process holds the screen their keys are withheld
     /// instead of going to the desktop (ADR 0075).
@@ -214,6 +217,9 @@ pub mod keys {
     /// with one pixel sample per window, which the GUI scenarios check.
     /// Without it a frame prints nothing: the serial port busy-waits.
     pub const GUI_TRACE: &str = "gui_trace";
+    /// Tests only: `gui_notice`, the compositor shows a notice as it starts, as it does
+    /// for what cannot be provoked in a test (a hot processor).
+    pub const GUI_NOTICE: &str = "gui_notice";
 
     /// Every key documented "Tests only": they exit QEMU, inject failures or
     /// run test programs. `cargo xtask usb-image` refuses them (a unit test
@@ -234,6 +240,7 @@ pub mod keys {
         BLK_FAULT,
         PCI_FAULT,
         GUI_TRACE,
+        GUI_NOTICE,
     ];
 
     /// Keys AriBoot adds itself; `cargo xtask usb-image` refuses them too.

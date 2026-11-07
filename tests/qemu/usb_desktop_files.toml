@@ -1,7 +1,7 @@
 # The desktop's file manager (ADR 0074 phase C) on the owner's folder
 # home/. From the keyboard: the launcher opens it; Tab, `mo` and Enter
-# create home/mo; `p` and Ctrl+R rename it to p; Tab and Delete twice
-# delete it. Each step answers in the window and on serial, and the shell
+# create home/mo; `p` and Ctrl+R rename it to p; Shift+Tab and Delete ask, and
+# the answer deletes it. Each step answers in the window and on serial, and the shell
 # finds home/ empty again.
 name = "usb.desktop_files"
 description = "the desktop file manager creates, renames and deletes files in home/"
@@ -12,7 +12,7 @@ selftest = false
 disk = "usb-image"
 install = ["desktop/launcher", "desktop/files"]
 stick_profiles = ["desktop:launcher,files"]
-stdin = ["sleep 15000", "ls", "shutdown"]
+stdin = ["sleep 17000", "ls", "shutdown"]
 timeout_secs = 120
 
 [host_input]
@@ -24,9 +24,27 @@ marker = "files: ready"
 keys = ["tab", "m", "o", "ret", "p", "ctrl+r"]
 key_delay_ms = 100
 
+# Holding Delete asks once and answers nothing, or the key would empty the folder
+# (audit of ADR 0078, stage 2, H2). Esc keeps the file. Asked again, the keys start on
+# Keep: Tab and Enter delete it.
 [[host_input_then]]
 marker = "files: renamed mo to p"
-keys = ["tab", "delete", "delete"]
+keys = ["shift+tab"]
+hold_key = ["delete", 900]
+
+[[host_input_then]]
+marker = "files: asks to delete p"
+wait_ms = 300
+screendump = "dialog"
+keys = ["esc"]
+
+[[host_input_then]]
+marker = "files: kept the file"
+keys = ["delete"]
+
+[[host_input_then]]
+marker = "files: asks to delete p"
+keys = ["tab", "ret"]
 key_delay_ms = 100
 
 [expect]
@@ -37,7 +55,8 @@ serial_contains = [
     "files: 0 file(s) in home/",
     "files: created mo",
     "files: renamed mo to p",
-    "files: press Delete again to delete p",
+    "files: asks to delete p",
+    "files: kept the file",
     "files: deleted p",
     "ARICODEOS_SHUTDOWN",
 ]

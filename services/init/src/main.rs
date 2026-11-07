@@ -811,6 +811,10 @@ fn report_network_address(net_service: Handle, wait_ms: u64) {
 
 /// Bound of each wait (send, reply) of a network health request.
 const NET_CALL_MS: u64 = 250;
+/// How often the desktop's bar is told the network's address.
+const NETWORK_REPORT_MS: u64 = 5000;
+/// And after a service did not answer.
+const NETWORK_RETRY_MS: u64 = 30_000;
 /// Pause between network health requests while DHCP is pending.
 const NET_POLL_MS: u64 = 20;
 /// How long the health check waits for DHCP on virtio-net, where QEMU's
@@ -1329,7 +1333,13 @@ impl Supervisor {
                     }
                     Err(Error::Limit)
                 } else {
-                    start_driver(r.name, pci_index, r.endpoint, &extras[..n], r.driver_arg)
+                    let granted = if with_system {
+                        driver_arg::WITH_SYSTEM
+                    } else {
+                        0
+                    };
+                    let arg = r.driver_arg | granted;
+                    start_driver(r.name, pci_index, r.endpoint, &extras[..n], arg)
                 }
             }
             Kind::Fs {
@@ -1827,6 +1837,7 @@ fn run_shell(
         broker.serve_one(20, sup);
         broker.serve_apps();
         broker.serve_settings();
+        broker.report_network();
         // The session ends with its launcher or with its compositor (audit
         // of phase B, M1): with the compositor gone and nothing done, the
         // input services would have no reader. The compositor is looked at
@@ -2166,6 +2177,9 @@ struct Broker {
     running: [Option<Running>; MAX_RUNNING + DESKTOP_SLOTS],
     /// The installed applications the launcher may offer, as last listed.
     offered: Offered,
+    /// When the bar is next told the network's address, and what it was told last.
+    network_due: Option<u64>,
+    network_said: alloc::string::String,
     /// Where `terminal` holders ask for session shells (ADR 0074 phase C).
     terminals: Sessions,
     /// Where `settings` holders ask (ADR 0074 phase C).
@@ -2344,6 +2358,8 @@ impl Broker {
             compositor,
             running: [None; MAX_RUNNING + DESKTOP_SLOTS],
             offered: Offered::new(),
+            network_due: None,
+            network_said: alloc::string::String::new(),
             terminals: Sessions {
                 endpoint: sys::endpoint_create()?,
                 children: [None; MAX_SESSIONS],
@@ -2740,6 +2756,41 @@ impl Broker {
     /// for, and the one change it may make, the session. It never reaches
     /// a file itself; a change is said on the console and logged in the
     /// install history, as from the shell.
+    /// Tells the bar the network's address, every few seconds and when it changes. The
+    /// compositor holds no network capability, and needs none for this. Each try costs
+    /// init at most `NET_CALL_MS` twice for each service, and one that does not answer
+    /// is asked again less often: nothing else stops for the bar.
+    fn report_network(&mut self) {
+        let (Some(compositor), Some(net)) = (self.compositor, self.net) else {
+            return;
+        };
+        let now = sys::time::uptime_ms(SYSTEM).unwrap_or(0);
+        if self.network_due.is_some_and(|due| now < due) {
+            return;
+        }
+        let mut text = alloc::string::String::new();
+        address_text(net, &mut text);
+        let mut answered = !text.starts_with("the network service");
+        // The bar has room for an address; the long reasons are in the settings.
+        if !text.starts_with(|c: char| c.is_ascii_digit()) {
+            text = alloc::string::String::from("no network");
+        }
+        if text != self.network_said {
+            if sys::window::set_network(compositor, &text, NET_CALL_MS).is_ok() {
+                self.network_said = text;
+            } else {
+                answered = false;
+            }
+        }
+        let wait = if answered {
+            NETWORK_REPORT_MS
+        } else {
+            NETWORK_RETRY_MS
+        };
+        // From now, after the calls: a slow answer never makes them back to back.
+        self.network_due = Some(sys::time::uptime_ms(SYSTEM).unwrap_or(now) + wait);
+    }
+
     fn serve_settings(&mut self) {
         use aricode_proto::settings::{Item, Op, Reply, Request, Status};
         let mut msg = [0u8; Request::LEN];
@@ -2770,8 +2821,15 @@ impl Broker {
         if req.op == Op::SetSession && (req.item != Item::Session || req.value > 1) {
             return refuse(b"a change other than the session's");
         }
+        if req.op == Op::SetAppearance && (req.item != Item::Appearance || req.value > 1) {
+            return refuse(b"an appearance that does not exist");
+        }
+        if req.op == Op::SetTimezone && (req.item != Item::Timezone || req.value > 26) {
+            return refuse(b"a time zone that does not exist");
+        }
         let mut text = alloc::string::String::new();
         let net = self.net;
+        let comp = self.compositor;
         let status = match self.fs.as_mut() {
             None => {
                 text.push_str("no file service");
@@ -2781,6 +2839,16 @@ impl Broker {
                 (Op::Get, Item::Session) => session_text(fs, &mut text),
                 (Op::SetSession, _) if req.value == 0 => set_session(fs, Session::Shell, &mut text),
                 (Op::SetSession, _) => set_session(fs, Session::Desktop, &mut text),
+                (Op::Get, Item::Appearance) => {
+                    text.push_str(if appearance_dark(fs) { "dark" } else { "light" });
+                    Status::Ok
+                }
+                (Op::SetAppearance, _) => set_appearance(fs, comp, req.value == 1, &mut text),
+                (Op::Get, Item::Timezone) => {
+                    zone_text(saved_zone(fs), &mut text);
+                    Status::Ok
+                }
+                (Op::SetTimezone, _) => set_zone(fs, comp, req.value as i32 - 12, &mut text),
                 (Op::Get, Item::UpdateSource) => sources_text(fs, &mut text),
                 (Op::Get, Item::Address) => match net {
                     Some(net) => address_text(net, &mut text),
@@ -3114,7 +3182,7 @@ impl Broker {
             };
             // A session of its own (ADR 0052): its windows are its alone and
             // close when it is gone. Same rights as before: send only.
-            let session = match sys::window::attach(comp) {
+            let session = match sys::window::attach(comp, name) {
                 Ok((h, id)) => {
                     window = Some(WindowSession {
                         compositor: comp,
@@ -3321,6 +3389,85 @@ fn session_text(
 
 /// Chooses the session from the next boot for the desktop's settings,
 /// said and logged as the shell's `session` does.
+/// The file that keeps how the desktop looks: `dark`, or anything else for light.
+const APPEARANCE_FILE: &str = "appearance";
+
+fn appearance_dark(fs: &mut FsClient) -> bool {
+    let mut buf = [0u8; 16];
+    matches!(read_small(fs, APPEARANCE_FILE, &mut buf), Ok(Some(n)) if &buf[..n] == b"dark")
+}
+
+/// Keeps the owner's choice and shows it at once. A choice that cannot be kept is not
+/// shown: it would be gone at the next boot, against what the owner was told.
+fn set_appearance(
+    fs: &mut FsClient,
+    compositor: Option<Handle>,
+    dark: bool,
+    text: &mut alloc::string::String,
+) -> aricode_proto::settings::Status {
+    use aricode_proto::settings::Status;
+    let name = if dark { "dark" } else { "light" };
+    if update_index::client::save(fs, APPEARANCE_FILE, name.as_bytes()).is_err() {
+        text.push_str("the appearance file cannot be saved");
+        return Status::Failed;
+    }
+    if let Some(compositor) = compositor {
+        if sys::window::set_appearance(compositor, dark).is_err() {
+            text.push_str("saved; the desktop did not answer: from the next boot");
+            return Status::Failed;
+        }
+    }
+    text.push_str(name);
+    Status::Ok
+}
+
+/// The file that keeps the clock's zone: hours from UTC, as text. None is UTC.
+const ZONE_FILE: &str = "timezone";
+
+fn saved_zone(fs: &mut FsClient) -> i32 {
+    let mut buf = [0u8; 8];
+    let Ok(Some(n)) = read_small(fs, ZONE_FILE, &mut buf) else {
+        return 0;
+    };
+    core::str::from_utf8(&buf[..n])
+        .ok()
+        .and_then(|t| t.trim().parse::<i32>().ok())
+        .filter(|h| (-12..=14).contains(h))
+        .unwrap_or(0)
+}
+
+/// `UTC`, or `UTC+1`, `UTC-5`.
+fn zone_text(hours: i32, text: &mut alloc::string::String) {
+    use core::fmt::Write;
+    text.push_str("UTC");
+    if hours != 0 {
+        let _ = write!(text, "{hours:+}");
+    }
+}
+
+/// Keeps the zone and sets the clock, as `set_appearance` does.
+fn set_zone(
+    fs: &mut FsClient,
+    compositor: Option<Handle>,
+    hours: i32,
+    text: &mut alloc::string::String,
+) -> aricode_proto::settings::Status {
+    use aricode_proto::settings::Status;
+    let saved = alloc::format!("{hours}");
+    if update_index::client::save(fs, ZONE_FILE, saved.as_bytes()).is_err() {
+        text.push_str("the time zone file cannot be saved");
+        return Status::Failed;
+    }
+    if let Some(compositor) = compositor {
+        if sys::window::set_timezone(compositor, hours * 60).is_err() {
+            text.push_str("saved; the desktop did not answer: from the next boot");
+            return Status::Failed;
+        }
+    }
+    zone_text(hours, text);
+    Status::Ok
+}
+
 fn set_session(
     fs: &mut FsClient,
     chosen: Session,
@@ -4299,6 +4446,16 @@ fn main(arg: u64) -> u64 {
             match run_gui(gui_eps) {
                 Ok(g) => {
                     services |= SERVICE_GUI;
+                    // The owner's choice, before any window opens.
+                    if fs_client.as_mut().is_some_and(appearance_dark)
+                        && sys::window::set_appearance(g.endpoint, true).is_err()
+                    {
+                        say(b"the compositor did not take the appearance");
+                    }
+                    let zone = fs_client.as_mut().map_or(0, saved_zone);
+                    if zone != 0 && sys::window::set_timezone(g.endpoint, zone * 60).is_err() {
+                        say(b"the compositor did not take the time zone");
+                    }
                     gui = Some(g);
                     say(b"desktop session: compositor started");
                 }

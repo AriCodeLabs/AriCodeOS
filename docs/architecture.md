@@ -1358,7 +1358,7 @@ latter briefly to add the region.
   fsd on `home/`, the owner's folder, granted only to an installed, signed
   `editor` or `files`; no application named `home` gets a private
   directory, which would be that folder. `desktop/editor` edits up to
-  64 KiB of text there (`aricode_gfx::widgets::TextArea`) and saves with
+  64 KiB of plain text there, on the toolkit (`libs/ui`), and saves with
   an atomic replace; `desktop/files` lists, creates, renames (never over
   an existing name: fsd's rename would replace it) and deletes, asking for
   a second Delete.
