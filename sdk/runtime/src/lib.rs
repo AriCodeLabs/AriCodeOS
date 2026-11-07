@@ -41,8 +41,10 @@ pub extern "C" fn rust_eh_personality() -> ! {
 }
 
 /// User program heap: 256 KiB of static memory served by
-/// `aricode-heap` (the same allocator as the kernel) behind a spinlock. No
-/// growth: services and drivers use little dynamic memory.
+/// `aricode-heap` (the same allocator as the kernel) behind a spinlock. When
+/// it is full, it grows by memory objects (ADR 0084) of at least
+/// `GROW_MIN`, within the process's memory quota: a program allocates as it
+/// would anywhere.
 mod user_heap {
     use aricode_heap::Heap;
     use aricode_sync::SpinLock;
@@ -50,6 +52,10 @@ mod user_heap {
     use core::cell::UnsafeCell;
 
     const SIZE: usize = 256 * 1024;
+    /// The least the heap grows by.
+    const GROW_MIN: usize = 1024 * 1024;
+    /// Room for the allocator's header and alignment within a new region.
+    const GROW_SLACK: usize = 4096;
 
     #[repr(align(4096))]
     struct Arena(UnsafeCell<[u8; SIZE]>);
@@ -118,6 +124,28 @@ mod user_heap {
     unsafe impl GlobalAlloc for UserHeap {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
             self.with(|h| {
+                if let Some(p) = h.allocate(layout) {
+                    return p.as_ptr();
+                }
+                // Full: a memory object as big as the request needs, mapped
+                // for good (the mapping keeps it; its handle is not needed).
+                let want = layout
+                    .size()
+                    .saturating_add(layout.align())
+                    .saturating_add(GROW_SLACK);
+                let size = want.max(GROW_MIN).next_multiple_of(4096);
+                let Ok(mem) = crate::sys::mem_create(size as u64) else {
+                    return core::ptr::null_mut();
+                };
+                let mapped = crate::sys::mmio_map(mem);
+                let _ = crate::sys::handle_close(mem);
+                let Ok(start) = mapped else {
+                    return core::ptr::null_mut();
+                };
+                // SAFETY: a mapping of `size` bytes this process made just now,
+                // page aligned, kept for the program's life, used by nothing
+                // else.
+                unsafe { h.add_region(start as usize, size) };
                 h.allocate(layout)
                     .map_or(core::ptr::null_mut(), |p| p.as_ptr())
             })

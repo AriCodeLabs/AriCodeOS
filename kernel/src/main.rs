@@ -209,6 +209,12 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
         _ => pci::Lie::None,
     });
     framebuffer::use_panel_size(cmdline.get(keys::VIDEO).is_some());
+    if let Some(pct) = cmdline
+        .get(keys::MEM_APP_MAX_PCT)
+        .and_then(|v| v.parse().ok())
+    {
+        user::process::set_app_max_pct(pct);
+    }
     gpu::init(
         cmdline.get(keys::GPU) == Some("off"),
         cmdline.get(keys::GPU_MHZ).and_then(|v| v.parse().ok()),

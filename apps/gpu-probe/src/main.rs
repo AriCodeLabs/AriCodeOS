@@ -164,10 +164,20 @@ fn line(what: &[u8], gpu: (u64, u64), cpu: (u64, u64)) {
     ]);
 }
 
-fn map(hardware: Handle, gpu: Handle, at: u64, bytes: u64) -> Result<&'static mut [u32], Error> {
-    let dma = sys::dma_alloc(hardware, bytes)?;
-    let virt = sys::mmio_map(dma)?;
-    sys::gpu_map(gpu, dma, at)?;
+/// A DMA buffer, or with `hardware` `None` a memory object (ADR 0084),
+/// mapped for the CPU and at `at` for the GPU.
+fn map(
+    hardware: Option<Handle>,
+    gpu: Handle,
+    at: u64,
+    bytes: u64,
+) -> Result<&'static mut [u32], Error> {
+    let memory = match hardware {
+        Some(hw) => sys::dma_alloc(hw, bytes)?,
+        None => sys::mem_create(bytes)?,
+    };
+    let virt = sys::mmio_map(memory)?;
+    sys::gpu_map(gpu, memory, at)?;
     // SAFETY: `mmio_map` mapped `bytes` of this process's own buffer at
     // `virt`, kept while the process lives; nothing else aliases it here.
     Ok(unsafe { core::slice::from_raw_parts_mut(virt as *mut u32, (bytes / 4) as usize) })
@@ -217,8 +227,10 @@ fn main(_arg: u64) -> u64 {
         Ok::<_, Error>(Gpu {
             gpu,
             system,
-            src: map(hardware, gpu, SRC_AT, BYTES)?,
-            dst: map(hardware, gpu, DST_AT, BYTES)?,
+            // The source a DMA buffer, the destination a memory object: the
+            // GPU reaches both kinds.
+            src: map(Some(hardware), gpu, SRC_AT, BYTES)?,
+            dst: map(None, gpu, DST_AT, BYTES)?,
         })
     })();
     let mut g = match setup {

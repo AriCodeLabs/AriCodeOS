@@ -133,7 +133,7 @@ pub struct Process {
 /// frames a process's first touch fails instead, so the kernel's own
 /// allocations (its heap, page tables, the kill path itself) still find
 /// memory. 1 MiB.
-const KERNEL_RESERVE_FRAMES: usize = 256;
+pub const KERNEL_RESERVE_FRAMES: usize = 256;
 
 /// What [`back_on_demand`] did with a page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,7 +157,7 @@ fn back_page(p: &mut Process, page: u64) -> OnDemand {
         .iter()
         .find(|(s, e, _)| (*s..*e).contains(&page))
     else {
-        return OnDemand::NotReserved;
+        return back_memory_page(p, page);
     };
     let Some(m) = p.mapper.as_mut() else {
         return OnDemand::NotReserved;
@@ -181,6 +181,37 @@ fn back_page(p: &mut Process, page: u64) -> OnDemand {
         return OnDemand::OutOfMemory;
     }
     p.on_demand_backed += 1;
+    OnDemand::Backed
+}
+
+/// Backs `page` of `p` if a mapping of a memory object covers it (ADR 0084):
+/// the object's own frame for that page, taken now if no one touched it yet,
+/// so every mapping of the object sees the same memory.
+fn back_memory_page(p: &mut Process, page: u64) -> OnDemand {
+    let Some(frame) = p.foreign.iter().find_map(|f| {
+        let mem = f.mem.as_ref()?;
+        if !(f.virt..f.virt + f.span).contains(&page) {
+            return None;
+        }
+        let crate::object::ObjectKind::Mem(m) = &mem.kind else {
+            return None;
+        };
+        Some(m.page(((page - f.virt) / PAGE_SIZE) as usize))
+    }) else {
+        return OnDemand::NotReserved;
+    };
+    let Some(m) = p.mapper.as_mut() else {
+        return OnDemand::NotReserved;
+    };
+    if m.translate(page).is_some() {
+        return OnDemand::Present;
+    }
+    let Some(frame) = frame else {
+        return OnDemand::OutOfMemory;
+    };
+    if m.map_4k(page, frame, USER | WRITABLE | NO_EXECUTE).is_err() {
+        return OnDemand::OutOfMemory;
+    }
     OnDemand::Backed
 }
 
@@ -216,6 +247,10 @@ struct Foreign {
     phys: u64,
     span: u64,
     dma: Option<crate::object::ObjectRef>,
+    /// A memory object (ADR 0084): no physical range, its pages mapped as
+    /// they are touched (`phys` is 0, and nothing that matches by physical
+    /// address looks at this entry).
+    mem: Option<crate::object::ObjectRef>,
     caching: crate::hw::Caching,
     /// Mapping it put the buffer in the process's IOMMU domain: unmapping
     /// takes it out again (audit 2026-10-25 C, L11).
@@ -560,7 +595,8 @@ fn map_image(
 /// `KERNEL_RESERVE_FRAMES` (ADR 0049): those stay for the kernel.
 fn user_frame() -> Option<Frame> {
     pmm::with(|f| {
-        if f.stats().free_frames <= KERNEL_RESERVE_FRAMES {
+        // Frames promised to memory objects are theirs (ADR 0084).
+        if f.stats().free_frames <= KERNEL_RESERVE_FRAMES + crate::hw::promised() {
             None
         } else {
             f.allocate()
@@ -934,9 +970,9 @@ pub fn release_address_space(pid: u32) {
         log::debug!("user: address space of process {pid} freed ({n} frames)");
         // A screen it held goes back to the console once its pages are
         // gone (ADR 0074 phase B).
-        let screen = foreign
-            .iter()
-            .any(|f| f.dma.is_none() && crate::framebuffer::overlaps(f.phys, f.span));
+        let screen = foreign.iter().any(|f| {
+            f.dma.is_none() && f.mem.is_none() && crate::framebuffer::overlaps(f.phys, f.span)
+        });
         if let Some(lent) = screen
             .then(|| crate::console::screen_release(pid, None))
             .flatten()
@@ -1682,7 +1718,11 @@ pub fn map_foreign(
     // every request) reuses the existing mapping instead of leaking one. A
     // mapped DMA buffer cannot be freed, so the same physical range is
     // still the same buffer.
-    if let Some(f) = p.foreign.iter().find(|f| f.phys == start && f.span == span) {
+    if let Some(f) = p
+        .foreign
+        .iter()
+        .find(|f| f.mem.is_none() && f.phys == start && f.span == span)
+    {
         // Two memory types on one range would be an alias the SDM forbids.
         if f.caching != caching {
             return Err(aricode_abi::Error::Invalid);
@@ -1735,6 +1775,7 @@ pub fn map_foreign(
         phys: start,
         span,
         dma,
+        mem: None,
         caching,
         in_domain: lingered,
     });
@@ -1743,6 +1784,64 @@ pub fn map_foreign(
         created: true,
         screen,
     })
+}
+
+/// Maps memory object `mem` into the current process (ADR 0084): an address
+/// range only; each page is mapped when first touched (`back_memory_page`).
+/// Mapping the same object again returns the mapping it has.
+pub fn map_memory(mem: crate::object::ObjectRef) -> Result<Mapped, aricode_abi::Error> {
+    let span = match &mem.kind {
+        crate::object::ObjectKind::Mem(m) => m.len(),
+        _ => return Err(aricode_abi::Error::Invalid),
+    };
+    let pid = current_pid().ok_or(aricode_abi::Error::Fault)?;
+    let mut procs = PROCESSES.lock();
+    let p = procs.get_mut(&pid).ok_or(aricode_abi::Error::Fault)?;
+    if let Some(f) = p.foreign.iter().find(|f| {
+        f.mem
+            .as_ref()
+            .is_some_and(|o| alloc::sync::Arc::ptr_eq(o, &mem))
+    }) {
+        return Ok(Mapped {
+            virt: f.virt,
+            created: false,
+            screen: false,
+        });
+    }
+    let virt = p.mmio_ranges.alloc(span).ok_or(aricode_abi::Error::Limit)?;
+    p.foreign.push(Foreign {
+        virt,
+        phys: 0,
+        span,
+        dma: None,
+        mem: Some(mem),
+        caching: crate::hw::Caching::WriteBack,
+        in_domain: false,
+    });
+    Ok(Mapped {
+        virt,
+        created: true,
+        screen: false,
+    })
+}
+
+/// The share of the machine's usable memory one process may hold
+/// (`mem.app_max_pct`, ADR 0084: half by default, the owner's choice).
+static APP_MAX_PCT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(50);
+
+/// Sets the share of usable memory one process may hold, 1 to 100.
+pub fn set_app_max_pct(pct: u64) {
+    APP_MAX_PCT.store(pct.clamp(1, 100), core::sync::atomic::Ordering::Relaxed);
+}
+
+/// The memory quota a process asked for, as granted: at most its share of
+/// the machine. 0 (no quota, for the system's own services) stays 0.
+pub fn grantable_quota(asked: u64) -> u64 {
+    if asked == 0 {
+        return 0;
+    }
+    let usable = pmm::stats().usable_frames as u64 * PAGE_SIZE;
+    asked.min(usable / 100 * APP_MAX_PCT.load(core::sync::atomic::Ordering::Relaxed))
 }
 
 /// Records an event the current process caused, within its rate
@@ -1869,11 +1968,12 @@ pub fn unmap_foreign(virt: u64) -> Result<(), aricode_abi::Error> {
         for page in (f.virt..f.virt + f.span).step_by(PAGE_SIZE as usize) {
             let _ = m.unmap_4k(page);
         }
-        let screen_back = if f.dma.is_none() && crate::framebuffer::overlaps(f.phys, f.span) {
-            crate::console::screen_release(pid.0, Some(f.virt))
-        } else {
-            None
-        };
+        let screen_back =
+            if f.dma.is_none() && f.mem.is_none() && crate::framebuffer::overlaps(f.phys, f.span) {
+                crate::console::screen_release(pid.0, Some(f.virt))
+            } else {
+                None
+            };
         if f.dma.is_some() {
             p.dma_mapped -= f.span;
         }

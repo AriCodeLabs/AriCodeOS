@@ -458,10 +458,12 @@ static VECTORS: IrqLock<Vectors> = IrqLock::new(Vectors {
 /// good, deliberately; each one was reported when it got here.
 static QUARANTINE: IrqLock<alloc::vec::Vec<ObjectRef>> = IrqLock::new(alloc::vec::Vec::new());
 
-/// Keeps `dma` (a DMA buffer) alive forever. Returns its size.
+/// Keeps `dma` (a DMA buffer or a memory object a device may still reach)
+/// alive forever. Returns its size.
 pub fn quarantine(dma: ObjectRef) -> u64 {
     let len = match &dma.kind {
         ObjectKind::Dma(d) => d.region.len,
+        ObjectKind::Mem(m) => m.len(),
         _ => return 0,
     };
     QUARANTINE.lock().push(dma);
@@ -509,8 +511,14 @@ pub fn dma_alloc(len: u64, charge: Option<DmaCharge>) -> Result<ObjectRef, &'sta
         return Err("hw: invalid DMA size");
     }
     let frames = len.div_ceil(FRAME_SIZE) as usize;
-    let first =
-        pmm::with(|p| p.allocate_contiguous(frames, 1)).ok_or("hw: no contiguous memory")?;
+    // Frames promised to memory objects are theirs (ADR 0084).
+    let first = pmm::with(|p| {
+        if p.stats().free_frames < promised() + frames {
+            return None;
+        }
+        p.allocate_contiguous(frames, 1)
+    })
+    .ok_or("hw: no contiguous memory")?;
     // Zero it: a driver must not see another driver's data.
     // SAFETY: freshly allocated frames, reachable through the physical map.
     unsafe {
@@ -682,4 +690,116 @@ pub fn selftest() {
     log::info!(
         "drivers selftest ok (IRQ0 serviced in ring 3, {fired} pending at close, DMA allocated and mapped, framebuffer painted from ring 3)"
     );
+}
+
+/// Frames promised to memory objects and not taken yet (ADR 0084): changed
+/// only under the PMM's lock, so a promise and the frames it counts on are
+/// decided together.
+static PROMISED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Frames promised to memory objects and not yet taken. Allocations for
+/// programs leave them alone.
+pub fn promised() -> usize {
+    PROMISED.load(Ordering::Relaxed)
+}
+
+/// A memory object (ADR 0084): pages that need not be contiguous, each taken
+/// from the PMM and zeroed when first touched, out of frames promised when
+/// the object was made. Its frames go back when the last handle or mapping
+/// of it does (ADR 0038). Not for devices: it has no physical address.
+pub struct MemObject {
+    /// The frame number of each page, 0 while not taken.
+    pages: IrqLock<alloc::vec::Vec<u32>>,
+    /// Dropped after `drop` returned the frames.
+    _charge: Option<DmaCharge>,
+}
+
+impl MemObject {
+    pub fn len(&self) -> u64 {
+        self.pages.lock().len() as u64 * FRAME_SIZE
+    }
+
+    /// The frame of page `index`, taken and zeroed now if it was not yet.
+    /// `None` past the end, or if no frame could be had (only if a promise
+    /// was broken, which the PMM's accounting prevents).
+    pub fn page(&self, index: usize) -> Option<u64> {
+        let mut pages = self.pages.lock();
+        let slot = pages.get_mut(index)?;
+        if *slot != 0 {
+            return Some(*slot as u64 * FRAME_SIZE);
+        }
+        let frame = pmm::with(|p| {
+            let f = p.allocate()?;
+            PROMISED.fetch_sub(1, Ordering::Relaxed);
+            Some(f)
+        })?;
+        // SAFETY: a frame just taken, reachable through the physical map.
+        unsafe {
+            core::ptr::write_bytes(
+                crate::memory::phys::phys_to_virt(frame.addr()) as *mut u8,
+                0,
+                FRAME_SIZE as usize,
+            )
+        };
+        *slot = (frame.addr() / FRAME_SIZE) as u32;
+        Some(frame.addr())
+    }
+
+    /// Every page's frame, taking those not taken yet: for a device that
+    /// needs them all at once (the GPU, ADR 0083).
+    pub fn all_pages(&self) -> Option<alloc::vec::Vec<u64>> {
+        let count = self.pages.lock().len();
+        (0..count).map(|i| self.page(i)).collect()
+    }
+}
+
+impl Drop for MemObject {
+    fn drop(&mut self) {
+        let pages = core::mem::take(self.pages.get_mut());
+        pmm::with(|p| {
+            let mut unpromise = 0;
+            for &n in &pages {
+                if n == 0 {
+                    unpromise += 1;
+                } else {
+                    p.free(Frame::from_addr(n as u64 * FRAME_SIZE))
+                        .expect("memory object frame");
+                }
+            }
+            PROMISED.fetch_sub(unpromise, Ordering::Relaxed);
+        });
+    }
+}
+
+/// Makes a memory object of `len` bytes (whole pages), promising its pages
+/// out of the free ones beyond `reserve` frames; nothing is taken yet.
+pub fn mem_alloc(
+    len: u64,
+    reserve: usize,
+    charge: Option<DmaCharge>,
+) -> Result<ObjectRef, &'static str> {
+    if len == 0 || !len.is_multiple_of(FRAME_SIZE) {
+        return Err("hw: invalid memory object size");
+    }
+    let pages = usize::try_from(len / FRAME_SIZE).map_err(|_| "hw: memory object too large")?;
+    if pages > u32::MAX as usize {
+        return Err("hw: memory object too large");
+    }
+    let mut table = alloc::vec::Vec::new();
+    table
+        .try_reserve_exact(pages)
+        .map_err(|_| "hw: no kernel memory for the page table")?;
+    table.resize(pages, 0u32);
+    pmm::with(|p| {
+        let promised = PROMISED.load(Ordering::Relaxed);
+        if p.stats().free_frames < promised.saturating_add(pages).saturating_add(reserve) {
+            return Err("hw: the memory cannot be promised");
+        }
+        PROMISED.store(promised + pages, Ordering::Relaxed);
+        Ok(())
+    })?;
+    Ok(KernelObject::new(ObjectKind::Mem(MemObject {
+        pages: IrqLock::new(table),
+        _charge: charge,
+    })))
 }
