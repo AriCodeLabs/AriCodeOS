@@ -226,6 +226,8 @@ fn events(session: Handle, hw: Handle) -> u64 {
 /// painting `FREED` and pausing, as a game or a benchmark faster than the screen
 /// is. With two buffers (mode 4) the compositor never reads the buffer not shown,
 /// so `FREED` never reaches the screen; with one (mode 5, the old way) it does.
+/// Mode 4 then resizes: the window gets its second buffer again, of the new size,
+/// and its frames still never show `FREED`.
 fn frames(session: Handle, hw: Handle, double: bool) -> u64 {
     const FRAMES: [u32; 2] = [0xfe0102, 0x0102fe];
     const FREED: u32 = 0x00fe01;
@@ -236,17 +238,36 @@ fn frames(session: Handle, hw: Handle, double: bool) -> u64 {
         sys::print(b"gui_demo E: no second buffer\n");
         return 2;
     }
-    for _ in 0..60 {
-        for colour in FRAMES {
-            win.canvas().fill(colour);
-            if win.present().is_err() {
-                return 3;
+    let pairs = |win: &mut Window, count: usize| {
+        for _ in 0..count {
+            for colour in FRAMES {
+                win.canvas().fill(colour);
+                if win.present().is_err() {
+                    return false;
+                }
             }
+            win.canvas().fill(FREED);
+            sys::thread_sleep(30);
         }
-        win.canvas().fill(FREED);
-        sys::thread_sleep(30);
+        true
+    };
+    if !pairs(&mut win, 60) {
+        return 3;
     }
     sys::print(b"gui_demo E: 120 frames presented\n");
+    if double {
+        if win.resize(hw, 240, 140, |c| c.fill(FRAMES[0])).is_err() {
+            return 4;
+        }
+        if !win.is_double() {
+            sys::print(b"gui_demo E: one buffer after resizing\n");
+            return 5;
+        }
+        if !pairs(&mut win, 10) {
+            return 6;
+        }
+        sys::print(b"gui_demo E: two buffers after resizing, 20 frames presented\n");
+    }
     let _ = win.close();
     0
 }

@@ -24,9 +24,12 @@ pub struct Window {
     /// The buffer [`canvas`](Self::canvas) draws on, and where it is mapped. Cells, so
     /// that presenting, which swaps the buffers, needs no `&mut`.
     draw: Cell<(Handle, u64)>,
-    /// The buffer shown, when the window has two ([`double_buffer`](Self::double_buffer)):
-    /// the compositor reads it, so nothing here writes to it.
+    /// The other buffer, when the window has two ([`double_buffer`](Self::double_buffer)):
+    /// the one shown, which the compositor reads, so nothing here writes to it.
     shown: Cell<Option<(Handle, u64)>>,
+    /// The compositor's slot of `draw`: 0 for the buffer of `Create` or `Resize`, 1
+    /// for the second.
+    draw_slot: Cell<u32>,
     width: u32,
     height: u32,
     /// The desktop was dark when this opened.
@@ -74,6 +77,7 @@ impl Window {
             dark: false,
             draw: Cell::new((dma, pixels)),
             shown: Cell::new(None),
+            draw_slot: Cell::new(0),
             width,
             height,
         };
@@ -96,9 +100,10 @@ impl Window {
 
     /// Gives the window a second buffer, so a frame is drawn on one while the other
     /// shows and [`present`](Self::present) swaps them: no frame shows half drawn,
-    /// whenever the compositor reads (incident 0063). From then on the canvas holds
-    /// the frame before last, not the last one: draw each frame whole. A resize
-    /// returns to one buffer.
+    /// whenever the compositor reads (incident 0063, ADR 0081). From then on the
+    /// canvas holds the frame before last, not the last one: draw each frame whole.
+    /// The program's quota pays for both. Should the answer be lost in a timeout, the
+    /// compositor may keep the buffer this lets go, until the window closes.
     pub fn double_buffer(&mut self, hardware: Handle) -> Result<(), WindowError> {
         if self.shown.get().is_some() {
             return Ok(());
@@ -116,6 +121,7 @@ impl Window {
             Ok(_) => {
                 self.shown.set(Some(self.draw.get()));
                 self.draw.set((dma, pixels));
+                self.draw_slot.set(1);
                 Ok(())
             }
             Err(e) => {
@@ -124,6 +130,12 @@ impl Window {
                 Err(e)
             }
         }
+    }
+
+    /// Whether the window has two buffers now: a resize asks for the second again,
+    /// and may not get it.
+    pub fn is_double(&self) -> bool {
+        self.shown.get().is_some()
     }
 
     /// Canvas over the content buffer: the one not shown, when there are two.
@@ -176,38 +188,44 @@ impl Window {
     /// the last `present` reaches the screen with its next frame (ADR 0046).
     pub fn present(&self) -> Result<(), WindowError> {
         let req = self.presenting(self.request(Op::Present));
-        self.call(req, false)?;
-        self.swapped();
+        let reply = self.call(req, false)?;
+        self.swapped(reply.value);
         Ok(())
     }
 
     /// As [`present`](Self::present), for what changed: at most
-    /// [`MAX_DAMAGE`] rectangles reach the compositor; more mean all of it.
+    /// [`MAX_DAMAGE`] rectangles reach the compositor; more mean all of it. With two
+    /// buffers the whole window goes: the one drawn on holds the frame before last.
     pub fn present_rects(&self, rects: &[DamageRect]) -> Result<(), WindowError> {
         let mut req = self.presenting(self.request(Op::Present));
-        if rects.len() <= MAX_DAMAGE {
+        if !self.is_double() && rects.len() <= MAX_DAMAGE {
             req.damage[..rects.len()].copy_from_slice(rects);
             req.damage_len = rects.len() as u8;
         }
-        self.call(req, false)?;
-        self.swapped();
+        let reply = self.call(req, false)?;
+        self.swapped(reply.value);
         Ok(())
     }
 
-    /// A present that swaps the buffers, when there are two.
+    /// A present that shows the buffer drawn on, when there are two.
     fn presenting(&self, mut req: Request) -> Request {
-        if self.shown.get().is_some() {
-            req.width = 1;
+        if self.is_double() {
+            req.width = 1 + self.draw_slot.get();
         }
         req
     }
 
-    /// After a swapping present: the buffer drawn on shows, and the one that showed
-    /// is drawn on next. The compositor answered, so it no longer reads that one.
-    fn swapped(&self) {
-        if let Some(shown) = self.shown.get() {
-            self.shown.set(Some(self.draw.get()));
-            self.draw.set(shown);
+    /// After a present the compositor answered with the slot it shows: the buffer
+    /// drawn on next is the other one, which it no longer reads. Taken from the
+    /// answer, not assumed, so a present whose answer was lost puts nothing out of
+    /// step for longer than one frame.
+    fn swapped(&self, shown: u64) {
+        if let Some(other) = self.shown.get() {
+            if shown == u64::from(self.draw_slot.get()) {
+                self.shown.set(Some(self.draw.get()));
+                self.draw.set(other);
+                self.draw_slot.set(1 - self.draw_slot.get());
+            }
         }
     }
 
@@ -278,8 +296,11 @@ impl Window {
     /// Gives the content a new size, in a new buffer that `paint` draws first: the
     /// compositor shows the new size with its picture, never blank. The old buffer
     /// goes once the compositor lets it go: for this call, the program's quota must
-    /// hold both. Should the answer be lost in a timeout, the compositor may hold the
-    /// new buffer while this keeps the old one, until the next resize.
+    /// hold both, or all three with two buffers. A window with two asks for its second
+    /// again after, of the new size; should that fail it keeps one
+    /// ([`is_double`](Self::is_double)). Should the answer be lost in a timeout, the
+    /// compositor may hold the new buffer while this keeps the old one, until the
+    /// next resize.
     pub fn resize(
         &mut self,
         hardware: Handle,
@@ -310,10 +331,12 @@ impl Window {
             Ok(_) => {
                 let _ = sys::mmio_unmap(old.0 .1);
                 let _ = sys::handle_close(old.0 .0);
-                // The compositor dropped the second buffer: back to one.
+                // The compositor dropped the second buffer, of the old size: a new one.
+                self.draw_slot.set(0);
                 if let Some((dma, pixels)) = self.shown.take() {
                     let _ = sys::mmio_unmap(pixels);
                     let _ = sys::handle_close(dma);
+                    let _ = self.double_buffer(hardware);
                 }
                 Ok(())
             }
@@ -360,8 +383,18 @@ impl Window {
         Ok(reply)
     }
 
+    /// Closes the window and lets its buffers go: the compositor keeps a buffer only
+    /// while a window shows or holds it.
     pub fn close(self) -> Result<(), WindowError> {
-        self.call(self.request(Op::Close), false).map(|_| ())
+        let closed = self.call(self.request(Op::Close), false).map(|_| ());
+        for (dma, pixels) in [Some(self.draw.get()), self.shown.get()]
+            .into_iter()
+            .flatten()
+        {
+            let _ = sys::mmio_unmap(pixels);
+            let _ = sys::handle_close(dma);
+        }
+        closed
     }
 }
 

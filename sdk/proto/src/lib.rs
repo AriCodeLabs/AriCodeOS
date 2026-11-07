@@ -1179,10 +1179,12 @@ pub mod window {
         /// Creates a `w`x`h` window with `title`; handles `[reply, buffer]`
         /// (the buffer has `w*h*4` bytes in `0x00RRGGBB`); `value` = id.
         Create = 1,
-        /// The buffer content changed: recompose. With `width` 1, on a window given
-        /// a [`SecondBuffer`](Op::SecondBuffer), the other buffer is shown from now
-        /// on, and the one shown until now is its program's to draw on again: the
-        /// compositor never reads a buffer while it is not the one shown.
+        /// The buffer content changed: recompose. `width` 0 keeps the buffer shown;
+        /// 1 shows the window's first buffer (that of `Create` or `Resize`) and 2 its
+        /// [`SecondBuffer`](Op::SecondBuffer), with the whole window redrawn, and
+        /// the other is its program's to draw on: the compositor never reads a
+        /// buffer while it is not the one shown. `Reply::value` is the one shown,
+        /// 0 or 1, so a program that lost an answer finds its step again.
         Present = 2,
         /// Waits up to `timeout_ms` for a window event.
         Poll = 3,
@@ -1220,10 +1222,11 @@ pub mod window {
         /// Main endpoint only (init): the bar shows `title` for the network.
         Network = 13,
         /// A second buffer for the window, of its size; handles `[reply, buffer]`,
-        /// as `Create`. Its program draws on the one not shown and presents with
-        /// `width` 1 to swap them, so no frame shows half drawn (incident 0063).
-        /// `Invalid` for a window that shares its buffer with another. A resize
-        /// drops it: the program gives a new one after.
+        /// as `Create`. Its program draws on the one not shown and presents naming
+        /// it, so no frame shows half drawn (incident 0063, ADR 0081). Once per
+        /// window; `Invalid` for a window that shares its buffer with another and
+        /// for a buffer a window already holds. A resize drops it: the program
+        /// gives a new one after.
         SecondBuffer = 14,
     }
 
@@ -2107,7 +2110,7 @@ mod tests {
         assert_eq!(Request::decode(&second.encode()), Some(second));
         let mut swap = Request::new(Op::Present);
         swap.window = 4;
-        swap.width = 1;
+        swap.width = 2;
         swap.damage[0] = DamageRect {
             x: 1,
             y: 2,
