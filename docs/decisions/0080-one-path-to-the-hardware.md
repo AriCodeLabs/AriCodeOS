@@ -483,6 +483,18 @@ that copy, about 0.4 ms a frame here.
 
 Raw lines: `bench3d-laptop-1.txt` and `bench3d-laptop-2.txt` in the same scratch directory.
 
+### Material content version (textures=v2)
+
+The four original procedural materials introduced after the section 4c measurements
+are identified by `textures=v2` in bench3d's run header. They change the three texture
+scenes, terrain, objects, everything and the source image of both 2D effects. Their
+figures form a new dataset; the laptop table above remains the earlier checker-based
+reference. The metric line format and finished-frame presentation remain unchanged.
+
+The [material audit](../audits/2026-11-07-bench3d-textures.md) records provenance,
+procedural/RGB24/QOI package and startup comparisons, memory accounting within the
+unchanged 8 MiB manifest, and QEMU screenshots. No v2 laptop baseline has been measured.
+
 ## 8. Stages
 
 Each stage ends with something shown. A to E and H are in order of dependency; F and G are side

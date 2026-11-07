@@ -574,7 +574,7 @@ mod tests {
     #[test]
     fn every_shading_and_filter_draws_a_lit_torus_inside_the_frame() {
         let tex = Texture::checker(64, 8, 0xffffff, 0x4060a0);
-        let torus = Mesh::torus(1.2, 0.5, 24, 12);
+        let torus = Mesh::torus(1.2, 0.5, 24, 12).unwrap();
         let model = Mat4::rotate_x(0.6);
         let mut counts = Vec::new();
         for shading in [Shading::Flat, Shading::Gouraud, Shading::Phong] {
@@ -677,7 +677,7 @@ mod dump {
             ambient: 0.2,
         };
         let tex = crate::texture::Texture::checker(256, 8, 0xf0f0f0, 0x3070c0);
-        let ground = Mesh::terrain(60.0, 96, 2.0);
+        let ground = Mesh::terrain(60.0, 96, 2.0).unwrap();
         draw(
             &mut t,
             &ground,
@@ -691,7 +691,7 @@ mod dump {
                 shininess: 0.0,
             },
         );
-        let torus = Mesh::torus(1.3, 0.5, 48, 24);
+        let torus = Mesh::torus(1.3, 0.5, 48, 24).unwrap();
         draw(
             &mut t,
             &torus,
@@ -705,7 +705,7 @@ mod dump {
                 shininess: 32.0,
             },
         );
-        let cube = Mesh::cube();
+        let cube = Mesh::cube().unwrap();
         draw(
             &mut t,
             &cube,
@@ -721,7 +721,7 @@ mod dump {
                 shininess: 0.0,
             },
         );
-        let sphere = Mesh::sphere(0.9, 24, 48);
+        let sphere = Mesh::sphere(0.9, 24, 48).unwrap();
         draw(
             &mut t,
             &sphere,

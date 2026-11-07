@@ -13,7 +13,9 @@ pub struct Vertex {
     pub uv: [f32; 2],
 }
 
-/// Triangles as indices into `vertices`, counter-clockwise from outside.
+/// Triangles as indices into `vertices`, counter-clockwise from outside. Every shape is
+/// `None` for a size it cannot have or when the heap has no room, so a program with a
+/// fixed budget says so instead of stopping.
 #[derive(Debug, Clone, Default)]
 pub struct Mesh {
     pub vertices: Vec<Vertex>,
@@ -21,6 +23,13 @@ pub struct Mesh {
 }
 
 impl Mesh {
+    fn reserved(vertices: usize, indices: usize) -> Option<Self> {
+        let mut m = Self::default();
+        m.vertices.try_reserve_exact(vertices).ok()?;
+        m.indices.try_reserve_exact(indices).ok()?;
+        Some(m)
+    }
+
     pub fn triangles(&self) -> usize {
         self.indices.len() / 3
     }
@@ -29,11 +38,13 @@ impl Mesh {
     /// `at(u, v)` for `u` and `v` from 0 to 1. What the round shapes and the terrain share.
     /// The triangles turn counter-clockwise around the direction of `du x dv`; `flip`
     /// turns them the other way, for a surface whose outside is the other side.
-    fn grid(columns: u32, rows: u32, flip: bool, at: impl Fn(f32, f32) -> Vertex) -> Self {
-        let mut m = Mesh {
-            vertices: Vec::with_capacity(((columns + 1) * (rows + 1)) as usize),
-            indices: Vec::with_capacity((columns * rows * 6) as usize),
-        };
+    fn grid(columns: u32, rows: u32, flip: bool, at: impl Fn(f32, f32) -> Vertex) -> Option<Self> {
+        if columns == 0 || rows == 0 {
+            return None;
+        }
+        let vertices = columns.checked_add(1)?.checked_mul(rows.checked_add(1)?)?;
+        let indices = columns.checked_mul(rows)?.checked_mul(6)?;
+        let mut m = Mesh::reserved(vertices as usize, indices as usize)?;
         for j in 0..=rows {
             for i in 0..=columns {
                 m.vertices
@@ -52,11 +63,11 @@ impl Mesh {
                 }
             }
         }
-        m
+        Some(m)
     }
 
     /// A ring, `sides` around its tube and `rings` around its centre.
-    pub fn torus(major: f32, minor: f32, rings: u32, sides: u32) -> Self {
+    pub fn torus(major: f32, minor: f32, rings: u32, sides: u32) -> Option<Self> {
         Self::grid(rings, sides, false, |u, v| {
             let (a, b) = (u * TAU, v * TAU);
             let (sa, ca, sb, cb) = (libm::sinf(a), libm::cosf(a), libm::sinf(b), libm::cosf(b));
@@ -71,7 +82,7 @@ impl Mesh {
     }
 
     /// A sphere of `stacks` from pole to pole and `slices` around.
-    pub fn sphere(radius: f32, stacks: u32, slices: u32) -> Self {
+    pub fn sphere(radius: f32, stacks: u32, slices: u32) -> Option<Self> {
         Self::grid(slices, stacks, true, |u, v| {
             let (a, b) = (u * TAU, v * PI);
             let normal = Vec3::new(
@@ -88,8 +99,8 @@ impl Mesh {
     }
 
     /// A cube of side 2 around the origin, each face with its own corners and texture.
-    pub fn cube() -> Self {
-        let mut m = Mesh::default();
+    pub fn cube() -> Option<Self> {
+        let mut m = Mesh::reserved(24, 36)?;
         let faces = [
             (Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0)),
             (Vec3::new(-1.0, 0.0, 0.0), Vec3::new(0.0, 0.0, -1.0)),
@@ -111,12 +122,12 @@ impl Mesh {
             m.indices
                 .extend_from_slice(&[base, base + 1, base + 2, base + 1, base + 3, base + 2]);
         }
-        m
+        Some(m)
     }
 
     /// Hills of `cells` x `cells` quads over a square of `size`, heights from a sum of
     /// waves: many triangles, near and far, as a landscape has.
-    pub fn terrain(size: f32, cells: u32, height: f32) -> Self {
+    pub fn terrain(size: f32, cells: u32, height: f32) -> Option<Self> {
         let h = |x: f32, z: f32| {
             height
                 * (0.5 * libm::sinf(x * 0.31) * libm::cosf(z * 0.23)
@@ -130,7 +141,7 @@ impl Mesh {
                 normal: Vec3::default(),
                 uv: [u * 8.0, v * 8.0],
             }
-        });
+        })?;
         // Normals from the slope, as a surface's are.
         let e = size / cells as f32;
         for v in &mut m.vertices {
@@ -142,7 +153,7 @@ impl Mesh {
             )
             .normalized();
         }
-        m
+        Some(m)
     }
 }
 
@@ -151,13 +162,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn invalid_grid_sizes_fail_before_allocating() {
+        for size in [0, u32::MAX] {
+            assert!(Mesh::torus(1.0, 0.3, size, 16).is_none());
+            assert!(Mesh::sphere(1.0, 16, size).is_none());
+            assert!(Mesh::terrain(40.0, size, 3.0).is_none());
+        }
+    }
+
+    #[test]
     fn shapes_have_the_triangles_and_unit_normals_they_should() {
-        let t = Mesh::torus(1.0, 0.3, 32, 16);
+        let t = Mesh::torus(1.0, 0.3, 32, 16).unwrap();
         assert_eq!(t.triangles(), 32 * 16 * 2);
-        let s = Mesh::sphere(1.0, 20, 40);
+        let s = Mesh::sphere(1.0, 20, 40).unwrap();
         assert_eq!(s.triangles(), 20 * 40 * 2);
-        assert_eq!(Mesh::cube().triangles(), 12);
-        let g = Mesh::terrain(40.0, 64, 3.0);
+        assert_eq!(Mesh::cube().unwrap().triangles(), 12);
+        let g = Mesh::terrain(40.0, 64, 3.0).unwrap();
         assert_eq!(g.triangles(), 64 * 64 * 2);
         for m in [&t, &s, &g] {
             assert!(m.indices.iter().all(|&i| (i as usize) < m.vertices.len()));
@@ -172,10 +192,10 @@ mod tests {
     #[test]
     fn every_shape_winds_the_way_its_normals_face() {
         for (name, m) in [
-            ("torus", Mesh::torus(1.0, 0.3, 32, 16)),
-            ("sphere", Mesh::sphere(1.0, 20, 40)),
-            ("terrain", Mesh::terrain(40.0, 32, 3.0)),
-            ("cube", Mesh::cube()),
+            ("torus", Mesh::torus(1.0, 0.3, 32, 16).unwrap()),
+            ("sphere", Mesh::sphere(1.0, 20, 40).unwrap()),
+            ("terrain", Mesh::terrain(40.0, 32, 3.0).unwrap()),
+            ("cube", Mesh::cube().unwrap()),
         ] {
             let mut agree = 0;
             for tri in m.indices.chunks(3) {
@@ -199,7 +219,7 @@ mod tests {
 
     #[test]
     fn the_cube_faces_outward() {
-        let c = Mesh::cube();
+        let c = Mesh::cube().unwrap();
         for tri in c.indices.chunks(3) {
             let [a, b, d] = [0, 1, 2].map(|k| c.vertices[tri[k] as usize].pos);
             let n = (b - a).cross(d - a);

@@ -94,6 +94,11 @@ mod user_heap {
         HEAP.with(|h| unsafe { h.add_region(start, size) });
     }
 
+    /// Current allocator totals, including allocation headers and alignment.
+    pub fn stats() -> aricode_heap::HeapStats {
+        HEAP.with(|h| h.stats())
+    }
+
     // SAFETY: access serialized by the spinlock; pointers come from `alloc`.
     unsafe impl GlobalAlloc for UserHeap {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
@@ -110,7 +115,7 @@ mod user_heap {
     }
 }
 
-pub use user_heap::extend as extend_heap;
+pub use user_heap::{extend as extend_heap, stats as heap_stats};
 
 /// Exit code of the panic handler.
 pub const PANIC_EXIT_CODE: u64 = 255;
