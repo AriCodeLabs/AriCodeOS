@@ -56,12 +56,18 @@ impl Caps {
     /// init tells and the session it changes, never a file. Only for
     /// `settings`, and only when it is an installed, signed package.
     pub const SETTINGS: Caps = Caps(1 << 13);
+    /// The GPU's engine (ADR 0083): the program maps its own DMA buffers
+    /// into a GPU address space of its own and runs batches there,
+    /// non-secure; nothing else is reachable through it. One program at a
+    /// time is the GPU's client.
+    pub const GPU: Caps = Caps(1 << 14);
 
     pub const NONE: Caps = Caps(0);
     /// The ones the broker grants to normal applications.
-    pub const APP_ALLOWED: Caps = Caps(Caps::SYSTEM.0 | Caps::FS.0 | Caps::NET.0 | Caps::WINDOW.0);
+    pub const APP_ALLOWED: Caps =
+        Caps(Caps::SYSTEM.0 | Caps::FS.0 | Caps::NET.0 | Caps::WINDOW.0 | Caps::GPU.0);
 
-    const NAMES: [(&'static str, Caps); 14] = [
+    const NAMES: [(&'static str, Caps); 15] = [
         ("system", Caps::SYSTEM),
         ("fs", Caps::FS),
         ("net", Caps::NET),
@@ -76,6 +82,7 @@ impl Caps {
         ("terminal", Caps::TERMINAL),
         ("home", Caps::HOME),
         ("settings", Caps::SETTINGS),
+        ("gpu", Caps::GPU),
     ];
 
     /// System applications that may also ask for `block`.

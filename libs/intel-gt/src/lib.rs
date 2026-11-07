@@ -67,6 +67,8 @@ pub enum Refusal {
     FrequencyLimits = 11,
     /// A wait on the engine ran out of time.
     Timeout = 12,
+    /// No memory for the engine's own pages.
+    NoMemory = 13,
 }
 
 /// How long each wait may take, in microseconds. The defaults are Linux's

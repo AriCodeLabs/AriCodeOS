@@ -20,6 +20,7 @@ mod console_input;
 mod cpu;
 mod events;
 mod framebuffer;
+mod gpu;
 mod hw;
 mod initrd;
 mod iommu;
@@ -208,6 +209,11 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
         _ => pci::Lie::None,
     });
     framebuffer::use_panel_size(cmdline.get(keys::VIDEO).is_some());
+    gpu::init(
+        cmdline.get(keys::GPU) == Some("off"),
+        cmdline.get(keys::GPU_MHZ).and_then(|v| v.parse().ok()),
+        cmdline.get(keys::GPU_HANG_MS).and_then(|v| v.parse().ok()),
+    );
     if cmdline.get(keys::PCI_FLR) == Some("off") {
         pci::set_flr_enabled(false);
         info!("pci: function level resets disabled on the command line (pci.flr=off)");
@@ -509,6 +515,15 @@ fn run_init(arg: u64, fb: boot_protocol::FramebufferInfo) {
                 .union(Rights::TRANSFER)
         ),
     ];
+    // The GPU, always, so it is `INIT_GPU` whether or not the kernel took
+    // the engine (ADR 0083).
+    handles.push((
+        object::KernelObject::new(object::ObjectKind::Gpu),
+        Rights::READ
+            .union(Rights::WRITE)
+            .union(Rights::DUPLICATE)
+            .union(Rights::TRANSFER),
+    ));
     // The PS/2 stream, last, so it is `INIT_PS2` when there is one (ADR 0075).
     if console_input::ps2_stream_kinds().is_some() {
         handles.push((

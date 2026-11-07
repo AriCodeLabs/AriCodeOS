@@ -43,6 +43,8 @@ const CONSOLE_IN: Handle = Handle(0x0001_0008);
 const FRAMEBUFFER: Handle = Handle(0x0001_0009);
 /// The PS/2 stream, when the machine has an i8042 (ADR 0075).
 const PS2: Handle = Handle(sys::abi::handle::INIT_PS2);
+/// The GPU (ADR 0083): always here; its calls say `NotFound` without an engine.
+const GPU: Handle = Handle(sys::abi::handle::INIT_GPU);
 
 /// Bits of the service mask passed to the shell.
 const SERVICE_BLOCK: u64 = 1;
@@ -3240,6 +3242,15 @@ impl Broker {
                 Ok(h) => granted.push(h),
                 Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
             }
+        }
+        // The GPU (ADR 0083): the kernel makes the first process to use it
+        // its only client, and the buffers it maps come from `dma_alloc`.
+        if caps.contains(Caps::GPU) {
+            match sys::handle_duplicate(GPU, rights::WRITE | rights::READ | rights::TRANSFER) {
+                Ok(h) => granted.push(h),
+                Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
+            }
+            needs_hw = true;
         }
         if needs_hw {
             match sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER) {

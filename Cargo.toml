@@ -61,6 +61,7 @@ members = [
     "apps/notes-reader",
     "apps/installer",
     "apps/bench",
+    "apps/gpu-probe",
     "sdk/rust",
     "sdk/proto",
     "sdk/https",

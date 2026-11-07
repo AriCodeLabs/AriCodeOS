@@ -1,0 +1,23 @@
+# ADR 0083 on a machine without the GPU it supports: QEMU's display device is
+# not an Intel GPU, so the kernel leaves the engine alone, `diag` says nothing
+# about a GPU, and gpu_probe, granted the `gpu` capability by the broker, finds
+# every GPU call refused with NotFound (its exit code 2). The real engine is
+# covered only on the reference laptop: QEMU emulates no Intel GPU.
+name = "gpu.absent"
+description = "without a supported GPU the gpu object exists and every call is refused with NotFound"
+level = "smoke"
+areas = ["gpu", "apps"]
+timeout_secs = 90
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["run gpu_probe", "diag", "shutdown"]
+[boots.expect]
+exit = 33
+serial_contains = [
+    "gpu_probe: no GPU engine here: no supported GPU",
+    "gpu_probe: calls refused with NotFound, as documented",
+    "run: gpu_probe exited with 2",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "gpu     ", "denied, requests system capabilities"]

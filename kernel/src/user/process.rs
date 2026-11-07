@@ -898,6 +898,9 @@ pub fn release_address_space(pid: u32) {
     // call when the end began may have claimed the console or the PS/2 stream
     // after `finish` let them go (ADR 0082, audit M1).
     crate::console_input::process_gone(pid);
+    // Its GPU mappings keep its buffers alive until the engine lets go of
+    // them, at the next GPU call (ADR 0083).
+    crate::gpu::process_gone(pid);
     // The capabilities are taken out now, before anything is freed, so the
     // devices they claim can be stopped first; they are dropped below.
     let handles = PROCESSES

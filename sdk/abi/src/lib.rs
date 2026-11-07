@@ -12,10 +12,12 @@
 //! the handles [`handle::SELF_PROCESS`], [`handle::MAIN_THREAD`] and
 //! [`handle::CONSOLE`].
 //!
-//! During `0.x` the ABI may change (section 74). Current version: 9
-//! (ADR 0082: threads in a process, `thread_create`, `thread_exit`,
-//! `thread_join`, `futex_wait`, `futex_wake`, and the thread limit in
-//! `spawn_limits`). Version 8 (ADR 0075): the `PS2` object, `ps2_read` and
+//! During `0.x` the ABI may change (section 74). Current version: 10
+//! (ADR 0083: the `GPU` object at `INIT_GPU`, which moves `INIT_PS2` one
+//! on; `gpu_map`, `gpu_unmap`, `gpu_submit`, `gpu_wait`; `Error::Busy` and
+//! `Error::Hung`; `sysinfo::GPU`). Version 9 (ADR 0082: threads in a
+//! process, `thread_create`, `thread_exit`, `thread_join`, `futex_wait`,
+//! `futex_wake`, and the thread limit in `spawn_limits`). Version 8 (ADR 0075): the `PS2` object, `ps2_read` and
 //! `INIT_PS2`. Version 7
 //! (ADR 0047): `spawn_limits::CONSOLE_FIRST` gives the child a session
 //! console. Version 6 (ADR 0044): `ipc_receive_any` also waits on
@@ -26,7 +28,7 @@
 
 #![no_std]
 
-pub const ABI_VERSION: u32 = 9;
+pub const ABI_VERSION: u32 = 10;
 
 /// Kernel base signature (SHA-512), required to check and verify the origin
 /// and authorship of an AriCodeOS build. It is part of the fixed ABI: it is
@@ -55,10 +57,15 @@ pub mod handle {
     pub const INIT_CONSOLE_IN: u32 = 0x0001_0008;
     /// Handle through which `init` receives the framebuffer (`MMIO`, `READ|WRITE`).
     pub const INIT_FRAMEBUFFER: u32 = 0x0001_0009;
+    /// Handle through which `init` receives the GPU (`GPU`,
+    /// `READ|WRITE|DUPLICATE|TRANSFER`, ADR 0083). Always present; on a
+    /// machine whose GPU engine the kernel did not take, its calls return
+    /// `NotFound` and `sysinfo::GPU` says why.
+    pub const INIT_GPU: u32 = 0x0001_000A;
     /// Handle through which `init` receives the PS/2 stream (`PS2`,
     /// `READ|WAIT|DUPLICATE|TRANSFER`), only if the machine has an i8042 that passed
     /// its self-test (ADR 0075). Absent otherwise: the handle is invalid.
-    pub const INIT_PS2: u32 = 0x0001_000A;
+    pub const INIT_PS2: u32 = 0x0001_000B;
 }
 
 /// Bits of the `arg` the kernel passes to `init`.
@@ -152,6 +159,20 @@ pub mod kind {
     pub const SYSTEM: u64 = 11;
     /// The i8042's bytes while a process holds the screen (ADR 0075).
     pub const PS2: u64 = 12;
+    /// The GPU's engine (ADR 0083): memory mapped for it, batches run on it.
+    pub const GPU: u64 = 13;
+}
+
+/// The GPU (ADR 0083). One process at a time is its client: the first that
+/// maps memory or submits a batch, until it ends. Its address space (a PPGTT)
+/// holds only the DMA buffers it mapped there; batches run non-secure in it.
+pub mod gpu {
+    /// The client's address space: addresses below this.
+    pub const SIZE: u64 = 2 << 30;
+    /// Mappings start at or above this, so an address of 0 never names memory.
+    pub const FIRST: u64 = 0x1_0000;
+    /// Mappings are made of whole pages of this size.
+    pub const PAGE: u64 = 4096;
 }
 
 /// The PS/2 stream (ADR 0075): `ps2_read` copies entries of two bytes, a
@@ -362,6 +383,27 @@ pub mod nr {
     /// `futex_wake(addr, count) -> woken`: wakes up to `count` threads of the
     /// calling process waiting on `addr`, the oldest first.
     pub const FUTEX_WAKE: u64 = 42;
+    /// `gpu_map(gpu, dma, address)` (ADR 0083): maps the whole DMA buffer
+    /// into the client's GPU address space at `address`, a multiple of
+    /// [`gpu::PAGE`](crate::gpu::PAGE) in `[gpu::FIRST, gpu::SIZE)`, not
+    /// overlapping another mapping. Requires `WRITE` on the `GPU` and
+    /// `READ|WRITE` on the buffer (the GPU can write every page it sees).
+    /// The buffer stays allocated while mapped. `Busy` if another process
+    /// is the GPU's client; `NotFound` without a GPU engine.
+    pub const GPU_MAP: u64 = 43;
+    /// `gpu_unmap(gpu, address)`: removes the mapping made at `address`.
+    /// `Busy` while the engine has not finished the client's batches.
+    pub const GPU_UNMAP: u64 = 44;
+    /// `gpu_submit(gpu, batch) -> number`: runs the batch at the GPU address
+    /// `batch` (4-byte aligned, inside a mapping, ending with
+    /// `MI_BATCH_BUFFER_END`) after those submitted before, non-secure in the
+    /// client's address space. The number names it for `gpu_wait`. `Busy`
+    /// while the ring is full.
+    pub const GPU_SUBMIT: u64 = 45;
+    /// `gpu_wait(gpu, number, timeout_ms)`: until the batch has finished.
+    /// `Timeout` at the deadline; `Hung` if the engine stopped making
+    /// progress and was reset, which loses that batch and the ones after it.
+    pub const GPU_WAIT: u64 = 46;
 }
 
 /// `process_spawn_from` request (48 bytes in caller memory).
@@ -529,6 +571,90 @@ pub mod sysinfo {
     /// Two `u32`s: the CPU's temperature in degrees and the limit at which it
     /// throttles itself. `NotFound` if it cannot be read here.
     pub const TEMPERATURE: u64 = 16;
+    /// A [`GpuReport`]: whether the kernel took the GPU's engine and, if not,
+    /// why (ADR 0083).
+    pub const GPU: u64 = 17;
+
+    /// The state of the GPU's engine ([`GPU`]).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct GpuReport {
+        /// One of the `GPU_*` states.
+        pub state: u8,
+        /// With [`GPU_REFUSED`]: the reason, as `aricode_intel_gt::Refusal`.
+        pub refusal: u8,
+        /// The client's pid, 0 if none.
+        pub client: u32,
+        /// The GPU's clock now, and its limits, in MHz.
+        pub mhz: u16,
+        pub mhz_lowest: u16,
+        pub mhz_highest: u16,
+        /// Batches submitted, and engine resets, since boot.
+        pub requests: u64,
+        pub resets: u64,
+        /// A dword of the kernel's status page that nothing should write, and
+        /// the blitter's watchdog threshold register: both stay as they were
+        /// unless a non-secure batch could reach them (ADR 0083's
+        /// measurements).
+        pub canary: u32,
+        pub watchdog: u32,
+        /// The status page's address in the global GTT, for those
+        /// measurements.
+        pub status_page: u32,
+        /// KiB the client has mapped.
+        pub mapped_kib: u32,
+    }
+
+    /// No Intel GPU of a supported family.
+    pub const GPU_ABSENT: u8 = 0;
+    pub const GPU_READY: u8 = 1;
+    /// Found but left as the firmware set it; `refusal` says why.
+    pub const GPU_REFUSED: u8 = 2;
+    /// `gpu=off` on the command line.
+    pub const GPU_OFF: u8 = 3;
+
+    impl GpuReport {
+        pub const LEN: usize = 48;
+
+        pub fn encode(&self) -> [u8; Self::LEN] {
+            let mut b = [0u8; Self::LEN];
+            b[0] = self.state;
+            b[1] = self.refusal;
+            b[4..8].copy_from_slice(&self.client.to_le_bytes());
+            b[8..10].copy_from_slice(&self.mhz.to_le_bytes());
+            b[10..12].copy_from_slice(&self.mhz_lowest.to_le_bytes());
+            b[12..14].copy_from_slice(&self.mhz_highest.to_le_bytes());
+            b[16..24].copy_from_slice(&self.requests.to_le_bytes());
+            b[24..32].copy_from_slice(&self.resets.to_le_bytes());
+            b[32..36].copy_from_slice(&self.canary.to_le_bytes());
+            b[36..40].copy_from_slice(&self.watchdog.to_le_bytes());
+            b[40..44].copy_from_slice(&self.status_page.to_le_bytes());
+            b[44..48].copy_from_slice(&self.mapped_kib.to_le_bytes());
+            b
+        }
+
+        pub fn decode(b: &[u8]) -> Option<Self> {
+            if b.len() < Self::LEN {
+                return None;
+            }
+            let u16_at = |i: usize| u16::from_le_bytes([b[i], b[i + 1]]);
+            let u32_at = |i: usize| u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
+            let u64_at = |i: usize| (u32_at(i) as u64) | (u32_at(i + 4) as u64) << 32;
+            Some(Self {
+                state: b[0],
+                refusal: b[1],
+                client: u32_at(4),
+                mhz: u16_at(8),
+                mhz_lowest: u16_at(10),
+                mhz_highest: u16_at(12),
+                requests: u64_at(16),
+                resets: u64_at(24),
+                canary: u32_at(32),
+                watchdog: u32_at(36),
+                status_page: u32_at(40),
+                mapped_kib: u32_at(44),
+            })
+        }
+    }
 
     /// What seeded the kernel generator. The number is the code of the
     /// `net tcp secret weak` and `ssh entropy weak` fault events.
@@ -937,6 +1063,27 @@ pub mod sysinfo {
         })
     }
 
+    /// Why the kernel left the GPU's engine as the firmware set it (ADR
+    /// 0083). The numbers are those of `aricode_intel_gt::Refusal`.
+    pub const fn gpu_refusal(code: u8) -> Option<&'static str> {
+        Some(match code {
+            1 => "no support for this graphics device",
+            2 => "its PCI addresses are not as needed",
+            3 => "the device does not answer",
+            4 => "an engine's ring is already running",
+            5 => "an engine already has its own page tables",
+            6 => "a reset is under way",
+            7 => "forcewake was not acknowledged",
+            8 => "an engine is not idle",
+            9 => "an engine reports a fault",
+            10 => "its GTT is not as this family has it",
+            11 => "its frequency limits are not sane",
+            12 => "the engine did not respond in time",
+            13 => "no memory for the engine's pages",
+            _ => return None,
+        })
+    }
+
     /// One mode the firmware offered, in [`Display`].
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
     pub struct DisplayMode {
@@ -1339,6 +1486,12 @@ pub enum Error {
     /// service is relaunched on the same endpoint, so a later request may
     /// be served; retry after a short pause.
     ReplyLost = 15,
+    /// Someone else holds the resource for now (ADR 0083: another process is
+    /// the GPU's client, or the engine has work pending).
+    Busy = 16,
+    /// The GPU's engine stopped making progress and was reset; the work
+    /// waited for was lost (ADR 0083).
+    Hung = 17,
 }
 
 impl Error {
@@ -1372,6 +1525,8 @@ impl Error {
             13 => Some(Error::PeerClosed),
             14 => Some(Error::ServiceGone),
             15 => Some(Error::ReplyLost),
+            16 => Some(Error::Busy),
+            17 => Some(Error::Hung),
             _ => None,
         }
     }

@@ -1,9 +1,9 @@
 # ADR 0083: The GPU engine on the HD 4000
 
 - **Date:** 2026-11-07
-- **Status:** Proposed, as stage A of ADR 0080. Steps 1 to 4 of the device study are
-  done (sources, veterans, read-only probe). Point 1 of the decision, where the code
-  that owns the engine runs, waits for the owner.
+- **Status:** Accepted, as stage A of ADR 0080. Steps 1 to 4 of the device study are
+  done (sources, veterans, read-only probe). The owner chose option (a) of point 1 on
+  2026-11-07: the kernel, with the logic in a host-tested library.
 
 ## Context
 
@@ -88,9 +88,9 @@ Raw dump and decoder: `~/aricode-scratch/gpu-reference/probe/` and
 So decision 4 holds only if the kernel owns more than the page tables: whoever writes the
 ring, or any register on the blitter's page, can rewrite the GTT.
 
-## Decision (proposed)
+## Decision
 
-1. **Owner's choice: where the engine's owner runs.** The study leaves almost nothing a
+1. **Where the engine's owner runs: the kernel (owner's choice, 2026-11-07).** The study leaves almost nothing a
    separate driver could hold without breaking decision 4: the GTT, the PPGTT, the ring,
    the status page, every register of the engine, reset and interrupts must stay out of
    reach of any program. The options:

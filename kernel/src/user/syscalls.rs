@@ -120,6 +120,12 @@ pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
         nr::THREAD_JOIN => process::join_thread(frame.rdi, deadline_from(frame.rsi)),
         nr::FUTEX_WAIT => super::futex::wait(frame.rdi, frame.rsi as u32, deadline_from(frame.rdx)),
         nr::FUTEX_WAKE => super::futex::wake(frame.rdi, frame.rsi),
+        nr::GPU_MAP => gpu_map(h, Handle(frame.rsi as u32), frame.rdx),
+        nr::GPU_UNMAP => gpu_object(h)
+            .and_then(|_| crate::gpu::unmap(frame.rsi))
+            .map(|()| 0),
+        nr::GPU_SUBMIT => gpu_object(h).and_then(|_| crate::gpu::submit(frame.rsi)),
+        nr::GPU_WAIT => gpu_object(h).and_then(|_| crate::gpu::wait(frame.rsi, frame.rdx)),
         n => {
             warn!("unknown syscall {n} from rip={:#x}", frame.user_rip);
             Err(Error::NoSys)
@@ -336,6 +342,7 @@ fn system_info(h: Handle, kind: u64, ptr: u64, len: u64) -> Result<u64, Error> {
             }
             None => return Err(Error::NotFound),
         },
+        sysinfo::GPU => crate::gpu::report().encode().to_vec(),
         sysinfo::DISPLAY => match crate::framebuffer::abi_display() {
             Some(d) => d.encode().to_vec(),
             None => return Err(Error::NotFound),
@@ -927,6 +934,28 @@ fn ps2_read(h: Handle, ptr: u64, len: u64) -> Result<u64, Error> {
         return Err(e);
     }
     Ok(n as u64)
+}
+
+/// Checks that `h` is the GPU, with `WRITE` (ADR 0083).
+fn gpu_object(h: Handle) -> Result<(), Error> {
+    with_handles(|t| match lookup(t, h, Rights::WRITE)?.kind {
+        ObjectKind::Gpu => Ok(()),
+        _ => Err(Error::Invalid),
+    })
+}
+
+/// `gpu_map`: the GPU with `WRITE`, the buffer with `READ|WRITE`, since the
+/// GPU can write every page it sees (no read-only mappings on this family).
+fn gpu_map(h: Handle, dma: Handle, address: u64) -> Result<u64, Error> {
+    gpu_object(h)?;
+    let buffer = with_handles(|t| {
+        let o = lookup(t, dma, Rights::READ.union(Rights::WRITE))?;
+        match o.kind {
+            ObjectKind::Dma(_) => Ok(o.clone()),
+            _ => Err(Error::Invalid),
+        }
+    })?;
+    crate::gpu::map(buffer, address).map(|()| 0)
 }
 
 fn irq_wait(h: Handle, timeout_ms: u64) -> Result<u64, Error> {

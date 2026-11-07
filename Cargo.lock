@@ -59,6 +59,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ari-app-gpu-probe"
+version = "0.18.0"
+dependencies = [
+ "aricode-build",
+ "aricode-intel-gt",
+ "aricode-rt",
+]
+
+[[package]]
 name = "ari-app-hello"
 version = "0.18.0"
 dependencies = [
@@ -449,6 +458,9 @@ dependencies = [
 [[package]]
 name = "aricode-intel-gt"
 version = "0.18.0"
+dependencies = [
+ "aricode-abi",
+]
 
 [[package]]
 name = "aricode-iommu"
@@ -680,6 +692,7 @@ dependencies = [
  "aricode-initrd",
  "aricode-input",
  "aricode-intel-display",
+ "aricode-intel-gt",
  "aricode-iommu",
  "aricode-pci",
  "aricode-pmm",

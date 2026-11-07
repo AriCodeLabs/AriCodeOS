@@ -512,6 +512,7 @@ fn diag(fs: &mut FsClient, net_client: &NetClient, mask: u64, rest: &[u8]) {
     }
     devices();
     screen();
+    gpu();
     events();
     print(b"=== end of diagnostics ===\n");
     if name.is_empty() {
@@ -822,6 +823,54 @@ fn screen() {
         print(b")");
     }
     print(b"\n");
+}
+
+/// The GPU's engine (`sysinfo::GPU`, ADR 0083): `gpu     blitter ready, 350
+/// MHz (350 to 1050), 12 batches, 0 resets`, or why it was left alone.
+/// Nothing on a machine without one.
+fn gpu() {
+    use abi::sysinfo::{GpuReport, GPU_OFF, GPU_READY, GPU_REFUSED};
+    let mut b = [0u8; GpuReport::LEN];
+    let Some(r) = sys::system_info(SYSTEM, abi::sysinfo::GPU, &mut b)
+        .ok()
+        .and_then(|_| GpuReport::decode(&b))
+    else {
+        return;
+    };
+    match r.state {
+        GPU_READY => {
+            print(b"gpu     blitter ready, ");
+            num(r.mhz as u64);
+            print(b" MHz (");
+            num(r.mhz_lowest as u64);
+            print(b" to ");
+            num(r.mhz_highest as u64);
+            print(b"), ");
+            num(r.requests);
+            print(b" batches, ");
+            num(r.resets);
+            print(b" resets");
+            if r.client != 0 {
+                print(b"; client pid ");
+                num(r.client as u64);
+                print(b", ");
+                num(r.mapped_kib as u64);
+                print(b" KiB mapped");
+            }
+            print(b"\n");
+        }
+        GPU_REFUSED => {
+            print(b"gpu     left as the firmware set it: ");
+            print(
+                abi::sysinfo::gpu_refusal(r.refusal)
+                    .unwrap_or("unknown reason")
+                    .as_bytes(),
+            );
+            print(b"\n");
+        }
+        GPU_OFF => print(b"gpu     left as the firmware set it (gpu=off)\n"),
+        _ => {}
+    }
 }
 
 fn print_ip(ip: [u8; 4]) {

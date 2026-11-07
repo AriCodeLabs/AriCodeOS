@@ -514,3 +514,28 @@ fn the_directory_lives_in_the_tables_own_slots() {
     assert_eq!(ppgtt::split(0x7FFF_F000), (511, 1023));
     assert_eq!(ppgtt::SIZE, 2 << 30);
 }
+
+#[test]
+fn every_refusal_has_a_name_in_diag() {
+    use aricode_abi::sysinfo::gpu_refusal;
+    let all = [
+        Refusal::NotThisFamily,
+        Refusal::BadBars,
+        Refusal::NoAnswer,
+        Refusal::RingRunning,
+        Refusal::PpgttOn,
+        Refusal::ResetPending,
+        Refusal::ForcewakeTimeout,
+        Refusal::NotIdle,
+        Refusal::Faulted,
+        Refusal::GttSize,
+        Refusal::FrequencyLimits,
+        Refusal::Timeout,
+        Refusal::NoMemory,
+    ];
+    for (i, r) in all.iter().enumerate() {
+        assert_eq!(*r as u8, i as u8 + 1, "numbered in order");
+        assert!(gpu_refusal(*r as u8).is_some(), "{r:?}");
+    }
+    assert_eq!(gpu_refusal(all.len() as u8 + 1), None);
+}
