@@ -94,6 +94,7 @@ pub struct Theme {
     pub margin: i32,
     pub control_h: i32,
     pub row_h: i32,
+    pub list_icon: u32,
     pub radius: i32,
     /// Of a group on a card.
     pub card_radius: i32,
@@ -152,6 +153,7 @@ impl Theme {
             margin: 20,
             control_h: 22,
             row_h: 24,
+            list_icon: 20,
             radius: 6,
             card_radius: 8,
             ring: 3,

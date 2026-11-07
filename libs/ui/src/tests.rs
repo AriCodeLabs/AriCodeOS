@@ -54,6 +54,37 @@ fn form() -> Form {
     f
 }
 
+#[test]
+fn icon_lists_keep_identity_and_repaint_after_scroll_filter_and_theme() {
+    let mut f = form();
+    f.ui.set_rows(
+        f.list,
+        ["terminal", "files", "editor", "settings", "pista", "other"],
+    );
+    f.ui.set_list_icons(f.list, ListIcons::Applications);
+    f.ui.focus(f.list);
+    assert_eq!(
+        f.ui.row(f.list, 0),
+        "terminal",
+        "the display name is not the launch identity"
+    );
+    f.same_as_full_paint();
+    f.keys(b"\r");
+    assert!(f.actions().contains(&Action::Activated(f.list, 0)));
+    f.ui.select(f.list, Some(5));
+    f.same_as_full_paint();
+    f.ui.set_rows(f.list, ["files"]);
+    f.same_as_full_paint();
+    f.ui.set_theme(Theme::dark());
+    f.same_as_full_paint();
+    f.ui.set_list_icons(f.list, ListIcons::Documents);
+    f.same_as_full_paint();
+    f.ui.set_rows(f.list, core::iter::empty());
+    f.same_as_full_paint();
+    f.ui.set_list_icons(f.list, ListIcons::None);
+    f.same_as_full_paint();
+}
+
 impl Form {
     fn paint(&mut self) -> Frame {
         let mut c = Canvas::new(&mut self.pixels, W, H, W).unwrap();
@@ -711,6 +742,30 @@ fn delete_on_a_list_goes_to_the_program() {
     f.ui.focus(f.list);
     f.keys(b"\x1b[3~");
     assert_eq!(f.actions(), [Action::DeleteRow(f.list, 0)]);
+}
+
+#[test]
+fn a_long_file_name_never_paints_over_its_size_column() {
+    let mut f = form();
+    f.ui.set_list_icons(f.list, ListIcons::Documents);
+    f.ui.set_rows(f.list, ["\t12345"]);
+    f.paint();
+    let before = f.pixels.clone();
+    let r = f.rect(f.list);
+    let ty = f.ui.theme.style(Style::Body);
+    let width = f.ui.text.width(ty.face, ty.size, "12345");
+    let right_column = r.right() - f.ui.theme.margin - width;
+    f.ui.set_rows(
+        f.list,
+        ["a_very_long_name_that_would_run_across_the_file_size_column\t12345"],
+    );
+    f.same_as_full_paint();
+    for y in r.y..r.y + f.ui.theme.row_h {
+        for x in right_column..r.right() {
+            let offset = (y as u32 * W + x as u32) as usize;
+            assert_eq!(before[offset], f.pixels[offset], "column pixel ({x},{y})");
+        }
+    }
 }
 
 #[test]

@@ -1333,7 +1333,13 @@ impl Supervisor {
                     }
                     Err(Error::Limit)
                 } else {
-                    start_driver(r.name, pci_index, r.endpoint, &extras[..n], r.driver_arg)
+                    let granted = if with_system {
+                        driver_arg::WITH_SYSTEM
+                    } else {
+                        0
+                    };
+                    let arg = r.driver_arg | granted;
+                    start_driver(r.name, pci_index, r.endpoint, &extras[..n], arg)
                 }
             }
             Kind::Fs {

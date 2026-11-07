@@ -612,13 +612,37 @@ what one says can be believed. It warns once when the processor comes within 10 
 itself, and again only after it has cooled 5 C more. Programs have no way to post one yet: nothing
 needs it, and it would bring questions of spam and spoofing to answer when something does.
 
-**Not done, on purpose: names and icons in the manifests.** The manifest's parser refuses a key it
+**Not done, on purpose: package-supplied names and icons in the manifests.** The manifest's parser refuses a key it
 does not know, and so a package with a new line cannot be installed by an older system, including a
 0.18 updating itself. A `title` must first be accepted by a released system, and used by packages
 only in a later one, as `--all-machines-0.18` already does for profiles. Icons need vector paths
 that the compositor or the launcher would parse from packages: to be studied with their audit.
 
-Next: those, then the shell (stage 3).
+### Built-in shell artwork (2026-11-07)
+
+The dock, launcher and file list share a small set of original analytic icons in
+`libs/gfx/src/icons.rs`. Known package identifiers select their icon and display
+name; other packages retain their identifier and get a generic application icon.
+The compositor uses the identity init supplied, never the application's window
+title, to select artwork. This adds no manifest keys or wire fields, so existing
+packages remain installable. Package-supplied artwork still needs the compatibility
+and parsing work above.
+
+These shapes use the existing rounded rectangles and circles, plus bounded
+antialiased strokes, without a path parser, image decoder, allocation or new
+dependency. Drawing is clipped and capped at 64 pixels per icon. General paths
+remain a separate decision; this set does not require tiny-skia.
+
+Dock places are 96x64 pixels, with a 32-pixel icon, a label and a state mark:
+a line for the active window, a dot for another visible window, an outlined dot
+for a minimized one. Long labels end in an ellipsis. Zoom and snap reserve the
+new dock height. The launcher has a heading, 32-pixel application rows, separate
+open/refresh and leave controls, and an explicit empty-search state with Open
+disabled. The toolkit's optional list icons do not change stored row identifiers
+or activation indices; the file manager uses document icons beside its names.
+
+See the [desktop presentation audit](../audits/2026-11-07-desktop-presentation.md)
+for scope, validation and remaining work.
 
 ### The audit of this stage
 

@@ -24,7 +24,9 @@ use aricode_proto::fs::Status as FsStatus;
 use aricode_rt::sys::fs::{FsClient, FsError};
 use aricode_rt::sys::window::{wants, Event, Window};
 use aricode_rt::sys::{self, kind, permissions};
-use aricode_ui::{Action, Dialog, Fill, Id, Space, Stack, Style, Theme, Tone, Ui, EDIT_MENU};
+use aricode_ui::{
+    Action, Dialog, Fill, Id, ListIcons, Space, Stack, Style, Theme, Tone, Ui, EDIT_MENU,
+};
 
 const W: u32 = 480;
 const H: u32 = 400;
@@ -263,6 +265,7 @@ fn build(fs: FsClient, dark: bool) -> Files {
     let mut ui = Ui::new(Theme::of(dark), W, H);
     let title = ui.label("home/", Style::Headline, Tone::Primary);
     let list = ui.list();
+    ui.set_list_icons(list, ListIcons::Documents);
     ui.set_flex(list, 1);
     let caption = ui.label("Name", Style::Body, Tone::Primary);
     let field = ui.field(NAME_MAX, "a-z, 0-9, . _ -");

@@ -84,6 +84,10 @@ pub mod init_arg {
 /// Bits of the `arg` init passes to a PCI driver (`start_driver`), above
 /// the BAR (bits 0..5) and IRQ (bit 15) bits.
 pub mod driver_arg {
+    /// Init gave this driver a `SYSTEM` handle, its first extra. A driver that takes one
+    /// only for some boots asks here, since any other handle may be at that place.
+    pub const WITH_SYSTEM: u64 = 1 << 14;
+
     /// The driver is relaunched after serving the system disk (ADR 0031):
     /// bits 17..63 carry the first 47 bits of that disk's GPT disk GUID,
     /// and the driver serves no other disk.
@@ -1414,6 +1418,7 @@ mod tests {
         other[0] = 0;
         assert_ne!(expected_digest(arg), Some(digest(&other)));
         assert_eq!(expected_digest(0x3F | 1 << 15), None);
+        assert_eq!(expected_digest(WITH_SYSTEM), None, "a bit of its own");
     }
 
     #[test]

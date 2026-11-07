@@ -9,6 +9,9 @@
 
 #![no_std]
 
+pub mod icons;
+use icons::Icon;
+
 use aricode_fb_console::char_glyph;
 use aricode_fb_console::font::GLYPH_WIDTH;
 
@@ -693,6 +696,10 @@ pub struct Theme {
     /// A minimized program's title in the dock.
     pub dock_quiet_ink: Color,
     pub dock_item: (u32, u32),
+    pub dock_icon: u32,
+    pub dock_icon_top: i32,
+    pub dock_label_middle: i32,
+    pub dock_indicator_h: u32,
     pub dock_gap: i32,
     /// Inside the dock, around its places.
     pub dock_pad: i32,
@@ -731,7 +738,11 @@ impl Theme {
         dock_active: rgb(0xFF, 0xFF, 0xFF),
         dock_ink: rgb(0x26, 0x26, 0x26),
         dock_quiet_ink: rgb(0x80, 0x80, 0x80),
-        dock_item: (140, 32),
+        dock_item: (96, 64),
+        dock_icon: 32,
+        dock_icon_top: 4,
+        dock_label_middle: 46,
+        dock_indicator_h: 3,
         dock_gap: 4,
         dock_pad: 4,
         dock_margin: 6,
@@ -1029,6 +1040,11 @@ impl Window {
         if self.program_len == 0 {
             return self.title_str();
         }
+        Icon::application_name(self.program_name())
+    }
+
+    /// Identity supplied by init, never inferred from the window title.
+    pub fn program_name(&self) -> &str {
         core::str::from_utf8(&self.program[..self.program_len as usize]).unwrap_or("")
     }
 
@@ -1521,10 +1537,6 @@ impl Desktop {
         if let Some(w) = self.windows.iter_mut().flatten().find(|w| w.id == id) {
             let n = name.len().min(MENU_LABEL);
             w.program[..n].copy_from_slice(&name[..n]);
-            w.program[..n]
-                .iter_mut()
-                .take(1)
-                .for_each(|b| *b = b.to_ascii_uppercase());
             w.program_len = n as u8;
         }
     }
@@ -1762,7 +1774,7 @@ impl Desktop {
         for (id, place) in places.iter().flatten() {
             let Some(w) = self.get(*id) else { continue };
             if self.focus == Some(*id) {
-                out.rounded(place, RADIUS - t.dock_pad, t.dock_active);
+                out.rounded(place, RADIUS, t.dock_active);
             }
             let ink = if w.hidden {
                 t.dock_quiet_ink
@@ -1770,12 +1782,68 @@ impl Desktop {
                 t.dock_ink
             };
             let mut inside = out.clipped(place);
-            let name = labels.width(w.panel_name());
-            let x = place.x + (place.w as i32 - name).max(0) / 2;
-            let middle = place.y + place.h as i32 / 2;
-            labels.draw(&mut inside, w.panel_name(), x, middle, ink);
+            let size = t.dock_icon.min(place.w.saturating_sub(8));
+            Icon::application(w.program_name()).draw(
+                &mut inside,
+                Rect::new(
+                    place.x + (place.w - size) as i32 / 2,
+                    place.y + t.dock_icon_top,
+                    size,
+                    size,
+                ),
+            );
+            let room = Rect::new(place.x + 4, place.y, place.w.saturating_sub(8), place.h);
+            let mut label = inside.clipped(&room);
+            draw_fitted_label(
+                &mut label,
+                labels,
+                w.panel_name(),
+                &room,
+                place.y + t.dock_label_middle,
+                ink,
+            );
+            // A line for the active window, a dot for another visible window,
+            // and an outlined dot for a minimized one: colour is not the only cue.
+            let width = if self.focus == Some(*id) { 16 } else { 5 };
+            let mark = Rect::new(
+                place.x + (place.w as i32 - width) / 2,
+                place.bottom() - t.dock_indicator_h as i32 - 3,
+                width as u32,
+                t.dock_indicator_h,
+            );
+            inside.rounded(&mark, 2, ink);
+            if w.hidden && mark.w > 2 && mark.h > 2 {
+                inside.fill_rect(
+                    &Rect::new(mark.x + 1, mark.y + 1, mark.w - 2, mark.h - 2),
+                    t.dock,
+                );
+            }
         }
     }
+}
+
+/// Centres a dock label and ends a shortened UTF-8 name with an ellipsis.
+fn draw_fitted_label(
+    out: &mut Canvas,
+    labels: &mut impl Labels,
+    name: &str,
+    room: &Rect,
+    middle: i32,
+    ink: Color,
+) {
+    let width = labels.width(name);
+    if width <= room.w as i32 {
+        labels.draw(out, name, room.x + (room.w as i32 - width) / 2, middle, ink);
+        return;
+    }
+    let dots = labels.width("…");
+    let mut end = name.len();
+    while end > 0 && labels.width(&name[..end]) + dots > room.w as i32 {
+        end = name.floor_char_boundary(end - 1);
+    }
+    labels.draw(out, &name[..end], room.x, middle, ink);
+    let x = room.x + labels.width(&name[..end]);
+    labels.draw(out, "…", x, middle, ink);
 }
 
 /// Snapshot of what a composed frame depends on apart from the window
@@ -1823,7 +1891,11 @@ impl Scene {
             && self.focus == newer.focus
             && self.iter().all(|old| {
                 newer.iter().any(|new| {
-                    new.id == old.id && new.title == old.title && new.hidden == old.hidden
+                    new.id == old.id
+                        && new.title == old.title
+                        && new.hidden == old.hidden
+                        && new.program == old.program
+                        && new.program_len == old.program_len
                 })
             });
         if !same_for_panels || self.status != newer.status {
@@ -2082,12 +2154,56 @@ mod tests {
     }
 
     #[test]
+    fn icons_use_the_manifest_and_identity_changes_repaint_panels() {
+        let mut d = Desktop::new(800, 600);
+        let id = d.create(100, 100, "terminal").unwrap();
+        assert_eq!(
+            Icon::application(d.get(id).unwrap().program_name()),
+            Icon::Application
+        );
+        let before = d.scene();
+        d.set_program(id, b"files");
+        let w = d.get(id).unwrap();
+        assert_eq!(w.panel_name(), "Files");
+        assert_eq!(Icon::application(w.program_name()), Icon::Files);
+        let mut damage = Damage::new(Rect::new(0, 0, 800, 600));
+        before.damage(&d.scene(), &mut damage);
+        assert!(damage.rects().iter().any(|r| r.intersects(&d.dock().0)));
+        assert!(damage.rects().iter().any(|r| r.intersects(&d.bar())));
+    }
+
+    #[test]
+    fn dock_ellipsis_keeps_utf8_and_fits_the_available_width() {
+        struct Recorded(Vec<std::string::String>);
+        impl Labels for Recorded {
+            fn width(&mut self, text: &str) -> i32 {
+                text.chars().count() as i32 * 8
+            }
+            fn draw(&mut self, _: &mut Canvas, text: &str, _: i32, _: i32, _: Color) {
+                self.0.push(text.into());
+            }
+        }
+        let mut labels = Recorded(Vec::new());
+        let mut buf = Vec::new();
+        let mut out = canvas(&mut buf, 40, 20);
+        draw_fitted_label(
+            &mut out,
+            &mut labels,
+            "ééééé",
+            &Rect::new(0, 0, 32, 20),
+            10,
+            0,
+        );
+        assert_eq!(labels.0, ["ééé", "…"]);
+    }
+
+    #[test]
     fn windows_fit_between_the_bar_and_the_dock() {
         let mut d = Desktop::new(1280, 800);
         let work = d.work();
-        assert_eq!((work.y, work.h), (24, 800 - 24 - 52));
+        assert_eq!((work.y, work.h), (24, 800 - 24 - 84));
         let full = snap_content(Snap::Full, &work);
-        assert_eq!((full.x, full.y, full.w, full.h), (0, 24 + 28, 1280, 696));
+        assert_eq!((full.x, full.y, full.w, full.h), (0, 24 + 28, 1280, 664));
         let low = snap_content(Snap::BottomRight, &work);
         assert_eq!(low.bottom(), work.bottom());
         // A title bar never goes under the bar.
