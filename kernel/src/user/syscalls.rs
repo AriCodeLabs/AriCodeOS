@@ -492,7 +492,13 @@ fn ipc_send(
         unreachable!()
     };
     endpoint.send_with(timeout_ms, || {
+        // Looked at again and taken in one hold of the table: another thread of
+        // the process may have closed one since the early check, and a take that
+        // failed half-way would lose those taken before it (ADR 0082).
         let handles: Vec<(Cap, Rights)> = with_handles(|t| {
+            for uh in &user_handles {
+                lookup(t, *uh, Rights::TRANSFER)?;
+            }
             user_handles
                 .iter()
                 .map(|uh| t.take(*uh).map_err(abi_error))
@@ -793,11 +799,19 @@ fn pci_claim(root: Handle, index: usize, out_ptr: u64) -> Result<u64, Error> {
         warn!("pci_claim {index}: {e}");
         Error::NotFound
     })?;
+    // Room looked at again in the hold that inserts: another thread of the
+    // process may have filled the table since (ADR 0082). What is not inserted
+    // stays in `slots` and drops after the table's lock: the claim's drop takes
+    // the PCI locks.
+    let mut slots = claimed.handles;
     let raw: Vec<u8> = with_handles(|t| {
+        if t.room() < aricode_abi::PCI_CLAIM_HANDLES {
+            return Err(Error::Limit);
+        }
         let mut out = Vec::with_capacity(aricode_abi::PCI_CLAIM_HANDLES * 4);
-        for slot in claimed.handles {
-            let value = match slot {
-                // Room was checked above; this process is single-threaded.
+        for slot in slots.iter_mut() {
+            let value = match slot.take() {
+                // Room for all of them was checked in this hold.
                 Some((obj, rights)) => insert(t, obj, rights)?.0,
                 None => 0,
             };
@@ -805,6 +819,7 @@ fn pci_claim(root: Handle, index: usize, out_ptr: u64) -> Result<u64, Error> {
         }
         Ok(out)
     })?;
+    drop(slots);
     if let Err(e) = process::copy_to_user(out_ptr, &raw) {
         // The caller never learns the handles: take them back (dropped
         // here, outside the table's lock: the claim's drop takes the PCI

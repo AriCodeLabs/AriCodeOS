@@ -385,6 +385,7 @@ fn run_requested_test(cmdline: &CmdLine) {
         "pci_reap" => pci::reap_selftest(),
         "pci_stale_line" => pci::stale_line_selftest(),
         "fpu" => arch::x86_64::fpu::selftest(),
+        "usercopy" => arch::x86_64::usercopy::selftest(),
         other if other.starts_with("user_") => run_user_program(&other[5..]),
         // W^X: writing to .rodata -> protection #PF.
         "write_rodata" => {

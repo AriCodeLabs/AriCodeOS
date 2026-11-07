@@ -109,8 +109,11 @@ const KERNEL_RESERVE_FRAMES: usize = 256;
 pub enum OnDemand {
     /// The page was reserved and is now backed by a zeroed frame.
     Backed,
-    /// Not a reserved page (or already backed): a real fault.
+    /// Not a reserved page: a real fault.
     NotReserved,
+    /// Reserved and already backed: another thread of the process touched it
+    /// first (ADR 0082), so the access runs again.
+    Present,
     /// Reserved, but no frame was left.
     OutOfMemory,
 }
@@ -129,7 +132,7 @@ fn back_page(p: &mut Process, page: u64) -> OnDemand {
         return OnDemand::NotReserved;
     };
     if m.translate(page).is_some() {
-        return OnDemand::NotReserved;
+        return OnDemand::Present;
     }
     let Some(frame) = user_frame() else {
         return OnDemand::OutOfMemory;
@@ -1274,17 +1277,26 @@ pub fn check_user_writable(ptr: u64, len: u64) -> Result<(), aricode_abi::Error>
 /// checking that each page is mapped USER. The process space is the active one.
 pub fn copy_from_user(ptr: u64, len: u64) -> Result<Vec<u8>, aricode_abi::Error> {
     check_user_range(ptr, len, false)?;
-    // SAFETY: range validated page by page in the active address space.
-    let bytes = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
-    Ok(bytes.to_vec())
+    let mut bytes = alloc::vec![0u8; len as usize];
+    // SAFETY: `bytes` holds `len`; the range was checked as the process's own, and
+    // should another thread unmap it meanwhile the copy fails (ADR 0082).
+    if !unsafe {
+        crate::arch::x86_64::usercopy::copy(bytes.as_mut_ptr(), ptr as *const u8, bytes.len())
+    } {
+        return Err(aricode_abi::Error::Fault);
+    }
+    Ok(bytes)
 }
 
 /// Writes `bytes` to `[ptr, ptr+len)` of the current process, checking that
 /// each page is mapped USER and WRITABLE.
 pub fn copy_to_user(ptr: u64, bytes: &[u8]) -> Result<(), aricode_abi::Error> {
     check_user_range(ptr, bytes.len() as u64, true)?;
-    // SAFETY: range validated as writable in the active address space.
-    unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr as *mut u8, bytes.len()) };
+    // SAFETY: as in `copy_from_user`, the other way.
+    if !unsafe { crate::arch::x86_64::usercopy::copy(ptr as *mut u8, bytes.as_ptr(), bytes.len()) }
+    {
+        return Err(aricode_abi::Error::Fault);
+    }
     Ok(())
 }
 
