@@ -280,6 +280,22 @@ earlier.
 | White, green and orange, no text | Between kernel entry and its console (initrd hash), or the console does not draw |
 | Kernel text | Follow the traces; see the previous table |
 
+## Graphics: the HD Graphics 4000 (ADR 0079, ADR 0083)
+
+Ivy Bridge GT2, `8086:0166`, at 00:02.0: BAR 0 at `f7800000` (2 MiB of registers, then
+2 MiB of GTT), the aperture at `e0000000` (256 MiB), 64 MiB of stolen memory at
+`dbe00000`, the GPU's clock from 350 to 1050 MHz.
+
+- **The screen** (ADR 0079): the kernel gives it the panel's own 1366x768 on the
+  firmware's running pipe. `video=firmware` keeps the firmware's mode.
+- **The GPU's engine** (ADR 0083): the kernel takes it at boot and `diag` says
+  `gpu     blitter ready, 350 MHz (350 to 1050), N batches, N resets`, or why it was left
+  alone. The firmware leaves forcewake held and the GTT beyond its 64 MiB full of stale
+  entries: the kernel releases the first and clears the second before anything runs.
+  `run gpu_probe` fills and copies with the blitter beside the CPU and checks that what
+  must be refused is. `gpu=off` in `cmdline.txt` leaves the engine as the firmware set
+  it; `gpu.mhz=N` asks for another clock.
+
 ## Storage
 
 The first boot does not need to write anything. When the block service on

@@ -109,35 +109,38 @@ ring, or any register on the blitter's page, can rewrite the GTT.
    one PPGTT (page directory in the GTT's own memory, page tables in kernel pages);
    `GFX_MODE`, `PP_DIR_BASE`, `PP_DCLV`, the status page and ring registers and memory;
    TLB invalidation; forcewake; RC6 and frequency; interrupts; reset.
-3. **A client gives batches and memory, nothing else.** With a GPU capability (one client
-   at a time on this family, decision 5 of ADR 0080):
-   - `map(memory, gpu_address)`: a memory object the client holds with write rights (the
-     GPU can always write, point 5 above) enters the client's PPGTT;
-   - `unmap(gpu_address)`: returns once the engine is idle on it and the TLB is flushed;
-   - `submit(batch_address, length) -> fence`: the kernel's ring starts the batch with
-     bit 8 set (non-secure, in the PPGTT), then stores the fence's number to the status
-     page and raises an interrupt;
-   - `wait(fence, timeout)`: on timeout the blitter is reset, the ring and PPGTT rebuilt,
-     and the fence fails.
-   At a change of client the PPGTT is emptied. The kernel never reads a batch.
-4. **The GPU's frequency is a parameter** (no hardcoding, ADR 0080): default the floor,
-   350 MHz; a cap the owner or a program can set and read back; RPS stays off until a
-   thermal policy exists. The thermal watch reads the package temperature as today.
+3. **A client gives batches and memory, nothing else.** With the `GPU` object (one client
+   at a time on this family, decision 5 of ADR 0080; the first process to map or submit,
+   until it ends), ABI 10:
+   - `gpu_map(gpu, dma, address)`: a DMA buffer the client holds with `READ|WRITE` (the
+     GPU can write every page it sees, point 5 above) enters its PPGTT at `address`, in
+     `[gpu::FIRST, 2 GiB)`. The buffer stays allocated while mapped.
+   - `gpu_unmap(gpu, address)`: `Busy` until the engine has consumed every command given,
+     read from the hardware (`HEAD` equals the ring's tail), never from the status page.
+   - `gpu_submit(gpu, ptr, len) -> number`: see "Decision, added" below: the kernel
+     copies, checks and runs its own copy of the batch.
+   - `gpu_wait(gpu, number, timeout_ms)`: `Hung` when no batch has finished for
+     `gpu.hang_ms` (2 s by default) with work pending; the blitter is then reset, the ring
+     restarted with the PPGTT, and the batches given until then are lost.
+   A process that ends while it is the client leaves a mark; the next GPU call resets the
+   engine if it still works for it, points its pages back at the scratch page and lets
+   its buffers go.
+4. **The GPU's frequency is a parameter** (no hardcoding, ADR 0080): the floor, 350 MHz,
+   by default; `gpu.mhz=N` asks for another, within the limits. RPS stays off until a
+   thermal policy exists. A call for a program to set and read it back comes with the
+   thermal watch's GPU side (next step), not before.
 5. **Forcewake is taken and released by the kernel** around its own register writes; the
    firmware's held bits are cleared at start, as Linux does, so RC6 can work.
 6. **The way back:** `gpu=off` in `cmdline.txt` leaves the GT as the firmware left it.
    An unknown model, or any state the probe did not see (a ring already running, PPGTT
    on, forcewake that will not answer), is left alone and reported in `diag`.
 
-## Still to measure on the laptop
+## Measured before trusting the hardware
 
-From a non-secure batch, before any client relies on it:
-
-1. A register load into the blitter's page (the manual's "22XX" note in Vol 1 Part 4
-   2.1.12 is ambiguous; Linux allows only `BCS_SWCTRL` and the timestamps).
-2. A store with the GGTT bit set, aimed at a canary page: it must not land; record which
-   error bit is raised.
-3. A store-index flush: where does it write in ring mode?
+From a non-secure batch, before any client relied on it: a register load into the
+blitter's page (the manual's "22XX" note in Vol 1 Part 4, 2.1.12, is ambiguous; Linux
+allows only `BCS_SWCTRL` and the timestamps), a store with the global GTT bit set, and a
+store by index from a flush.
 
 ## Measured on the laptop: non-secure batches reach the blitter's registers
 
@@ -177,30 +180,57 @@ its own copy of it.
   idleness is still read from the hardware.
 
 This is a check of a handful of commands, not Linux's parser of every command and
-register: what is not on the list does not run.
+register: what is not on the list does not run. Whether the global GTT store lands
+stays unmeasured: the check refuses it before the hardware sees it.
+
+## Stage A on the laptop (dev build 42, 2026-11-07)
+
+`run gpu_probe`, two surfaces of 1024x768 at 32 bits (3 MiB each), eight runs of each,
+GPU at its lowest clock, 350 MHz; each GPU time includes the submit and the wait:
+
+| Work | GPU best (median) | CPU best (median) |
+|---|---|---|
+| Fill 3 MiB | 971 us (972), 3.2 GB/s | 269 us (276), 11.7 GB/s |
+| Copy 3 MiB | 1598 us (1610), 2.0 GB/s | 536 us (547), 5.9 GB/s |
+
+- Every pixel was checked after each GPU fill and copy: all right, so the PPGTT, the LLC
+  coherence between the GPU's writes and the CPU's reads, and the completion number work.
+- The four batches that must not run (the register load, the store by index, the global
+  GTT store, a fill one row past the client's memory) were each refused, and the canary
+  and the watchdog register kept their values.
+- A batch jumping to its own start was caught and reset after 2,012 ms (limit 2,000), and
+  the engine filled correctly after it.
+- Dev build 41 had sampled the engine's head to find hangs, as Linux did before 5.5: a
+  batch looping on itself keeps the head moving, and it was not caught. The rule became
+  Linux's heartbeat, above. The status page is trustworthy for it once no checked batch
+  can write it, and a batch of the checked commands ends well under a second.
+- **At 350 MHz the blitter is a third of the CPU's speed** on these sizes. The figures at
+  the GPU's other clocks, and the heat they cost, are the next measurement; the point of
+  stage A was the path, not the speed. Temperature during the runs: 57 to 58 C.
 
 ## The resources this device offers
 
 | Resource | Today | Stage A |
 |---|---|---|
-| Blitter engine | Not used | Fill and copy |
+| Blitter engine | Used: fill and copy | Tiled surfaces, more blit types as needed |
 | Render engine, EUs | Not used | Stage B |
 | Video engine | Not used | Not planned |
-| PPGTT | Off | One, for the current client |
-| RC6 | Enabled, never reached (forcewake held) | Reached once forcewake is released |
-| Frequency | Fixed at 350 MHz | Parameter with a cap; measured |
-| Interrupts (MSI) | Off | Fence completion; polling first |
-| Fences, tiling | Unused | Linear surfaces first |
-| Hardware watchdog (`BCS_CTR_THRSH`) | Unused | Studied with reset |
+| PPGTT | Used: one, for the current client | |
+| RC6 | Forcewake released at boot, so the GT may enter it | Residency to read in `diag` |
+| Frequency | 350 MHz, `gpu.mhz` at boot | Measured at each clock with the heat; a call to set it |
+| Interrupts (MSI) | Off: waits spin 2 ms, then poll each millisecond | `MI_USER_INTERRUPT` is already in each request |
+| Fences, tiling | Unused | With tiled surfaces |
+| Hardware watchdog (`BCS_CTR_THRSH`) | Unused: the heartbeat rule replaces it | |
 
 ## Order of work
 
 1. `libs/intel-gt`: register model, forcewake, GGTT clear, PPGTT, ring bring-up,
-   completion, reset, frequency, against a fake bank with the probe's state, including
-   every "leave it alone" case.
-2. Kernel glue and the GPU capability, after the owner's choice in point 1.
-3. On the laptop: the three measurements above, then fill and copy with CPU and GPU
-   figures side by side, a looping batch reset, the frequency cap.
+   completion, reset, frequency, the batch check, against a fake bank with the probe's
+   state, including every "leave it alone" case. Done; each test was seen to fail on a
+   deliberately broken build.
+2. Kernel glue and the GPU capability. Done.
+3. On the laptop: the measurements, fill and copy beside the CPU, a looping batch reset.
+   Done; the frequency at other clocks is next.
 4. Independent audit of the kernel part.
 
 ## Consequences
@@ -210,4 +240,10 @@ register: what is not on the list does not run.
 - A program with the GPU capability can hang the blitter (reset covers it), and write
   only memory it presented with write rights.
 - QEMU emulates no Intel GPU: host tests and the laptop are the only coverage, as for
-  ADR 0079.
+  ADR 0079. `gpu.absent` covers a machine without one: the `GPU` object exists, every
+  call says `NotFound`, `diag` says nothing.
+- The kernel now reads every batch, which this ADR first meant to avoid: the laptop showed
+  the hardware alone does not hold the line on this family. The check is a list of five
+  commands; a client needing more gets them added one by one, each with its limits.
+- Any application may ask for `gpu` in its manifest: through it a program reaches only
+  its own buffers, and one program at a time.
