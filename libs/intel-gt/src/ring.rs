@@ -223,22 +223,6 @@ pub fn submit<R: Regs + ?Sized>(awake: &mut Awake<'_, R>, tail: u32) {
     awake.read(bcs::TAIL);
 }
 
-/// Where the engine is: two samples that agree, with its request unfinished
-/// past its time, mean it is hung (Linux's hangcheck before 5.5: the head
-/// and the active head both still).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Progress {
-    pub head: u32,
-    pub active: u32,
-}
-
-pub fn progress<R: Regs + ?Sized>(awake: &Awake<'_, R>) -> Progress {
-    Progress {
-        head: awake.read(bcs::HEAD),
-        active: awake.read(bcs::ACTHD),
-    }
-}
-
 /// Stops the blitter and resets its domain alone (Linux `__intel_engine_
 /// reset_bh`: stop, then `GDRST` twice). The ring must be started again
 /// after, which also invalidates the TLB: a soft reset does not (PRM Vol 1

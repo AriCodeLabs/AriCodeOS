@@ -23,7 +23,7 @@ use aricode_abi::Error;
 use aricode_intel_gt::check::{self, Range};
 use aricode_intel_gt::gtt::{self, Cache, Layout};
 use aricode_intel_gt::power::{self, Forcewake, Limits};
-use aricode_intel_gt::ring::{self, Progress, Ring};
+use aricode_intel_gt::ring::{self, Ring};
 use aricode_intel_gt::{self as gt, ppgtt, regs, Refusal, Timeouts};
 use aricode_pmm::FRAME_SIZE;
 use log::{info, warn};
@@ -41,7 +41,8 @@ const CANARY_INDEX: usize = 0x90;
 /// The blitter's watchdog threshold (PRM Vol 1 Part 4, 2.1.9.2): unused,
 /// read back as a probe of what non-secure batches can write.
 const WATCHDOG: u32 = 0x2_217C;
-/// Without progress for this long, a batch is hung: Linux's heartbeat is
+/// With work pending and no batch finishing for this long, the engine is
+/// hung: Linux's heartbeat is
 /// 2.5 s. `gpu.hang_ms` changes it.
 const HANG_MS: u64 = 2_000;
 /// Waits spin this long before they sleep, so short batches are timed well.
@@ -96,8 +97,10 @@ struct Engine {
     resets: u64,
     /// Numbers lost to the last reset: those after `.0` up to `.1`.
     lost: (u32, u32),
-    /// The engine's position, and when it last moved.
-    progress: (Progress, u64),
+    /// The number of the last batch finished, and when it changed or the
+    /// engine got work while idle. The status page is the kernel's alone:
+    /// no checked batch can write it.
+    progress: (u32, u64),
     /// A reset failed: the engine takes no more work.
     dead: bool,
 }
@@ -253,7 +256,6 @@ fn bring_up(
     ppgtt::set_directory(&mut regs, &layout, 0, first);
     ppgtt::flush_directory(&mut regs);
     let mut ring = Ring::new(RING_PAGES);
-    let progress;
     {
         let mut awake = fw.hold(&mut regs, &clock)?;
         ring::prepare(&mut awake);
@@ -262,7 +264,6 @@ fn bring_up(
             (m / power::STEP_MHZ).min(255) as u8
         });
         power::set_frequency(&mut awake, &found.limits, step);
-        progress = ring::progress(&awake);
     }
     let mut tables = Vec::new();
     tables.resize_with(layout.directory_entries as usize, || None);
@@ -288,7 +289,7 @@ fn bring_up(
         requests: 0,
         resets: 0,
         lost: (0, 0),
-        progress: (progress, crate::time::uptime_us()),
+        progress: (0, crate::time::uptime_us()),
         dead: false,
     }))
 }
@@ -389,7 +390,7 @@ fn reset(e: &mut Engine, regs: &mut Bar0) {
     dwords(phys(&e.status), 1)[ring::SEQNO_INDEX as usize] = e.submitted;
     e.lost = (stored, e.submitted);
     e.resets += 1;
-    e.progress.1 = crate::time::uptime_us();
+    e.progress = (e.submitted, crate::time::uptime_us());
     if ok {
         warn!(
             "gpu: blitter reset; batches {} to {} lost",
@@ -584,7 +585,7 @@ pub fn submit(ptr: u64, len: u64) -> Result<u64, Error> {
     unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
     ring::submit(&mut awake, tail);
     if idle_before {
-        e.progress = (ring::progress(&awake), crate::time::uptime_us());
+        e.progress = (stored, crate::time::uptime_us());
     }
     e.submitted = seqno;
     e.requests += 1;
@@ -618,19 +619,17 @@ pub fn wait(seqno: u64, timeout_ms: u64) -> Result<u64, Error> {
             if e.dead {
                 return Err(Error::Hung);
             }
-            let mut regs = framebuffer::mapped_bar0().ok_or(Error::NotFound)?;
+            // A batch of the checked commands ends in well under a second:
+            // none finishing for `hang_us` with work pending is a hang
+            // (Linux's heartbeat, not its old head sampling, which a batch
+            // looping on itself keeps moving).
             let now = crate::time::uptime_us();
-            let p =
-                e.fw.hold(&mut regs, &Clock)
-                    .ok()
-                    .map(|a| ring::progress(&a));
-            match p {
-                Some(p) if p != e.progress.0 => e.progress = (p, now),
-                _ if now.saturating_sub(e.progress.1) > e.hang_us => {
-                    reset(&mut e, &mut regs);
-                    return Err(Error::Hung);
-                }
-                _ => {}
+            if stored != e.progress.0 {
+                e.progress = (stored, now);
+            } else if now.saturating_sub(e.progress.1) > e.hang_us {
+                let mut regs = framebuffer::mapped_bar0().ok_or(Error::NotFound)?;
+                reset(&mut e, &mut regs);
+                return Err(Error::Hung);
             }
         }
         let now = crate::time::uptime_us();
