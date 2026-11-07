@@ -404,6 +404,43 @@ gpu.submit_to_start ns <p50> <p95> <p99> p999=<v> max=<v> n=<samples>
 This also tests the thesis. The `gpu.` submit figure, against Linux's on the same chip, says
 whether a shorter path matters. It may say no.
 
+## 4b. The reference, measured on the laptop (2026-11-07)
+
+The laptop's own Ubuntu 22.04.5 (kernel 6.8.0-138, Mesa 23.2.1: OpenGL 4.2 core and ES 3.0 on
+crocus, Vulkan 1.2 on `hasvk`, which reports conformance 0.0.0.0) was used instead of a Debian live
+stick. The processor is an Intel Core i3-3217U: 2 cores and 4 threads at 1.8 GHz, no turbo. The GPU
+runs from 350 to 1050 MHz.
+
+**Heat comes first.** At full load the package went from 63 to 85 C in 10 s and reached the 90 C
+limit of the thermal watch in 25 s, at 1050 MHz. So every run is scene by scene: glmark2's 33
+default scenes at 800x600, 5 s each, each started below 70 C, under a watch that stops at 90 C. No
+scene was stopped. 5 s scenes are not glmark2's official score; they are ours, to repeat the same
+way.
+
+| Run | Mean of 33 scenes | Peak during scenes | refract | terrain | shadow |
+|---|---|---|---|---|---|
+| On screen, GPU as shipped (350 to 1050 MHz) | 521 fps | 86 to 89 C | 124 | 79 | 335 |
+| On screen, GPU fixed at 650 MHz | 510 fps | 85 to 89 C | 122 | 89 | 333 |
+| Off screen, GPU fixed at 650 MHz | 1374 fps | 60 to 73 C | 109 | 77 | 365 |
+
+**What it says** [M]:
+- **The path to the screen is what limits Linux here, and what heats the machine.** Drawing off
+  screen, the same scenes at the same clock run 2.7 times faster on average (up to 4.4 times for
+  `bump`), and the package stays 15 to 20 C cooler. On screen, each frame goes through Xwayland and
+  the desktop's compositor, which copies it again.
+- **The GPU's clock hardly matters on screen:** 650 MHz gives 98 % of the stock figure.
+- **The heavy scenes are the GPU's own limit:** `refract`, `terrain`, `shadow` and the desktop blur
+  barely change between on screen and off screen. They are the fair comparison for stage D.
+
+**For this design:** a game that shows its frames by having the display scan its buffer directly,
+with no compositor copy, is the largest single gain on this machine, larger than any clock. The
+compositor's software copy stays for windows; a full-screen game presents its own buffer. And the
+engine driver needs control of the GPU's frequency from stage A, or the kernel's thermal watch will
+end a long game on this laptop.
+
+Raw logs, per-second temperatures and the scripts are kept outside the repository, in
+`~/aricode-scratch/gpu-reference/` on the build host.
+
 ## 8. Stages
 
 Each stage ends with something shown. A to E and H are in order of dependency; F and G are side
