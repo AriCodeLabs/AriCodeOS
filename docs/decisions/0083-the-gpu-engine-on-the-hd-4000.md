@@ -139,6 +139,46 @@ From a non-secure batch, before any client relies on it:
    error bit is raised.
 3. A store-index flush: where does it write in ring mode?
 
+## Measured on the laptop: non-secure batches reach the blitter's registers
+
+Dev build 40 (2026-11-07) ran `gpu_probe` with the design above, batches executed
+straight from the client's memory. One non-secure batch in the PPGTT:
+
+| Command in the batch | Aimed at | Result |
+|---|---|---|
+| `MI_LOAD_REGISTER_IMM` | the blitter's watchdog threshold, 0x2217C | **Written**: 0x00150000 became 0x00AB0000 |
+| `MI_FLUSH_DW`, store by index | dword 0x90 of the global status page | **Written**: 0 became 0xBAD00002 |
+| `MI_STORE_DATA_IMM` with the global GTT bit | the same dword | Unknown: the flush wrote it after |
+
+So on Ivy Bridge the hardware does not keep a non-secure batch away from the
+blitter's own register page, which the manual's note on "22XX" registers (Vol 1
+Part 4, 2.1.12) meant. That page holds `PP_DIR_BASE`, `PP_DIR_DCLV` and the PPGTT's
+enable bit. A batch could move the page directory onto GTT entries whose pages it can
+write (the status page, through the store above), and from there reach any physical
+page: decision 4 would not hold. Linux does not protect against this on gen7: its
+command parser runs a batch that fails it anyway, non-secure, "leaving it to the HW to
+validate" (`intel_engine_cmd_parser`), and its gen7 PPGTT aliases the global GTT. The
+laptop went back to dev build 38 at once; nothing of this reached `develop`.
+
+**Decision, added:** the kernel checks every batch, against a short list, and runs
+its own copy of it.
+
+- `gpu_submit` takes the batch from the client's memory, copies it into a page of the
+  kernel's (one of four), checks the copy, and runs the copy, non-secure, from a range
+  of the PPGTT below `gpu::FIRST` that no mapping can reach. The client cannot change
+  what was checked.
+- Allowed: `MI_NOOP`; `MI_BATCH_BUFFER_END`; `MI_FLUSH_DW` with no store; linear
+  `XY_COLOR_BLT` and `XY_SRC_COPY_BLT` at 32 bits a pixel whose every byte, source and
+  destination, lies inside one of the client's mappings; and `MI_BATCH_BUFFER_START`
+  to the copy's own start, which can only loop (the reset ends it) and lets the reset
+  be tested on any machine. Everything else is refused, the batch is not run, and the
+  refusal is recorded with the dword it stopped at.
+- With no store reaching the status page, its sequence numbers are the kernel's again;
+  idleness is still read from the hardware.
+
+This is a check of a handful of commands, not Linux's parser of every command and
+register: what is not on the list does not run.
+
 ## The resources this device offers
 
 | Resource | Today | Stage A |

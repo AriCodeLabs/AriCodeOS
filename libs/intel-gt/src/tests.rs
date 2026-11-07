@@ -539,3 +539,214 @@ fn every_refusal_has_a_name_in_diag() {
     }
     assert_eq!(gpu_refusal(all.len() as u8 + 1), None);
 }
+
+mod batches {
+    extern crate std;
+    use crate::check::{check, Fault, Range};
+    use crate::cmd::{self, Rect, Surface};
+
+    const START: u32 = 0x8000;
+    const MAPS: [Range; 2] = [
+        Range {
+            start: 0x10_0000,
+            end: 0x40_0000,
+        },
+        Range {
+            start: 0x50_0000,
+            end: 0x80_0000,
+        },
+    ];
+    const DST: Surface = Surface {
+        address: 0x50_0000,
+        pitch: 4096,
+        width: 1024,
+        height: 768,
+    };
+    const SRC: Surface = Surface {
+        address: 0x10_0000,
+        pitch: 4096,
+        width: 1024,
+        height: 768,
+    };
+    const ALL: Rect = Rect {
+        x1: 0,
+        y1: 0,
+        x2: 1024,
+        y2: 768,
+    };
+
+    fn batch(parts: &[&[u32]]) -> std::vec::Vec<u32> {
+        parts.iter().flat_map(|p| p.iter().copied()).collect()
+    }
+
+    #[test]
+    fn what_the_client_library_writes_passes() {
+        let fill = cmd::fill(&DST, &ALL, 0x0033_6699).unwrap();
+        let copy = cmd::copy(&DST, 0, 0, &SRC, &ALL).unwrap();
+        let flush = [cmd::FLUSH_DW, 0, 0];
+        let mut b = batch(&[
+            &fill,
+            &[cmd::NOOP],
+            &copy,
+            &flush,
+            &[cmd::BATCH_END, 0xFFFF_FFFF],
+        ]);
+        let len = b.len();
+        assert_eq!(check(&mut b, START, &MAPS), Ok(len - 1), "stops at the end");
+        // A loop to its own start is allowed: only the reset ends it.
+        let mut looping = [cmd::BATCH_START | cmd::BATCH_PPGTT, 0];
+        assert_eq!(check(&mut looping, START, &MAPS), Ok(2));
+        assert_eq!(looping[1], START, "the copy's own address written in");
+    }
+
+    #[test]
+    fn what_reached_the_registers_on_the_laptop_is_refused() {
+        // ADR 0083's measurement, each part on its own.
+        let mut lri = [(0x22 << 23) | 1, 0x2_217C, 0x00AB_0000, cmd::BATCH_END];
+        assert_eq!(check(&mut lri, START, &MAPS), Err(Fault::Command(0)));
+        let mut store_index = [
+            cmd::FLUSH_DW | cmd::FLUSH_DW_STORE_INDEX | cmd::FLUSH_DW_STORE_DWORD,
+            0x240 | cmd::FLUSH_DW_GLOBAL_GTT,
+            0xBAD0_0002,
+            cmd::BATCH_END,
+        ];
+        assert_eq!(
+            check(&mut store_index, START, &MAPS),
+            Err(Fault::Command(0))
+        );
+        let mut sdi = [(0x20 << 23) | (1 << 22) | 2, 0, 0x240, 1, cmd::BATCH_END];
+        assert_eq!(check(&mut sdi, START, &MAPS), Err(Fault::Command(0)));
+        // A flush that names an address or data, even without the store bits.
+        assert_eq!(
+            check(&mut [cmd::FLUSH_DW, 4, 0, cmd::BATCH_END], START, &MAPS),
+            Err(Fault::Command(0))
+        );
+        // A jump anywhere but its own start, a secure one, MI_UPDATE_GTT.
+        let mut away = [cmd::BATCH_START | cmd::BATCH_PPGTT, 0x10_0000];
+        assert_eq!(check(&mut away, START, &MAPS), Err(Fault::Command(0)));
+        assert_eq!(
+            check(&mut [cmd::BATCH_START, START], START, &MAPS),
+            Err(Fault::Command(0))
+        );
+        assert_eq!(
+            check(&mut [(0x23 << 23) | 1, 0, 0], START, &MAPS),
+            Err(Fault::Command(0))
+        );
+    }
+
+    #[test]
+    fn blits_must_stay_inside_the_mappings_to_the_byte() {
+        let fill = |s: &Surface, r: &Rect| {
+            let f = cmd::fill(s, r, 1).unwrap();
+            check(&mut batch(&[&f, &[cmd::BATCH_END]]), START, &MAPS)
+        };
+        // The last byte of a mapping is fine; one more is not.
+        let edge = Surface {
+            address: 0x80_0000 - 4096 * 768,
+            ..DST
+        };
+        assert!(fill(&edge, &ALL).is_ok());
+        let past = Surface {
+            address: 0x80_0000 - 4096 * 768 + 4,
+            ..DST
+        };
+        assert_eq!(fill(&past, &ALL), Err(Fault::Outside(0)));
+        // Across two mappings with a gap between: outside.
+        let across = Surface {
+            address: 0x3F_F000,
+            ..DST
+        };
+        assert_eq!(
+            fill(
+                &across,
+                &Rect {
+                    x1: 0,
+                    y1: 0,
+                    x2: 1024,
+                    y2: 2
+                }
+            ),
+            Err(Fault::Outside(0))
+        );
+        // The kernel's copy, below every mapping.
+        let onto = Surface {
+            address: START,
+            ..DST
+        };
+        assert_eq!(
+            fill(
+                &onto,
+                &Rect {
+                    x1: 0,
+                    y1: 0,
+                    x2: 4,
+                    y2: 1
+                }
+            ),
+            Err(Fault::Outside(0))
+        );
+        // A copy whose source is outside.
+        let copy = cmd::copy(
+            &DST,
+            0,
+            0,
+            &Surface {
+                address: 0x8_0000,
+                ..SRC
+            },
+            &ALL,
+        )
+        .unwrap();
+        assert_eq!(
+            check(&mut batch(&[&copy, &[cmd::BATCH_END]]), START, &MAPS),
+            Err(Fault::Outside(0))
+        );
+    }
+
+    #[test]
+    fn fields_the_list_does_not_allow_are_refused() {
+        let f = cmd::fill(&DST, &ALL, 1).unwrap();
+        let with = |k: usize, v: u32| {
+            let mut b = batch(&[&f, &[cmd::BATCH_END]]);
+            b[k] = v;
+            check(&mut b, START, &MAPS)
+        };
+        assert_eq!(with(0, f[0] | 1 << 11), Err(Fault::Command(0)), "tiled");
+        assert_eq!(with(1, f[1] | 1 << 30), Err(Fault::Command(0)), "clipping");
+        assert_eq!(
+            with(1, f[1] & !(3 << 24)),
+            Err(Fault::Command(0)),
+            "8 bits a pixel"
+        );
+        assert_eq!(
+            with(1, (f[1] & !0xFFFF) | 0x8000),
+            Err(Fault::Command(0)),
+            "negative pitch"
+        );
+        assert_eq!(with(2, 0x8000), Err(Fault::Command(0)), "negative x");
+        assert_eq!(with(3, f[2]), Err(Fault::Command(0)), "empty");
+        let copy = cmd::copy(&DST, 0, 0, &SRC, &ALL).unwrap();
+        let mut b = batch(&[&copy, &[cmd::BATCH_END]]);
+        b[6] |= 1 << 16;
+        assert_eq!(
+            check(&mut b, START, &MAPS),
+            Err(Fault::Command(0)),
+            "source pitch high bits"
+        );
+    }
+
+    #[test]
+    fn a_batch_must_end_within_itself() {
+        let f = cmd::fill(&DST, &ALL, 1).unwrap();
+        assert_eq!(
+            check(&mut f.clone()[..5], START, &MAPS),
+            Err(Fault::Unended(0))
+        );
+        assert_eq!(check(&mut f.clone(), START, &MAPS), Err(Fault::Unended(6)));
+        assert_eq!(check(&mut [], START, &MAPS), Err(Fault::Unended(0)));
+        assert_eq!(
+            check(&mut [cmd::FLUSH_DW, 0], START, &MAPS),
+            Err(Fault::Unended(0))
+        );
+    }
+}

@@ -394,11 +394,16 @@ pub mod nr {
     /// `gpu_unmap(gpu, address)`: removes the mapping made at `address`.
     /// `Busy` while the engine has not finished the client's batches.
     pub const GPU_UNMAP: u64 = 44;
-    /// `gpu_submit(gpu, batch) -> number`: runs the batch at the GPU address
-    /// `batch` (4-byte aligned, inside a mapping, ending with
-    /// `MI_BATCH_BUFFER_END`) after those submitted before, non-secure in the
-    /// client's address space. The number names it for `gpu_wait`. `Busy`
-    /// while the ring is full.
+    /// `gpu_submit(gpu, ptr, len) -> number`: runs the batch of `len` bytes
+    /// at `ptr` in the caller's memory (8 to 4096, a multiple of 8) after those
+    /// submitted before. The kernel copies it into a page of its own, checks
+    /// the copy and runs the copy, non-secure in the client's address space
+    /// (ADR 0083): `MI_NOOP`, `MI_BATCH_BUFFER_END`, `MI_FLUSH_DW` without a
+    /// store, linear 32-bit `XY_COLOR_BLT` and `XY_SRC_COPY_BLT` entirely
+    /// inside the client's mappings, and `MI_BATCH_BUFFER_START` to address 0,
+    /// meaning the batch's own start. Anything else: `Denied`, nothing runs,
+    /// and a `Fault` event records where the check stopped. The number names
+    /// the batch for `gpu_wait`. `Busy` while the ring or the copies are full.
     pub const GPU_SUBMIT: u64 = 45;
     /// `gpu_wait(gpu, number, timeout_ms)`: until the batch has finished.
     /// `Timeout` at the deadline; `Hung` if the engine stopped making

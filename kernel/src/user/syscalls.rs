@@ -124,7 +124,7 @@ pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
         nr::GPU_UNMAP => gpu_object(h)
             .and_then(|_| crate::gpu::unmap(frame.rsi))
             .map(|()| 0),
-        nr::GPU_SUBMIT => gpu_object(h).and_then(|_| crate::gpu::submit(frame.rsi)),
+        nr::GPU_SUBMIT => gpu_object(h).and_then(|_| crate::gpu::submit(frame.rsi, frame.rdx)),
         nr::GPU_WAIT => gpu_object(h).and_then(|_| crate::gpu::wait(frame.rsi, frame.rdx)),
         n => {
             warn!("unknown syscall {n} from rip={:#x}", frame.user_rip);

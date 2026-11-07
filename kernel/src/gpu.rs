@@ -20,6 +20,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use aricode_abi::sysinfo::{GpuReport, GPU_ABSENT, GPU_OFF, GPU_READY, GPU_REFUSED};
 use aricode_abi::Error;
+use aricode_intel_gt::check::{self, Range};
 use aricode_intel_gt::gtt::{self, Cache, Layout};
 use aricode_intel_gt::power::{self, Forcewake, Limits};
 use aricode_intel_gt::ring::{self, Progress, Ring};
@@ -29,6 +30,12 @@ use log::{info, warn};
 
 /// Pages of the ring (Linux's 16 KiB).
 const RING_PAGES: u32 = 4;
+/// The kernel's copies of client batches: this many pages, each holding one
+/// batch of up to a page, mapped in the client's PPGTT from `COPY_AT`, below
+/// `gpu::FIRST`, where no mapping of the client's can reach them.
+const COPIES: usize = 4;
+const COPY_AT: u32 = 0x8000;
+const _: () = assert!(COPY_AT as u64 + COPIES as u64 * 4096 <= aricode_abi::gpu::FIRST);
 /// A dword of the status page nothing writes; see `GpuReport::canary`.
 const CANARY_INDEX: usize = 0x90;
 /// The blitter's watchdog threshold (PRM Vol 1 Part 4, 2.1.9.2): unused,
@@ -74,6 +81,9 @@ struct Engine {
     hang_us: u64,
     ring_mem: ObjectRef,
     status: ObjectRef,
+    /// The batch copies, and the number of the request that last used each.
+    copies: ObjectRef,
+    copy_seq: [u32; COPIES],
     _scratch: ObjectRef,
     _scratch_table: ObjectRef,
     scratch_pte: u32,
@@ -210,6 +220,7 @@ fn bring_up(
     };
     let (scratch, status, ring_mem, scratch_table) =
         (alloc(1)?, alloc(1)?, alloc(RING_PAGES)?, alloc(1)?);
+    let (copies, first_table) = (alloc(COPIES as u32)?, alloc(1)?);
     let scratch_pte = gtt::encode(phys(&scratch), Cache::Uncached).ok_or(Refusal::GttSize)?;
     let table = dwords(phys(&scratch_table), 1);
     table.fill(scratch_pte);
@@ -227,9 +238,19 @@ fn bring_up(
         );
     }
     let pde = ppgtt::directory_entry(phys(&scratch_table)).ok_or(Refusal::GttSize)?;
-    for i in 0..layout.directory_entries {
+    for i in 1..layout.directory_entries {
         ppgtt::set_directory(&mut regs, &layout, i, pde);
     }
+    // The first table holds the batch copies, in every client's PPGTT.
+    let t = dwords(phys(&first_table), 1);
+    t.fill(scratch_pte);
+    for i in 0..COPIES {
+        let (_, entry) = ppgtt::split(COPY_AT + i as u32 * FRAME_SIZE as u32);
+        t[entry as usize] = llc(phys(&copies) + i as u64 * FRAME_SIZE)?;
+    }
+    flush_lines(t.as_ptr(), t.len() * 4);
+    let first = ppgtt::directory_entry(phys(&first_table)).ok_or(Refusal::GttSize)?;
+    ppgtt::set_directory(&mut regs, &layout, 0, first);
     ppgtt::flush_directory(&mut regs);
     let mut ring = Ring::new(RING_PAGES);
     let progress;
@@ -245,6 +266,7 @@ fn bring_up(
     }
     let mut tables = Vec::new();
     tables.resize_with(layout.directory_entries as usize, || None);
+    tables[0] = Some(first_table);
     Ok(Box::new(Engine {
         fw,
         layout,
@@ -254,6 +276,8 @@ fn bring_up(
         hang_us,
         ring_mem,
         status,
+        copies,
+        copy_seq: [0; COPIES],
         _scratch: scratch,
         _scratch_table: scratch_table,
         scratch_pte,
@@ -493,41 +517,71 @@ pub fn unmap(address: u64) -> Result<(), Error> {
     Ok(())
 }
 
-/// `gpu_submit`.
-pub fn submit(batch: u64) -> Result<u64, Error> {
+/// `gpu_submit`: the batch at `ptr`, `len` bytes of the caller's memory, is
+/// copied into one of the kernel's pages, checked there, and that copy runs
+/// (ADR 0083: a non-secure batch reaches the blitter's registers).
+pub fn submit(ptr: u64, len: u64) -> Result<u64, Error> {
+    if !(8..=FRAME_SIZE).contains(&len) || !len.is_multiple_of(8) {
+        return Err(Error::Invalid);
+    }
+    let bytes = process::copy_from_user(ptr, len)?;
+    let mut words: Vec<u32> = bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| u32::from_le_bytes(*c))
+        .collect();
     let (mut e, _) = take()?;
     if e.dead {
         return Err(Error::Hung);
     }
     claim()?;
-    let inside = e.maps.iter().any(|m| {
-        batch >= m.address as u64 && batch + 8 <= m.address as u64 + m.pages as u64 * FRAME_SIZE
-    });
-    if !inside || !batch.is_multiple_of(4) {
-        return Err(Error::Invalid);
-    }
-    let mut regs = framebuffer::mapped_bar0().ok_or(Error::NotFound)?;
     let e = &mut *e;
+    let slot = e.next as usize % COPIES;
+    let stored = dwords(phys(&e.status), 1)[ring::SEQNO_INDEX as usize];
+    if e.copy_seq[slot] != 0 && !ring::passed(stored, e.copy_seq[slot]) {
+        return Err(Error::Busy);
+    }
+    let at = COPY_AT + slot as u32 * FRAME_SIZE as u32;
+    let maps: Vec<Range> = e
+        .maps
+        .iter()
+        .map(|m| Range {
+            start: m.address as u64,
+            end: m.address as u64 + m.pages as u64 * FRAME_SIZE,
+        })
+        .collect();
+    let used = match check::check(&mut words, at, &maps) {
+        Ok(n) => n,
+        Err(fault) => {
+            process::record_event(
+                aricode_abi::sysinfo::EventKind::Fault,
+                fault.at() as u64,
+                "gpu batch refused",
+            );
+            return Err(Error::Denied);
+        }
+    };
+    let mut regs = framebuffer::mapped_bar0().ok_or(Error::NotFound)?;
     let mut awake = e.fw.hold(&mut regs, &Clock).map_err(|_| Error::Busy)?;
     let head = awake.read(regs::bcs::HEAD);
+    let idle_before = head & regs::bcs::HEAD_ADDR == e.ring.tail();
     let seqno = e.next;
+    let copy = &mut dwords(phys(&e.copies), COPIES as u32)[slot * 1024..(slot + 1) * 1024];
+    copy[..used].copy_from_slice(&words[..used]);
     let tail = e
         .ring
-        .request(
-            dwords(phys(&e.ring_mem), RING_PAGES),
-            head,
-            batch as u32,
-            seqno,
-        )
+        .request(dwords(phys(&e.ring_mem), RING_PAGES), head, at, seqno)
         .ok_or(Error::Busy)?;
     e.next = match seqno.wrapping_add(1) {
         0 => 1,
         n => n,
     };
-    // The ring's writes reach memory before the engine is told of them.
+    e.copy_seq[slot] = seqno;
+    // The copy's and the ring's writes reach memory before the engine is
+    // told of them.
     // SAFETY: a fence touches no memory.
     unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
-    let idle_before = head & regs::bcs::HEAD_ADDR == e.ring.tail();
     ring::submit(&mut awake, tail);
     if idle_before {
         e.progress = (ring::progress(&awake), crate::time::uptime_us());

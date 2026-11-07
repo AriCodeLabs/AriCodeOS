@@ -2,14 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 //! `gpu_probe`: stage A of ADR 0080 (ADR 0083). Fills and copies a surface
 //! with the GPU's blitter and with the CPU, timed side by side and checked
-//! pixel by pixel; measures what a non-secure batch can reach; hangs the
-//! engine on purpose and checks it is reset and works again.
+//! pixel by pixel; checks that the commands a non-secure batch could use to
+//! reach the blitter's registers are refused; hangs the engine on purpose
+//! and checks it is reset and works again.
 //!
 //! Exit codes: 0 all as expected; 2 no GPU engine here, and its calls
 //! refused cleanly; 10 setup failed; 11 a fill was wrong; 12 a copy was
-//! wrong; 13 a non-secure batch reached what it must not; 14 a hang was not
-//! caught; 15 the engine did not work after its reset; 16 a refusal was not
-//! as documented.
+//! wrong; 13 a batch that must be refused was not, or something it aimed at
+//! changed; 14 a hang was not caught; 15 the engine did not work after its
+//! reset; 16 a call on an absent GPU was not refused as documented.
 #![no_std]
 #![no_main]
 
@@ -22,13 +23,46 @@ const WIDTH: u32 = 1024;
 const HEIGHT: u32 = 768;
 const PITCH: u32 = WIDTH * 4;
 const BYTES: u64 = PITCH as u64 * HEIGHT as u64;
-/// Where each buffer sits in the GPU's address space.
-const BATCH_AT: u64 = 0x1_0000;
+/// Where each surface sits in the GPU's address space.
 const SRC_AT: u64 = 0x10_0000;
 const DST_AT: u64 = 0x50_0000;
-const BATCH_BYTES: u64 = 16 * 1024;
 const RUNS: usize = 8;
 const WAIT_MS: u64 = 5_000;
+
+/// A number as text.
+struct Text {
+    buf: [u8; 20],
+    len: usize,
+}
+
+impl Text {
+    fn s(&self) -> &[u8] {
+        &self.buf[..self.len]
+    }
+}
+
+fn n(v: u64) -> Text {
+    let mut b = [0u8; 20];
+    let digits = fmt_u64(v, &mut b);
+    let mut t = Text {
+        buf: [0; 20],
+        len: digits.len(),
+    };
+    t.buf[..t.len].copy_from_slice(digits);
+    t
+}
+
+fn hex(v: u64) -> Text {
+    let mut b = [0u8; 16];
+    let digits = fmt_hex(v, 8, &mut b);
+    let mut t = Text {
+        buf: [0; 20],
+        len: 2 + digits.len(),
+    };
+    t.buf[..2].copy_from_slice(b"0x");
+    t.buf[2..t.len].copy_from_slice(digits);
+    t
+}
 
 fn say(parts: &[&[u8]]) {
     sys::print(b"gpu_probe: ");
@@ -38,57 +72,47 @@ fn say(parts: &[&[u8]]) {
     sys::print(b"\n");
 }
 
-fn n(v: u64) -> [u8; 20] {
-    let mut b = [0u8; 20];
-    let len = fmt_u64(v, &mut b).len();
-    let mut out = [b' '; 20];
-    out[..len].copy_from_slice(&b[..len]);
-    out
-}
-
-/// `v` as text, trimmed.
-fn t(buf: &[u8; 20]) -> &[u8] {
-    let end = buf.iter().position(|&c| c == b' ').unwrap_or(20);
-    &buf[..end]
-}
-
-fn hex(v: u64) -> [u8; 16] {
-    let mut b = [0u8; 16];
-    fmt_hex(v, 8, &mut b);
-    b
+fn error_name(e: Error) -> &'static [u8] {
+    match e {
+        Error::Denied => b"refused by the kernel's check",
+        Error::Hung => b"hung, and the engine was reset",
+        Error::Timeout => b"timed out",
+        Error::Busy => b"busy",
+        Error::Invalid => b"invalid",
+        Error::NotFound => b"no GPU",
+        _ => b"another error",
+    }
 }
 
 struct Gpu {
     gpu: Handle,
     system: Handle,
-    batch: &'static mut [u32],
     src: &'static mut [u32],
     dst: &'static mut [u32],
 }
 
 impl Gpu {
-    fn report(&self) -> Option<GpuReport> {
+    fn report(&self) -> GpuReport {
         let mut b = [0u8; GpuReport::LEN];
-        sys::system_info(self.system, sysinfo::GPU, &mut b).ok()?;
-        GpuReport::decode(&b)
+        sys::system_info(self.system, sysinfo::GPU, &mut b)
+            .ok()
+            .and_then(|_| GpuReport::decode(&b))
+            .unwrap_or_default()
     }
 
     fn now(&self) -> u64 {
         time::uptime_us(self.system).unwrap_or(0)
     }
 
-    /// Writes `words` and `MI_BATCH_BUFFER_END` at the batch's start, runs
-    /// it, and returns its time in microseconds.
+    /// Runs `words` then `MI_BATCH_BUFFER_END`, padded to whole quadwords;
+    /// its time in microseconds.
     fn run(&mut self, words: &[u32], timeout_ms: u64) -> Result<u64, Error> {
-        let mut i = 0;
-        for &w in words {
-            self.batch[i] = w;
-            i += 1;
-        }
-        self.batch[i] = cmd::BATCH_END;
-        self.batch[i + 1] = cmd::NOOP;
+        let mut batch = [cmd::NOOP; 32];
+        batch[..words.len()].copy_from_slice(words);
+        batch[words.len()] = cmd::BATCH_END;
+        let len = (words.len() + 2) & !1;
         let t0 = self.now();
-        let number = sys::gpu_submit(self.gpu, BATCH_AT)?;
+        let number = sys::gpu_submit(self.gpu, &batch[..len])?;
         sys::gpu_wait(self.gpu, number, timeout_ms)?;
         Ok(self.now() - t0)
     }
@@ -125,17 +149,17 @@ fn line(what: &[u8], gpu: (u64, u64), cpu: (u64, u64)) {
     say(&[
         what,
         b": gpu best ",
-        t(&n(gpu.0)),
+        n(gpu.0).s(),
         b" us, median ",
-        t(&n(gpu.1)),
+        n(gpu.1).s(),
         b" us (",
-        t(&n(rate(gpu.0))),
+        n(rate(gpu.0)).s(),
         b" MB/s); cpu best ",
-        t(&n(cpu.0)),
+        n(cpu.0).s(),
         b" us, median ",
-        t(&n(cpu.1)),
+        n(cpu.1).s(),
         b" us (",
-        t(&n(rate(cpu.0))),
+        n(rate(cpu.0)).s(),
         b" MB/s)",
     ]);
 }
@@ -177,11 +201,11 @@ fn main(_arg: u64) -> u64 {
         };
         say(&[b"no GPU engine here: ", why.as_bytes()]);
         // Its calls must say so, and take nothing.
-        let refused = sys::gpu_submit(gpu, BATCH_AT) == Err(Error::NotFound)
+        let end = [cmd::BATCH_END, cmd::NOOP];
+        let refused = sys::gpu_submit(gpu, &end) == Err(Error::NotFound)
             && sys::gpu_wait(gpu, 1, 0) == Err(Error::NotFound)
-            && sys::gpu_unmap(gpu, BATCH_AT) == Err(Error::NotFound);
-        let dma = sys::dma_alloc(hardware, 4096);
-        let mapped = dma.map(|d| sys::gpu_map(gpu, d, BATCH_AT));
+            && sys::gpu_unmap(gpu, SRC_AT) == Err(Error::NotFound);
+        let mapped = sys::dma_alloc(hardware, 4096).map(|d| sys::gpu_map(gpu, d, SRC_AT));
         if !refused || mapped != Ok(Err(Error::NotFound)) {
             say(&[b"a call on the absent GPU was not refused with NotFound"]);
             return 16;
@@ -193,7 +217,6 @@ fn main(_arg: u64) -> u64 {
         Ok::<_, Error>(Gpu {
             gpu,
             system,
-            batch: map(hardware, gpu, BATCH_AT, BATCH_BYTES)?,
             src: map(hardware, gpu, SRC_AT, BYTES)?,
             dst: map(hardware, gpu, DST_AT, BYTES)?,
         })
@@ -201,20 +224,20 @@ fn main(_arg: u64) -> u64 {
     let mut g = match setup {
         Ok(g) => g,
         Err(e) => {
-            aricode_rt::print_error(b"gpu_probe: setup", e);
+            say(&[b"setup failed: ", error_name(e)]);
             return 10;
         }
     };
-    let r = g.report().unwrap_or_default();
+    let r = g.report();
     say(&[
         b"engine ready at ",
-        t(&n(r.mhz as u64)),
+        n(r.mhz as u64).s(),
         b" MHz (",
-        t(&n(r.mhz_lowest as u64)),
+        n(r.mhz_lowest as u64).s(),
         b" to ",
-        t(&n(r.mhz_highest as u64)),
+        n(r.mhz_highest as u64).s(),
         b"), ",
-        t(&n(r.mapped_kib as u64)),
+        n(r.mapped_kib as u64).s(),
         b" KiB mapped",
     ]);
 
@@ -227,16 +250,16 @@ fn main(_arg: u64) -> u64 {
         match g.run(&fill, WAIT_MS) {
             Ok(us) => gpu_t[i] = us,
             Err(e) => {
-                aricode_rt::print_error(b"gpu_probe: fill", e);
+                say(&[b"fill: ", error_name(e)]);
                 return 11;
             }
         }
         if let Some(at) = g.dst.iter().position(|&p| p != colour) {
             say(&[
                 b"fill wrong at pixel ",
-                t(&n(at as u64)),
+                n(at as u64).s(),
                 b": ",
-                &hex(g.dst[at] as u64),
+                hex(g.dst[at] as u64).s(),
             ]);
             return 11;
         }
@@ -256,12 +279,12 @@ fn main(_arg: u64) -> u64 {
         match g.run(&copy, WAIT_MS) {
             Ok(us) => gpu_t[i] = us,
             Err(e) => {
-                aricode_rt::print_error(b"gpu_probe: copy", e);
+                say(&[b"copy: ", error_name(e)]);
                 return 12;
             }
         }
         if let Some(at) = (0..g.dst.len()).find(|&k| g.dst[k] != g.src[k]) {
-            say(&[b"copy wrong at pixel ", t(&n(at as u64))]);
+            say(&[b"copy wrong at pixel ", n(at as u64).s()]);
             return 12;
         }
         let t0 = g.now();
@@ -270,57 +293,79 @@ fn main(_arg: u64) -> u64 {
     }
     line(b"copy 3 MiB", spread(&mut gpu_t), spread(&mut cpu_t));
 
-    // 3. What a non-secure batch reaches (ADR 0083, "still to measure"): a
-    // store to the global GTT, a flush that stores to the status page by
-    // index, and a register load into the blitter's own page. Each must
-    // leave what it aimed at as it was.
-    let before = g.report().unwrap_or_default();
+    // 3. What reached the blitter's registers and the status page on the
+    // laptop (ADR 0083), each in a batch of its own, and a blit past the
+    // client's memory: all refused, and nothing they aimed at changed.
+    let before = g.report();
     let canary = before.status_page + 0x90 * 4;
-    let probe = [
-        // MI_STORE_DATA_IMM with "use the global GTT" (Linux
-        // MI_STORE_DWORD_IMM_GEN4 | MI_USE_GGTT): 0, address, value.
-        (0x20 << 23) | (1 << 22) | 2,
-        0,
-        canary,
-        0xBAD0_0001,
-        // MI_FLUSH_DW storing by index into the status page.
-        cmd::FLUSH_DW | cmd::FLUSH_DW_STORE_INDEX | cmd::FLUSH_DW_STORE_DWORD,
-        (0x90 * 4) | cmd::FLUSH_DW_GLOBAL_GTT,
-        0xBAD0_0002,
-        // MI_LOAD_REGISTER_IMM of the blitter's watchdog threshold.
-        (0x22 << 23) | 1,
-        0x2_217C,
-        0x00AB_0000,
-        cmd::NOOP,
-    ];
-    let outcome = g.run(&probe, WAIT_MS);
-    let after = g.report().unwrap_or_default();
-    say(&[
-        b"non-secure batch ",
-        match outcome {
-            Ok(_) => b"finished".as_slice(),
-            Err(Error::Hung) => b"hung the engine (reset)",
-            Err(_) => b"failed",
+    let past = cmd::fill(
+        &Surface {
+            address: (DST_AT + BYTES - PITCH as u64) as u32,
+            ..surface(DST_AT)
         },
-        b": canary ",
-        &hex(before.canary as u64),
+        &Rect {
+            x1: 0,
+            y1: 0,
+            x2: WIDTH,
+            y2: 2,
+        },
+        0xBAD0_0003,
+    )
+    .expect("a well-formed fill");
+    let dangerous: [(&[u8], &[u32]); 4] = [
+        (
+            b"register load into the blitter's page",
+            &[(0x22 << 23) | 1, 0x2_217C, 0x00AB_0000],
+        ),
+        (
+            b"store by index into the status page",
+            &[
+                cmd::FLUSH_DW | cmd::FLUSH_DW_STORE_INDEX | cmd::FLUSH_DW_STORE_DWORD,
+                (0x90 * 4) | cmd::FLUSH_DW_GLOBAL_GTT,
+                0xBAD0_0002,
+            ],
+        ),
+        (
+            b"store through the global GTT",
+            &[(0x20 << 23) | (1 << 22) | 2, 0, canary, 0xBAD0_0001],
+        ),
+        (b"fill past the client's memory", &past),
+    ];
+    for (what, words) in dangerous {
+        match g.run(words, WAIT_MS) {
+            Err(Error::Denied) => say(&[what, b": refused by the kernel's check"]),
+            other => {
+                say(&[
+                    what,
+                    b": NOT refused: ",
+                    match other {
+                        Ok(_) => b"it ran".as_slice(),
+                        Err(e) => error_name(e),
+                    },
+                ]);
+                return 13;
+            }
+        }
+    }
+    let after = g.report();
+    say(&[
+        b"canary ",
+        hex(before.canary as u64).s(),
         b" -> ",
-        &hex(after.canary as u64),
+        hex(after.canary as u64).s(),
         b", watchdog ",
-        &hex(before.watchdog as u64),
+        hex(before.watchdog as u64).s(),
         b" -> ",
-        &hex(after.watchdog as u64),
+        hex(after.watchdog as u64).s(),
     ]);
     if after.canary != before.canary || after.watchdog != before.watchdog {
-        say(&[b"REACHED: a non-secure batch wrote what it must not"]);
+        say(&[b"REACHED: something a refused batch aimed at changed"]);
         return 13;
     }
-    say(&[b"not reached: privileged writes from a non-secure batch did not land"]);
 
-    // 4. A hang: a batch that jumps to itself.
-    let resets = after.resets;
+    // 4. A hang: a batch that jumps to its own start.
     let t0 = g.now();
-    let hang = [cmd::BATCH_START | cmd::BATCH_PPGTT, BATCH_AT as u32];
+    let hang = [cmd::BATCH_START | cmd::BATCH_PPGTT, 0];
     match g.run(&hang, 15_000) {
         Err(Error::Hung) => {}
         other => {
@@ -328,21 +373,20 @@ fn main(_arg: u64) -> u64 {
                 b"a batch that never ends was not reset: ",
                 match other {
                     Ok(_) => b"it finished".as_slice(),
-                    Err(Error::Timeout) => b"the wait timed out",
-                    Err(_) => b"another error",
+                    Err(e) => error_name(e),
                 },
             ]);
             return 14;
         }
     }
-    let r = g.report().unwrap_or_default();
+    let r = g.report();
     say(&[
         b"hang caught and reset after ",
-        t(&n((g.now() - t0) / 1000)),
+        n((g.now() - t0) / 1000).s(),
         b" ms; resets ",
-        t(&n(resets)),
+        n(after.resets).s(),
         b" -> ",
-        t(&n(r.resets)),
+        n(r.resets).s(),
     ]);
     g.dst.fill(0);
     match g.run(&fill, WAIT_MS) {

@@ -422,9 +422,16 @@ pub fn gpu_unmap(gpu: Handle, address: u64) -> Result<(), Error> {
     call(nr::GPU_UNMAP, gpu.0 as u64, address, 0, 0).map(|_| ())
 }
 
-/// Runs the batch at the GPU address `batch`; its number, for [`gpu_wait`].
-pub fn gpu_submit(gpu: Handle, batch: u64) -> Result<u64, Error> {
-    call(nr::GPU_SUBMIT, gpu.0 as u64, batch, 0, 0)
+/// Runs `batch` on the GPU, after the kernel has checked its own copy of
+/// it; its number, for [`gpu_wait`] (see `abi::nr::GPU_SUBMIT`).
+pub fn gpu_submit(gpu: Handle, batch: &[u32]) -> Result<u64, Error> {
+    call(
+        nr::GPU_SUBMIT,
+        gpu.0 as u64,
+        batch.as_ptr() as u64,
+        core::mem::size_of_val(batch) as u64,
+        0,
+    )
 }
 
 /// Waits for batch `number`: `Timeout`, or `Hung` if the engine was reset.
