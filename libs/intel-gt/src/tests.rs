@@ -189,6 +189,12 @@ fn the_firmwares_run_is_found_and_must_cover_the_screen() {
         gtt::firmware_run(&bank, fake::ENTRIES, fake::STOLEN + 4096, screen),
         Err(Refusal::GttSize)
     );
+    // A screen that does not start at 0 must be covered to its end (audit M1).
+    let at = (fake::FIRMWARE_RUN as u64 - 100) * 4096;
+    assert_eq!(
+        gtt::firmware_run(&bank, fake::ENTRIES, fake::STOLEN, at + screen),
+        Err(Refusal::GttSize)
+    );
     assert!(bank.writes.is_empty());
 }
 
@@ -207,19 +213,42 @@ fn clearing_leaves_the_screen_and_replaces_every_stale_entry() {
 
 #[test]
 fn the_layout_keeps_clear_of_the_firmware_and_aligns_the_directory() {
-    let l = Layout::new(fake::FIRMWARE_RUN, fake::ENTRIES, 4).unwrap();
-    assert_eq!(l.status, fake::FIRMWARE_RUN + 1, "a guard page between");
+    // The laptop: 64 MiB kept, a 256 MiB aperture.
+    const APERTURE: u32 = (256 << 20) / 4096;
+    let l = Layout::new(fake::FIRMWARE_RUN, fake::ENTRIES, 4, APERTURE).unwrap();
+    assert_eq!(
+        l.status,
+        APERTURE + 1,
+        "past the aperture, a guard page between"
+    );
+    let small = Layout::new(fake::FIRMWARE_RUN, fake::ENTRIES, 4, 4096).unwrap();
+    assert_eq!(
+        small.status,
+        fake::FIRMWARE_RUN + 1,
+        "past the firmware's run"
+    );
     assert_eq!(l.ring, l.status + 1);
     assert_eq!(l.end, l.ring + 4);
     assert_eq!(l.directory, fake::ENTRIES - 512);
     assert_eq!(l.directory % 16, 0);
     assert_eq!(l.pp_dir_base(), (l.directory * 4) << 10);
-    assert_eq!(Layout::new(fake::FIRMWARE_RUN, fake::ENTRIES, 0), None);
-    assert_eq!(Layout::new(fake::FIRMWARE_RUN, fake::ENTRIES, 513), None);
-    // A ring that would start above 512 MiB.
-    assert_eq!(Layout::new(200_000, fake::ENTRIES, 4), None);
+    assert_eq!(
+        Layout::new(fake::FIRMWARE_RUN, fake::ENTRIES, 0, APERTURE),
+        None
+    );
+    assert_eq!(
+        Layout::new(fake::FIRMWARE_RUN, fake::ENTRIES, 513, APERTURE),
+        None
+    );
+    // A ring that would start above 512 MiB: a 512 MiB aperture, or a run
+    // that long.
+    assert_eq!(
+        Layout::new(fake::FIRMWARE_RUN, fake::ENTRIES, 4, 131_072),
+        None
+    );
+    assert_eq!(Layout::new(200_000, fake::ENTRIES, 4, APERTURE), None);
     // A table too small for the directory.
-    assert_eq!(Layout::new(0, 256, 4), None);
+    assert_eq!(Layout::new(0, 256, 4, 0), None);
 }
 
 #[test]
@@ -434,7 +463,7 @@ mod blitter {
         let mut bank = Bank::probed();
         let clock = Ticks::new();
         let fw = Forcewake::init(&mut bank, &clock, Timeouts::default()).unwrap();
-        let layout = Layout::new(fake::FIRMWARE_RUN, fake::ENTRIES, 4).unwrap();
+        let layout = Layout::new(fake::FIRMWARE_RUN, fake::ENTRIES, 4, (256 << 20) / 4096).unwrap();
         (bank, fw, layout)
     }
 
@@ -503,7 +532,7 @@ mod blitter {
 fn the_directory_lives_in_the_tables_own_slots() {
     use crate::ppgtt;
     let mut bank = Bank::probed();
-    let layout = Layout::new(fake::FIRMWARE_RUN, fake::ENTRIES, 4).unwrap();
+    let layout = Layout::new(fake::FIRMWARE_RUN, fake::ENTRIES, 4, (256 << 20) / 4096).unwrap();
     let pde = ppgtt::directory_entry(0x1_2345_6000).unwrap();
     assert_eq!(pde, 0x2345_6011, "no cache bits");
     assert_eq!(ppgtt::directory_entry(0x1234), None);
@@ -532,6 +561,7 @@ fn every_refusal_has_a_name_in_diag() {
         Refusal::FrequencyLimits,
         Refusal::Timeout,
         Refusal::NoMemory,
+        Refusal::Partial,
     ];
     for (i, r) in all.iter().enumerate() {
         assert_eq!(*r as u8, i as u8 + 1, "numbered in order");
@@ -732,6 +762,43 @@ mod batches {
             check(&mut b, START, &MAPS),
             Err(Fault::Command(0)),
             "source pitch high bits"
+        );
+        // Audit L1: only the PRM's raster operation for each, aligned
+        // addresses, and overlap only as the PRM defines it.
+        assert_eq!(
+            with(1, (f[1] & !(0xFF << 16)) | 0xCC << 16),
+            Err(Fault::Command(0)),
+            "rop"
+        );
+        assert_eq!(with(4, f[4] + 2), Err(Fault::Command(0)), "unaligned");
+        let mut b = batch(&[&copy, &[cmd::BATCH_END]]);
+        b[1] = (b[1] & !(0xFF << 16)) | 0xF0 << 16;
+        assert_eq!(
+            check(&mut b, START, &MAPS),
+            Err(Fault::Command(0)),
+            "copy rop"
+        );
+        let rows = Rect {
+            x1: 0,
+            y1: 0,
+            x2: 1024,
+            y2: 8,
+        };
+        let mut b = batch(&[
+            &cmd::copy(&DST, 0, 4, &DST, &rows).unwrap(),
+            &[cmd::BATCH_END],
+        ]);
+        assert!(
+            check(&mut b, START, &MAPS).is_ok(),
+            "one surface, pitch of 64s"
+        );
+        let mut raw = cmd::copy(&DST, 0, 0, &DST, &rows).unwrap();
+        raw[7] = DST.address + 4096; // another base over the same bytes
+        let mut b = batch(&[&raw, &[cmd::BATCH_END]]);
+        assert_eq!(
+            check(&mut b, START, &MAPS),
+            Err(Fault::Command(0)),
+            "overlap, two bases"
         );
     }
 

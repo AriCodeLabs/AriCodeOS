@@ -46,10 +46,12 @@ const BLT_COPY: u32 = 2 << 29 | 0x53 << 22 | 6;
 /// The write enables of a 32-bit blit (bits 21:20), the only bits besides
 /// the opcode and length a blit's first dword may have: no tiling.
 const WRITE_ENABLES: u32 = 3 << 20;
-/// Bits 25:24 of the second dword: 32 bits a pixel. Bits 23:16, the raster
-/// operation, are free; 31:26 and the clipping bit 30 are not.
-const DEPTH_32: u32 = 3 << 24;
-const ROP: u32 = 0xFF << 16;
+/// The second dword above the pitch: 32 bits a pixel (bits 25:24) and the
+/// raster operation (23:16) the PRM gives each blit, the pattern for a fill
+/// and the source for a copy (Vol 1 Part 4, 1.9.8 and 1.9.14); no clipping
+/// (bit 30) and nothing else (audit L1).
+const FILL_MODE: u32 = 3 << 24 | 0xF0 << 16;
+const COPY_MODE: u32 = 3 << 24 | 0xCC << 16;
 
 /// The bytes a blit touches on a surface at `base` with `pitch`, from
 /// pixel (`x1`, `y1`), `w` by `h` pixels. `None` when a field is out of its
@@ -59,7 +61,13 @@ fn area(base: u32, pitch: u32, x1: u32, y1: u32, w: u32, h: u32) -> Option<Range
     if !(s16(pitch) && s16(x1) && s16(y1) && s16(x1 + w) && s16(y1 + h)) {
         return None;
     }
-    if w == 0 || h == 0 || pitch == 0 || !pitch.is_multiple_of(4) || w * 4 > pitch {
+    if w == 0
+        || h == 0
+        || pitch == 0
+        || !pitch.is_multiple_of(4)
+        || w * 4 > pitch
+        || !base.is_multiple_of(4)
+    {
         return None;
     }
     let first = base as u64 + y1 as u64 * pitch as u64 + x1 as u64 * 4;
@@ -108,7 +116,7 @@ pub fn check(batch: &mut [u32], start: u32, maps: &[Range]) -> Result<usize, Fau
             }
             w if w & !WRITE_ENABLES == BLT_COLOR => {
                 let c = need(6)?;
-                if c[1] & !(DEPTH_32 | ROP | 0xFFFF) != 0 || c[1] & DEPTH_32 != DEPTH_32 {
+                if c[1] & !0xFFFF != FILL_MODE {
                     return Err(Fault::Command(i));
                 }
                 let (x1, y1, x2, y2) = (c[2] & 0xFFFF, c[2] >> 16, c[3] & 0xFFFF, c[3] >> 16);
@@ -123,10 +131,7 @@ pub fn check(batch: &mut [u32], start: u32, maps: &[Range]) -> Result<usize, Fau
             }
             w if w & !WRITE_ENABLES == BLT_COPY => {
                 let c = need(8)?;
-                if c[1] & !(DEPTH_32 | ROP | 0xFFFF) != 0
-                    || c[1] & DEPTH_32 != DEPTH_32
-                    || c[6] & !0xFFFF != 0
-                {
+                if c[1] & !0xFFFF != COPY_MODE || c[6] & !0xFFFF != 0 {
                     return Err(Fault::Command(i));
                 }
                 let (x1, y1, x2, y2) = (c[2] & 0xFFFF, c[2] >> 16, c[3] & 0xFFFF, c[3] >> 16);
@@ -139,6 +144,14 @@ pub fn check(batch: &mut [u32], start: u32, maps: &[Range]) -> Result<usize, Fau
                     area(c[7], c[6], c[5] & 0xFFFF, c[5] >> 16, w, h).ok_or(Fault::Command(i))?;
                 if !inside(&dst, maps) || !inside(&src, maps) {
                     return Err(Fault::Outside(i));
+                }
+                // Overlapping linear copies are defined only within one
+                // surface whose pitch is whole 64 bytes (PRM Vol 1 Part 4,
+                // 1.7.1).
+                let overlap = dst.start < src.end && src.start < dst.end;
+                let pitch = c[1] & 0xFFFF;
+                if overlap && (c[4] != c[7] || pitch != c[6] || !pitch.is_multiple_of(64)) {
+                    return Err(Fault::Command(i));
                 }
                 i += 8;
             }

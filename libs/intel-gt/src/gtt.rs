@@ -52,19 +52,20 @@ pub fn decode(entry: u32) -> Option<u64> {
 }
 
 /// Counts the entries from 0 that map `stolen` page after page, as the
-/// firmware leaves them for the screen, and checks they cover `screen`
-/// bytes. Reads only.
+/// firmware leaves them for the screen, and checks they cover the screen,
+/// which ends `screen_end` bytes into the aperture (its offset there plus
+/// its size: it need not start at 0). Reads only.
 pub fn firmware_run<R: Regs + ?Sized>(
     regs: &R,
     entries: u32,
     stolen: u64,
-    screen: u64,
+    screen_end: u64,
 ) -> Result<u32, Refusal> {
     let mut n = 0;
     while n < entries && decode(regs.read(regs::GTT + n * 4)) == Some(stolen + n as u64 * PAGE) {
         n += 1;
     }
-    if (n as u64) * PAGE < screen {
+    if (n as u64) * PAGE < screen_end {
         return Err(Refusal::GttSize);
     }
     Ok(n)
@@ -109,9 +110,11 @@ pub struct Layout {
     /// the directory's entries, each covering 4 MiB.
     pub directory: u32,
     pub directory_entries: u32,
-    /// Entries `[0, kept)` stay as the firmware set them; `[kept, end)` hold
-    /// a guard page, the status page and the ring; from `end` up to the
-    /// directory, entries point at the scratch page until something is mapped.
+    /// Entries `[0, kept)` stay as the firmware set them. The status page and
+    /// the ring sit past both those and the CPU's aperture (a guard page
+    /// before them), so no window onto the aperture ever reaches the kernel's
+    /// GPU pages (audit M1); they end at `end`. Every other entry below the
+    /// directory points at the scratch page.
     pub kept: u32,
     pub end: u32,
 }
@@ -122,12 +125,13 @@ pub const DIRECTORY_ENTRIES: u32 = 512;
 pub const RING_PAGES_MAX: u32 = 512;
 
 impl Layout {
-    /// `kept`: entries left as the firmware set them; `entries`: the table's.
-    pub fn new(kept: u32, entries: u32, ring_pages: u32) -> Option<Self> {
+    /// `kept`: entries left as the firmware set them; `entries`: the table's;
+    /// `aperture`: entries the CPU's aperture (BAR 2) shows.
+    pub fn new(kept: u32, entries: u32, ring_pages: u32, aperture: u32) -> Option<Self> {
         if ring_pages == 0 || ring_pages > RING_PAGES_MAX {
             return None;
         }
-        let status = kept.checked_add(1)?;
+        let status = kept.max(aperture).checked_add(1)?;
         let ring = status + 1;
         let end = ring.checked_add(ring_pages)?;
         let directory = entries.checked_sub(DIRECTORY_ENTRIES)? & !15;

@@ -40,8 +40,9 @@ pub fn passed(stored: u32, seqno: u32) -> bool {
 }
 
 /// The kernel's side of the ring: its size and where the next command goes.
-/// The ring's memory is given to each call: the kernel maps it uncached,
-/// as the PRM asks (Vol 1 Part 4, 2.1.9).
+/// The ring's memory is given to each call. The PRM asks for uncached
+/// memory (Vol 1 Part 4, 2.1.9); the kernel maps it through the LLC with the
+/// CPU writing back, as Linux does on this family's shared LLC.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ring {
     bytes: u32,

@@ -389,25 +389,35 @@ pub mod nr {
     /// overlapping another mapping. Requires `WRITE` on the `GPU` and
     /// `READ|WRITE` on the buffer (the GPU can write every page it sees).
     /// The buffer stays allocated while mapped. `Busy` if another process
-    /// is the GPU's client; `NotFound` without a GPU engine.
+    /// is the GPU's client; `Limit` past 256 mappings; `Hung` once a reset
+    /// has failed; `NotFound` without a GPU engine.
     pub const GPU_MAP: u64 = 43;
     /// `gpu_unmap(gpu, address)`: removes the mapping made at `address`.
-    /// `Busy` while the engine has not finished the client's batches.
+    /// `Busy` while the engine has not finished the client's batches, or if
+    /// another process is the client; `Invalid` for no mapping there; `Hung`
+    /// once a reset has failed (the buffer then stays the GPU's for good).
     pub const GPU_UNMAP: u64 = 44;
     /// `gpu_submit(gpu, ptr, len) -> number`: runs the batch of `len` bytes
     /// at `ptr` in the caller's memory (8 to 4096, a multiple of 8) after those
     /// submitted before. The kernel copies it into a page of its own, checks
     /// the copy and runs the copy, non-secure in the client's address space
     /// (ADR 0083): `MI_NOOP`, `MI_BATCH_BUFFER_END`, `MI_FLUSH_DW` without a
-    /// store, linear 32-bit `XY_COLOR_BLT` and `XY_SRC_COPY_BLT` entirely
-    /// inside the client's mappings, and `MI_BATCH_BUFFER_START` to address 0,
+    /// store, linear 32-bit `XY_COLOR_BLT` (raster operation 0xF0) and
+    /// `XY_SRC_COPY_BLT` (0xCC) at 4-byte aligned addresses, entirely inside
+    /// the client's mappings (source and destination may overlap only as the
+    /// same surface with a pitch of whole 64 bytes), and
+    /// `MI_BATCH_BUFFER_START` with the PPGTT bit (bit 8) to address 0,
     /// meaning the batch's own start. Anything else: `Denied`, nothing runs,
     /// and a `Fault` event records where the check stopped. The number names
-    /// the batch for `gpu_wait`. `Busy` while the ring or the copies are full.
+    /// the batch for `gpu_wait`. `Busy` while the ring or the copies are full,
+    /// or if another process is the client; `Hung` once a reset has failed.
     pub const GPU_SUBMIT: u64 = 45;
     /// `gpu_wait(gpu, number, timeout_ms)`: until the batch has finished.
-    /// `Timeout` at the deadline; `Hung` if the engine stopped making
-    /// progress and was reset, which loses that batch and the ones after it.
+    /// `Timeout` at the deadline; `Hung` if no batch finished for
+    /// `gpu.hang_ms` with work pending and the engine was reset, which loses
+    /// every batch given until then; `Invalid` for a number not given;
+    /// `Busy` if another process is the client; `Killed` if the caller is
+    /// being ended.
     pub const GPU_WAIT: u64 = 46;
 }
 
@@ -1085,6 +1095,7 @@ pub mod sysinfo {
             11 => "its frequency limits are not sane",
             12 => "the engine did not respond in time",
             13 => "no memory for the engine's pages",
+            14 => "taking it failed halfway; it was stopped",
             _ => return None,
         })
     }

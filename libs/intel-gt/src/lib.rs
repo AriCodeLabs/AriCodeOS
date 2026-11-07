@@ -70,6 +70,9 @@ pub enum Refusal {
     Timeout = 12,
     /// No memory for the engine's own pages.
     NoMemory = 13,
+    /// Taking the engine failed after its tables were written: it was
+    /// stopped and its pages are kept for good (audit M2).
+    Partial = 14,
 }
 
 /// How long each wait may take, in microseconds. The defaults are Linux's
