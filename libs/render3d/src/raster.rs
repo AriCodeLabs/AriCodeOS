@@ -8,6 +8,7 @@
 
 use crate::math::{Mat4, Vec3};
 use crate::mesh::{Mesh, Vertex};
+use crate::shadow::ShadowMap;
 use crate::texture::{Filter, Texture};
 
 /// Sub-pixel steps per pixel, per axis.
@@ -138,6 +139,31 @@ pub fn draw(
     light: &Light,
     material: &Material,
 ) -> Stats {
+    draw_with(target, mesh, model, camera, light, material, None)
+}
+
+/// As [`draw`], with what `shadow` hides from `light` lit only by its ambient part.
+pub fn draw_shadowed(
+    target: &mut Target,
+    mesh: &Mesh,
+    model: &Mat4,
+    camera: &Camera,
+    light: &Light,
+    material: &Material,
+    shadow: &ShadowMap,
+) -> Stats {
+    draw_with(target, mesh, model, camera, light, material, Some(shadow))
+}
+
+fn draw_with(
+    target: &mut Target,
+    mesh: &Mesh,
+    model: &Mat4,
+    camera: &Camera,
+    light: &Light,
+    material: &Material,
+    shadow: Option<&ShadowMap>,
+) -> Stats {
     let mut stats = Stats::default();
     if target.check().is_none() {
         return stats;
@@ -215,6 +241,7 @@ pub fn draw(
                 light,
                 camera,
                 flat,
+                shadow,
             ) {
                 stats.pixels += pixels;
                 drew = true;
@@ -229,21 +256,21 @@ pub fn draw(
 
 /// A corner on the screen: position in sixteenths, depth, and 1/w.
 #[derive(Clone, Copy)]
-struct Screen {
-    x: i64,
-    y: i64,
-    z: f32,
+pub(crate) struct Screen {
+    pub(crate) x: i64,
+    pub(crate) y: i64,
+    pub(crate) z: f32,
     inv_w: f32,
 }
 
-fn to_screen(v: &Var, width: usize, height: usize) -> Option<Screen> {
-    let w = v.clip[3];
+pub(crate) fn to_screen(clip: [f32; 4], width: usize, height: usize) -> Option<Screen> {
+    let w = clip[3];
     if w <= 1e-6 {
         return None;
     }
     let inv_w = 1.0 / w;
-    let sx = (v.clip[0] * inv_w * 0.5 + 0.5) * width as f32;
-    let sy = (0.5 - v.clip[1] * inv_w * 0.5) * height as f32;
+    let sx = (clip[0] * inv_w * 0.5 + 0.5) * width as f32;
+    let sy = (0.5 - clip[1] * inv_w * 0.5) * height as f32;
     // Far beyond the screen: the edge functions would overflow nothing, but such a
     // triangle is not worth the bounding box.
     let limit = 1.0e6;
@@ -253,14 +280,14 @@ fn to_screen(v: &Var, width: usize, height: usize) -> Option<Screen> {
     Some(Screen {
         x: libm::roundf(sx * SUB as f32) as i64,
         y: libm::roundf(sy * SUB as f32) as i64,
-        z: v.clip[2] * inv_w,
+        z: clip[2] * inv_w,
         inv_w,
     })
 }
 
 /// Where an edge from `a` to `b` stands at `p`: positive on one side, negative on the
 /// other, zero on it, exactly the opposite for `b` to `a`.
-fn edge(a: (i64, i64), b: (i64, i64), p: (i64, i64)) -> i64 {
+pub(crate) fn edge(a: (i64, i64), b: (i64, i64), p: (i64, i64)) -> i64 {
     (b.0 - a.0) * (p.1 - a.1) - (b.1 - a.1) * (p.0 - a.0)
 }
 
@@ -281,11 +308,12 @@ fn fill(
     light: &Light,
     camera: &Camera,
     flat: Option<[f32; 3]>,
+    shadow: Option<&ShadowMap>,
 ) -> Option<u64> {
     let s: [Screen; 3] = [
-        to_screen(v[0], target.width, target.height)?,
-        to_screen(v[1], target.width, target.height)?,
-        to_screen(v[2], target.width, target.height)?,
+        to_screen(v[0].clip, target.width, target.height)?,
+        to_screen(v[1].clip, target.width, target.height)?,
+        to_screen(v[2].clip, target.width, target.height)?,
     ];
     let p = s.map(|c| (c.x, c.y));
     let area = edge(p[0], p[1], p[2]);
@@ -294,15 +322,6 @@ fn fill(
     if area <= 0 {
         return None;
     }
-    let x0 = (p.iter().map(|q| q.0).min()? / SUB).max(0);
-    let x1 = ((p.iter().map(|q| q.0).max()? + SUB - 1) / SUB).min(target.width as i64);
-    let y0 = (p.iter().map(|q| q.1).min()? / SUB).max(0);
-    let y1 = ((p.iter().map(|q| q.1).max()? + SUB - 1) / SUB).min(target.height as i64);
-    if x0 >= x1 || y0 >= y1 {
-        return None;
-    }
-    let owned = [owns(p[1], p[2]), owns(p[2], p[0]), owns(p[0], p[1])];
-    let inside = |e: i64, k: usize| e > 0 || (e == 0 && owned[k]);
     // The mip level for the whole triangle, from its texels per pixel.
     let level = match material.texture {
         Some((tex, Filter::Mipmap)) => {
@@ -318,6 +337,78 @@ fn fill(
     };
     let inv_area = 1.0 / area as f32;
     let mut written = 0;
+    let (width, height, stride) = (target.width, target.height, target.stride);
+    cover(p, width, height, stride, |at, [e0, e1, e2]| {
+        let l = [
+            e0 as f32 * inv_area,
+            e1 as f32 * inv_area,
+            e2 as f32 * inv_area,
+        ];
+        let z = l[0] * s[0].z + l[1] * s[1].z + l[2] * s[2].z;
+        let depth = (z.clamp(0.0, 1.0) * 65534.0) as u16;
+        if depth >= target.depth[at] {
+            return;
+        }
+        // With perspective: each corner's share weighted by its 1/w.
+        let wl = [l[0] * s[0].inv_w, l[1] * s[1].inv_w, l[2] * s[2].inv_w];
+        let norm = 1.0 / (wl[0] + wl[1] + wl[2]);
+        let mix3 = |f: fn(&Var) -> [f32; 3]| mix(v, wl, norm, f);
+        let mut color = match (material.shading, flat) {
+            (Shading::Flat, Some(c)) => c,
+            (Shading::Phong, _) => {
+                let n = mix3(|v| [v.normal.x, v.normal.y, v.normal.z]);
+                let w = mix3(|v| [v.world.x, v.world.y, v.world.z]);
+                shade(
+                    material.color,
+                    Vec3::new(n[0], n[1], n[2]).normalized(),
+                    Vec3::new(w[0], w[1], w[2]),
+                    camera.eye,
+                    light,
+                    material.shininess,
+                )
+            }
+            _ => mix3(|v| v.lit),
+        };
+        if let Some(map) = shadow {
+            let w = mix3(|v| [v.world.x, v.world.y, v.world.z]);
+            if map.hides(Vec3::new(w[0], w[1], w[2])) {
+                // Only what reaches a surface turned away: no direct light, no highlight.
+                color = material.color.map(|c| c * light.ambient);
+            }
+        }
+        if let Some((tex, filter)) = material.texture {
+            let uv = mix3(|v| [v.uv[0], v.uv[1], 0.0]);
+            let t = tex.sample(uv[0], uv[1], filter, level);
+            color = core::array::from_fn(|i| color[i] * t[i]);
+        }
+        target.depth[at] = depth;
+        target.color[at] = pack(color);
+        written += 1;
+    })?;
+    Some(written)
+}
+
+/// Calls `pixel(at, edges)` for each pixel centre inside the triangle `p` (in
+/// sixteenths, counter-clockwise on screen) within `width` x `height`, `at` its index
+/// `stride` apart. The one rule both passes share: of two triangles with a common edge,
+/// exactly one takes the pixels on it. `None` when no pixel of its box is on screen.
+#[inline(always)]
+pub(crate) fn cover(
+    p: [(i64, i64); 3],
+    width: usize,
+    height: usize,
+    stride: usize,
+    mut pixel: impl FnMut(usize, [i64; 3]),
+) -> Option<()> {
+    let x0 = (p.iter().map(|q| q.0).min()? / SUB).max(0);
+    let x1 = ((p.iter().map(|q| q.0).max()? + SUB - 1) / SUB).min(width as i64);
+    let y0 = (p.iter().map(|q| q.1).min()? / SUB).max(0);
+    let y1 = ((p.iter().map(|q| q.1).max()? + SUB - 1) / SUB).min(height as i64);
+    if x0 >= x1 || y0 >= y1 {
+        return None;
+    }
+    let owned = [owns(p[1], p[2]), owns(p[2], p[0]), owns(p[0], p[1])];
+    let inside = |e: i64, k: usize| e > 0 || (e == 0 && owned[k]);
     // Each edge function is linear in the pixel: start it at the box's first pixel
     // centre and add its step per pixel and per row. Integers, so exactly what
     // `edge` gives there, without its multiplications.
@@ -327,57 +418,18 @@ fn fill(
     let first = (x0 * SUB + SUB / 2, y0 * SUB + SUB / 2);
     let mut row_e = sides.map(|(a, b)| edge(a, b, first));
     for y in y0..y1 {
-        let row = y as usize * target.stride;
+        let row = y as usize * stride;
         let mut next = row_e;
         row_e = core::array::from_fn(|k| row_e[k] + step_y[k]);
         for x in x0..x1 {
-            let [e0, e1, e2] = next;
+            let e = next;
             next = core::array::from_fn(|k| next[k] + step_x[k]);
-            if !(inside(e0, 0) && inside(e1, 1) && inside(e2, 2)) {
-                continue;
+            if inside(e[0], 0) && inside(e[1], 1) && inside(e[2], 2) {
+                pixel(row + x as usize, e);
             }
-            let l = [
-                e0 as f32 * inv_area,
-                e1 as f32 * inv_area,
-                e2 as f32 * inv_area,
-            ];
-            let z = l[0] * s[0].z + l[1] * s[1].z + l[2] * s[2].z;
-            let depth = (z.clamp(0.0, 1.0) * 65534.0) as u16;
-            let at = row + x as usize;
-            if depth >= target.depth[at] {
-                continue;
-            }
-            // With perspective: each corner's share weighted by its 1/w.
-            let wl = [l[0] * s[0].inv_w, l[1] * s[1].inv_w, l[2] * s[2].inv_w];
-            let norm = 1.0 / (wl[0] + wl[1] + wl[2]);
-            let mix3 = |f: fn(&Var) -> [f32; 3]| mix(v, wl, norm, f);
-            let mut color = match (material.shading, flat) {
-                (Shading::Flat, Some(c)) => c,
-                (Shading::Phong, _) => {
-                    let n = mix3(|v| [v.normal.x, v.normal.y, v.normal.z]);
-                    let w = mix3(|v| [v.world.x, v.world.y, v.world.z]);
-                    shade(
-                        material.color,
-                        Vec3::new(n[0], n[1], n[2]).normalized(),
-                        Vec3::new(w[0], w[1], w[2]),
-                        camera.eye,
-                        light,
-                        material.shininess,
-                    )
-                }
-                _ => mix3(|v| v.lit),
-            };
-            if let Some((tex, filter)) = material.texture {
-                let uv = mix3(|v| [v.uv[0], v.uv[1], 0.0]);
-                let t = tex.sample(uv[0], uv[1], filter, level);
-                color = core::array::from_fn(|i| color[i] * t[i]);
-            }
-            target.depth[at] = depth;
-            target.color[at] = pack(color);
-            written += 1;
         }
     }
-    Some(written)
+    Some(())
 }
 
 /// A corner value mixed by the pixel's perspective weights. Generic and inlined: a

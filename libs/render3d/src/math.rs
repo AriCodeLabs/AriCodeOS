@@ -124,6 +124,18 @@ impl Mat4 {
         ])
     }
 
+    /// A parallel projection of a box `half_width` x `half_height` across: depth 0 at
+    /// `near`, 1 at `far`, and `w` 1. What a light far away sees.
+    pub fn orthographic(half_width: f32, half_height: f32, near: f32, far: f32) -> Self {
+        let range = 1.0 / (far - near);
+        Self([
+            [1.0 / half_width, 0.0, 0.0, 0.0],
+            [0.0, 1.0 / half_height, 0.0, 0.0],
+            [0.0, 0.0, range, -near * range],
+            [0.0, 0.0, 0.0, 1.0],
+        ])
+    }
+
     /// A camera at `eye` looking at `at`, with `up` roughly upward. The view looks
     /// along +z.
     pub fn look_at(eye: Vec3, at: Vec3, up: Vec3) -> Self {

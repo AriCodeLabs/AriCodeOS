@@ -1,5 +1,5 @@
 # The graphics benchmark (ADR 0080) runs on the system: its window opens through the
-# broker, and each of its thirteen scenes draws 3 frames and gives its line in the
+# broker, and each of its sixteen scenes draws 3 frames and gives its line in the
 # format of ADR 0080. QEMU's figures say nothing about speed: the reference laptop
 # measures, with the same method as the Linux reference (5 s a scene, below 70 C to
 # start, 90 C to stop).
@@ -21,6 +21,14 @@ marker = "bench3d.objects us "
 screendump = "objects"
 
 [[host_input_then]]
+marker = "bench3d.shadow-fast us "
+screendump = "shadow"
+
+[[host_input_then]]
+marker = "bench3d.fractal us "
+screendump = "fractal"
+
+[[host_input_then]]
 marker = "bench3d.everything us "
 screendump = "everything"
 
@@ -35,8 +43,11 @@ serial_contains = [
     "bench3d.texture-mipmap us ",
     "bench3d.effect2d-5x5 us ",
     "bench3d.desktop us ",
+    "bench3d.shadow-slow us ",
+    "bench3d.shadow-fast us ",
+    "bench3d.fractal us ",
     "bench3d.everything us ",
-    "bench3d: 13 scenes measured",
+    "bench3d: 16 scenes measured",
     "ARICODEOS_SHUTDOWN",
 ]
 serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "killed by fault", "bench3d: no memory", "bench3d: could not", "bench3d: started without"]
