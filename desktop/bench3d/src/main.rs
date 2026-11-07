@@ -1,0 +1,608 @@
+// SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
+// SPDX-License-Identifier: Apache-2.0
+//! bench3d: the graphics benchmark of ADR 0080. Thirteen scenes, of the kinds glmark2
+//! has (geometry, textures, shading, 2D effects, a desktop, heavy scenes), drawn in its
+//! window while it measures them, with the frame rate, the frame time and the
+//! processor's temperature on screen.
+//!
+//! The method is the one used for the Linux reference on the same laptop (ADR 0080,
+//! section 4b): each scene runs 5 s at 800x600, starts below 70 C, and stops at 90 C.
+//! Each scene's figures go to the log in the ADR's format, for a machine to compare.
+//!
+//! Today the scenes are drawn by the CPU (`aricode_render3d`); the GPU path will draw the
+//! same ones. `arg` N > 0 draws N frames of each, without waiting to cool, and ends: the
+//! `gui.bench3d` scenario, where QEMU's figures say nothing about speed.
+//!
+//! Handles: its compositor session, `HARDWARE` and `SYSTEM`.
+#![no_std]
+#![no_main]
+
+extern crate alloc;
+
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
+use aricode_cmdline::{keys, CmdLine};
+use aricode_gfx::{rgb, Canvas, Rect};
+use aricode_render3d::effects::convolve;
+use aricode_render3d::{
+    draw, Camera, Filter, Light, Mat4, Material, Mesh, Shading, Stats, Target, Texture, Vec3,
+};
+use aricode_rt::sys::window::{wants, Event, KeyState, Window};
+use aricode_rt::sys::{self, abi, kind, permissions, Handle};
+use aricode_text::{Face, Typesetter, INTER_REGULAR, INTER_SEMIBOLD};
+
+const W: usize = 800;
+const H: usize = 600;
+/// What each scene lasts, in microseconds.
+const SCENE_US: u64 = 5_000_000;
+/// A scene starts below this, and stops at that: the method of ADR 0080, 4b.
+const COOL_C: u32 = 70;
+const STOP_C: u32 = 90;
+/// More heap, for the depth buffer, the meshes, the texture and a copy of a frame.
+const MORE_HEAP: usize = 5632 * 1024;
+const KEY_ESC: u16 = 1;
+
+#[derive(Clone, Copy)]
+enum Kind {
+    /// A torus, one colour per triangle.
+    Geometry,
+    /// A finely divided sphere, lit at its corners.
+    DenseGeometry,
+    /// A turning cube, its texture filtered so.
+    Texture(Filter),
+    /// A torus, lit so.
+    Shade(Shading),
+    /// A rows of cubes going into the distance, with mipmaps.
+    Corridor,
+    /// A picture filtered by a square kernel of this side.
+    Effect(usize),
+    /// Windows with their shadows, moving, as the compositor draws them.
+    Desktop,
+    /// Hills flown over.
+    Terrain,
+    /// Many small lit spheres.
+    Objects,
+    /// Hills, objects and textures together.
+    Everything,
+}
+
+const SCENES: [(&str, Kind); 13] = [
+    ("geometry", Kind::Geometry),
+    ("geometry-dense", Kind::DenseGeometry),
+    ("texture-nearest", Kind::Texture(Filter::Nearest)),
+    ("texture-linear", Kind::Texture(Filter::Linear)),
+    ("texture-mipmap", Kind::Corridor),
+    ("shading-gouraud", Kind::Shade(Shading::Gouraud)),
+    ("shading-phong", Kind::Shade(Shading::Phong)),
+    ("effect2d-3x3", Kind::Effect(3)),
+    ("effect2d-5x5", Kind::Effect(5)),
+    ("desktop", Kind::Desktop),
+    ("terrain", Kind::Terrain),
+    ("objects", Kind::Objects),
+    ("everything", Kind::Everything),
+];
+
+struct Assets {
+    torus: Mesh,
+    sphere: Mesh,
+    small_sphere: Mesh,
+    cube: Mesh,
+    terrain: Mesh,
+    texture: Texture,
+    depth: Vec<u16>,
+    /// A frame to filter, for the 2D effects.
+    picture: Vec<u32>,
+}
+
+fn say(text: &str) {
+    sys::print(b"bench3d: ");
+    sys::print(text.as_bytes());
+    sys::print(b"\n");
+}
+
+fn now_us(system: Handle) -> u64 {
+    let mut b = [0u8; 8];
+    match sys::system_info(system, abi::sysinfo::UPTIME_US, &mut b) {
+        Ok(8) => u64::from_le_bytes(b),
+        _ => 0,
+    }
+}
+
+/// The processor's temperature and where it slows itself, if this machine says.
+fn temperature(system: Handle) -> Option<(u32, u32)> {
+    let mut b = [0u8; 8];
+    (sys::system_info(system, abi::sysinfo::TEMPERATURE, &mut b) == Ok(8)).then(|| {
+        (
+            u32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+            u32::from_le_bytes([b[4], b[5], b[6], b[7]]),
+        )
+    })
+}
+
+/// The line that names a run, as ADR 0080's format asks: build and processors.
+fn header(system: Handle) -> String {
+    let mut args = [0u8; sys::CMDLINE_MAX];
+    let line = sys::cmdline(system, &mut args).ok().map(CmdLine::new);
+    let build = line.as_ref().map_or(String::from("unknown"), |l| {
+        match (l.get(keys::BOOT_CHANNEL), l.get(keys::BOOT_VERSION)) {
+            (Some("dev"), Some(v)) => {
+                format!("dev-{v}-{}", l.get(keys::BOOT_COMMIT).unwrap_or("?"))
+            }
+            (_, Some(v)) => String::from(v),
+            _ => String::from("esp"),
+        }
+    });
+    let mut cpus = [0u8; 8];
+    let n = match sys::system_info(system, abi::sysinfo::CPUS, &mut cpus) {
+        Ok(8) => u64::from_le_bytes(cpus),
+        _ => 0,
+    };
+    // `machine` waits for the firmware's model in `diag` (SMBIOS): until then, unknown.
+    format!("# machine=unknown build={build} clock=tsc cpus={n} scene=bench3d size={W}x{H} renderer=cpu")
+}
+
+fn camera(eye: Vec3, at: Vec3) -> Camera {
+    let view = Mat4::look_at(eye, at, Vec3::new(0.0, 1.0, 0.0));
+    Camera {
+        view_proj: Mat4::perspective(1.0, W as f32 / H as f32, 0.3, 300.0) * view,
+        eye,
+    }
+}
+
+const LIGHT: Light = Light {
+    direction: Vec3::new(-0.39, 0.77, -0.49),
+    ambient: 0.2,
+};
+
+fn material(shading: Shading, color: [f32; 3]) -> Material<'static> {
+    Material {
+        shading,
+        color,
+        texture: None,
+        shininess: 0.0,
+    }
+}
+
+/// One frame of a scene at `t` seconds into it, onto the window's pixels.
+fn frame(kind: Kind, t: f32, a: &mut Assets, pixels: &mut [u32]) -> Stats {
+    const SKY: u32 = 0x182030;
+    let mut stats = Stats::default();
+    match kind {
+        Kind::Effect(size) => {
+            let kernel: Vec<f32> = (0..size * size)
+                .map(|i| {
+                    let (x, y) = ((i % size) as f32, (i / size) as f32);
+                    let c = (size / 2) as f32;
+                    let d = (x - c) * (x - c) + (y - c) * (y - c);
+                    libm::expf(-d / (size as f32))
+                })
+                .collect();
+            convolve(&a.picture, pixels, (W, H, W), &kernel, size);
+            return stats;
+        }
+        Kind::Desktop => {
+            let Some(mut c) = Canvas::new(pixels, W as u32, H as u32, W as u32) else {
+                return stats;
+            };
+            c.fill(rgb(0x8E, 0xA9, 0xC4));
+            for i in 0..4 {
+                let k = i as f32;
+                let x = 60.0 + k * 140.0 + 40.0 * libm::sinf(t * 1.3 + k);
+                let y = 60.0 + k * 90.0 + 30.0 * libm::cosf(t * 1.1 + k);
+                let frame = Rect::new(x as i32, y as i32, 320, 220);
+                c.window_shadow(&frame, 77);
+                c.round_rect(&frame, rgb(0xEC, 0xEC, 0xEC));
+                let body = Rect::new(frame.x + 12, frame.y + 40, 296, 168);
+                c.rounded(&body, 8, rgb(0xFF, 0xFF, 0xFF));
+            }
+            return stats;
+        }
+        _ => {}
+    }
+    let mut target = Target {
+        color: pixels,
+        depth: &mut a.depth,
+        width: W,
+        height: H,
+        stride: W,
+    };
+    target.clear(SKY);
+    let spin = Mat4::rotate_y(t * 0.9) * Mat4::rotate_x(t * 0.6);
+    let near = camera(Vec3::new(0.0, 0.8, -4.2), Vec3::default());
+    match kind {
+        Kind::Geometry => {
+            stats += draw(
+                &mut target,
+                &a.torus,
+                &spin,
+                &near,
+                &LIGHT,
+                &material(Shading::Flat, [0.9, 0.4, 0.2]),
+            );
+        }
+        Kind::DenseGeometry => {
+            stats += draw(
+                &mut target,
+                &a.sphere,
+                &spin,
+                &near,
+                &LIGHT,
+                &material(Shading::Gouraud, [0.3, 0.6, 0.9]),
+            );
+        }
+        Kind::Texture(filter) => {
+            let m = Material {
+                texture: Some((&a.texture, filter)),
+                ..material(Shading::Flat, [1.0, 1.0, 1.0])
+            };
+            stats += draw(
+                &mut target,
+                &a.cube,
+                &(Mat4::scale(1.2) * spin),
+                &near,
+                &LIGHT,
+                &m,
+            );
+        }
+        Kind::Shade(shading) => {
+            let m = Material {
+                shininess: 32.0,
+                ..material(shading, [0.9, 0.35, 0.2])
+            };
+            stats += draw(&mut target, &a.torus, &spin, &near, &LIGHT, &m);
+        }
+        Kind::Corridor => {
+            let cam = camera(
+                Vec3::new(0.0, 1.5, -6.0 + t * 2.0),
+                Vec3::new(0.0, 0.5, 30.0 + t * 2.0),
+            );
+            let m = Material {
+                texture: Some((&a.texture, Filter::Mipmap)),
+                ..material(Shading::Flat, [1.0, 1.0, 1.0])
+            };
+            for i in 0..12 {
+                for side in [-2.5f32, 2.5] {
+                    let at = Vec3::new(side, 0.5, i as f32 * 4.0);
+                    stats += draw(
+                        &mut target,
+                        &a.cube,
+                        &(Mat4::translate(at) * Mat4::rotate_y(t + i as f32)),
+                        &cam,
+                        &LIGHT,
+                        &m,
+                    );
+                }
+            }
+        }
+        Kind::Terrain | Kind::Everything => {
+            let z = t * 4.0;
+            let cam = camera(Vec3::new(0.0, 6.0, -30.0 + z), Vec3::new(0.0, 0.0, z));
+            stats += draw(
+                &mut target,
+                &a.terrain,
+                &Mat4::translate(Vec3::new(0.0, -2.0, 0.0)),
+                &cam,
+                &LIGHT,
+                &material(Shading::Gouraud, [0.45, 0.7, 0.35]),
+            );
+            if let Kind::Everything = kind {
+                let m = Material {
+                    texture: Some((&a.texture, Filter::Mipmap)),
+                    shininess: 24.0,
+                    ..material(Shading::Phong, [1.0, 1.0, 1.0])
+                };
+                for i in 0..8 {
+                    let at = Vec3::new(
+                        (i as f32 - 3.5) * 3.0,
+                        2.0 + libm::sinf(t + i as f32),
+                        z - 10.0 + (i % 3) as f32 * 6.0,
+                    );
+                    stats += draw(
+                        &mut target,
+                        &a.small_sphere,
+                        &(Mat4::translate(at) * Mat4::scale(1.4)),
+                        &cam,
+                        &LIGHT,
+                        &m,
+                    );
+                }
+            }
+        }
+        Kind::Objects => {
+            let cam = camera(Vec3::new(0.0, 6.0, -14.0), Vec3::new(0.0, 0.0, 0.0));
+            let m = Material {
+                shininess: 32.0,
+                ..material(Shading::Phong, [0.85, 0.85, 0.3])
+            };
+            for i in 0..64 {
+                let (x, z) = ((i % 8) as f32 - 3.5, (i / 8) as f32 - 3.5);
+                let at = Vec3::new(x * 2.0, libm::sinf(t * 2.0 + x + z) * 0.5, z * 2.0);
+                stats += draw(
+                    &mut target,
+                    &a.small_sphere,
+                    &(Mat4::translate(at) * Mat4::scale(0.7)),
+                    &cam,
+                    &LIGHT,
+                    &m,
+                );
+            }
+        }
+        Kind::Effect(_) | Kind::Desktop => {}
+    }
+    stats
+}
+
+/// What a scene's run gave.
+struct Outcome {
+    frames: Vec<u32>,
+    elapsed_us: u64,
+    peak_c: Option<u32>,
+    stopped_hot: bool,
+    stats: Stats,
+}
+
+impl Outcome {
+    fn fps(&self) -> u64 {
+        self.frames.len() as u64 * 1_000_000 / self.elapsed_us.max(1)
+    }
+
+    /// The log line of ADR 0080's format, for this scene.
+    fn line(&self, name: &str) -> String {
+        let mut t = self.frames.clone();
+        t.sort_unstable();
+        let at = |q: usize| {
+            t.get((t.len() * q / 100).min(t.len().saturating_sub(1)))
+                .copied()
+                .unwrap_or(0)
+        };
+        let n = t.len().max(1) as u64;
+        format!(
+            "bench3d.{name} us {} {} {} max={} n={} fps={} triangles={} pixels={} peak_c={}{}",
+            at(50),
+            at(95),
+            at(99),
+            t.last().copied().unwrap_or(0),
+            t.len(),
+            self.fps(),
+            self.stats.triangles / n,
+            self.stats.pixels / n,
+            self.peak_c.map_or(String::from("-"), |c| format!("{c}")),
+            if self.stopped_hot { " stopped=hot" } else { "" },
+        )
+    }
+}
+
+struct App {
+    win: Window,
+    system: Handle,
+    text: Typesetter,
+}
+
+/// The owner asked to stop: the close box or Esc.
+struct Leave;
+
+impl App {
+    /// Looks at what the owner did, without waiting long.
+    fn events(&mut self) -> Result<(), Leave> {
+        loop {
+            match self.win.poll(1) {
+                Ok(Some(Event::Close)) => return Err(Leave),
+                Ok(Some(Event::KeyCode {
+                    code: KEY_ESC,
+                    state: KeyState::Pressed,
+                    ..
+                })) => return Err(Leave),
+                Ok(Some(_)) => {}
+                Ok(None) => return Ok(()),
+                Err(_) => return Err(Leave),
+            }
+        }
+    }
+
+    /// Words on the frame, on a dark band so they read over any scene.
+    fn hud(&mut self, lines: &[String]) {
+        let mut c = self.win.canvas();
+        let band = Rect::new(12, 12, 360, 22 * lines.len() as u32 + 12);
+        c.rounded(&band, 8, rgb(0x10, 0x14, 0x1c));
+        for (i, l) in lines.iter().enumerate() {
+            let face = if i == 0 {
+                INTER_SEMIBOLD
+            } else {
+                INTER_REGULAR
+            };
+            let at = (24, 34 + 22 * i as i32);
+            self.text
+                .draw(&mut c, (Face(face), 14), l, at, rgb(0xF0, 0xF0, 0xF0));
+        }
+    }
+
+    /// Waits for the processor to cool below `COOL_C`, saying so on screen.
+    fn cool_down(&mut self, next: &str) -> Result<(), Leave> {
+        loop {
+            let Some((c, _)) = temperature(self.system) else {
+                return Ok(());
+            };
+            if c < COOL_C {
+                return Ok(());
+            }
+            self.win.canvas().fill(rgb(0x18, 0x20, 0x30));
+            self.hud(&[
+                format!("Next: {next}"),
+                format!("Cooling: {c} C, it starts below {COOL_C} C"),
+            ]);
+            let _ = self.win.present();
+            for _ in 0..50 {
+                self.events()?;
+                sys::thread_sleep(10);
+            }
+        }
+    }
+
+    /// Runs one scene for its time, or `quick` frames.
+    fn run(
+        &mut self,
+        name: &str,
+        kind: Kind,
+        a: &mut Assets,
+        quick: u64,
+    ) -> Result<Outcome, Leave> {
+        let mut out = Outcome {
+            frames: Vec::with_capacity(4096),
+            elapsed_us: 0,
+            peak_c: None,
+            stopped_hot: false,
+            stats: Stats::default(),
+        };
+        let start = now_us(self.system);
+        let mut next_look = start;
+        let mut current = String::new();
+        loop {
+            let f0 = now_us(self.system);
+            let t = (f0 - start) as f32 / 1e6;
+            let stats = {
+                let c = self.win.canvas();
+                frame(kind, t, a, &mut *c.pixels)
+            };
+            out.stats += stats;
+            let n = out.frames.len() as u64;
+            let elapsed = (f0 - start).max(1);
+            let fps = n * 1_000_000 / elapsed;
+            let ms = out.frames.last().map_or(0, |&us| us / 100);
+            if f0 >= next_look {
+                // The temperature is looked at every half second, not each frame.
+                next_look = f0 + 500_000;
+                if let Some((c, _)) = temperature(self.system) {
+                    out.peak_c = Some(out.peak_c.map_or(c, |p| p.max(c)));
+                    current = format!("{c} C");
+                    if c >= STOP_C {
+                        out.stopped_hot = true;
+                    }
+                }
+                self.events()?;
+            }
+            self.hud(&[
+                String::from(name),
+                format!("{fps} fps, {}.{} ms a frame", ms / 10, ms % 10),
+                format!("{} triangles, {} pixels", stats.triangles, stats.pixels),
+                if current.is_empty() {
+                    String::from("temperature: not readable")
+                } else {
+                    current.clone()
+                },
+            ]);
+            let _ = self.win.present();
+            let f1 = now_us(self.system);
+            out.frames.push((f1 - f0).min(u32::MAX as u64) as u32);
+            out.elapsed_us = f1 - start;
+            let done = if quick > 0 {
+                out.frames.len() as u64 >= quick
+            } else {
+                out.elapsed_us >= SCENE_US
+            };
+            if done || out.stopped_hot || out.frames.len() == out.frames.capacity() {
+                return Ok(out);
+            }
+        }
+    }
+}
+
+fn assets(hw: Handle) -> Option<Assets> {
+    let heap = sys::dma_alloc(hw, MORE_HEAP as u64)
+        .ok()
+        .and_then(|d| sys::mmio_map(d).ok())?;
+    // SAFETY: a new mapping of whole pages, never unmapped, used by nothing else.
+    unsafe { aricode_rt::extend_heap(heap as usize, MORE_HEAP) };
+    let texture = Texture::checker(256, 8, 0xF0F0F0, 0x3070C0);
+    let terrain = Mesh::terrain(120.0, 96, 4.0);
+    let mut a = Assets {
+        torus: Mesh::torus(1.3, 0.5, 64, 32),
+        sphere: Mesh::sphere(1.6, 64, 128),
+        small_sphere: Mesh::sphere(0.6, 12, 24),
+        cube: Mesh::cube(),
+        terrain,
+        texture,
+        depth: alloc::vec![u16::MAX; W * H],
+        picture: alloc::vec![0; W * H],
+    };
+    // The picture the 2D effects filter: a frame of the heaviest scene.
+    let mut picture = core::mem::take(&mut a.picture);
+    frame(Kind::Everything, 1.0, &mut a, &mut picture);
+    a.picture = picture;
+    Some(a)
+}
+
+fn main(arg: u64) -> u64 {
+    let (mut session, mut hw, mut system) = (None, None, None);
+    permissions::granted(|h, _| {
+        if permissions::is(h, kind::ENDPOINT) {
+            session = Some(h);
+        } else if permissions::is(h, kind::HARDWARE) {
+            hw = Some(h);
+        } else if permissions::is(h, kind::SYSTEM) {
+            system = Some(h);
+        }
+    });
+    let (Some(session), Some(hw), Some(system)) = (session, hw, system) else {
+        say("started without a compositor session, HARDWARE or SYSTEM");
+        return 1;
+    };
+    say("making its scenes");
+    let Some(mut a) = assets(hw) else {
+        say("no memory for its scenes");
+        return 2;
+    };
+    let Ok(win) =
+        Window::create_wanting(session, hw, W as u32, H as u32, "Bench3D", wants::KEY_CODES)
+    else {
+        say("could not create its window");
+        return 3;
+    };
+    say("window open");
+    let mut app = App {
+        win,
+        system,
+        text: Typesetter::new(),
+    };
+    let quick = arg;
+    let head = header(system);
+    sys::print(head.as_bytes());
+    sys::print(b"\n");
+    let mut results: Vec<(&str, u64, bool)> = Vec::new();
+    for (name, kind) in SCENES {
+        if quick == 0 && app.cool_down(name).is_err() {
+            break;
+        }
+        let Ok(out) = app.run(name, kind, &mut a, quick) else {
+            say("stopped by the owner");
+            break;
+        };
+        let line = out.line(name);
+        sys::print(line.as_bytes());
+        sys::print(b"\n");
+        results.push((name, out.fps(), out.stopped_hot));
+    }
+    say(&format!("{} scenes measured", results.len()));
+    if quick > 0 {
+        let _ = app.win.close();
+        return 0;
+    }
+    // The table stays until the owner closes it.
+    app.win.canvas().fill(rgb(0x18, 0x20, 0x30));
+    let mut lines = alloc::vec![String::from("bench3d: frames a second, drawn by the CPU")];
+    for (name, fps, hot) in &results {
+        lines.push(format!(
+            "{name}: {fps}{}",
+            if *hot { "  (stopped at 90 C)" } else { "" }
+        ));
+    }
+    app.hud(&lines);
+    let _ = app.win.present();
+    while app.events().is_ok() {
+        sys::thread_sleep(100);
+    }
+    let _ = app.win.close();
+    0
+}
+
+aricode_rt::entry!(main);

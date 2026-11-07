@@ -499,6 +499,13 @@ name = "aricode-proto"
 version = "0.18.0"
 
 [[package]]
+name = "aricode-render3d"
+version = "0.18.0"
+dependencies = [
+ "libm",
+]
+
+[[package]]
 name = "aricode-rt"
 version = "0.18.0"
 dependencies = [
