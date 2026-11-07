@@ -19,6 +19,8 @@
 
 extern crate alloc;
 
+mod materials;
+
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -90,7 +92,8 @@ struct Assets {
     small_sphere: Mesh,
     cube: Mesh,
     terrain: Mesh,
-    texture: Texture,
+    textures: [Texture; 4],
+    texture_us: u64,
     depth: Vec<u16>,
     /// A frame to filter, for the 2D effects.
     picture: Vec<u32>,
@@ -140,7 +143,7 @@ fn header(system: Handle) -> String {
         _ => 0,
     };
     // `machine` waits for the firmware's model in `diag` (SMBIOS): until then, unknown.
-    format!("# machine=unknown build={build} clock=tsc cpus={n} scene=bench3d size={W}x{H} renderer=cpu")
+    format!("# machine=unknown build={build} clock=tsc cpus={n} scene=bench3d size={W}x{H} renderer=cpu textures=v2")
 }
 
 fn camera(eye: Vec3, at: Vec3) -> Camera {
@@ -172,15 +175,14 @@ fn frame(kind: Kind, t: f32, a: &mut Assets, pixels: &mut [u32]) -> Stats {
     let mut stats = Stats::default();
     match kind {
         Kind::Effect(size) => {
-            let kernel: Vec<f32> = (0..size * size)
-                .map(|i| {
-                    let (x, y) = ((i % size) as f32, (i / size) as f32);
-                    let c = (size / 2) as f32;
-                    let d = (x - c) * (x - c) + (y - c) * (y - c);
-                    libm::expf(-d / (size as f32))
-                })
-                .collect();
-            convolve(&a.picture, pixels, (W, H, W), &kernel, size);
+            let mut kernel = [0.0; 25];
+            for (i, value) in kernel[..size * size].iter_mut().enumerate() {
+                let (x, y) = ((i % size) as f32, (i / size) as f32);
+                let c = (size / 2) as f32;
+                let d = (x - c) * (x - c) + (y - c) * (y - c);
+                *value = libm::expf(-d / (size as f32));
+            }
+            convolve(&a.picture, pixels, (W, H, W), &kernel[..size * size], size);
             return stats;
         }
         Kind::Desktop => {
@@ -235,7 +237,7 @@ fn frame(kind: Kind, t: f32, a: &mut Assets, pixels: &mut [u32]) -> Stats {
         }
         Kind::Texture(filter) => {
             let m = Material {
-                texture: Some((&a.texture, filter)),
+                texture: Some((&a.textures[0], filter)),
                 ..material(Shading::Flat, [1.0, 1.0, 1.0])
             };
             stats += draw(
@@ -259,11 +261,11 @@ fn frame(kind: Kind, t: f32, a: &mut Assets, pixels: &mut [u32]) -> Stats {
                 Vec3::new(0.0, 1.5, -6.0 + t * 2.0),
                 Vec3::new(0.0, 0.5, 30.0 + t * 2.0),
             );
-            let m = Material {
-                texture: Some((&a.texture, Filter::Mipmap)),
-                ..material(Shading::Flat, [1.0, 1.0, 1.0])
-            };
             for i in 0..12 {
+                let m = Material {
+                    texture: Some((&a.textures[i % 2], Filter::Mipmap)),
+                    ..material(Shading::Flat, [1.0, 1.0, 1.0])
+                };
                 for side in [-2.5f32, 2.5] {
                     let at = Vec3::new(side, 0.5, i as f32 * 4.0);
                     stats += draw(
@@ -286,11 +288,14 @@ fn frame(kind: Kind, t: f32, a: &mut Assets, pixels: &mut [u32]) -> Stats {
                 &Mat4::translate(Vec3::new(0.0, -2.0, 0.0)),
                 &cam,
                 &LIGHT,
-                &material(Shading::Gouraud, [0.45, 0.7, 0.35]),
+                &Material {
+                    texture: Some((&a.textures[2], Filter::Mipmap)),
+                    ..material(Shading::Gouraud, [1.0, 1.0, 1.0])
+                },
             );
             if let Kind::Everything = kind {
                 let m = Material {
-                    texture: Some((&a.texture, Filter::Mipmap)),
+                    texture: Some((&a.textures[3], Filter::Mipmap)),
                     shininess: 24.0,
                     ..material(Shading::Phong, [1.0, 1.0, 1.0])
                 };
@@ -313,11 +318,12 @@ fn frame(kind: Kind, t: f32, a: &mut Assets, pixels: &mut [u32]) -> Stats {
         }
         Kind::Objects => {
             let cam = camera(Vec3::new(0.0, 6.0, -14.0), Vec3::new(0.0, 0.0, 0.0));
-            let m = Material {
-                shininess: 32.0,
-                ..material(Shading::Phong, [0.85, 0.85, 0.3])
-            };
             for i in 0..64 {
+                let m = Material {
+                    texture: Some((&a.textures[[0, 1, 3][i % 3]], Filter::Mipmap)),
+                    shininess: if i % 3 == 2 { 32.0 } else { 4.0 },
+                    ..material(Shading::Phong, [1.0, 1.0, 1.0])
+                };
                 let (x, z) = ((i % 8) as f32 - 3.5, (i / 8) as f32 - 3.5);
                 let at = Vec3::new(x * 2.0, libm::sinf(t * 2.0 + x + z) * 0.5, z * 2.0);
                 stats += draw(
@@ -350,9 +356,9 @@ impl Outcome {
     }
 
     /// The log line of ADR 0080's format, for this scene.
-    fn line(&self, name: &str) -> String {
-        let mut t = self.frames.clone();
-        t.sort_unstable();
+    fn line(&mut self, name: &str) -> String {
+        self.frames.sort_unstable();
+        let t = &self.frames;
         let at = |q: usize| {
             t.get((t.len() * q / 100).min(t.len().saturating_sub(1)))
                 .copied()
@@ -383,6 +389,7 @@ struct App {
     /// makes a frame of the screen, so a frame drawn there shows half made: models cut
     /// and empty zones. Only a finished frame is copied there, by [`App::show`].
     back: Vec<u32>,
+    samples: Vec<u32>,
 }
 
 /// The owner asked to stop: the close box or Esc.
@@ -466,7 +473,7 @@ impl App {
         quick: u64,
     ) -> Result<Outcome, Leave> {
         let mut out = Outcome {
-            frames: Vec::with_capacity(4096),
+            frames: core::mem::take(&mut self.samples),
             elapsed_us: 0,
             peak_c: None,
             stopped_hot: false,
@@ -531,7 +538,7 @@ fn buffer<T: Copy>(n: usize, v: T) -> Option<Vec<T>> {
 }
 
 /// The scenes' meshes and textures, and the frame to draw on.
-fn assets(hw: Handle) -> Option<(Assets, Vec<u32>)> {
+fn assets(hw: Handle, system: Handle) -> Option<(Assets, Vec<u32>, Vec<u32>)> {
     let heap = sys::dma_alloc(hw, MORE_HEAP as u64)
         .ok()
         .and_then(|d| sys::mmio_map(d).ok())?;
@@ -541,23 +548,32 @@ fn assets(hw: Handle) -> Option<(Assets, Vec<u32>)> {
     let back = buffer(W * H, 0u32)?;
     let depth = buffer(W * H, u16::MAX)?;
     let picture = buffer(W * H, 0u32)?;
-    let texture = Texture::checker(256, 8, 0xF0F0F0, 0x3070C0);
-    let terrain = Mesh::terrain(120.0, 96, 4.0);
+    let texture_start = now_us(system);
+    let textures = materials::make()?;
+    let texture_us = now_us(system) - texture_start;
+    let terrain = Mesh::try_terrain(120.0, 96, 4.0)?;
     let mut a = Assets {
-        torus: Mesh::torus(1.3, 0.5, 64, 32),
-        sphere: Mesh::sphere(1.6, 64, 128),
-        small_sphere: Mesh::sphere(0.6, 12, 24),
-        cube: Mesh::cube(),
+        torus: Mesh::try_torus(1.3, 0.5, 64, 32)?,
+        sphere: Mesh::try_sphere(1.6, 64, 128)?,
+        small_sphere: Mesh::try_sphere(0.6, 12, 24)?,
+        cube: Mesh::try_cube()?,
         terrain,
-        texture,
+        textures,
+        texture_us,
         depth,
         picture,
     };
+    let mut samples = buffer(4096, 0u32)?;
+    samples.clear();
+    // Leave a contiguous 256 KiB for the bounded 96 KiB glyph cache, font
+    // hinting/scratch and small HUD/results strings. Fail here, before any scene.
+    let reserve = buffer(256 * 1024, 0u8)?;
+    drop(reserve);
     // The picture the 2D effects filter: a frame of the heaviest scene.
     let mut picture = core::mem::take(&mut a.picture);
     frame(Kind::Everything, 1.0, &mut a, &mut picture);
     a.picture = picture;
-    Some((a, back))
+    Some((a, back, samples))
 }
 
 fn main(arg: u64) -> u64 {
@@ -576,7 +592,8 @@ fn main(arg: u64) -> u64 {
         return 1;
     };
     say("making its scenes");
-    let Some((mut a, back)) = assets(hw) else {
+    let startup = now_us(system);
+    let Some((mut a, back, samples)) = assets(hw, system) else {
         say("no memory for its scenes");
         return 2;
     };
@@ -592,7 +609,14 @@ fn main(arg: u64) -> u64 {
         system,
         text: Typesetter::new(),
         back,
+        samples,
     };
+    say(&format!(
+        "startup_us={} texture_us={} heap_free_bytes={} dma_free_kib=172",
+        now_us(system) - startup,
+        a.texture_us,
+        aricode_rt::heap_stats().free
+    ));
     let quick = arg;
     let head = header(system);
     sys::print(head.as_bytes());
@@ -602,7 +626,7 @@ fn main(arg: u64) -> u64 {
         if quick == 0 && app.cool_down(name).is_err() {
             break;
         }
-        let Ok(out) = app.run(name, kind, &mut a, quick) else {
+        let Ok(mut out) = app.run(name, kind, &mut a, quick) else {
             say("stopped by the owner");
             break;
         };
@@ -610,8 +634,24 @@ fn main(arg: u64) -> u64 {
         sys::print(line.as_bytes());
         sys::print(b"\n");
         results.push((name, out.fps(), out.stopped_hot));
+        app.samples = core::mem::take(&mut out.frames);
+        app.samples.clear();
+        if quick > 0
+            && matches!(
+                kind,
+                Kind::Texture(Filter::Linear) | Kind::Objects | Kind::Everything
+            )
+        {
+            // Outside the measured frames: let the compositor and QMP snapshot
+            // observe this completed scene before the next one replaces it.
+            sys::thread_sleep(500);
+        }
     }
     say(&format!("{} scenes measured", results.len()));
+    say(&format!(
+        "heap_free_bytes={} after scenes",
+        aricode_rt::heap_stats().free
+    ));
     if quick > 0 {
         let _ = app.win.close();
         return 0;
