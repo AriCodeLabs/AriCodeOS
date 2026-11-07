@@ -1,0 +1,27 @@
+# Incident 0063: a window with two buffers never shows a frame half drawn. Demo E
+# presents frames of one colour each and, right after each present, paints the
+# buffer it gave up in a third colour, 0x00fe01, as a program starting its next
+# frame does. The compositor's frame trace samples the window's pixels on screen:
+# with two buffers that colour never shows, whenever the compositor makes a frame.
+# Frames come in pairs, faster than the compositor's own, so the second one's frame
+# is made later, while the program paints and pauses; the same program on one
+# buffer (`run gui_demo 5`) shows that colour then.
+name = "gui.double_buffer"
+description = "a double-buffered window never shows what its program paints after presenting"
+level = "full"
+areas = ["gui"]
+cmdline = "qemu_exit gui shell gui_trace"
+install = ["examples/gui_demo"]
+stdin = ["run gui_demo 4", "shutdown"]
+timeout_secs = 60
+
+[expect]
+exit = 33
+serial_contains = [
+    "compositor: window 1 'Demo E' 200x120",
+    ") = 0xfe0102",
+    ") = 0x0102fe",
+    "gui_demo E: 120 frames presented",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", ") = 0x00fe01", "no second buffer"]

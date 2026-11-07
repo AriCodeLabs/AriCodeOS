@@ -37,7 +37,7 @@ exit = 33
 serial_contains = [
     "compositor: window 1 'Bench3D' 800x600",
     "# machine=unknown build=",
-    "renderer=cpu textures=v2",
+    "renderer=cpu textures=v2 present=double",
     "heap_free_bytes=",
     "bench3d.geometry us ",
     "bench3d.texture-mipmap us ",

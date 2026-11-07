@@ -8,6 +8,7 @@ use aricode_gfx::Canvas;
 pub use aricode_proto::window::Event;
 pub use aricode_proto::window::{mods, wants, DamageRect, KeyState};
 use aricode_proto::window::{Op, Reply, Request, Status, MAX_CLIPBOARD, MAX_DAMAGE, MAX_TITLE};
+use core::cell::Cell;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowError {
@@ -20,8 +21,12 @@ pub enum WindowError {
 pub struct Window {
     service: Handle,
     id: u32,
-    dma: Handle,
-    pixels: u64,
+    /// The buffer [`canvas`](Self::canvas) draws on, and where it is mapped. Cells, so
+    /// that presenting, which swaps the buffers, needs no `&mut`.
+    draw: Cell<(Handle, u64)>,
+    /// The buffer shown, when the window has two ([`double_buffer`](Self::double_buffer)):
+    /// the compositor reads it, so nothing here writes to it.
+    shown: Cell<Option<(Handle, u64)>>,
     width: u32,
     height: u32,
     /// The desktop was dark when this opened.
@@ -67,8 +72,8 @@ impl Window {
             service,
             id: 0,
             dark: false,
-            dma,
-            pixels,
+            draw: Cell::new((dma, pixels)),
+            shown: Cell::new(None),
             width,
             height,
         };
@@ -89,16 +94,48 @@ impl Window {
         self.dark
     }
 
-    /// Canvas over the content buffer.
+    /// Gives the window a second buffer, so a frame is drawn on one while the other
+    /// shows and [`present`](Self::present) swaps them: no frame shows half drawn,
+    /// whenever the compositor reads (incident 0063). From then on the canvas holds
+    /// the frame before last, not the last one: draw each frame whole. A resize
+    /// returns to one buffer.
+    pub fn double_buffer(&mut self, hardware: Handle) -> Result<(), WindowError> {
+        if self.shown.get().is_some() {
+            return Ok(());
+        }
+        let len = self.width as u64 * self.height as u64 * 4;
+        let dma = sys::dma_alloc(hardware, len).map_err(WindowError::Ipc)?;
+        let pixels = match sys::mmio_map(dma) {
+            Ok(p) => p,
+            Err(e) => {
+                let _ = sys::handle_close(dma);
+                return Err(WindowError::Ipc(e));
+            }
+        };
+        match self.call_with(self.request(Op::SecondBuffer), Some(dma)) {
+            Ok(_) => {
+                self.shown.set(Some(self.draw.get()));
+                self.draw.set((dma, pixels));
+                Ok(())
+            }
+            Err(e) => {
+                let _ = sys::mmio_unmap(pixels);
+                let _ = sys::handle_close(dma);
+                Err(e)
+            }
+        }
+    }
+
+    /// Canvas over the content buffer: the one not shown, when there are two.
     pub fn canvas(&mut self) -> Canvas<'_> {
         let n = (self.width * self.height) as usize;
         // SAFETY: our own DMA buffer of `width*height*4` bytes, mapped RW.
-        let pixels = unsafe { core::slice::from_raw_parts_mut(self.pixels as *mut u32, n) };
+        let pixels = unsafe { core::slice::from_raw_parts_mut(self.draw.get().1 as *mut u32, n) };
         Canvas::new(pixels, self.width, self.height, self.width).expect("window buffer")
     }
 
     fn call(&self, req: Request, with_buffer: bool) -> Result<Reply, WindowError> {
-        self.call_with(req, with_buffer.then_some(self.dma))
+        self.call_with(req, with_buffer.then_some(self.draw.get().0))
     }
 
     fn call_with(&self, req: Request, buffer: Option<Handle>) -> Result<Reply, WindowError> {
@@ -138,18 +175,40 @@ impl Window {
     /// Asks the compositor to repaint the content: what was painted since
     /// the last `present` reaches the screen with its next frame (ADR 0046).
     pub fn present(&self) -> Result<(), WindowError> {
-        self.call(self.request(Op::Present), false).map(|_| ())
+        let req = self.presenting(self.request(Op::Present));
+        self.call(req, false)?;
+        self.swapped();
+        Ok(())
     }
 
     /// As [`present`](Self::present), for what changed: at most
     /// [`MAX_DAMAGE`] rectangles reach the compositor; more mean all of it.
     pub fn present_rects(&self, rects: &[DamageRect]) -> Result<(), WindowError> {
-        let mut req = self.request(Op::Present);
+        let mut req = self.presenting(self.request(Op::Present));
         if rects.len() <= MAX_DAMAGE {
             req.damage[..rects.len()].copy_from_slice(rects);
             req.damage_len = rects.len() as u8;
         }
-        self.call(req, false).map(|_| ())
+        self.call(req, false)?;
+        self.swapped();
+        Ok(())
+    }
+
+    /// A present that swaps the buffers, when there are two.
+    fn presenting(&self, mut req: Request) -> Request {
+        if self.shown.get().is_some() {
+            req.width = 1;
+        }
+        req
+    }
+
+    /// After a swapping present: the buffer drawn on shows, and the one that showed
+    /// is drawn on next. The compositor answered, so it no longer reads that one.
+    fn swapped(&self) {
+        if let Some(shown) = self.shown.get() {
+            self.shown.set(Some(self.draw.get()));
+            self.draw.set(shown);
+        }
     }
 
     /// Adds to this window's menus in the bar: `id` 0 names menu `menu`, and any other
@@ -240,22 +299,29 @@ impl Window {
                 return Err(WindowError::Ipc(e));
             }
         };
-        let old = (self.dma, self.pixels, self.width, self.height);
-        (self.dma, self.pixels, self.width, self.height) = (dma, pixels, width, height);
+        let old = (self.draw.get(), self.width, self.height);
+        (self.width, self.height) = (width, height);
+        self.draw.set((dma, pixels));
         paint(&mut self.canvas());
         let mut req = self.request(Op::Resize);
         req.width = width;
         req.height = height;
         match self.call(req, true) {
             Ok(_) => {
-                let _ = sys::mmio_unmap(old.1);
-                let _ = sys::handle_close(old.0);
+                let _ = sys::mmio_unmap(old.0 .1);
+                let _ = sys::handle_close(old.0 .0);
+                // The compositor dropped the second buffer: back to one.
+                if let Some((dma, pixels)) = self.shown.take() {
+                    let _ = sys::mmio_unmap(pixels);
+                    let _ = sys::handle_close(dma);
+                }
                 Ok(())
             }
             Err(e) => {
                 let _ = sys::mmio_unmap(pixels);
                 let _ = sys::handle_close(dma);
-                (self.dma, self.pixels, self.width, self.height) = old;
+                self.draw.set(old.0);
+                (self.width, self.height) = (old.1, old.2);
                 Err(e)
             }
         }
