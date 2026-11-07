@@ -217,6 +217,9 @@ pub mod keys {
     /// with one pixel sample per window, which the GUI scenarios check.
     /// Without it a frame prints nothing: the serial port busy-waits.
     pub const GUI_TRACE: &str = "gui_trace";
+    /// Tests only: `gui_notice`, the compositor shows a notice as it starts, as it does
+    /// for what cannot be provoked in a test (a hot processor).
+    pub const GUI_NOTICE: &str = "gui_notice";
 
     /// Every key documented "Tests only": they exit QEMU, inject failures or
     /// run test programs. `cargo xtask usb-image` refuses them (a unit test
@@ -237,6 +240,7 @@ pub mod keys {
         BLK_FAULT,
         PCI_FAULT,
         GUI_TRACE,
+        GUI_NOTICE,
     ];
 
     /// Keys AriBoot adds itself; `cargo xtask usb-image` refuses them too.
