@@ -526,6 +526,16 @@ with many small triangles least, since every band still projects every triangle.
 The package peaked at 74 C, 5 C more than on one thread. Raw lines:
 `bench3d-laptop-7.txt`.
 
+**Bands that follow the work** (bench3d 8): equal bands left threads idle, since a
+picture's work is not even over its rows (the objects scene's quarters took 0.3,
+3.2, 4.3 and 1.7 ms on the host). With the bands' ends moved after each frame
+toward equal times, fps against bench3d 7: geometry 158 to 189, dense 88 to 99,
+texture nearest, linear and mipmap 107, 98, 68 to 126, 113, 104, Gouraud 129 to
+159, Phong 48 to 69, terrain 36 to 45, objects 37 to 53, both shadow scenes 25 to
+31, fractal 43 to 62, everything 33 to 41; the effects, whose work is even, 46 and
+21 to 43 and 20, within the noise. Against one thread (bench3d 6): 1.5 to 3 times.
+Peak 78 C. Raw lines: `bench3d-laptop-8.txt`.
+
 ## 8. Stages
 
 Each stage ends with something shown. A to E and H are in order of dependency; F and G are side
