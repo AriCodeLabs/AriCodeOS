@@ -493,7 +493,26 @@ reference. The metric line format and finished-frame presentation remain unchang
 
 The [material audit](../audits/2026-11-07-bench3d-textures.md) records provenance,
 procedural/RGB24/QOI package and startup comparisons, memory accounting within the
-unchanged 8 MiB manifest, and QEMU screenshots. No v2 laptop baseline has been measured.
+unchanged 8 MiB manifest, and QEMU screenshots.
+
+The first v2 run on the laptop (bench3d 3, dev build 36, 2026-11-07, peak 69 C):
+
+| Scene | fps, textures=v2 | Content changed |
+|---|---|---|
+| geometry, geometry-dense | 101, 49 | no (matches bench3d 2) |
+| shading-gouraud, shading-phong | 76, 25 | no |
+| desktop | 534 | no |
+| texture-nearest, linear, mipmap | 40, 24, 24 | yes |
+| effect2d-3x3, 5x5 | 21, 9 | source image only |
+| terrain | 12 | yes, now textured (was 33 plain) |
+| objects | 22 | yes |
+| everything | 11 | yes |
+
+A texture on every pixel of the landscape costs the CPU nearly two thirds of its frame
+rate: the kind of work the GPU of stage D is for. `texture-linear` and `texture-mipmap`
+fell from 32 to 24 with a smaller texture, which the filters' cost alone does not explain;
+it is to be measured before the rasteriser is spread over threads. Raw lines:
+`bench3d-laptop-3.txt`.
 
 ## 8. Stages
 
