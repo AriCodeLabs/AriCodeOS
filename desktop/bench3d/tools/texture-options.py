@@ -4,7 +4,10 @@
 """Prepare equivalent procedural/RGB24/QOI bench3d packages outside the checkout.
 
 Usage: python3 -I desktop/bench3d/tools/texture-options.py ~/aricode-scratch/texture-options
-Then use cargo xtask app-pack <output>/<procedural|raw|qoi> --version 1.
+Before each cargo xtask app-pack <output>/<procedural|raw|qoi> --version 1, run:
+  cargo clean --manifest-path <candidate>/Cargo.toml \
+    --target-dir build/external/bench3d-v1 --target x86_64-unknown-linux-gnu --release -p desktop-bench3d
+Clean/rebuild when returning to desktop/bench3d too: the output binary path is shared.
 The optional comparison dependency is pure Rust qoi =0.4.1 (MIT OR Apache-2.0),
 with default features disabled. It is never a dependency of the shipped app.
 """

@@ -51,19 +51,27 @@ the pre-rendered effects image and window creation, so its variation is not a de
 benchmark. A host release probe averaged 750 us over 100 procedural constructions;
 that host figure is likewise not a laptop or guest performance claim.
 
-The comparison can be regenerated without changing production dependencies:
+The comparison can be regenerated without changing production dependencies. Each
+candidate has the same package/binary name, and xtask shares `build/external/bench3d-v1`
+between them: clean the app artifacts when switching directories. Otherwise Cargo can
+consider the earlier directory fresh while the public output binary belongs to the
+last candidate built. The first final rerun caught precisely this with the reduced-heap
+binary; its failed log is retained as `bench3d-textures-stale-artifact-gui.log`.
 
 ```sh
 python3 -I desktop/bench3d/tools/texture-options.py ~/aricode-scratch/texture-options
-cargo xtask app-pack ~/aricode-scratch/texture-options/procedural --version 1
-cargo xtask app-pack ~/aricode-scratch/texture-options/raw --version 1
-cargo xtask app-pack ~/aricode-scratch/texture-options/qoi --version 1
+for mode in procedural raw qoi; do
+    cargo clean --manifest-path ~/aricode-scratch/texture-options/$mode/Cargo.toml \
+        --target-dir build/external/bench3d-v1 --target x86_64-unknown-linux-gnu --release -p desktop-bench3d
+    cargo xtask app-pack ~/aricode-scratch/texture-options/$mode --version 1
+done
 ```
 
 For each guest measurement, temporarily point the scenario's `install` entry at the
-candidate directory, run `cargo xtask test --only gui.bench3d`, and preserve its serial
-log before the next run. Restore `install = ["desktop/bench3d"]` afterwards. The script
-verifies that QOI decodes to the identical RGB24 source bytes. It builds only Rust;
+candidate directory, clean/rebuild that candidate, run
+`cargo xtask test --only gui.bench3d`, and preserve its serial log before the next run.
+Restore `install = ["desktop/bench3d"]` afterwards and clean/rebuild the production
+package too. The script verifies that QOI decodes to the identical RGB24 source bytes. It builds only Rust;
 no downloaded C implementation is compiled. QOI is confined to comparison directories
 outside the repository and is not in the shipped app's dependency graph or lockfile.
 
@@ -80,6 +88,10 @@ bytes free after the 13 quick scenes**, including their font cache and results.
 These are allocator snapshots, including headers/alignment, not a claimed minimum
 at every instruction. `aricode_rt::heap_stats()` reads those existing allocator counters
 under its lock without allocating. Later runs may differ slightly with HUD glyphs.
+The final clean production rerun left 328,192 bytes at startup and **290,192 bytes
+after all scenes**, with `startup_us=464227` and `texture_us=7898`. The same 759,240-byte
+package passed all 13 scenes in 19.6 s of scenario time; all metric lines had `n=3`,
+ordered percentiles and the v2 header. Its three final PNGs were inspected again.
 
 All scene buffers, the four mip chains, five meshes and 4,096 timing samples are now
 reserved fallibly at startup. Partial allocations unwind normally on failure. The
@@ -138,7 +150,7 @@ material swatches were also inspected at 128x128 / 64x64.
 - `cargo xtask notices`: generated `build/THIRD-PARTY-NOTICES.txt`; the production
   package still has 56 third-party crates, all with accepted licenses. No third-party
   texture was added.
-- The final production rerun is recorded alongside the format comparison under
+- The final clean production rerun passed and is recorded alongside the comparison under
   `~/aricode-logs/bench3d-textures-*`.
 
 Evidence files include `baseline-package.log`, `procedural-package.log`,
