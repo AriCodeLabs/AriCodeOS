@@ -99,7 +99,10 @@ texture and grid constructors reject invalid/overflowing dimensions. Once the as
 and samples fit, startup also tests a contiguous **256 KiB runtime reserve**, then
 releases it for the 96 KiB glyph cache, font hinting/scratch and small HUD/result strings.
 Failure returns through `bench3d: no memory for its scenes` before opening a window.
-The existing infallible render3d constructors remain available to existing callers.
+On review, render3d keeps one constructor per shape and texture, fallible under its
+original name (no panicking twin); `Texture::checker` is now test-only. The DMA figure
+bench3d prints is computed from its constants, and a build-time assertion keeps the
+window and extra heap within the manifest's 8 MiB.
 
 The timing vector is reused between scenes and sorted in place after measurement,
 removing a 16 KiB percentile clone. Effects use a 25-float stack kernel instead of a

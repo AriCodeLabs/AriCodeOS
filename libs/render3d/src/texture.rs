@@ -26,14 +26,10 @@ pub struct Texture {
 }
 
 impl Texture {
-    /// `texel(x, y)` gives the top level; the rest are averages of four.
-    pub fn new(size: usize, texel: impl Fn(usize, usize) -> u32) -> Self {
-        Self::try_new(size, texel).expect("invalid texture size or no memory")
-    }
-
-    /// Build all levels without aborting on an exhausted heap or an invalid size.
-    /// No temporary decoded image is needed: texels go straight into the top level.
-    pub fn try_new(size: usize, texel: impl Fn(usize, usize) -> u32) -> Option<Self> {
+    /// `texel(x, y)` gives the top level; the rest are averages of four. `None` when
+    /// `size` is not a power of two or the heap has no room: a program with a fixed
+    /// budget says so instead of stopping. Texels go straight into the top level.
+    pub fn new(size: usize, texel: impl Fn(usize, usize) -> u32) -> Option<Self> {
         if !size.is_power_of_two() {
             return None;
         }
@@ -64,17 +60,19 @@ impl Texture {
     }
 
     /// A checker of `cells` squares a side, in two colours, with a thin grid: what shows
-    /// filtering, and its faults, most plainly.
-    pub fn checker(size: usize, cells: usize, a: u32, b: u32) -> Self {
+    /// filtering, and its faults, most plainly. The tests' texture.
+    #[cfg(test)]
+    pub(crate) fn checker(size: usize, cells: usize, a: u32, b: u32) -> Self {
         let cell = (size / cells).max(1);
-        Self::new(size, |x, y| {
+        let t = Self::new(size, |x, y| {
             let edge = x % cell == 0 || y % cell == 0;
             match ((x / cell + y / cell).is_multiple_of(2), edge) {
                 (_, true) => 0x202020,
                 (true, _) => a,
                 (false, _) => b,
             }
-        })
+        });
+        t.expect("a test's checker fits")
     }
 
     pub fn levels(&self) -> usize {
@@ -127,15 +125,13 @@ mod tests {
     #[test]
     fn invalid_or_unrepresentable_sizes_fail_without_calling_the_generator() {
         for size in [0, 3, 1usize << (usize::BITS - 1)] {
-            assert!(
-                Texture::try_new(size, |_, _| panic!("invalid size reached generator")).is_none()
-            );
+            assert!(Texture::new(size, |_, _| panic!("invalid size reached generator")).is_none());
         }
     }
 
     #[test]
     fn levels_go_down_to_one_texel_and_average() {
-        let t = Texture::new(4, |x, y| if (x + y) % 2 == 0 { 0xffffff } else { 0 });
+        let t = Texture::new(4, |x, y| if (x + y) % 2 == 0 { 0xffffff } else { 0 }).unwrap();
         assert_eq!(t.levels(), 3);
         // Black and white average to grey on the 1x1 level.
         let grey = t.sample(0.5, 0.5, Filter::Nearest, 2);
@@ -144,7 +140,7 @@ mod tests {
 
     #[test]
     fn nearest_gives_texels_and_linear_blends_between_them() {
-        let t = Texture::new(2, |x, _| if x == 0 { 0x000000 } else { 0xff0000 });
+        let t = Texture::new(2, |x, _| if x == 0 { 0x000000 } else { 0xff0000 }).unwrap();
         assert_eq!(t.sample(0.25, 0.25, Filter::Nearest, 0), [0.0, 0.0, 0.0]);
         assert_eq!(t.sample(0.75, 0.25, Filter::Nearest, 0), [1.0, 0.0, 0.0]);
         // Halfway between the two texel centres.

@@ -9,10 +9,10 @@ pub const SIZES: [usize; 4] = [128, 128, 128, 64];
 
 pub fn make() -> Option<[Texture; 4]> {
     Some([
-        Texture::try_new(SIZES[0], |x, y| texel(0, x, y))?,
-        Texture::try_new(SIZES[1], |x, y| texel(1, x, y))?,
-        Texture::try_new(SIZES[2], |x, y| texel(2, x, y))?,
-        Texture::try_new(SIZES[3], |x, y| texel(3, x, y))?,
+        Texture::new(SIZES[0], |x, y| texel(0, x, y))?,
+        Texture::new(SIZES[1], |x, y| texel(1, x, y))?,
+        Texture::new(SIZES[2], |x, y| texel(2, x, y))?,
+        Texture::new(SIZES[3], |x, y| texel(3, x, y))?,
     ])
 }
 

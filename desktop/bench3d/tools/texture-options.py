@@ -93,7 +93,7 @@ pub fn make() -> Option<[Texture; 4]> {
 fn load(i: usize) -> Option<Texture> {
     let size = SIZES[i];
     DECODE
-    Texture::try_new(size, |x, y| {
+    Texture::new(size, |x, y| {
         let j = (y * size + x) * 3;
         ((raw[j] as u32) << 16) | ((raw[j + 1] as u32) << 8) | raw[j + 2] as u32
     })

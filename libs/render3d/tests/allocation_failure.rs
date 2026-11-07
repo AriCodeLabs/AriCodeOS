@@ -65,9 +65,9 @@ fn exhaust<T>(make: impl Fn() -> Option<T>) {
 
 #[test]
 fn allocation_failure_is_recoverable_and_releases_partial_assets() {
-    exhaust(|| Texture::try_new(128, |x, y| (x ^ y) as u32));
-    exhaust(Mesh::try_cube);
-    exhaust(|| Mesh::try_torus(1.3, 0.5, 64, 32));
-    exhaust(|| Mesh::try_sphere(1.6, 64, 128));
-    exhaust(|| Mesh::try_terrain(120.0, 96, 4.0));
+    exhaust(|| Texture::new(128, |x, y| (x ^ y) as u32));
+    exhaust(Mesh::cube);
+    exhaust(|| Mesh::torus(1.3, 0.5, 64, 32));
+    exhaust(|| Mesh::sphere(1.6, 64, 128));
+    exhaust(|| Mesh::terrain(120.0, 96, 4.0));
 }

@@ -44,6 +44,14 @@ const STOP_C: u32 = 90;
 /// More heap, for the depth buffer, the meshes, the texture, the picture the 2D effects
 /// filter and the frame being drawn: with the window, within the manifest's 8 MiB.
 const MORE_HEAP: usize = 6144 * 1024;
+/// The `memory` of bench3d.manifest, in KiB: what its DMA may take, the window included.
+const QUOTA_KIB: usize = 8 * 1024;
+/// The window's buffer, in whole pages, as the kernel charges it.
+const WINDOW_KIB: usize = (W * H * 4).div_ceil(4096) * 4;
+/// What the quota leaves after the window and the extra heap.
+const SPARE_KIB: usize = QUOTA_KIB - WINDOW_KIB - MORE_HEAP / 1024;
+// The budget is checked when bench3d is built, not when it runs out on a machine.
+const _: () = assert!(WINDOW_KIB + MORE_HEAP / 1024 <= QUOTA_KIB);
 const KEY_ESC: u16 = 1;
 
 #[derive(Clone, Copy)]
@@ -551,12 +559,12 @@ fn assets(hw: Handle, system: Handle) -> Option<(Assets, Vec<u32>, Vec<u32>)> {
     let texture_start = now_us(system);
     let textures = materials::make()?;
     let texture_us = now_us(system) - texture_start;
-    let terrain = Mesh::try_terrain(120.0, 96, 4.0)?;
+    let terrain = Mesh::terrain(120.0, 96, 4.0)?;
     let mut a = Assets {
-        torus: Mesh::try_torus(1.3, 0.5, 64, 32)?,
-        sphere: Mesh::try_sphere(1.6, 64, 128)?,
-        small_sphere: Mesh::try_sphere(0.6, 12, 24)?,
-        cube: Mesh::try_cube()?,
+        torus: Mesh::torus(1.3, 0.5, 64, 32)?,
+        sphere: Mesh::sphere(1.6, 64, 128)?,
+        small_sphere: Mesh::sphere(0.6, 12, 24)?,
+        cube: Mesh::cube()?,
         terrain,
         textures,
         texture_us,
@@ -612,7 +620,7 @@ fn main(arg: u64) -> u64 {
         samples,
     };
     say(&format!(
-        "startup_us={} texture_us={} heap_free_bytes={} dma_free_kib=172",
+        "startup_us={} texture_us={} heap_free_bytes={} dma_free_kib={SPARE_KIB}",
         now_us(system) - startup,
         a.texture_us,
         aricode_rt::heap_stats().free
