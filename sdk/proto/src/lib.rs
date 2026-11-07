@@ -1214,6 +1214,8 @@ pub mod window {
         /// Menu `width` of this window gets an item `title`, which tells its program
         /// `height` when chosen; a `height` of 0 names the menu. Menus come in order.
         MenuAdd = 12,
+        /// Main endpoint only (init): the bar shows `title` for the network.
+        Network = 13,
     }
 
     /// Request (64 bytes).
@@ -1318,6 +1320,7 @@ pub mod window {
                 10 => Op::Appearance,
                 11 => Op::Timezone,
                 12 => Op::MenuAdd,
+                13 => Op::Network,
                 _ => return None,
             };
             let mut req = Self::new(op);

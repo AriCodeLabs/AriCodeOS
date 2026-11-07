@@ -615,7 +615,7 @@ pub enum MenuHit {
 /// A running program's place in the dock: its window and rectangle.
 pub type Dock = [Option<(u32, Rect)>; MAX_WINDOWS];
 /// The longest text the bar shows at its right end, in bytes.
-pub const STATUS_MAX: usize = 32;
+pub const STATUS_MAX: usize = 48;
 
 /// A minute since the Unix epoch, already in the owner's time, as the bar shows it:
 /// `Fri 6 Nov  23:40`, in `out`. How many bytes.
@@ -705,6 +705,9 @@ pub struct Theme {
     pub menu_text_pad: i32,
     pub menu_accent: Color,
     pub menu_accent_ink: Color,
+    /// A notice, under the bar at the right.
+    pub notice_size: (u32, u32),
+    pub notice_margin: i32,
 }
 
 impl Theme {
@@ -738,6 +741,8 @@ impl Theme {
         menu_text_pad: 12,
         menu_accent: rgb(0x1E, 0x6E, 0xF4),
         menu_accent_ink: rgb(0xFF, 0xFF, 0xFF),
+        notice_size: (380, 36),
+        notice_margin: 12,
     };
 
     /// The dark theme of ADR 0078: the frame on #323232, over a darker desktop.
@@ -1077,6 +1082,8 @@ fn band_edges(frame: &Rect, x: i32, y: i32) -> u8 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hit {
     Desktop,
+    /// A notice on show: a click takes it away.
+    Notice,
     /// The bar at the top, or the dock around its places: nothing below takes the click.
     Panel,
     /// A running program's place in the dock.
@@ -1142,6 +1149,8 @@ pub struct Desktop {
     next_id: u32,
     status: [u8; STATUS_MAX],
     status_len: u8,
+    notice: [u8; STATUS_MAX],
+    notice_len: u8,
     pub theme: Theme,
 }
 
@@ -1157,6 +1166,8 @@ impl Desktop {
             next_id: 1,
             status: [0; STATUS_MAX],
             status_len: 0,
+            notice: [0; STATUS_MAX],
+            notice_len: 0,
             theme: Theme::LIGHT,
         }
     }
@@ -1249,6 +1260,9 @@ impl Desktop {
 
     /// Topmost window under `(x, y)` (frame included).
     pub fn hit(&self, x: i32, y: i32) -> Hit {
+        if self.notice_len > 0 && self.notice_box().contains(x, y) {
+            return Hit::Notice;
+        }
         let (dock, places) = self.dock();
         if let Some((id, _)) = places.iter().flatten().find(|(_, p)| p.contains(x, y)) {
             return Hit::Dock { id: *id };
@@ -1477,6 +1491,24 @@ impl Desktop {
         }
     }
 
+    /// Shows a notice, or takes it away with an empty text. The compositor's own: no
+    /// program writes here, so what one says can be believed.
+    pub fn set_notice(&mut self, text: &str) {
+        let n = text.floor_char_boundary(self.notice.len());
+        self.notice = [0; STATUS_MAX];
+        self.notice[..n].copy_from_slice(&text.as_bytes()[..n]);
+        self.notice_len = n as u8;
+    }
+
+    /// Where a notice goes: under the bar, at the right, and on a small screen.
+    fn notice_box(&self) -> Rect {
+        let t = &self.theme;
+        let (w, h) = t.notice_size;
+        let w = w.min(self.screen.w);
+        let x = (self.screen.w as i32 - w as i32 - t.notice_margin).max(0);
+        Rect::new(x, t.bar_h as i32 + t.notice_margin, w, h)
+    }
+
     /// What the bar says at its right end: the clock.
     pub fn set_status(&mut self, text: &str) {
         let n = text.floor_char_boundary(self.status.len());
@@ -1540,6 +1572,8 @@ impl Desktop {
             bar: self.bar(),
             dock: self.dock().0,
             status: self.status,
+            notice: self.notice,
+            notice_at: self.notice_box(),
         }
     }
 
@@ -1671,6 +1705,14 @@ impl Desktop {
                 labels.draw(&mut inside, w.title_str(), t.bar_margin, middle, t.bar_ink);
             }
         }
+        if self.notice_len > 0 {
+            let place = self.notice_box();
+            out.rounded(&place, RADIUS, t.bar);
+            let text = core::str::from_utf8(&self.notice[..self.notice_len as usize]).unwrap_or("");
+            let mut inside = out.clipped(&place);
+            let middle = place.y + place.h as i32 / 2;
+            labels.draw(&mut inside, text, place.x + t.bar_margin, middle, t.bar_ink);
+        }
         let (dock, places) = self.dock();
         if !dock.intersects(clip) {
             return;
@@ -1709,6 +1751,8 @@ pub struct Scene {
     bar: Rect,
     dock: Rect,
     status: [u8; STATUS_MAX],
+    notice: [u8; STATUS_MAX],
+    notice_at: Rect,
 }
 
 impl Scene {
@@ -1748,6 +1792,10 @@ impl Scene {
         if !same_for_panels {
             damage.add(&self.dock);
             damage.add(&newer.dock);
+        }
+        if self.notice != newer.notice {
+            damage.add(&self.notice_at);
+            damage.add(&newer.notice_at);
         }
         let focused = |s: &Scene, id: u32| s.focus == Some(id);
         for old in self.iter() {
@@ -2119,6 +2167,23 @@ mod tests {
             out.get(row.x + row.w as i32 - 2, row.y + 2),
             Some(d.theme.menu_accent)
         );
+    }
+
+    #[test]
+    fn a_notice_shows_marks_its_place_and_a_click_finds_it() {
+        let mut d = Desktop::new(800, 600);
+        let at = d.notice_box();
+        assert_eq!(d.hit(at.x + 1, at.y + 1), Hit::Desktop, "none on show");
+        let before = d.scene();
+        d.set_notice("Hot");
+        assert_eq!(d.hit(at.x + 1, at.y + 1), Hit::Notice);
+        let mut damage = Damage::new(Rect::new(0, 0, 800, 600));
+        before.damage(&d.scene(), &mut damage);
+        assert_eq!(damage.rects(), [at]);
+        // On a screen narrower than a notice it stays on the screen.
+        let small = Desktop::new(200, 100);
+        assert_eq!(small.notice_box().x, 0);
+        assert_eq!(small.notice_box().w, 200);
     }
 
     #[test]

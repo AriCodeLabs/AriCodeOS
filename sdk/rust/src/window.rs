@@ -324,6 +324,14 @@ pub fn set_timezone(compositor: Handle, minutes: i32) -> Result<(), WindowError>
     main_request(compositor, req)
 }
 
+/// Init only, over the compositor's main endpoint: what the bar says of the network.
+pub fn set_network(compositor: Handle, text: &str) -> Result<(), WindowError> {
+    let req = Request::new(Op::Network)
+        .with_title(text)
+        .ok_or(WindowError::Invalid)?;
+    main_request(compositor, req)
+}
+
 fn main_request(compositor: Handle, req: Request) -> Result<(), WindowError> {
     let mut msg = [0u8; Reply::LEN];
     let len = rpc::call(

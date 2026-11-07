@@ -12,6 +12,7 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
+use alloc::format;
 use alloc::vec::Vec;
 use aricode_cmdline::{keys, CmdLine};
 use aricode_gfx::{
@@ -44,6 +45,12 @@ const RETRY_MS: u64 = 50;
 const MAX_INPUTS: usize = 5;
 const MAX_WINDOWS: usize = aricode_gfx::MAX_WINDOWS;
 /// evdev codes the desktop itself answers to.
+/// How long a notice stays, unless a click takes it first.
+const NOTICE_MS: u64 = 8000;
+/// The processor's heat is said this many degrees before it slows itself, and again only
+/// after it has been this many more degrees below that.
+const HEAT_WARNING_C: u32 = 10;
+const HEAT_COOLED_C: u32 = 5;
 const KEY_TAB: u16 = 15;
 const KEY_ESC: u16 = 1;
 const KEY_ENTER: u16 = 28;
@@ -409,6 +416,13 @@ struct Compositor {
     /// Minutes from UTC of the owner's clock, and the minute the bar shows.
     tz_minutes: i32,
     clock_minute: Option<i64>,
+    /// What init says of the network.
+    network: [u8; aricode_proto::window::MAX_TITLE],
+    network_len: usize,
+    /// When the notice on show goes.
+    notice_until: Option<u64>,
+    /// The processor's heat was said, and has not cooled since.
+    heat_said: bool,
     screen: Screen,
     desktop: Desktop,
     /// On the heap: with their event queues, they would take 6 KB of the stack.
@@ -1021,6 +1035,10 @@ impl Compositor {
                     self.dock_clicked(id);
                     None
                 }
+                Hit::Notice if left => {
+                    self.dismiss_notice();
+                    None
+                }
                 Hit::Close { id } if left => {
                     self.ask_close(id, at);
                     None
@@ -1426,7 +1444,7 @@ impl Compositor {
         if (owner == MAIN)
             != matches!(
                 req.op,
-                Op::Attach | Op::Detach | Op::Appearance | Op::Timezone
+                Op::Attach | Op::Detach | Op::Appearance | Op::Timezone | Op::Network
             )
         {
             return answer(reply_to, Reply::status(Status::Invalid));
@@ -1436,6 +1454,18 @@ impl Compositor {
             Op::Detach => self.detach(reply_to, req.window),
             Op::Appearance => {
                 self.set_appearance(req.width != 0);
+                answer(reply_to, Reply::ok(0));
+            }
+            Op::Network => {
+                let n = req.title_len as usize;
+                if self.network[..self.network_len] != req.title[..n] {
+                    self.network = req.title;
+                    self.network_len = n;
+                    self.clock_minute = None;
+                    sys::print(b"compositor: network ");
+                    sys::print(req.title_str().as_bytes());
+                    sys::print(b"\n");
+                }
                 answer(reply_to, Reply::ok(0));
             }
             Op::Timezone => {
@@ -1619,20 +1649,72 @@ impl Compositor {
         }
     }
 
-    /// The bar's clock, when the minute changes. Nothing is shown when the kernel could
-    /// not read the real-time clock: a wrong time is worse than none.
-    fn tick_clock(&mut self) {
-        let Some(unix) = sys::time::unix_seconds(SYSTEM) else {
-            return;
-        };
-        let minute = (unix as i64 + i64::from(self.tz_minutes) * 60).div_euclid(60);
-        if self.clock_minute != Some(minute) {
-            self.clock_minute = Some(minute);
-            let mut text = [0u8; STATUS_MAX];
-            let n = aricode_gfx::clock_text(minute, &mut text);
-            self.desktop
-                .set_status(core::str::from_utf8(&text[..n]).unwrap_or(""));
+    /// What the bar says, when the minute or the network changes: the network, and the
+    /// date and time, which are not shown when the kernel could not read the real-time
+    /// clock, since a wrong time is worse than none. Once a minute, the processor's heat
+    /// too.
+    fn tick_clock(&mut self, now_ms: u64) {
+        if self.notice_until.is_some_and(|until| now_ms >= until) {
+            self.dismiss_notice();
+            say(b"notice gone");
         }
+        let minute = sys::time::unix_seconds(SYSTEM)
+            .map(|u| (u as i64 + i64::from(self.tz_minutes) * 60).div_euclid(60));
+        // Without a clock, one bar all the same, for the network alone.
+        let shown = Some(minute.unwrap_or(0));
+        if self.clock_minute == shown {
+            return;
+        }
+        self.clock_minute = shown;
+        let mut text = [0u8; STATUS_MAX];
+        let mut n = self.network_len;
+        text[..n].copy_from_slice(&self.network[..n]);
+        if let Some(minute) = minute {
+            if n > 0 {
+                text[n..n + 3].fill(b' ');
+                n += 3;
+            }
+            let mut clock = [0u8; STATUS_MAX];
+            let len = aricode_gfx::clock_text(minute, &mut clock);
+            let take = len.min(STATUS_MAX - n);
+            text[n..n + take].copy_from_slice(&clock[..take]);
+            n += take;
+        }
+        self.desktop
+            .set_status(core::str::from_utf8(&text[..n]).unwrap_or(""));
+        self.watch_heat(now_ms);
+    }
+
+    /// Says once when the processor comes near where it slows itself, and again only
+    /// after it has cooled. The kernel's own watch powers off at its limit: this is the
+    /// owner's warning, well before that.
+    fn watch_heat(&mut self, now_ms: u64) {
+        let mut b = [0u8; 8];
+        if sys::system_info(SYSTEM, abi::sysinfo::TEMPERATURE, &mut b) != Ok(8) {
+            return;
+        }
+        let celsius = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+        let limit = u32::from_le_bytes([b[4], b[5], b[6], b[7]]);
+        if celsius + HEAT_WARNING_C >= limit && !self.heat_said {
+            self.heat_said = true;
+            let text = format!("Hot: {celsius} C, and the processor slows at {limit} C");
+            self.show_notice(&text, now_ms);
+        } else if celsius + HEAT_WARNING_C + HEAT_COOLED_C < limit {
+            self.heat_said = false;
+        }
+    }
+
+    fn show_notice(&mut self, text: &str, now_ms: u64) {
+        self.desktop.set_notice(text);
+        self.notice_until = Some(now_ms + NOTICE_MS);
+        sys::print(b"compositor: notice: ");
+        sys::print(text.as_bytes());
+        sys::print(b"\n");
+    }
+
+    fn dismiss_notice(&mut self) {
+        self.notice_until = None;
+        self.desktop.set_notice("");
     }
 
     /// The owner chose light or dark: the frames at the next frame, and each program
@@ -1942,17 +2024,21 @@ fn main(inputs: u64) -> u64 {
     // The keyboard layout of `kbd=`, the one the console uses too: a
     // Spanish keyboard types the same characters in a window as at the
     // console.
-    let (trace, layout) = match sys::cmdline(SYSTEM, &mut args) {
+    let (trace, layout, test_notice) = match sys::cmdline(SYSTEM, &mut args) {
         Ok(text) => {
             let line = CmdLine::new(text);
             let layout = line.get(keys::KBD).and_then(Layout::parse);
-            (line.has_flag(keys::GUI_TRACE), layout.unwrap_or_default())
+            (
+                line.has_flag(keys::GUI_TRACE),
+                layout.unwrap_or_default(),
+                line.has_flag(keys::GUI_NOTICE),
+            )
         }
         // A line that does not fit or is not text is reported, not read as
         // empty (ADR 0045, L5): the trace stays off.
         Err(_) => {
             say(b"cannot read the command line (too long or not text): gui_trace off, US keyboard");
-            (false, Layout::Us)
+            (false, Layout::Us, false)
         }
     };
     let mut keyboard = Keyboard::new();
@@ -1971,6 +2057,10 @@ fn main(inputs: u64) -> u64 {
         dark: false,
         tz_minutes: 0,
         clock_minute: None,
+        network: [0; aricode_proto::window::MAX_TITLE],
+        network_len: 0,
+        notice_until: None,
+        heat_said: false,
         contents: (0..MAX_WINDOWS).map(|_| None).collect(),
         keys: Keys {
             keyboard,
@@ -1993,6 +2083,9 @@ fn main(inputs: u64) -> u64 {
         last_sweep_ms: 0,
         late: aricode_faults::Meter::new(),
     };
+    if test_notice {
+        comp.show_notice("Hot: 95 C, and the processor slows at 105 C", now(SYSTEM));
+    }
     // Room for a request and for an input device's reply: the wait below
     // receives either.
     let mut msg = [0u8; MSG_LEN];
@@ -2034,7 +2127,7 @@ fn main(inputs: u64) -> u64 {
         comp.flush_pointer();
         comp.repeat_keys(t);
         comp.expire(t);
-        comp.tick_clock();
+        comp.tick_clock(t);
         comp.compose(t);
         // Sleep until a request, a device's events or the next deadline,
         // whichever comes first (incident 0058: reading the devices in

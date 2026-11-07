@@ -593,6 +593,19 @@ owner reading that word: a program cannot get the clipboard from a row with any 
 could name a row Paste and do something else with that one read. The name is the compromise; the
 rule stays that nothing reads the clipboard without the owner's act.
 
-To come in this stage: the network in the bar, notifications, and the manifests' names and icons.
+**The network** shows in the bar, beside the clock. Init reads the address every 5 s and tells the
+compositor when it changes, so the compositor still holds no network capability. With the network
+service hung that costs init at most half a second each time, which its supervisor already ends.
+
+**Notices** show under the bar and go after 8 s, or at a click. Only the compositor writes them, so
+what one says can be believed. It warns once when the processor comes within 10 C of where it slows
+itself, and again only after it has cooled 5 C more. Programs have no way to post one yet: nothing
+needs it, and it would bring questions of spam and spoofing to answer when something does.
+
+**Not done, on purpose: names and icons in the manifests.** The manifest's parser refuses a key it
+does not know, and so a package with a new line cannot be installed by an older system, including a
+0.18 updating itself. A `title` must first be accepted by a released system, and used by packages
+only in a later one, as `--all-machines-0.18` already does for profiles. Icons need vector paths
+that the compositor or the launcher would parse from packages: to be studied with their audit.
 
 Next: those, then the shell (stage 3).
