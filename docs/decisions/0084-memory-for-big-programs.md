@@ -78,3 +78,19 @@ them (ADR 0038); a quota per process set by its launcher from the manifest.
 - **The laptop** (dev build 44): `gpu_probe` filled and copied into a memory object of
   scattered pages mapped for the GPU, with every pixel right and the same figures as with
   a DMA buffer.
+
+## Audit
+
+`docs/audits/2026-11-08-memory-objects.md`: three High, two Medium and four Low, all fixed.
+What changed in the design:
+
+- **Page tables are part of the promise's guarantee.** A process's page tables never take
+  promised frames or the kernel's reserve, and a memory object's mapping prepares its tables
+  when it is made; a promise leaves the kernel 16 MiB or 1/64 of the machine of headroom.
+  `memory.full` gives one program all of QEMU's memory and touches every page of it.
+- **Nothing a program does can fill the kernel's heap:** an object's page table lives in
+  frames of its own, and a process holds at most 512 mappings.
+- **The system's own services** (no quota) hold at most `mem.service_max_mib`, 64 MiB, in
+  memory objects.
+- **Large objects are freed in the background**, in batches, so no work proportional to an
+  object's size runs with interrupts off.
