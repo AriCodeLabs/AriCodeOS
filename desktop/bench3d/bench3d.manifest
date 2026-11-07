@@ -1,0 +1,6 @@
+# bench3d, the graphics benchmark (ADR 0080): its window, and the system's clock,
+# temperature and boot line to time, watch and name its runs. Its 800x600 window and
+# its depth buffer, meshes and textures take about 7.5 MiB.
+name = bench3d
+caps = system, window
+memory = 8M

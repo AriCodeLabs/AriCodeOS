@@ -30,7 +30,10 @@ impl Mesh {
     /// The triangles turn counter-clockwise around the direction of `du x dv`; `flip`
     /// turns them the other way, for a surface whose outside is the other side.
     fn grid(columns: u32, rows: u32, flip: bool, at: impl Fn(f32, f32) -> Vertex) -> Self {
-        let mut m = Mesh::default();
+        let mut m = Mesh {
+            vertices: Vec::with_capacity(((columns + 1) * (rows + 1)) as usize),
+            indices: Vec::with_capacity((columns * rows * 6) as usize),
+        };
         for j in 0..=rows {
             for i in 0..=columns {
                 m.vertices
