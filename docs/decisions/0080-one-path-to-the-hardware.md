@@ -514,6 +514,18 @@ fell from 32 to 24 with a smaller texture, which the filters' cost alone does no
 it is to be measured before the rasteriser is spread over threads. Raw lines:
 `bench3d-laptop-3.txt`.
 
+**On every processor** (bench3d 7, dev build 38, 2026-11-07): with threads in a
+process (ADR 0082) each frame is drawn in one band per processor, `threads=4` on
+this i3 of 2 cores and 4 threads. Against bench3d 6 on one thread, fps: geometry
+113 to 158, dense 53 to 88, texture nearest, linear and mipmap 61, 54, 51 to 107,
+98, 68, Gouraud 82 to 129, Phong 26 to 48, effects 3x3 and 5x5 21 and 9 to 46 and
+21, terrain 24 to 36, objects 28 to 37, both shadow scenes 14 to 25, fractal 21 to
+43, everything 21 to 33; the desktop scene, still on one thread, 700 to 669. Gains
+of 1.3 to 2.3 times on 2 real cores: the pixel-bound scenes gain most, the scenes
+with many small triangles least, since every band still projects every triangle.
+The package peaked at 74 C, 5 C more than on one thread. Raw lines:
+`bench3d-laptop-7.txt`.
+
 ## 8. Stages
 
 Each stage ends with something shown. A to E and H are in order of dependency; F and G are side
