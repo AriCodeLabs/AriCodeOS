@@ -1,0 +1,64 @@
+# The programs' menus in the bar (ADR 0078, stage 3). The editor gives File and Edit; the
+# compositor draws them. With the keyboard: `a`, then F10 and Enter on File's first row
+# open the new file. `zq` goes in, Ctrl+A and Ctrl+C copy it. Ctrl+L goes to the name, and
+# F10, Right to Edit and Down to its third row choose Paste: the name becomes `azq`, so the
+# click-less choice opened the clipboard as Ctrl+V does. With the pointer: a click on the
+# title File at (80,12), and on its second row, Save, at (80,61), saves azq.
+name = "usb.desktop_menus"
+description = "a program's menus open from the bar, by key and by pointer, and Paste there opens the clipboard"
+level = "release"
+areas = ["usb", "apps", "gui"]
+cmdline = "qemu_exit shell"
+selftest = false
+disk = "usb-image"
+install = ["desktop/launcher", "desktop/editor"]
+stick_profiles = ["desktop:launcher,editor"]
+stdin = ["sleep 16000", "ls", "shutdown"]
+timeout_secs = 120
+
+[host_input]
+marker = "launcher: ready"
+keys = ["ret"]
+
+[[host_input_then]]
+marker = "editor: ready"
+keys = ["a", "f10", "ret"]
+key_delay_ms = 100
+
+[[host_input_then]]
+marker = "editor: new file a"
+keys = ["z", "q", "ctrl+a", "ctrl+c", "ctrl+l"]
+key_delay_ms = 100
+
+[[host_input_then]]
+marker = "editor: copied 2 bytes"
+wait_ms = 200
+screendump = "before"
+keys = ["f10", "right", "down", "down", "ret"]
+key_delay_ms = 100
+
+[[host_input_then]]
+marker = "compositor: window 2 pasted from its menu"
+wait_ms = 300
+screendump = "pasted"
+mouse_rel = [-560, -388]
+click = "left"
+
+[[host_input_then]]
+marker = "compositor: menu 0 of window 2 opened"
+wait_ms = 300
+screendump = "open"
+mouse_rel = [0, 49]
+click = "left"
+
+[expect]
+exit = 33
+serial_contains = [
+    "editor: new file a (saved with Save)",
+    "editor: copied 2 bytes",
+    "compositor: window 2 pasted from its menu",
+    "editor: saved azq (2 bytes)",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_order = ["editor: copied 2 bytes", "compositor: window 2 pasted from its menu", "editor: saved azq (2 bytes)"]
+serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "refused", "the bar did not take"]

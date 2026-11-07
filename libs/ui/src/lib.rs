@@ -68,7 +68,24 @@ pub enum Action {
     Cut(Id),
     /// The owner pressed Ctrl+V here: the clipboard's text goes to [`Ui::paste`].
     Paste(Id),
+    /// The owner chose this item of the window's menus. The items of [`EDIT_MENU`] are
+    /// the toolkit's and never come here.
+    Menu(u32),
 }
+
+/// A window's Edit menu, for `Window::menu_add`: what the widget with the keys does with
+/// them, as the same keys would. Numbers from here up are the toolkit's.
+pub const EDIT_MENU: [(&str, u32); 5] = [
+    ("Edit", 0),
+    ("Cut\tCtrl+X", MENU_CUT),
+    ("Copy\tCtrl+C", MENU_COPY),
+    ("Paste\tCtrl+V", MENU_PASTE),
+    ("Select All\tCtrl+A", MENU_SELECT_ALL),
+];
+const MENU_CUT: u32 = 0xFFFF_0001;
+const MENU_COPY: u32 = 0xFFFF_0002;
+const MENU_PASTE: u32 = 0xFFFF_0003;
+const MENU_SELECT_ALL: u32 = 0xFFFF_0004;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Axis {
@@ -879,6 +896,20 @@ impl Ui {
             Event::Release { x, y, button: LEFT } => self.release(x, y),
             Event::Wheel { x, y, delta } => self.wheel(x, y, delta),
             Event::Appearance { dark } => self.set_theme(Theme::of(dark)),
+            // Behind a question the menus are as closed as the keys.
+            Event::Menu { .. } if self.modal.is_some() => {}
+            Event::Menu { id } => {
+                let letter = match id {
+                    MENU_CUT => b'x',
+                    MENU_COPY => b'c',
+                    MENU_PASTE => b'v',
+                    MENU_SELECT_ALL => b'a',
+                    id => return self.actions.push_back(Action::Menu(id)),
+                };
+                // Chosen, not held, whatever key came last.
+                self.repeating = false;
+                self.on_key(Key::Ctrl(letter));
+            }
             Event::Focus(on) => {
                 self.active = on;
                 if !on {

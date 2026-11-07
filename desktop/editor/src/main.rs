@@ -27,12 +27,15 @@ use aricode_rt::sys::fs::{FsClient, FsError};
 use aricode_rt::sys::window::{wants, Event, Window};
 use aricode_rt::sys::{self, kind, permissions};
 use aricode_sync::SpinLock;
-use aricode_ui::{Action, Dialog, Fill, Id, Space, Stack, Style, Theme, Tone, Ui};
+use aricode_ui::{Action, Dialog, Fill, Id, Space, Stack, Style, Theme, Tone, Ui, EDIT_MENU};
 
 const W: u32 = 640;
 const H: u32 = 448;
 /// The largest file it edits.
 const MAX_TEXT: usize = 64 * 1024;
+/// The numbers of its File menu.
+const MENU_OPEN: u32 = 1;
+const MENU_SAVE: u32 = 2;
 /// More for the heap: the text, a copy of it as it is pasted, and the glyphs.
 const MORE_HEAP: usize = 512 * 1024;
 
@@ -370,6 +373,22 @@ fn main(_arg: u64) -> u64 {
         say(&[b"could not create its window"]);
         return 3;
     };
+    let file = [
+        ("File", 0),
+        ("Open\tCtrl+O", MENU_OPEN),
+        ("Save\tCtrl+S", MENU_SAVE),
+    ];
+    let menus = file
+        .iter()
+        .map(|&(label, id)| win.menu_add(0, label, id))
+        .chain(
+            EDIT_MENU
+                .iter()
+                .map(|&(label, id)| win.menu_add(1, label, id)),
+        );
+    if menus.into_iter().any(|added| added.is_err()) {
+        say(&[b"the bar did not take its menus"]);
+    }
     let mut ed = build(fs, win.starts_dark());
     ed.set_status(false, &[b"files in home/; type a name and press Enter"]);
     let frame = ed.ui.paint(&mut win.canvas());
@@ -422,8 +441,8 @@ fn main(_arg: u64) -> u64 {
                         None => {}
                     }
                 }
-                Action::Shortcut(b's') => ed.save(false),
-                Action::Shortcut(b'o') => ed.open(false),
+                Action::Shortcut(b's') | Action::Menu(MENU_SAVE) => ed.save(false),
+                Action::Shortcut(b'o') | Action::Menu(MENU_OPEN) => ed.open(false),
                 Action::Submitted(_) => ed.open(false),
                 Action::Pressed(id) if id == ed.open => ed.open(false),
                 Action::Pressed(id) if id == ed.save => ed.save(false),

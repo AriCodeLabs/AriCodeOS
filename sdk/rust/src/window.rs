@@ -152,6 +152,19 @@ impl Window {
         self.call(req, false).map(|_| ())
     }
 
+    /// Adds to this window's menus in the bar: `id` 0 names menu `menu`, and any other
+    /// `id` adds an item, told back as `Event::Menu` when the owner chooses it. A tab in
+    /// `label` puts what follows at the row's right end. Menus come in order.
+    pub fn menu_add(&self, menu: u32, label: &str, id: u32) -> Result<(), WindowError> {
+        let mut req = self
+            .request(Op::MenuAdd)
+            .with_title(label)
+            .ok_or(WindowError::Invalid)?;
+        req.width = menu;
+        req.height = id;
+        self.call(req, false).map(|_| ())
+    }
+
     /// A buffer of `len` bytes for a clipboard request, given to `use_it` mapped.
     fn with_buffer<R>(
         hardware: Handle,

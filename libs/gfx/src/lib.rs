@@ -486,6 +486,132 @@ pub const SHADOW: i32 = 24;
 pub const RESIZE_BAND: i32 = 6;
 /// The smallest content a window is dragged to.
 pub const MIN_CONTENT: (u32, u32) = (160, 80);
+/// A program's menus at most, and the items of each.
+pub const MAX_MENUS: usize = 6;
+pub const MAX_MENU_ITEMS: usize = 10;
+const MENU_LABEL: usize = 24;
+
+#[derive(Debug, Clone, Copy)]
+struct MenuItem {
+    label: [u8; MENU_LABEL],
+    len: u8,
+    id: u32,
+}
+
+impl MenuItem {
+    const EMPTY: Self = Self {
+        label: [0; MENU_LABEL],
+        len: 0,
+        id: 0,
+    };
+
+    fn set(&mut self, label: &str, id: u32) {
+        let n = label.floor_char_boundary(MENU_LABEL);
+        self.label = [0; MENU_LABEL];
+        self.label[..n].copy_from_slice(&label.as_bytes()[..n]);
+        self.len = n as u8;
+        self.id = id;
+    }
+
+    fn text(&self) -> &str {
+        core::str::from_utf8(&self.label[..self.len as usize]).unwrap_or("")
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Menu {
+    title: MenuItem,
+    items: [MenuItem; MAX_MENU_ITEMS],
+    count: u8,
+}
+
+/// The menus a program gave for the bar, within fixed bounds: text and numbers, which
+/// the compositor draws itself, so a hung program's menus still open.
+#[derive(Debug, Clone)]
+pub struct Menus {
+    menus: [Menu; MAX_MENUS],
+    count: u8,
+}
+
+impl Default for Menus {
+    fn default() -> Self {
+        let menu = Menu {
+            title: MenuItem::EMPTY,
+            items: [MenuItem::EMPTY; MAX_MENU_ITEMS],
+            count: 0,
+        };
+        Self {
+            menus: [menu; MAX_MENUS],
+            count: 0,
+        }
+    }
+}
+
+impl Menus {
+    /// Menu `menu` is named `label` when `id` is 0, and gets an item otherwise. A label
+    /// may hold a tab: what follows goes at the row's right end. Menus come in order.
+    /// `false` past what fits, or for a menu not named yet.
+    pub fn add(&mut self, menu: usize, label: &str, id: u32) -> bool {
+        if id == 0 {
+            if menu != self.count as usize || menu >= MAX_MENUS {
+                return false;
+            }
+            self.menus[menu].title.set(label, 0);
+            self.count += 1;
+            return true;
+        }
+        if menu >= self.count as usize {
+            return false;
+        }
+        let m = &mut self.menus[menu];
+        if m.count as usize >= MAX_MENU_ITEMS {
+            return false;
+        }
+        m.items[m.count as usize].set(label, id);
+        m.count += 1;
+        true
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    pub fn count(&self) -> usize {
+        self.count as usize
+    }
+
+    pub fn items(&self, menu: usize) -> usize {
+        self.menus.get(menu).map_or(0, |m| m.count as usize)
+    }
+
+    /// The number a chosen item tells its program, and whether it is the Paste item, for
+    /// which the owner's click opens the clipboard as Ctrl+V does ([`PasteGrant`]).
+    pub fn chosen(&self, menu: usize, item: usize) -> Option<(u32, bool)> {
+        let m = self.menus.get(menu)?;
+        if item >= m.count as usize {
+            return None;
+        }
+        let it = &m.items[item];
+        let name = it.text().split('\t').next().unwrap_or("");
+        Some((it.id, name == "Paste"))
+    }
+}
+
+/// The menu on show, and the row the pointer or the arrows are on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MenuOpen {
+    pub menu: usize,
+    pub item: Option<usize>,
+}
+
+/// What is under the pointer, as far as menus go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuHit {
+    Title(usize),
+    Item(usize, usize),
+    None,
+}
+
 /// A running program's place in the dock: its window and rectangle.
 pub type Dock = [Option<(u32, Rect)>; MAX_WINDOWS];
 /// The longest text the bar shows at its right end, in bytes.
@@ -572,6 +698,13 @@ pub struct Theme {
     pub dock_pad: i32,
     /// From the screen's edge to the dock.
     pub dock_margin: i32,
+    /// A menu's rows, around them, between titles in the bar, and the row under the keys.
+    pub menu_row_h: i32,
+    pub menu_pad: i32,
+    pub menu_gap: i32,
+    pub menu_text_pad: i32,
+    pub menu_accent: Color,
+    pub menu_accent_ink: Color,
 }
 
 impl Theme {
@@ -599,6 +732,12 @@ impl Theme {
         dock_gap: 4,
         dock_pad: 4,
         dock_margin: 6,
+        menu_row_h: 22,
+        menu_pad: 4,
+        menu_gap: 16,
+        menu_text_pad: 12,
+        menu_accent: rgb(0x1E, 0x6E, 0xF4),
+        menu_accent_ink: rgb(0xFF, 0xFF, 0xFF),
     };
 
     /// The dark theme of ADR 0078: the frame on #323232, over a darker desktop.
@@ -1225,6 +1364,119 @@ impl Desktop {
         (outer, places)
     }
 
+    /// Where a menu's title is in the bar: after the focused window's name.
+    fn menu_titles(&self, menus: &Menus, labels: &mut impl Labels) -> [Rect; MAX_MENUS] {
+        let t = &self.theme;
+        let mut rects = [Rect::new(0, 0, 0, 0); MAX_MENUS];
+        let name = self
+            .focus
+            .and_then(|id| self.get(id))
+            .map_or(0, |w| labels.width(w.title_str()));
+        let mut x = t.bar_margin + name + t.menu_gap / 2;
+        for (i, rect) in rects.iter_mut().enumerate().take(menus.count()) {
+            let w = labels.width(menus.menus[i].title.text()) + t.menu_gap;
+            *rect = Rect::new(x, 0, w as u32, t.bar_h);
+            x += w;
+        }
+        rects
+    }
+
+    /// The rectangle of an open menu, under its title.
+    pub fn menu_box(&self, menus: &Menus, labels: &mut impl Labels, menu: usize) -> Rect {
+        let t = &self.theme;
+        let Some(m) = menus.menus.get(menu).filter(|_| menu < menus.count()) else {
+            return Rect::new(0, 0, 0, 0);
+        };
+        let mut wide = 0;
+        for it in &m.items[..m.count as usize] {
+            let (name, keys) = it.text().split_once('\t').unwrap_or((it.text(), ""));
+            let both = labels.width(name) + labels.width(keys);
+            let apart = if keys.is_empty() { 0 } else { t.menu_gap * 2 };
+            wide = wide.max(both + apart);
+        }
+        let w = wide + 2 * (t.menu_pad + t.menu_text_pad);
+        let h = m.count as i32 * t.menu_row_h + 2 * t.menu_pad;
+        let x = self.menu_titles(menus, labels)[menu].x;
+        // On the screen, also for the rightmost title on a small one.
+        let x = x.min(self.screen.w as i32 - w).max(0);
+        Rect::new(x, t.bar_h as i32, w as u32, h as u32)
+    }
+
+    fn menu_row(&self, area: &Rect, item: usize) -> Rect {
+        let t = &self.theme;
+        Rect::new(
+            area.x + t.menu_pad,
+            area.y + t.menu_pad + item as i32 * t.menu_row_h,
+            (area.w as i32 - 2 * t.menu_pad).max(0) as u32,
+            t.menu_row_h as u32,
+        )
+    }
+
+    /// What the pointer is on, with the open menu, if any, over everything else.
+    pub fn menu_at(
+        &self,
+        menus: &Menus,
+        labels: &mut impl Labels,
+        open: Option<usize>,
+        x: i32,
+        y: i32,
+    ) -> MenuHit {
+        if let Some(menu) = open {
+            let area = self.menu_box(menus, labels, menu);
+            if area.contains(x, y) {
+                return (0..menus.items(menu))
+                    .find(|&i| self.menu_row(&area, i).contains(x, y))
+                    .map_or(MenuHit::None, |i| MenuHit::Item(menu, i));
+            }
+        }
+        let titles = self.menu_titles(menus, labels);
+        titles[..menus.count()]
+            .iter()
+            .position(|r| r.contains(x, y))
+            .map_or(MenuHit::None, MenuHit::Title)
+    }
+
+    /// The titles in the bar and the open menu, over everything but the pointer.
+    fn compose_menus(
+        &self,
+        out: &mut Canvas,
+        labels: &mut impl Labels,
+        menus: &Menus,
+        open: Option<MenuOpen>,
+    ) {
+        let t = &self.theme;
+        let titles = self.menu_titles(menus, labels);
+        let middle = t.bar_h as i32 / 2;
+        for (i, rect) in titles[..menus.count()].iter().enumerate() {
+            let on = open.is_some_and(|o| o.menu == i);
+            if on {
+                out.fill_rect(rect, t.menu_accent);
+            }
+            let ink = if on { t.menu_accent_ink } else { t.bar_ink };
+            let x = rect.x + t.menu_gap / 2;
+            labels.draw(out, menus.menus[i].title.text(), x, middle, ink);
+        }
+        let Some(open) = open else { return };
+        let area = self.menu_box(menus, labels, open.menu);
+        out.window_shadow(&area, t.shadow_active);
+        out.rounded(&area, RADIUS - t.menu_pad, t.bar);
+        let m = &menus.menus[open.menu];
+        for (i, it) in m.items[..m.count as usize].iter().enumerate() {
+            let row = self.menu_row(&area, i);
+            let on = open.item == Some(i);
+            if on {
+                out.rounded(&row, t.menu_pad, t.menu_accent);
+            }
+            let ink = if on { t.menu_accent_ink } else { t.bar_ink };
+            let (name, keys) = it.text().split_once('\t').unwrap_or((it.text(), ""));
+            let mid = row.y + row.h as i32 / 2;
+            let mut inside = out.clipped(&row);
+            labels.draw(&mut inside, name, row.x + t.menu_text_pad, mid, ink);
+            let right = row.right() - t.menu_text_pad - labels.width(keys);
+            labels.draw(&mut inside, keys, right, mid, ink);
+        }
+    }
+
     /// What the bar says at its right end: the clock.
     pub fn set_status(&mut self, text: &str) {
         let n = text.floor_char_boundary(self.status.len());
@@ -1312,7 +1564,7 @@ impl Desktop {
         region: &Rect,
         draw_content: impl FnMut(&Window, &mut Canvas),
     ) {
-        self.compose_labeled(out, region, &mut CellLabels, draw_content);
+        self.compose_labeled(out, region, &mut CellLabels, None, draw_content);
     }
 
     /// [`Desktop::compose_region`], with the title bars' text from `labels`.
@@ -1321,6 +1573,7 @@ impl Desktop {
         out: &mut Canvas,
         region: &Rect,
         labels: &mut impl Labels,
+        menus: Option<(&Menus, Option<MenuOpen>)>,
         mut draw_content: impl FnMut(&Window, &mut Canvas),
     ) {
         let mut out = out.clipped(region);
@@ -1395,6 +1648,9 @@ impl Desktop {
             }
         }
         self.compose_panels(&mut out, labels, &clip);
+        if let Some((menus, open)) = menus {
+            self.compose_menus(&mut out, labels, menus, open);
+        }
         out.cursor(self.pointer.0, self.pointer.1);
     }
 
@@ -1552,6 +1808,11 @@ impl PasteGrant {
             return;
         }
         self.0 = (bytes == [CTRL_V] && !held).then_some(focus);
+    }
+
+    /// The owner chose Paste in this window's menu: as good as pressing Ctrl+V there.
+    pub fn on_menu(&mut self, focus: u32) {
+        self.0 = Some(focus);
     }
 
     /// The focus moved.
@@ -1762,6 +2023,104 @@ mod tests {
         assert_eq!(text(-1), "Wed 31 Dec  23:59");
     }
 
+    fn sample_menus() -> Menus {
+        let mut m = Menus::default();
+        assert!(m.add(0, "File", 0));
+        assert!(m.add(0, "Open\tCtrl+O", 1));
+        assert!(m.add(0, "Save\tCtrl+S", 2));
+        assert!(m.add(1, "Edit", 0));
+        assert!(m.add(1, "Paste\tCtrl+V", 3));
+        assert!(m.add(1, "Pasted things", 4));
+        m
+    }
+
+    #[test]
+    fn menus_keep_within_their_bounds() {
+        let mut m = Menus::default();
+        assert!(!m.add(0, "Item before its menu", 1));
+        assert!(!m.add(1, "A menu out of order", 0));
+        assert!(m.add(0, "File", 0));
+        for i in 0..MAX_MENU_ITEMS {
+            assert!(m.add(0, "x", i as u32 + 1));
+        }
+        assert!(!m.add(0, "one too many", 99));
+        for i in 1..MAX_MENUS {
+            assert!(m.add(i, "m", 0));
+        }
+        assert!(!m.add(MAX_MENUS, "m", 0));
+        // A label too long is cut between characters.
+        let mut long = Menus::default();
+        assert!(long.add(0, &"é".repeat(30), 0));
+        assert!(long.menus[0].title.text().chars().all(|c| c == 'é'));
+    }
+
+    #[test]
+    fn only_the_item_named_paste_opens_the_clipboard() {
+        let m = sample_menus();
+        assert_eq!(m.chosen(0, 0), Some((1, false)));
+        assert_eq!(m.chosen(1, 0), Some((3, true)));
+        assert_eq!(
+            m.chosen(1, 1),
+            Some((4, false)),
+            "a name that only starts so"
+        );
+        assert_eq!(m.chosen(1, 2), None);
+        assert_eq!(m.chosen(5, 0), None);
+    }
+
+    #[test]
+    fn menus_are_found_where_they_are_drawn() {
+        let mut d = Desktop::new(800, 600);
+        d.create(100, 100, "App").unwrap();
+        let m = sample_menus();
+        let mut l = CellLabels;
+        let titles = d.menu_titles(&m, &mut l);
+        let file = titles[0];
+        let edit = titles[1];
+        assert!(file.right() <= edit.x);
+        assert_eq!(
+            d.menu_at(&m, &mut l, None, file.x + 1, 5),
+            MenuHit::Title(0)
+        );
+        assert_eq!(
+            d.menu_at(&m, &mut l, None, edit.x + 1, 5),
+            MenuHit::Title(1)
+        );
+        assert_eq!(d.menu_at(&m, &mut l, None, 700, 5), MenuHit::None);
+        let area = d.menu_box(&m, &mut l, 0);
+        assert_eq!(area.y, d.bar().h as i32);
+        let row = d.menu_row(&area, 1);
+        let (x, y) = (row.x + 2, row.y + 2);
+        assert_eq!(d.menu_at(&m, &mut l, Some(0), x, y), MenuHit::Item(0, 1));
+        assert_eq!(d.menu_at(&m, &mut l, None, x, y), MenuHit::None, "closed");
+        // On a small screen the menu stays on it.
+        let mut small = Desktop::new(120, 100);
+        small.create(10, 10, "App").unwrap();
+        let area = small.menu_box(&m, &mut l, 1);
+        assert!(area.x >= 0 && (area.right() <= 120 || area.x == 0));
+        // Drawing it stays inside what damage covers: the bar and the box.
+        let mut buf = Vec::new();
+        let mut out = canvas(&mut buf, 800, 600);
+        d.compose_labeled(
+            &mut out,
+            &Rect::new(0, 0, 800, 600),
+            &mut l,
+            Some((
+                &m,
+                Some(MenuOpen {
+                    menu: 0,
+                    item: Some(1),
+                }),
+            )),
+            |_, c| c.fill(0xffffff),
+        );
+        let row = d.menu_row(&d.menu_box(&m, &mut l, 0), 1);
+        assert_eq!(
+            out.get(row.x + row.w as i32 - 2, row.y + 2),
+            Some(d.theme.menu_accent)
+        );
+    }
+
     #[test]
     fn a_new_status_marks_the_bar_only() {
         let mut d = Desktop::new(800, 600);
@@ -1799,6 +2158,10 @@ mod tests {
         // Moving away ends it, even coming back.
         g.on_key(1, &[CTRL_V], false);
         g.on_focus_change();
+        assert!(!g.take(1, Some(1)));
+        // Choosing Paste in its menu opens it, once.
+        g.on_menu(1);
+        assert!(g.take(1, Some(1)));
         assert!(!g.take(1, Some(1)));
     }
 

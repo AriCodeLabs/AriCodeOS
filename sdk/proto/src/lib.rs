@@ -1211,6 +1211,9 @@ pub mod window {
         /// Main endpoint only (init): the owner's clock is `width` minutes from UTC, a
         /// signed value.
         Timezone = 11,
+        /// Menu `width` of this window gets an item `title`, which tells its program
+        /// `height` when chosen; a `height` of 0 names the menu. Menus come in order.
+        MenuAdd = 12,
     }
 
     /// Request (64 bytes).
@@ -1314,6 +1317,7 @@ pub mod window {
                 9 => Op::ClipboardGet,
                 10 => Op::Appearance,
                 11 => Op::Timezone,
+                12 => Op::MenuAdd,
                 _ => return None,
             };
             let mut req = Self::new(op);
@@ -1396,6 +1400,8 @@ pub mod window {
         Configure { width: u32, height: u32 },
         /// [`wants::APPEARANCE`]: the owner chose light or dark for the desktop.
         Appearance { dark: bool },
+        /// The owner chose an item of this window's menus, by the number it was given.
+        Menu { id: u32 },
     }
 
     /// Reply (32 bytes): status, value and optional event.
@@ -1493,6 +1499,10 @@ pub mod window {
                     b[3] = 12;
                     b[16] = dark as u8;
                 }
+                Some(Event::Menu { id }) => {
+                    b[3] = 13;
+                    b[16..20].copy_from_slice(&id.to_le_bytes());
+                }
             }
             b
         }
@@ -1552,6 +1562,9 @@ pub mod window {
                     mods: b[19],
                 }),
                 12 => Some(Event::Appearance { dark: b[16] != 0 }),
+                13 => Some(Event::Menu {
+                    id: u32::from_le_bytes(b[16..20].try_into().ok()?),
+                }),
                 11 => Some(Event::Configure {
                     width: u32::from_le_bytes(b[16..20].try_into().ok()?),
                     height: u32::from_le_bytes(b[20..24].try_into().ok()?),
@@ -2667,6 +2680,7 @@ pub mod status {
                 },
                 Event::Appearance { dark: true },
                 Event::Appearance { dark: false },
+                Event::Menu { id: 0xFFFF_0003 },
                 Event::Wheel {
                     x: 1,
                     y: 2,

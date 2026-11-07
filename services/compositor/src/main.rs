@@ -11,11 +11,12 @@
 
 extern crate alloc;
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 use aricode_cmdline::{keys, CmdLine};
 use aricode_gfx::{
-    resized, snap_at, snap_content, Canvas, Damage, Desktop, Hit, Labels, PasteGrant, PixelMasks,
-    Rect, Scene, Window, STATUS_MAX,
+    resized, snap_at, snap_content, Canvas, Damage, Desktop, Hit, Labels, MenuHit, MenuOpen, Menus,
+    PasteGrant, PixelMasks, Rect, Scene, Window, STATUS_MAX,
 };
 use aricode_input::{
     EscapeChord, KeyRepeat, Keyboard, Layout, BTN_LEFT, EV_KEY, EV_REL, REL_WHEEL, REL_X, REL_Y,
@@ -44,6 +45,13 @@ const MAX_INPUTS: usize = 5;
 const MAX_WINDOWS: usize = aricode_gfx::MAX_WINDOWS;
 /// evdev codes the desktop itself answers to.
 const KEY_TAB: u16 = 15;
+const KEY_ESC: u16 = 1;
+const KEY_ENTER: u16 = 28;
+const KEY_F10: u16 = 68;
+const KEY_UP: u16 = 103;
+const KEY_LEFT: u16 = 105;
+const KEY_RIGHT: u16 = 106;
+const KEY_DOWN: u16 = 108;
 const KEY_LEFTALT: u16 = 56;
 /// A title bar moved less than this was clicked, not dragged: it does not snap.
 const MIN_DRAG: i32 = 4;
@@ -209,6 +217,8 @@ struct Content {
     /// Which kinds of refused clipboard request were said: a program that keeps trying
     /// is said once for each.
     said_clipboard: u8,
+    /// The menus it gave for the bar.
+    menus: Option<Box<Menus>>,
 }
 
 impl Content {
@@ -392,6 +402,8 @@ enum ClipboardRefusal {
 }
 
 struct Compositor {
+    /// The focused window's menu on show.
+    menu_open: Option<MenuOpen>,
     paste_grant: PasteGrant,
     dark: bool,
     /// Minutes from UTC of the owner's clock, and the minute the bar shows.
@@ -589,6 +601,7 @@ impl Compositor {
         if self.pointer.drag.is_some() {
             return self.continue_drag(px, py);
         }
+        self.menu_hover(px, py);
         let under = self.pointer.grab.or_else(|| self.content_at(px, py));
         if under != self.pointer.inside {
             if let Some(old) = self.pointer.inside {
@@ -745,6 +758,196 @@ impl Compositor {
         self.set_focus(id);
     }
 
+    /// The focused window's menus, if it gave any.
+    fn focused_menus(&self) -> Option<&Menus> {
+        let id = self.desktop.focus?;
+        let c = self.contents.iter().flatten().find(|c| c.id == id)?;
+        c.menus.as_deref().filter(|m| !m.is_empty())
+    }
+
+    /// What the menus have on show goes on the next frame: the bar, and the box of `menu`.
+    fn damage_menu(&mut self, menu: usize) {
+        let bar = self.desktop.bar();
+        self.damage.add(&bar);
+        let Some(id) = self.desktop.focus else { return };
+        let menus = self.contents.iter().flatten().find(|c| c.id == id);
+        if let Some(menus) = menus.and_then(|c| c.menus.as_deref()) {
+            let area = self.desktop.menu_box(menus, &mut self.labels, menu);
+            let shadow = aricode_gfx::SHADOW;
+            let around = Rect::new(
+                area.x - shadow,
+                area.y - shadow,
+                area.w + 2 * shadow as u32,
+                area.h + 2 * shadow as u32,
+            );
+            self.damage.add(&around);
+        }
+    }
+
+    fn close_menu(&mut self) {
+        if let Some(open) = self.menu_open.take() {
+            self.damage_menu(open.menu);
+        }
+    }
+
+    fn set_menu(&mut self, open: Option<MenuOpen>) {
+        if self.menu_open == open {
+            return;
+        }
+        if let Some(old) = self.menu_open {
+            self.damage_menu(old.menu);
+        }
+        self.menu_open = open;
+        if let Some(new) = open {
+            self.damage_menu(new.menu);
+        }
+    }
+
+    /// What the pointer is on, as far as menus go.
+    fn menu_under(&mut self, x: i32, y: i32) -> MenuHit {
+        let open = self.menu_open.map(|o| o.menu);
+        let Some(id) = self.desktop.focus else {
+            return MenuHit::None;
+        };
+        let c = self.contents.iter().flatten().find(|c| c.id == id);
+        let Some(menus) = c.and_then(|c| c.menus.as_deref()) else {
+            return MenuHit::None;
+        };
+        self.desktop.menu_at(menus, &mut self.labels, open, x, y)
+    }
+
+    /// The left button went down: whether the menus took it. A press anywhere else
+    /// closes an open menu, and does nothing more.
+    fn menu_press(&mut self, x: i32, y: i32) -> bool {
+        match self.menu_under(x, y) {
+            MenuHit::Title(menu) => {
+                let same = self.menu_open.is_some_and(|o| o.menu == menu);
+                self.set_menu((!same).then_some(MenuOpen { menu, item: None }));
+                if !same {
+                    if let Some(id) = self.desktop.focus {
+                        sys::print(b"compositor: menu ");
+                        num(menu as u64);
+                        sys::print(b" of window ");
+                        num(id as u64);
+                        sys::print(b" opened\n");
+                    }
+                }
+                true
+            }
+            MenuHit::Item(..) => true,
+            MenuHit::None if self.menu_open.is_some() => {
+                self.close_menu();
+                true
+            }
+            MenuHit::None => false,
+        }
+    }
+
+    /// The left button came up: on a row of the open menu, that is the choice. So a press
+    /// on a title, a drag and a release choose, as a click on the title and one on a row do.
+    fn menu_release(&mut self, x: i32, y: i32) {
+        if self.menu_open.is_none() {
+            return;
+        }
+        if let MenuHit::Item(menu, item) = self.menu_under(x, y) {
+            self.choose_menu(menu, item);
+        }
+    }
+
+    fn choose_menu(&mut self, menu: usize, item: usize) {
+        let Some(id) = self.desktop.focus else { return };
+        let chosen = self.focused_menus().and_then(|m| m.chosen(menu, item));
+        self.close_menu();
+        let Some((number, paste)) = chosen else {
+            return;
+        };
+        if paste {
+            self.paste_grant.on_menu(id);
+            sys::print(b"compositor: window ");
+            num(id as u64);
+            sys::print(b" pasted from its menu\n");
+        }
+        self.deliver(id, Event::Menu { id: number });
+    }
+
+    /// The pointer moved with a menu open: over a row marks it, over another title opens
+    /// that one.
+    fn menu_hover(&mut self, x: i32, y: i32) {
+        let Some(open) = self.menu_open else { return };
+        let next = match self.menu_under(x, y) {
+            MenuHit::Title(menu) if menu != open.menu => MenuOpen { menu, item: None },
+            MenuHit::Item(menu, item) => MenuOpen {
+                menu,
+                item: Some(item),
+            },
+            _ => MenuOpen {
+                menu: open.menu,
+                item: None,
+            },
+        };
+        self.set_menu(Some(next));
+    }
+
+    /// A key while the menus may want it: F10 opens them, for a machine whose pointer
+    /// does not work, and with one open the arrows, Enter and Esc are theirs, and no
+    /// other key reaches the program. Whether it took the key.
+    fn menu_key(&mut self, ev: aricode_input::Event) -> bool {
+        if ev.value == 0 {
+            return false;
+        }
+        let Some(open) = self.menu_open else {
+            if ev.code == KEY_F10 && ev.value == 1 && self.focused_menus().is_some() {
+                self.keys.keyboard.feed(ev);
+                self.set_menu(Some(MenuOpen {
+                    menu: 0,
+                    item: Some(0),
+                }));
+                return true;
+            }
+            return false;
+        };
+        self.keys.keyboard.feed(ev);
+        let (count, items) = self
+            .focused_menus()
+            .map_or((0, 0), |m| (m.count(), m.items(open.menu)));
+        if count == 0 {
+            self.close_menu();
+            return true;
+        }
+        let row = open.item;
+        match ev.code {
+            KEY_ESC | KEY_F10 => self.close_menu(),
+            KEY_ENTER => {
+                if let (Some(item), 1) = (row, ev.value) {
+                    self.choose_menu(open.menu, item);
+                }
+            }
+            KEY_LEFT | KEY_RIGHT => {
+                let step = if ev.code == KEY_LEFT { count - 1 } else { 1 };
+                self.set_menu(Some(MenuOpen {
+                    menu: (open.menu + step) % count,
+                    item: Some(0),
+                }));
+            }
+            KEY_UP | KEY_DOWN if items > 0 => {
+                let at = row.unwrap_or(0);
+                let item = if ev.code == KEY_UP {
+                    (at + items - 1) % items
+                } else if row.is_none() {
+                    0
+                } else {
+                    (at + 1) % items
+                };
+                self.set_menu(Some(MenuOpen {
+                    menu: open.menu,
+                    item: Some(item),
+                }));
+            }
+            _ => {}
+        }
+        true
+    }
+
     /// A program's place in the dock: brings it to the front, or minimizes it if it is
     /// there already.
     fn dock_clicked(&mut self, id: u32) {
@@ -762,6 +965,7 @@ impl Compositor {
     /// and the one below takes the focus.
     fn hide(&mut self, id: u32) {
         if self.desktop.focus == Some(id) {
+            self.close_menu();
             self.keys.repeat.stop();
             self.release_keys_of_focus();
             self.deliver(id, Event::Focus(false));
@@ -780,6 +984,7 @@ impl Compositor {
             self.pointer.buttons &= !bit;
             if code == BTN_LEFT {
                 self.end_drag(px, py);
+                self.menu_release(px, py);
             }
             if let Some(id) = self
                 .pointer
@@ -803,6 +1008,9 @@ impl Compositor {
             return;
         }
         self.pointer.buttons |= bit;
+        if code == BTN_LEFT && self.pointer.grab.is_none() && self.menu_press(px, py) {
+            return;
+        }
         let target = if let Some(id) = self.pointer.grab {
             self.in_content(id, px, py).map(|(x, y)| (id, x, y))
         } else {
@@ -917,6 +1125,15 @@ impl Compositor {
             return;
         }
         if let Some(code) = self.keys.repeat.due(now_ms) {
+            // A key held with a menu open moves in the menu, never reaching the program.
+            if self.menu_open.is_some() {
+                self.menu_key(aricode_input::Event {
+                    kind: EV_KEY,
+                    code,
+                    value: 2,
+                });
+                return;
+            }
             self.on_key(
                 aricode_input::Event {
                     kind: EV_KEY,
@@ -1103,6 +1320,7 @@ impl Compositor {
     /// Closes the window of `slot`: a poll waiting on it is answered
     /// `BadWindow`, the buffer goes once no window shows it.
     fn close_window(&mut self, slot: usize) {
+        self.close_menu();
         let Some(closed) = self.contents[slot].take() else {
             return;
         };
@@ -1121,6 +1339,7 @@ impl Compositor {
             return;
         }
         // The key held was for the window that had the focus.
+        self.close_menu();
         self.keys.repeat.stop();
         self.release_keys_of_focus();
         self.paste_grant.on_focus_change();
@@ -1182,6 +1401,9 @@ impl Compositor {
         }
         if ev.value == 1 {
             self.last_key_ms = Some(at);
+        }
+        if self.menu_key(ev) {
+            return;
         }
         let state = if ev.value == 1 {
             KeyState::Pressed
@@ -1277,6 +1499,7 @@ impl Compositor {
                     place_at: None,
                     close_waiting: None,
                     said_clipboard: 0,
+                    menus: None,
                 });
                 if req.events & wants::RESIZE != 0 {
                     self.desktop.set_resizable(id);
@@ -1346,6 +1569,18 @@ impl Compositor {
                 answer(reply_to, Reply::ok(0));
             }
             Op::Resize => self.resize(req, owner, reply_to, buf),
+            Op::MenuAdd => {
+                let Some(c) = self.owned(req.window, owner) else {
+                    return answer(reply_to, Reply::status(Status::BadWindow));
+                };
+                let menus = c.menus.get_or_insert_with(Box::default);
+                let added = menus.add(req.width as usize, req.title_str(), req.height);
+                let status = if added { Status::Ok } else { Status::Invalid };
+                // The bar shows them once they are there.
+                let bar = self.desktop.bar();
+                self.damage.add(&bar);
+                answer(reply_to, Reply::status(status));
+            }
             Op::ClipboardSet => self.clipboard_set(req, owner, reply_to, buf),
             Op::ClipboardGet => self.clipboard_get(req, owner, reply_to, buf),
             Op::Poll => {
@@ -1613,18 +1848,31 @@ impl Compositor {
         let desktop = &self.desktop;
         let mut screen = self.screen.canvas();
         let labels = &mut self.labels;
+        let focused = contents
+            .iter()
+            .flatten()
+            .find(|c| Some(c.id) == desktop.focus);
+        let menus = focused
+            .and_then(|c| c.menus.as_deref())
+            .map(|m| (m, self.menu_open));
         for r in self.damage.rects() {
-            desktop.compose_labeled(&mut screen, r, labels, |w: &Window, out: &mut Canvas| {
-                let Some(c) = contents.iter().flatten().find(|c| c.id == w.id) else {
-                    return;
-                };
-                let n = (c.width * c.height) as usize;
-                // SAFETY: client buffer mapped in `Create`, `width*height*4` bytes long.
-                let pixels = unsafe { core::slice::from_raw_parts_mut(c.virt as *mut u32, n) };
-                if let Some(src) = Canvas::new(pixels, c.width, c.height, c.width) {
-                    out.blit(&src, w.content.x, w.content.y);
-                }
-            });
+            desktop.compose_labeled(
+                &mut screen,
+                r,
+                labels,
+                menus,
+                |w: &Window, out: &mut Canvas| {
+                    let Some(c) = contents.iter().flatten().find(|c| c.id == w.id) else {
+                        return;
+                    };
+                    let n = (c.width * c.height) as usize;
+                    // SAFETY: client buffer mapped in `Create`, `width*height*4` bytes long.
+                    let pixels = unsafe { core::slice::from_raw_parts_mut(c.virt as *mut u32, n) };
+                    if let Some(src) = Canvas::new(pixels, c.width, c.height, c.width) {
+                        out.blit(&src, w.content.x, w.content.y);
+                    }
+                },
+            );
         }
         self.screen.flip(self.damage.rects());
         if self.trace {
@@ -1718,6 +1966,7 @@ fn main(inputs: u64) -> u64 {
         damage: Damage::full(desktop.screen),
         desktop,
         screen,
+        menu_open: None,
         paste_grant: PasteGrant::default(),
         dark: false,
         tz_minutes: 0,
