@@ -41,6 +41,7 @@ pub const PACKAGES: &[(&str, Option<&str>)] = &[
     ("aricode-display", None),
     ("aricode-intel-display", None),
     ("aricode-text", None),
+    ("aricode-render3d", None),
     ("aricode-ui", None),
     ("aricode-pista", None),
     ("aricode-cmdline", None),
