@@ -1549,7 +1549,7 @@ pub fn unmap_foreign(virt: u64) -> Result<(), aricode_abi::Error> {
         };
         (f, release, screen_back)
     };
-    vmm::flush_own_user_range(f.virt, f.span);
+    vmm::flush_user_range(f.virt, f.span);
     if let Some(lent) = screen_back {
         crate::console::screen_returned_said(pid.0, lent);
     }

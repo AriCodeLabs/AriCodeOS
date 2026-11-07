@@ -423,6 +423,9 @@ fn switch_with(decide: impl FnOnce(&mut RoundRobin, usize) -> Option<Tid>) {
             unsafe {
                 core::arch::asm!("mov {}, cr3", out(reg) current_cr3, options(nomem, nostack))
             };
+            // Said before the load: a shootdown for this address space either finds
+            // this CPU or comes before it reads the tables (ADR 0082).
+            crate::cpu::current().set_cr3(cr3);
             if cr3 != current_cr3 {
                 // SAFETY: `cr3` is a PML4 built by the VMM or by `process::spawn`.
                 unsafe { core::arch::asm!("mov cr3, {}", in(reg) cr3, options(nostack)) };
