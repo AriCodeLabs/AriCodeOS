@@ -441,6 +441,48 @@ end a long game on this laptop.
 Raw logs, per-second temperatures and the scripts are kept outside the repository, in
 `~/aricode-scratch/gpu-reference/` on the build host.
 
+### 4c. Our side today: bench3d on the CPU, same laptop (2026-11-07)
+
+`desktop/bench3d` draws 13 scenes of glmark2's kinds with `libs/render3d` on one processor
+thread, by the method of 4b (800x600, 5 s a scene, started below 70 C, stopped at 90 C), on
+AriCodeOS dev build 36. Its scenes are not glmark2's, so no figure here compares one to one
+with the table above; they are the CPU baseline that the GPU path of stages A to D must beat,
+scene for scene.
+
+The first run drew straight into the window's buffer, which the compositor reads whenever it
+makes a frame of the screen: the owner saw models cut and zones left empty. Drawn on the host,
+frame by frame, every scene was whole, so the cause was the presentation. bench3d 2 draws each
+frame apart and copies it to the window finished. The second column is the honest one: it pays
+that copy, about 0.4 ms a frame here.
+
+| Scene | fps, drawn in the window | fps, drawn apart (bench3d 2) | p99 ms (bench3d 2) |
+|---|---|---|---|
+| geometry (torus, 4096 triangles, flat) | 112 | 102 | 13.6 |
+| geometry-dense (sphere, 16384, Gouraud) | 51 | 49 | 28.2 |
+| texture-nearest | 38 | 40 | 33.6 |
+| texture-linear | 31 | 32 | 39.1 |
+| texture-mipmap (corridor) | 31 | 32 | 40.5 |
+| shading-gouraud | 81 | 75 | 20.6 |
+| shading-phong | 26 | 26 | 50.9 |
+| effect2d-3x3 | 22 | 21 | 55.5 |
+| effect2d-5x5 | 10 | 9 | 106.5 |
+| desktop (four 2D windows) | 782 | 557 | 3.9 |
+| terrain (18432 triangles) | 34 | 33 | 39.1 |
+| objects (64 spheres, Phong) | 30 | 29 | 43.4 |
+| everything | 28 | 28 | 42.8 |
+
+**What it says** [M]:
+- **Pixels, not triangles, cost the CPU.** Per-pixel work (Phong, filtered textures, 2D kernels)
+  gives 9 to 32 fps; the 16384-triangle sphere, lit at its corners, still gives 49.
+- **One thread only.** The machine has 4; spreading the rasteriser over bands is a CPU gain
+  still unused, and it must be measured before any GPU figure is called a win.
+- **Cool runs.** The package peaked at 69 C in both runs, against 85 to 89 C for Linux on the
+  GPU on screen: the CPU path is slow but does not heat this laptop.
+- **For stage D,** the scenes where the GPU should gain most are the pixel-bound ones: Phong,
+  the effects and the textured scenes.
+
+Raw lines: `bench3d-laptop-1.txt` and `bench3d-laptop-2.txt` in the same scratch directory.
+
 ## 8. Stages
 
 Each stage ends with something shown. A to E and H are in order of dependency; F and G are side
