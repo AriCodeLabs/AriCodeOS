@@ -34,7 +34,7 @@ click = "left"
 
 # Its frame is at (0,24), under the bar: the zoom circle at (48,32). Back to where it was.
 [[host_input_then]]
-marker = "compositor: window 2 is now 1280x696"
+marker = "compositor: window 2 is now 1280x664"
 mouse_rel = [-180, -106]
 click = "left"
 
@@ -57,13 +57,13 @@ drag = [-500, 0]
 
 # From (0,140) to its title bar, at (300,38) under the bar, and dropped in the corner: a quarter.
 [[host_input_then]]
-marker = "compositor: window 2 is now 640x696"
+marker = "compositor: window 2 is now 640x664"
 mouse_rel = [300, -102]
 drag = [-400, -100]
 
 # Alt+Tab brings the minimized window back: its pixels are on screen again.
 [[host_input_then]]
-marker = "compositor: window 2 is now 640x334"
+marker = "compositor: window 2 is now 640x318"
 keys = ["alt+tab"]
 
 [[host_input_then]]
@@ -81,10 +81,10 @@ serial_contains = ["gui_demo D: focus lost", "ARICODEOS_SHUTDOWN"]
 serial_absent = ["KERNEL PANIC", "the resize failed", "killed by fault"]
 serial_order = [
     "sample (190,168)",
-    "compositor: window 2 is now 1280x696",
+    "compositor: window 2 is now 1280x664",
     "compositor: window 2 is now 440x320",
-    "compositor: window 2 is now 640x696",
-    "compositor: window 2 is now 640x334",
+    "compositor: window 2 is now 640x664",
+    "compositor: window 2 is now 640x318",
     "gui_demo D: done",
     "gui_demo D: done",
 ]
