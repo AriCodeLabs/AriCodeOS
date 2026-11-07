@@ -231,7 +231,7 @@ GPU at its lowest clock, 350 MHz; each GPU time includes the submit and the wait
 2. Kernel glue and the GPU capability. Done.
 3. On the laptop: the measurements, fill and copy beside the CPU, a looping batch reset.
    Done; the frequency at other clocks is next.
-4. Independent audit of the kernel part.
+4. Independent audit of the kernel part. Done: `docs/audits/2026-11-07-gpu-stage-a.md`.
 
 ## Consequences
 
@@ -247,3 +247,13 @@ GPU at its lowest clock, 350 MHz; each GPU time includes the submit and the wait
   commands; a client needing more gets them added one by one, each with its limits.
 - Any application may ask for `gpu` in its manifest: through it a program reaches only
   its own buffers, and one program at a time.
+- **Audit** (`docs/audits/2026-11-07-gpu-stage-a.md`): no way past the batch check was
+  found. One High and four Medium fixed: memory a stuck engine may reach is kept for good,
+  never freed; the screen must be covered to its end and the kernel's GPU pages sit past
+  the CPU's aperture; a bring-up failing halfway stops the engine and keeps its pages; every
+  page table exists from boot; at most 256 mappings. Seven Low fixed. The eighth, that any
+  application may ask for `gpu`, stays: it reaches only its own buffers, one program at a
+  time, and narrowing it to signed packages is the owner's call.
+- Dev build 43 on the laptop after the fixes: the same figures, every refusal, the hang
+  reset after 2,011 ms; the client released by the `gpu` thread when it ended.
+
