@@ -1,0 +1,11 @@
+[package]
+name = "aricode-intel-gt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The GT (render, blitter, page tables, power) of Intel Ivy Bridge graphics, as the kernel owns it (no_std)"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]

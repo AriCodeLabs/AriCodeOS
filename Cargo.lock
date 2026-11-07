@@ -447,6 +447,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "aricode-intel-gt"
+version = "0.18.0"
+
+[[package]]
 name = "aricode-iommu"
 version = "0.18.0"
 dependencies = [
