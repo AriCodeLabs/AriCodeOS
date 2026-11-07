@@ -84,31 +84,45 @@ impl Texture {
     }
 
     /// The colour at `(u, v)`, repeating, on `level` (0 the largest), as `[r, g, b]` in
-    /// 0 to 1.
+    /// 0 to 1. Linear filtering weighs in 1/256 of a texel, as graphics hardware does:
+    /// red and blue are mixed together in one integer, green in another, and only the
+    /// result becomes floating point.
     pub fn sample(&self, u: f32, v: f32, filter: Filter, level: usize) -> [f32; 3] {
         let level = &self.levels[level.min(self.levels.len() - 1)];
         let n = level.size;
-        let wrap = |i: i64| i.rem_euclid(n as i64) as usize;
-        let (x, y) = (u * n as f32 - 0.5, v * n as f32 - 0.5);
+        // Sides are powers of two (`new` refuses others), so repeating is a mask: no
+        // division, which on the laptop's processor is what a sample cost most.
+        let wrap = |i: i64| i as usize & (n - 1);
+        // Texel coordinates in 1/256 steps; the shift floors, negatives included.
+        let scale = (n * 256) as f32;
+        let (x, y) = ((u * scale) as i64, (v * scale) as i64);
         if filter == Filter::Nearest {
-            let (x, y) = (libm::floorf(x + 0.5) as i64, libm::floorf(y + 0.5) as i64);
-            return unpack(level.texels[wrap(y) * n + wrap(x)]);
+            return unpack(level.texels[wrap(y >> 8) * n + wrap(x >> 8)]);
         }
-        let (fx, fy) = (libm::floorf(x), libm::floorf(y));
-        let (tx, ty) = (x - fx, y - fy);
-        let (x0, y0) = (fx as i64, fy as i64);
-        let at = |dx: i64, dy: i64| unpack(level.texels[wrap(y0 + dy) * n + wrap(x0 + dx)]);
-        let (a, b, c, d) = (at(0, 0), at(1, 0), at(0, 1), at(1, 1));
-        core::array::from_fn(|i| {
-            let top = a[i] + (b[i] - a[i]) * tx;
-            let bottom = c[i] + (d[i] - c[i]) * tx;
-            top + (bottom - top) * ty
-        })
+        // Texel centres sit half a texel in.
+        let (x, y) = (x - 128, y - 128);
+        let (fx, fy) = ((x & 255) as u32, (y & 255) as u32);
+        let (x0, x1) = (wrap(x >> 8), wrap((x >> 8) + 1));
+        let (r0, r1) = (wrap(y >> 8) * n, wrap((y >> 8) + 1) * n);
+        let t = &level.texels;
+        let top = lerp(t[r0 + x0], t[r0 + x1], fx);
+        let bottom = lerp(t[r1 + x0], t[r1 + x1], fx);
+        unpack(lerp(top, bottom, fy))
     }
 }
 
+/// `a` to `b` by `w`/256, each 8-bit channel at once: red and blue share one product,
+/// green has its own, and none overflows into its neighbour.
+#[inline(always)]
+fn lerp(a: u32, b: u32, w: u32) -> u32 {
+    let (wa, wb) = (256 - w, w);
+    let rb = ((a & 0xff00ff) * wa + (b & 0xff00ff) * wb) >> 8;
+    let g = ((a & 0x00ff00) * wa + (b & 0x00ff00) * wb) >> 8;
+    (rb & 0xff00ff) | (g & 0x00ff00)
+}
+
 fn unpack(c: u32) -> [f32; 3] {
-    [16, 8, 0].map(|s| ((c >> s) & 0xff) as f32 / 255.0)
+    [16, 8, 0].map(|s| ((c >> s) & 0xff) as f32 * (1.0 / 255.0))
 }
 
 fn average4(c: [u32; 4]) -> u32 {
@@ -130,6 +144,29 @@ mod tests {
     }
 
     #[test]
+    fn coordinates_repeat_on_both_sides() {
+        // Every texel its own colour, so any wrong wrap shows.
+        let t = Texture::new(8, |x, y| (y * 8 + x) as u32 * 0x010101).unwrap();
+        for filter in [Filter::Nearest, Filter::Linear] {
+            for (u, v) in [
+                (0.375, 0.625),
+                (0.0625, 0.9375),
+                (0.0, 0.0),
+                (0.171875, 0.5),
+            ] {
+                let at = t.sample(u, v, filter, 0);
+                for (du, dv) in [(-1.0, 0.0), (0.0, -3.0), (2.0, 1.0), (-5.0, 7.0)] {
+                    assert_eq!(
+                        t.sample(u + du, v + dv, filter, 0),
+                        at,
+                        "{filter:?} {u} {v}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn levels_go_down_to_one_texel_and_average() {
         let t = Texture::new(4, |x, y| if (x + y) % 2 == 0 { 0xffffff } else { 0 }).unwrap();
         assert_eq!(t.levels(), 3);
@@ -143,9 +180,10 @@ mod tests {
         let t = Texture::new(2, |x, _| if x == 0 { 0x000000 } else { 0xff0000 }).unwrap();
         assert_eq!(t.sample(0.25, 0.25, Filter::Nearest, 0), [0.0, 0.0, 0.0]);
         assert_eq!(t.sample(0.75, 0.25, Filter::Nearest, 0), [1.0, 0.0, 0.0]);
-        // Halfway between the two texel centres.
+        // Halfway between the two texel centres: a mix is an 8-bit channel, as texels
+        // are, so it is right to within one step of 1/255.
         let mid = t.sample(0.5, 0.25, Filter::Linear, 0);
-        assert!((mid[0] - 0.5).abs() < 1e-5);
+        assert!((mid[0] - 0.5).abs() <= 1.0 / 255.0);
         // It repeats: past the right edge comes the left.
         assert_eq!(t.sample(1.25, 0.25, Filter::Nearest, 0), [0.0, 0.0, 0.0]);
     }

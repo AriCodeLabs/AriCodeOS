@@ -318,14 +318,21 @@ fn fill(
     };
     let inv_area = 1.0 / area as f32;
     let mut written = 0;
+    // Each edge function is linear in the pixel: start it at the box's first pixel
+    // centre and add its step per pixel and per row. Integers, so exactly what
+    // `edge` gives there, without its multiplications.
+    let sides = [(p[1], p[2]), (p[2], p[0]), (p[0], p[1])];
+    let step_x = sides.map(|(a, b)| -(b.1 - a.1) * SUB);
+    let step_y = sides.map(|(a, b)| (b.0 - a.0) * SUB);
+    let first = (x0 * SUB + SUB / 2, y0 * SUB + SUB / 2);
+    let mut row_e = sides.map(|(a, b)| edge(a, b, first));
     for y in y0..y1 {
-        let py = y * SUB + SUB / 2;
         let row = y as usize * target.stride;
+        let mut next = row_e;
+        row_e = core::array::from_fn(|k| row_e[k] + step_y[k]);
         for x in x0..x1 {
-            let q = (x * SUB + SUB / 2, py);
-            let e0 = edge(p[1], p[2], q);
-            let e1 = edge(p[2], p[0], q);
-            let e2 = edge(p[0], p[1], q);
+            let [e0, e1, e2] = next;
+            next = core::array::from_fn(|k| next[k] + step_x[k]);
             if !(inside(e0, 0) && inside(e1, 1) && inside(e2, 2)) {
                 continue;
             }
@@ -343,15 +350,12 @@ fn fill(
             // With perspective: each corner's share weighted by its 1/w.
             let wl = [l[0] * s[0].inv_w, l[1] * s[1].inv_w, l[2] * s[2].inv_w];
             let norm = 1.0 / (wl[0] + wl[1] + wl[2]);
-            let mix3 = |f: &dyn Fn(&Var) -> [f32; 3]| -> [f32; 3] {
-                let (a, b, c) = (f(v[0]), f(v[1]), f(v[2]));
-                core::array::from_fn(|i| (a[i] * wl[0] + b[i] * wl[1] + c[i] * wl[2]) * norm)
-            };
+            let mix3 = |f: fn(&Var) -> [f32; 3]| mix(v, wl, norm, f);
             let mut color = match (material.shading, flat) {
                 (Shading::Flat, Some(c)) => c,
                 (Shading::Phong, _) => {
-                    let n = mix3(&|v| [v.normal.x, v.normal.y, v.normal.z]);
-                    let w = mix3(&|v| [v.world.x, v.world.y, v.world.z]);
+                    let n = mix3(|v| [v.normal.x, v.normal.y, v.normal.z]);
+                    let w = mix3(|v| [v.world.x, v.world.y, v.world.z]);
                     shade(
                         material.color,
                         Vec3::new(n[0], n[1], n[2]).normalized(),
@@ -361,10 +365,10 @@ fn fill(
                         material.shininess,
                     )
                 }
-                _ => mix3(&|v| v.lit),
+                _ => mix3(|v| v.lit),
             };
             if let Some((tex, filter)) = material.texture {
-                let uv = mix3(&|v| [v.uv[0], v.uv[1], 0.0]);
+                let uv = mix3(|v| [v.uv[0], v.uv[1], 0.0]);
                 let t = tex.sample(uv[0], uv[1], filter, level);
                 color = core::array::from_fn(|i| color[i] * t[i]);
             }
@@ -374,6 +378,14 @@ fn fill(
         }
     }
     Some(written)
+}
+
+/// A corner value mixed by the pixel's perspective weights. Generic and inlined: a
+/// call through `dyn` per pixel and attribute was most of a pixel's cost.
+#[inline(always)]
+fn mix(v: [&Var; 3], wl: [f32; 3], norm: f32, f: impl Fn(&Var) -> [f32; 3]) -> [f32; 3] {
+    let (a, b, c) = (f(v[0]), f(v[1]), f(v[2]));
+    core::array::from_fn(|i| (a[i] * wl[0] + b[i] * wl[1] + c[i] * wl[2]) * norm)
 }
 
 fn pack(c: [f32; 3]) -> u32 {
