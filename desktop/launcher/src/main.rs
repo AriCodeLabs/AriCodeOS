@@ -25,6 +25,10 @@ use aricode_ui::{Action, Dialog, Fill, Id, Space, Stack, Style, Theme, Tone, Ui}
 
 const W: u32 = 320;
 const H: u32 = 360;
+/// The numbers of its menu.
+const MENU_OPEN: u32 = 1;
+const MENU_REFRESH: u32 = 2;
+const MENU_LEAVE: u32 = 3;
 /// Applications listed at most (the broker offers 16).
 const MAX_APPS: usize = 16;
 const NAME_MAX: usize = 32;
@@ -210,6 +214,18 @@ fn main(_arg: u64) -> u64 {
         say(&[b"could not create its window"]);
         return 2;
     };
+    let file = [
+        ("Desktop", 0),
+        ("Open\tEnter", MENU_OPEN),
+        ("Refresh", MENU_REFRESH),
+        ("Leave the desktop", MENU_LEAVE),
+    ];
+    if file
+        .iter()
+        .any(|&(label, id)| win.menu_add(0, label, id).is_err())
+    {
+        say(&[b"the bar did not take its menu"]);
+    }
     let mut l = Launcher::new(win.starts_dark());
     l.refresh(apps);
     for i in 0..l.ui.list_len(l.list) {
@@ -245,6 +261,9 @@ fn main(_arg: u64) -> u64 {
                 Action::Pressed(id) if id == l.leave => l.ask_to_leave(),
                 Action::Pressed(id) if id == l.open => l.open(apps),
                 Action::Pressed(id) if id == l.refresh => l.refresh(apps),
+                Action::Menu(MENU_LEAVE) => l.ask_to_leave(),
+                Action::Menu(MENU_OPEN) => l.open(apps),
+                Action::Menu(MENU_REFRESH) => l.refresh(apps),
                 Action::Activated(..) | Action::Submitted(_) => l.open(apps),
                 Action::Edited(id) if id == l.search => l.show_matches(),
                 Action::Arrow(_, up) => l.ui.select_next(l.list, up),
