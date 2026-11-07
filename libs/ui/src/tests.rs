@@ -1107,3 +1107,32 @@ fn a_field_hands_its_arrows_to_the_list_it_searches() {
     assert_eq!(f.ui.selected(f.list), Some(7), "and at the end");
     f.same_as_full_paint();
 }
+
+#[test]
+fn the_edit_menu_does_what_its_keys_do() {
+    let mut f = form();
+    f.ui.focus(f.field);
+    f.keys(b"abc");
+    f.actions();
+    let menu = |f: &mut Form, row: usize| {
+        let id = EDIT_MENU[row].1;
+        f.ui.handle(Event::Menu { id });
+    };
+    menu(&mut f, 4); // Select All
+    menu(&mut f, 2); // Copy
+    assert_eq!(f.actions(), [Action::Copied]);
+    assert_eq!(f.ui.take_copied().as_deref(), Some("abc"));
+    menu(&mut f, 1); // Cut
+    assert_eq!(f.actions(), [Action::Cut(f.field)]);
+    menu(&mut f, 3); // Paste
+    assert_eq!(f.actions(), [Action::Paste(f.field)]);
+    // A number of the program's goes to the program.
+    f.ui.handle(Event::Menu { id: 7 });
+    assert_eq!(f.actions(), [Action::Menu(7)]);
+    // Behind a question, nothing.
+    let d = f.ui.dialog("Yes", "No");
+    f.ui.ask(&d, "Sure?", "Yes");
+    f.ui.handle(Event::Menu { id: 7 });
+    menu(&mut f, 2);
+    assert_eq!(f.actions(), []);
+}

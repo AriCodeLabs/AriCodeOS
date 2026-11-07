@@ -24,12 +24,17 @@ use aricode_proto::fs::Status as FsStatus;
 use aricode_rt::sys::fs::{FsClient, FsError};
 use aricode_rt::sys::window::{wants, Event, Window};
 use aricode_rt::sys::{self, kind, permissions};
-use aricode_ui::{Action, Dialog, Fill, Id, Space, Stack, Style, Theme, Tone, Ui};
+use aricode_ui::{Action, Dialog, Fill, Id, Space, Stack, Style, Theme, Tone, Ui, EDIT_MENU};
 
 const W: u32 = 480;
 const H: u32 = 400;
 /// Files listed at most.
 const MAX_FILES: usize = 64;
+/// The numbers of its File menu.
+const MENU_NEW: u32 = 1;
+const MENU_RENAME: u32 = 2;
+const MENU_DELETE: u32 = 3;
+const MENU_REFRESH: u32 = 4;
 /// The longest name fsd keeps inside `home/` (32 bytes in all).
 const NAME_MAX: usize = 32 - 5;
 
@@ -318,6 +323,24 @@ fn main(_arg: u64) -> u64 {
         say(&[b"could not create its window"]);
         return 3;
     };
+    let file = [
+        ("File", 0),
+        ("New", MENU_NEW),
+        ("Rename\tCtrl+R", MENU_RENAME),
+        ("Delete\tDelete", MENU_DELETE),
+        ("Refresh", MENU_REFRESH),
+    ];
+    let menus = file
+        .iter()
+        .map(|&(label, id)| win.menu_add(0, label, id))
+        .chain(
+            EDIT_MENU
+                .iter()
+                .map(|&(label, id)| win.menu_add(1, label, id)),
+        );
+    if menus.into_iter().any(|added| added.is_err()) {
+        say(&[b"the bar did not take its menus"]);
+    }
     let mut f = build(fs, win.starts_dark());
     if f.refresh(None) {
         f.say_count();
@@ -358,7 +381,10 @@ fn main(_arg: u64) -> u64 {
                     f.ui.answered();
                     say(&[b"kept the file"]);
                 }
-                Action::DeleteRow(..) => f.ask_to_delete(),
+                Action::DeleteRow(..) | Action::Menu(MENU_DELETE) => f.ask_to_delete(),
+                Action::Menu(MENU_NEW) => f.create(),
+                Action::Menu(MENU_RENAME) => f.rename(),
+                Action::Menu(MENU_REFRESH) if f.refresh(None) => f.say_count(),
                 Action::Submitted(_) => f.create(),
                 Action::Shortcut(b'r') => f.rename(),
                 Action::Cancel => f.ui.focus(f.list),

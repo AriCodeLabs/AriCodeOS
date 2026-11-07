@@ -582,7 +582,17 @@ machine that also runs Windows the firmware's clock is usually local time, not U
 choice there is UTC: the kernel's own clock is then off, as it already was for what checks
 certificates. Tying this to real time zones needs their rules on the stick: to decide later.
 
-To come in this stage: the programs' menus in the bar, the network in the bar, notifications, and
-the manifests' names and icons.
+**The menus.** A program gives text and numbers, within fixed bounds (6 menus of 10 rows), and the
+compositor draws them: a hung program's menus still open, and a program parses nothing of anyone
+else's. They open with the pointer, by click or by press and drag, and with F10, the arrows, Enter
+and Esc, for a machine whose pointer does not work. A key held with a menu open moves in it and
+never reaches the program. `aricode_ui::EDIT_MENU` is the Edit menu, which does what its keys do.
+
+Choosing the row named exactly `Paste` opens the clipboard once, as Ctrl+V does. It rests on the
+owner reading that word: a program cannot get the clipboard from a row with any other name, but it
+could name a row Paste and do something else with that one read. The name is the compromise; the
+rule stays that nothing reads the clipboard without the owner's act.
+
+To come in this stage: the network in the bar, notifications, and the manifests' names and icons.
 
 Next: those, then the shell (stage 3).
