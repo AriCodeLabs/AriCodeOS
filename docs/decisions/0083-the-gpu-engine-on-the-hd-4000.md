@@ -246,7 +246,14 @@ GPU at its lowest clock, 350 MHz; each GPU time includes the submit and the wait
   the hardware alone does not hold the line on this family. The check is a list of five
   commands; a client needing more gets them added one by one, each with its limits.
 - Any application may ask for `gpu` in its manifest: through it a program reaches only
-  its own buffers, and one program at a time.
+  its own buffers, and one program at a time. **The owner's choice (2026-11-07), after
+  audit L8:** no narrowing by signature now, since every program that can run today is
+  signed (the system image or a package verified against the release key) and narrowing
+  would change nothing. When applications from other publishers arrive (their own ADR,
+  as ADR 0073 left them out), `gpu` becomes a permission the owner grants to each
+  application at install and can take back, not one the manifest alone obtains. What
+  limits heavy programs (video editing, training models) today is elsewhere: the GPU only
+  fills and copies until stages B and C, and an application's memory is capped at 8 MiB.
 - **Audit** (`docs/audits/2026-11-07-gpu-stage-a.md`): no way past the batch check was
   found. One High and four Medium fixed: memory a stuck engine may reach is kept for good,
   never freed; the screen must be covered to its end and the kernel's GPU pages sit past
