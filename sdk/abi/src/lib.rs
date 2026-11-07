@@ -12,8 +12,9 @@
 //! the handles [`handle::SELF_PROCESS`], [`handle::MAIN_THREAD`] and
 //! [`handle::CONSOLE`].
 //!
-//! During `0.x` the ABI may change (section 74). Current version: 10
-//! (ADR 0083: the `GPU` object at `INIT_GPU`, which moves `INIT_PS2` one
+//! During `0.x` the ABI may change (section 74). Current version: 11
+//! (ADR 0084: the `MEM` object, `mem_create`, and `mmio_map` and `gpu_map`
+//! taking it). Version 10 (ADR 0083: the `GPU` object at `INIT_GPU`, which moves `INIT_PS2` one
 //! on; `gpu_map`, `gpu_unmap`, `gpu_submit`, `gpu_wait`; `Error::Busy` and
 //! `Error::Hung`; `sysinfo::GPU`). Version 9 (ADR 0082: threads in a
 //! process, `thread_create`, `thread_exit`, `thread_join`, `futex_wait`,
@@ -28,7 +29,7 @@
 
 #![no_std]
 
-pub const ABI_VERSION: u32 = 10;
+pub const ABI_VERSION: u32 = 11;
 
 /// Kernel base signature (SHA-512), required to check and verify the origin
 /// and authorship of an AriCodeOS build. It is part of the fixed ABI: it is
@@ -161,6 +162,8 @@ pub mod kind {
     pub const PS2: u64 = 12;
     /// The GPU's engine (ADR 0083): memory mapped for it, batches run on it.
     pub const GPU: u64 = 13;
+    /// Memory that need not be contiguous, backed on first touch (ADR 0084).
+    pub const MEM: u64 = 14;
 }
 
 /// The GPU (ADR 0083). One process at a time is its client: the first that
@@ -273,7 +276,8 @@ pub mod nr {
     /// `IPC_RECEIVE_ANY` (ADR 0044).
     pub const IRQ_WAIT: u64 = 16;
     /// `mmio_map(region) -> virtual address`; requires `READ|WRITE` on an
-    /// MMIO or DMA object. Mapping a region the process already maps
+    /// MMIO, DMA or `MEM` object (a `MEM` object's pages are taken as they are
+    /// first touched, ADR 0084). Mapping a region the process already maps
     /// returns the existing mapping. A DMA buffer stays allocated while any
     /// process maps it, even after every handle to it is closed (ADR 0038);
     /// with a memory quota, the DMA bytes a process keeps mapped count
@@ -383,8 +387,9 @@ pub mod nr {
     /// `futex_wake(addr, count) -> woken`: wakes up to `count` threads of the
     /// calling process waiting on `addr`, the oldest first.
     pub const FUTEX_WAKE: u64 = 42;
-    /// `gpu_map(gpu, dma, address)` (ADR 0083): maps the whole DMA buffer
-    /// into the client's GPU address space at `address`, a multiple of
+    /// `gpu_map(gpu, dma, address)` (ADR 0083): maps the whole DMA buffer or
+    /// `MEM` object (every page of which is taken first, ADR 0084) into the
+    /// client's GPU address space at `address`, a multiple of
     /// [`gpu::PAGE`](crate::gpu::PAGE) in `[gpu::FIRST, gpu::SIZE)`, not
     /// overlapping another mapping. Requires `WRITE` on the `GPU` and
     /// `READ|WRITE` on the buffer (the GPU can write every page it sees).
@@ -419,6 +424,16 @@ pub mod nr {
     /// `Busy` if another process is the client; `Killed` if the caller is
     /// being ended.
     pub const GPU_WAIT: u64 = 46;
+    /// `mem_create(len) -> handle` (ADR 0084): `len` bytes (whole pages) of
+    /// zeroed memory that need not be contiguous, with
+    /// `READ|WRITE|DUPLICATE|TRANSFER`. Its whole size is charged to the
+    /// process's memory quota and promised out of the machine's free memory
+    /// now; each page is taken when first touched, and is always there then.
+    /// Mapped with `mmio_map` and unmapped with `mmio_unmap`, as a DMA buffer
+    /// is; it lives while any handle or mapping holds it. `Limit` beyond the
+    /// quota or what the machine can promise; `Invalid` for a size that is
+    /// 0 or not whole pages. `dma_phys` refuses it.
+    pub const MEM_CREATE: u64 = 47;
 }
 
 /// `process_spawn_from` request (48 bytes in caller memory).
@@ -589,6 +604,10 @@ pub mod sysinfo {
     /// A [`GpuReport`]: whether the kernel took the GPU's engine and, if not,
     /// why (ADR 0083).
     pub const GPU: u64 = 17;
+    /// One `u64`: frames promised to memory objects and not taken yet (ADR
+    /// 0084). They count as free in [`MEMORY`] but no allocation other than
+    /// their objects' own pages can have them.
+    pub const MEMORY_PROMISED: u64 = 18;
 
     /// The state of the GPU's engine ([`GPU`]).
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

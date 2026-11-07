@@ -1,0 +1,18 @@
+# ADR 0084: memory for big programs. mem_probe makes a 64 MiB memory object that
+# takes nothing until touched and about what is touched, gets it all back when it
+# lets go, lets a call write into an untouched page, grows its heap to 40 MiB (past
+# the old 8 MiB) and is refused beyond half the machine, though its manifest asked
+# for 1 GiB.
+name = "memory.big"
+description = "memory objects backed on first touch, a growing heap, and the share of the machine"
+level = "smoke"
+areas = ["memory", "apps"]
+timeout_secs = 90
+
+[[boots]]
+cmdline = "qemu_exit shell"
+stdin = ["run mem_probe", "shutdown"]
+[boots.expect]
+exit = 33
+serial_contains = ["mem_probe: ok", "run: mem_probe exited with 0", "ARICODEOS_SHUTDOWN"]
+serial_absent = ["KERNEL PANIC", "USER OUT OF MEMORY"]

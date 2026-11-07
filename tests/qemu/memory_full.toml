@@ -1,0 +1,16 @@
+# ADR 0084, audit H1: with mem.app_max_pct=100 one program may be promised all
+# the machine can promise; it touches every page of it, and none fails, nothing
+# is killed and the kernel goes on (diag runs after).
+name = "memory.full"
+description = "a program promised all the machine can promise touches every page and nothing fails"
+level = "smoke"
+areas = ["memory", "apps"]
+timeout_secs = 180
+
+[[boots]]
+cmdline = "qemu_exit shell mem.app_max_pct=100"
+stdin = ["run mem_probe 1", "diag", "shutdown"]
+[boots.expect]
+exit = 33
+serial_contains = ["mem_probe: full ok", "run: mem_probe exited with 0", "usable physical memory", "ARICODEOS_SHUTDOWN"]
+serial_absent = ["KERNEL PANIC", "USER OUT OF MEMORY", "out of frames"]

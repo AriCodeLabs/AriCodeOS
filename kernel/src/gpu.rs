@@ -506,27 +506,51 @@ fn release_client(e: &mut Engine) -> Vec<Mapping> {
     maps
 }
 
-/// Points the PPGTT's pages at `phys` onwards, or at the scratch page.
-fn set_pages(e: &mut Engine, address: u32, pages: u32, phys: Option<u64>) {
-    let tables = dwords(self::phys(&e.pages.tables), e.layout.directory_entries);
-    for i in 0..pages {
+/// Points the PPGTT's pages from `address` at `frame(i)`, or at the
+/// scratch page; `false` if a frame could not be had, the pages done so far
+/// pointed back at the scratch page.
+fn set_pages(
+    e: &mut Engine,
+    address: u32,
+    pages: u32,
+    frame: Option<&dyn Fn(u32) -> Option<u64>>,
+) -> bool {
+    let tables = dwords(phys(&e.pages.tables), e.layout.directory_entries);
+    let at = |i: u32| {
         let (dir, entry) = ppgtt::split(address + i * FRAME_SIZE as u32);
-        let value = phys
-            .and_then(|p| gtt::encode(p + i as u64 * FRAME_SIZE, Cache::Llc))
-            .unwrap_or(e.scratch_pte);
-        let at = (dir * ppgtt::TABLE_ENTRIES + entry) as usize;
-        tables[at] = value;
-        flush_lines(&tables[at], 4);
+        (dir * ppgtt::TABLE_ENTRIES + entry) as usize
+    };
+    for i in 0..pages {
+        let value = match frame {
+            None => e.scratch_pte,
+            Some(f) => match f(i).and_then(|p| gtt::encode(p, Cache::Llc)) {
+                Some(v) => v,
+                None => {
+                    for j in 0..i {
+                        tables[at(j)] = e.scratch_pte;
+                        flush_lines(&tables[at(j)], 4);
+                    }
+                    return false;
+                }
+            },
+        };
+        tables[at(i)] = value;
+        flush_lines(&tables[at(i)], 4);
     }
+    true
 }
 
-/// `gpu_map`: `dma` at `address` in the client's PPGTT.
+/// `gpu_map`: `dma`, a DMA buffer or a memory object (ADR 0084), at
+/// `address` in the client's PPGTT. A memory object's pages are taken as
+/// they are mapped, and stay while the mapping holds the object.
 pub fn map(dma: ObjectRef, address: u64) -> Result<(), Error> {
-    let (base, len) = match &dma.kind {
-        ObjectKind::Dma(d) => (d.region.phys, d.region.len),
+    use aricode_abi::gpu::{FIRST, PAGE, SIZE};
+    let len = match &dma.kind {
+        ObjectKind::Dma(d) => d.region.len.next_multiple_of(PAGE),
+        ObjectKind::Mem(m) => m.len(),
         _ => return Err(Error::Invalid),
     };
-    use aricode_abi::gpu::{FIRST, PAGE, SIZE};
+    // Checked before any page is taken (audit of ADR 0084, H2).
     if !address.is_multiple_of(PAGE)
         || address < FIRST
         || address.saturating_add(len) > SIZE
@@ -534,13 +558,13 @@ pub fn map(dma: ObjectRef, address: u64) -> Result<(), Error> {
     {
         return Err(Error::Invalid);
     }
-    let (address, pages) = (address as u32, len.div_ceil(PAGE) as u32);
+    let (address, pages) = (address as u32, (len / PAGE) as u32);
     let (mut e, _) = take()?;
     if e.dead {
         return Err(Error::Hung);
     }
     claim()?;
-    if e.maps.len() >= MAX_MAPS {
+    if e.maps.len() >= MAX_MAPS || e.maps.try_reserve(1).is_err() {
         return Err(Error::Limit);
     }
     let end = address + pages * PAGE as u32;
@@ -550,9 +574,16 @@ pub fn map(dma: ObjectRef, address: u64) -> Result<(), Error> {
     {
         return Err(Error::Invalid);
     }
+    let frame = |i: u32| match &dma.kind {
+        ObjectKind::Dma(d) => Some(d.region.phys + i as u64 * PAGE),
+        ObjectKind::Mem(m) => m.page(i as usize),
+        _ => None,
+    };
+    if !set_pages(&mut e, address, pages, Some(&frame)) {
+        return Err(Error::Limit);
+    }
     // Every table exists from boot; the next request invalidates the GPU's
     // TLB before its batch.
-    set_pages(&mut e, address, pages, Some(base));
     e.maps.push(Mapping {
         address,
         pages,

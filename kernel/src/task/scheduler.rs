@@ -509,6 +509,9 @@ pub fn threads_selftest() {
         }
     }
     assert_eq!(current_tid(), MAIN_TID, "the self-test runs on main");
+    // The kernel's own threads (cursor, reclaim, gpu, thermal, idle) vary
+    // with the machine; the test's own must all be gone at the end.
+    let baseline = thread_count();
     // Strict alternation only makes sense on one CPU: the three threads are
     // pinned to CPU 0.
     set_affinity(MAIN_TID, Some(0)).unwrap();
@@ -559,12 +562,10 @@ pub fn threads_selftest() {
         "frames not returned after reap: {}",
         free_before - free_after
     );
-    // main, the console cursor thread and one idle thread per CPU.
-    let expected = 2 + cpu::online_count();
     assert_eq!(
         thread_count(),
-        expected,
-        "only main, the cursor thread and one idle per CPU"
+        baseline,
+        "every thread the self-test made is reaped"
     );
     assert_eq!(current_tid(), MAIN_TID);
     info!(

@@ -74,6 +74,7 @@ pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
         nr::REGION_LEN => with_handles(|t| match lookup(t, h, Rights::READ)?.kind {
             ObjectKind::Mmio(ref r) => Ok(r.len),
             ObjectKind::Dma(ref d) => Ok(d.region.len),
+            ObjectKind::Mem(ref m) => Ok(m.len()),
             _ => Err(Error::Invalid),
         }),
         nr::DMA_ALLOC => dma_alloc(h, frame.rsi),
@@ -126,6 +127,7 @@ pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
             .map(|()| 0),
         nr::GPU_SUBMIT => gpu_object(h).and_then(|_| crate::gpu::submit(frame.rsi, frame.rdx)),
         nr::GPU_WAIT => gpu_object(h).and_then(|_| crate::gpu::wait(frame.rsi, frame.rdx)),
+        nr::MEM_CREATE => mem_create(frame.rdi),
         n => {
             warn!("unknown syscall {n} from rip={:#x}", frame.user_rip);
             Err(Error::NoSys)
@@ -343,6 +345,7 @@ fn system_info(h: Handle, kind: u64, ptr: u64, len: u64) -> Result<u64, Error> {
             None => return Err(Error::NotFound),
         },
         sysinfo::GPU => crate::gpu::report().encode().to_vec(),
+        sysinfo::MEMORY_PROMISED => (crate::hw::promised() as u64).to_le_bytes().to_vec(),
         sysinfo::DISPLAY => match crate::framebuffer::abi_display() {
             Some(d) => d.encode().to_vec(),
             None => return Err(Error::NotFound),
@@ -747,7 +750,9 @@ fn spawn_from_bytes(
     limits: u64,
 ) -> Result<u64, Error> {
     let handles_len = aricode_abi::spawn_limits::handles(limits) as u64;
-    let dma_quota = aricode_abi::spawn_limits::memory_kib(limits) as u64 * 1024;
+    // At most the share of the machine one process may hold (ADR 0084).
+    let dma_quota =
+        process::grantable_quota(aricode_abi::spawn_limits::memory_kib(limits) as u64 * 1024);
     let threads = aricode_abi::spawn_limits::threads(limits);
     let console_first = aricode_abi::spawn_limits::console_first(limits);
     if handles_len as usize > IPC_MAX_HANDLES * 4 {
@@ -951,7 +956,7 @@ fn gpu_map(h: Handle, dma: Handle, address: u64) -> Result<u64, Error> {
     let buffer = with_handles(|t| {
         let o = lookup(t, dma, Rights::READ.union(Rights::WRITE))?;
         match o.kind {
-            ObjectKind::Dma(_) => Ok(o.clone()),
+            ObjectKind::Dma(_) | ObjectKind::Mem(_) => Ok(o.clone()),
             _ => Err(Error::Invalid),
         }
     })?;
@@ -975,10 +980,19 @@ fn irq_wait(h: Handle, timeout_ms: u64) -> Result<u64, Error> {
 }
 
 fn mmio_map(h: Handle) -> Result<u64, Error> {
+    let mem = with_handles(|t| {
+        let o = lookup(t, h, Rights::READ.union(Rights::WRITE))?;
+        Ok(matches!(o.kind, ObjectKind::Mem(_)).then(|| o.clone()))
+    })?;
+    if let Some(mem) = mem {
+        return process::map_memory(mem).map(|m| m.virt);
+    }
     let (phys, len, caching, source_id, dma) = with_handles(|t| {
         let o = lookup(t, h, Rights::READ.union(Rights::WRITE))?;
         match o.kind {
             ObjectKind::Mmio(ref r) => Ok((r.phys, r.len, r.caching, r.source_id, None)),
+            // Mapped above; here only if another thread swapped the handle.
+            ObjectKind::Mem(_) => Err(Error::Invalid),
             // The mapping holds the buffer (ADR 0038).
             ObjectKind::Dma(ref d) => Ok((
                 d.region.phys,
@@ -1045,6 +1059,29 @@ fn event_record(code: Handle, name_ptr: u64, name_len: u64) -> Result<u64, Error
     let name = core::str::from_utf8(&raw).map_err(|_| Error::Invalid)?;
     process::record_event(aricode_abi::sysinfo::EventKind::Fault, code.0 as u64, name);
     Ok(0)
+}
+
+/// `mem_create` (ADR 0084): a memory object charged to the process's quota
+/// and promised out of the machine's free memory, its pages taken on touch.
+fn mem_create(len: u64) -> Result<u64, Error> {
+    if len == 0 || !len.is_multiple_of(4096) {
+        return Err(Error::Invalid);
+    }
+    let Ok(charge) = process::charge_memory(len) else {
+        process::record_event(aricode_abi::sysinfo::EventKind::DmaQuota, len, "mem_create");
+        return Err(Error::Limit);
+    };
+    let mem =
+        crate::hw::mem_alloc(len, process::KERNEL_RESERVE_FRAMES, Some(charge)).map_err(|e| {
+            warn!("mem_create: {e} ({len} bytes)");
+            Error::Limit
+        })?;
+    let rights = Rights::READ
+        .union(Rights::WRITE)
+        .union(Rights::DUPLICATE)
+        .union(Rights::TRANSFER);
+    // A refused object goes with `mem`, outside the table's lock.
+    with_handles(|t| insert(t, mem.clone(), rights).map(|h| h.0 as u64))
 }
 
 fn dma_alloc(h: Handle, len: u64) -> Result<u64, Error> {

@@ -374,6 +374,16 @@ fn mem() {
     print(b" MiB in use (");
     num(total);
     print(b" 4 KiB frames)\n");
+    // Promised to memory objects, not taken yet: free, but theirs (ADR 0084).
+    let mut promised = [0u8; 8];
+    if sys::system_info(SYSTEM, abi::sysinfo::MEMORY_PROMISED, &mut promised) == Ok(8) {
+        let frames = u64::from_le_bytes(promised);
+        if frames != 0 {
+            print(b"promised to memory objects: ");
+            num(frames * 4 / 1024);
+            print(b" MiB of the free\n");
+        }
+    }
 }
 
 fn uptime() {

@@ -395,6 +395,67 @@ impl<A: FrameAlloc, M: PhysMap> Mapper<A, M> {
         Ok(phys)
     }
 
+    /// Creates the intermediate tables of every 4 KiB page of
+    /// `[virt, virt + len)` without mapping any page, so later `map_4k`s in
+    /// the range allocate nothing (ADR 0084: a memory object's pages are
+    /// mapped at fault time, where no table may be needed). At most
+    /// [`tables_for`] frames are taken.
+    pub fn prepare_4k(&mut self, virt: u64, len: u64, user: bool) -> Result<(), MapError> {
+        if !virt.is_multiple_of(PAGE_SIZE) || !len.is_multiple_of(PAGE_SIZE) {
+            return Err(MapError::Unaligned);
+        }
+        let end = virt.checked_add(len).ok_or(MapError::Unaligned)?;
+        let mut at = virt & !(HUGE_2M - 1);
+        while at < end {
+            let pdpt = self
+                .next_level(self.root, index(at, 39), true, user)?
+                .expect("create");
+            let pd = self
+                .next_level(pdpt, index(at, 30), true, user)?
+                .expect("create");
+            self.next_level(pd, index(at, 21), true, user)?;
+            at += HUGE_2M;
+        }
+        Ok(())
+    }
+
+    /// Clears every present 4 KiB leaf of `[virt, virt + len)`, calling
+    /// `cleared(page)` for each, without walking tables that are absent; the
+    /// tables stay. Neither frees frames nor invalidates the TLB.
+    pub fn unmap_present_4k(&mut self, virt: u64, len: u64, mut cleared: impl FnMut(u64)) {
+        let end = virt.saturating_add(len);
+        let mut at = virt & !(PAGE_SIZE - 1);
+        while at < end {
+            let next_2m = (at & !(HUGE_2M - 1)) + HUGE_2M;
+            let pt = self
+                .next_level(self.root, index(at, 39), false, false)
+                .ok()
+                .flatten()
+                .and_then(|pdpt| {
+                    self.next_level(pdpt, index(at, 30), false, false)
+                        .ok()
+                        .flatten()
+                })
+                .and_then(|pd| {
+                    self.next_level(pd, index(at, 21), false, false)
+                        .ok()
+                        .flatten()
+                });
+            let Some(pt) = pt else {
+                at = next_2m;
+                continue;
+            };
+            while at < end.min(next_2m) {
+                let slot = &mut self.table_mut(pt)[index(at, 12)];
+                if *slot & PRESENT != 0 {
+                    *slot = 0;
+                    cleared(at);
+                }
+                at += PAGE_SIZE;
+            }
+        }
+    }
+
     /// Physical address and flags of the leaf covering `virt` (4 KiB or 2 MiB).
     pub fn translate(&self, virt: u64) -> Option<(u64, u64)> {
         let mut table = self.root;
@@ -422,6 +483,13 @@ impl<A: FrameAlloc, M: PhysMap> Mapper<A, M> {
             pte & !ADDR_MASK,
         ))
     }
+}
+
+/// The most table frames [`Mapper::prepare_4k`] can take for `len` bytes
+/// at any address: a page table per 2 MiB, a directory per 1 GiB, a PDPT per
+/// 512 GiB, each counted once more for a range that straddles a boundary.
+pub const fn tables_for(len: u64) -> u64 {
+    len / HUGE_2M + 2 + len / (1 << 30) + 2 + len / (1 << 39) + 2
 }
 
 /// PML4 entries that belong to the kernel (upper half).
@@ -654,6 +722,51 @@ mod tests {
                 unsafe { dealloc(p, Self::layout()) };
             }
         }
+    }
+
+    #[test]
+    fn prepared_ranges_map_without_new_tables_and_unmap_only_what_is_present() {
+        let base = 0x10_0000_0000u64 - HUGE_2M / 2; // straddles a 2 MiB boundary
+        let len = 3 * HUGE_2M;
+        let mut m = mapper(64);
+        m.prepare_4k(base, len, true).unwrap();
+        let used = m.allocator().live.len();
+        assert!(
+            used as u64 - 1 <= tables_for(len),
+            "root plus at most tables_for"
+        );
+        // Every page maps now with no frame taken for tables.
+        let phys = m.allocator().alloc_frame().unwrap();
+        let after = m.allocator().live.len();
+        for page in [base, base + HUGE_2M, base + len - PAGE_SIZE] {
+            m.map_4k(page, phys, USER | WRITABLE).unwrap();
+        }
+        assert_eq!(
+            m.allocator().live.len(),
+            after,
+            "no table allocated at map time"
+        );
+        let mut cleared = Vec::new();
+        m.unmap_present_4k(base, len, |p| cleared.push(p));
+        assert_eq!(cleared, [base, base + HUGE_2M, base + len - PAGE_SIZE]);
+        assert!(m.translate(base).is_none() && m.translate(base + HUGE_2M).is_none());
+        // Absent tables are skipped, and an unprepared range clears nothing.
+        let mut none = 0;
+        m.unmap_present_4k(0x20_0000_0000, 1 << 30, |_| none += 1);
+        assert_eq!(none, 0);
+        assert_eq!(
+            m.prepare_4k(base + 1, PAGE_SIZE, true),
+            Err(MapError::Unaligned)
+        );
+    }
+
+    #[test]
+    fn preparing_fails_cleanly_without_frames() {
+        let mut m = mapper(2);
+        assert_eq!(
+            m.prepare_4k(0x40_0000, 4 * HUGE_2M, true),
+            Err(MapError::OutOfFrames)
+        );
     }
 
     fn mapper(frames: usize) -> Mapper<HostFrames, IdentityMap> {

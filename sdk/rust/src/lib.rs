@@ -439,6 +439,12 @@ pub fn gpu_wait(gpu: Handle, number: u64, timeout_ms: u64) -> Result<(), Error> 
     call(nr::GPU_WAIT, gpu.0 as u64, number, timeout_ms, 0).map(|_| ())
 }
 
+/// A memory object of `len` bytes, whole pages, taken as they are first
+/// touched (ADR 0084): map it with [`mmio_map`].
+pub fn mem_create(len: u64) -> Result<Handle, Error> {
+    call(nr::MEM_CREATE, len, 0, 0, 0).map(|v| Handle(v as u32))
+}
+
 pub fn dma_phys(dma: Handle) -> Result<u64, Error> {
     call(nr::DMA_PHYS, dma.0 as u64, 0, 0, 0)
 }

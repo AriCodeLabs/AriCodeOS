@@ -1,0 +1,6 @@
+# ADR 0084: memory objects backed on first touch, the heap growing past the old
+# 8 MiB, and the ceiling of half the machine (`run mem_probe`). It asks for 1 GiB;
+# under QEMU's 512 MiB the kernel grants about half of that.
+name = mem_probe
+caps = system
+memory = 1G

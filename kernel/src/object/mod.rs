@@ -37,6 +37,8 @@ pub enum ObjectKind {
     /// The GPU's engine (ADR 0083): `gpu_map`, `gpu_unmap`, `gpu_submit`,
     /// `gpu_wait` (`WRITE`).
     Gpu,
+    /// Memory that need not be contiguous, backed on first touch (ADR 0084).
+    Mem(crate::hw::MemObject),
 }
 
 /// Object shared by every handle that refers to it. Revoking it invalidates
@@ -82,6 +84,7 @@ impl KernelObject {
             ObjectKind::System => kind::SYSTEM,
             ObjectKind::Ps2 => kind::PS2,
             ObjectKind::Gpu => kind::GPU,
+            ObjectKind::Mem(_) => kind::MEM,
         }
     }
 
