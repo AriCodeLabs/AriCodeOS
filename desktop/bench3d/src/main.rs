@@ -39,8 +39,9 @@ const SCENE_US: u64 = 5_000_000;
 /// A scene starts below this, and stops at that: the method of ADR 0080, 4b.
 const COOL_C: u32 = 70;
 const STOP_C: u32 = 90;
-/// More heap, for the depth buffer, the meshes, the texture and a copy of a frame.
-const MORE_HEAP: usize = 5632 * 1024;
+/// More heap, for the depth buffer, the meshes, the texture, the picture the 2D effects
+/// filter and the frame being drawn: with the window, within the manifest's 8 MiB.
+const MORE_HEAP: usize = 6144 * 1024;
 const KEY_ESC: u16 = 1;
 
 #[derive(Clone, Copy)]
@@ -164,7 +165,8 @@ fn material(shading: Shading, color: [f32; 3]) -> Material<'static> {
     }
 }
 
-/// One frame of a scene at `t` seconds into it, onto the window's pixels.
+/// One frame of a scene at `t` seconds into it, onto `pixels`: the frame being drawn,
+/// never the window's buffer, which the compositor may read at any moment.
 fn frame(kind: Kind, t: f32, a: &mut Assets, pixels: &mut [u32]) -> Stats {
     const SKY: u32 = 0x182030;
     let mut stats = Stats::default();
@@ -377,6 +379,10 @@ struct App {
     win: Window,
     system: Handle,
     text: Typesetter,
+    /// The frame being drawn. The compositor reads the window's buffer whenever it
+    /// makes a frame of the screen, so a frame drawn there shows half made: models cut
+    /// and empty zones. Only a finished frame is copied there, by [`App::show`].
+    back: Vec<u32>,
 }
 
 /// The owner asked to stop: the close box or Esc.
@@ -400,9 +406,21 @@ impl App {
         }
     }
 
+    /// The frame being drawn, to paint on.
+    fn screen(&mut self) -> Canvas<'_> {
+        Canvas::new(&mut self.back, W as u32, H as u32, W as u32).expect("frame buffer")
+    }
+
+    /// Copies the finished frame to the window in one pass and shows it.
+    fn show(&mut self) {
+        self.win.canvas().pixels.copy_from_slice(&self.back);
+        let _ = self.win.present();
+    }
+
     /// Words on the frame, on a dark band so they read over any scene.
     fn hud(&mut self, lines: &[String]) {
-        let mut c = self.win.canvas();
+        let mut c =
+            Canvas::new(&mut self.back, W as u32, H as u32, W as u32).expect("frame buffer");
         let band = Rect::new(12, 12, 360, 22 * lines.len() as u32 + 12);
         c.rounded(&band, 8, rgb(0x10, 0x14, 0x1c));
         for (i, l) in lines.iter().enumerate() {
@@ -426,12 +444,12 @@ impl App {
             if c < COOL_C {
                 return Ok(());
             }
-            self.win.canvas().fill(rgb(0x18, 0x20, 0x30));
+            self.screen().fill(rgb(0x18, 0x20, 0x30));
             self.hud(&[
                 format!("Next: {next}"),
                 format!("Cooling: {c} C, it starts below {COOL_C} C"),
             ]);
-            let _ = self.win.present();
+            self.show();
             for _ in 0..50 {
                 self.events()?;
                 sys::thread_sleep(10);
@@ -460,10 +478,7 @@ impl App {
         loop {
             let f0 = now_us(self.system);
             let t = (f0 - start) as f32 / 1e6;
-            let stats = {
-                let c = self.win.canvas();
-                frame(kind, t, a, &mut *c.pixels)
-            };
+            let stats = frame(kind, t, a, &mut self.back);
             out.stats += stats;
             let n = out.frames.len() as u64;
             let elapsed = (f0 - start).max(1);
@@ -491,7 +506,7 @@ impl App {
                     current.clone()
                 },
             ]);
-            let _ = self.win.present();
+            self.show();
             let f1 = now_us(self.system);
             out.frames.push((f1 - f0).min(u32::MAX as u64) as u32);
             out.elapsed_us = f1 - start;
@@ -507,12 +522,25 @@ impl App {
     }
 }
 
-fn assets(hw: Handle) -> Option<Assets> {
+/// A buffer of `n` copies of `v`, or `None` when the heap has no room for it.
+fn buffer<T: Copy>(n: usize, v: T) -> Option<Vec<T>> {
+    let mut b = Vec::new();
+    b.try_reserve_exact(n).ok()?;
+    b.resize(n, v);
+    Some(b)
+}
+
+/// The scenes' meshes and textures, and the frame to draw on.
+fn assets(hw: Handle) -> Option<(Assets, Vec<u32>)> {
     let heap = sys::dma_alloc(hw, MORE_HEAP as u64)
         .ok()
         .and_then(|d| sys::mmio_map(d).ok())?;
     // SAFETY: a new mapping of whole pages, never unmapped, used by nothing else.
     unsafe { aricode_rt::extend_heap(heap as usize, MORE_HEAP) };
+    // The large buffers first, so a heap too small says so instead of stopping.
+    let back = buffer(W * H, 0u32)?;
+    let depth = buffer(W * H, u16::MAX)?;
+    let picture = buffer(W * H, 0u32)?;
     let texture = Texture::checker(256, 8, 0xF0F0F0, 0x3070C0);
     let terrain = Mesh::terrain(120.0, 96, 4.0);
     let mut a = Assets {
@@ -522,14 +550,14 @@ fn assets(hw: Handle) -> Option<Assets> {
         cube: Mesh::cube(),
         terrain,
         texture,
-        depth: alloc::vec![u16::MAX; W * H],
-        picture: alloc::vec![0; W * H],
+        depth,
+        picture,
     };
     // The picture the 2D effects filter: a frame of the heaviest scene.
     let mut picture = core::mem::take(&mut a.picture);
     frame(Kind::Everything, 1.0, &mut a, &mut picture);
     a.picture = picture;
-    Some(a)
+    Some((a, back))
 }
 
 fn main(arg: u64) -> u64 {
@@ -548,7 +576,7 @@ fn main(arg: u64) -> u64 {
         return 1;
     };
     say("making its scenes");
-    let Some(mut a) = assets(hw) else {
+    let Some((mut a, back)) = assets(hw) else {
         say("no memory for its scenes");
         return 2;
     };
@@ -563,6 +591,7 @@ fn main(arg: u64) -> u64 {
         win,
         system,
         text: Typesetter::new(),
+        back,
     };
     let quick = arg;
     let head = header(system);
@@ -588,7 +617,7 @@ fn main(arg: u64) -> u64 {
         return 0;
     }
     // The table stays until the owner closes it.
-    app.win.canvas().fill(rgb(0x18, 0x20, 0x30));
+    app.screen().fill(rgb(0x18, 0x20, 0x30));
     let mut lines = alloc::vec![String::from("bench3d: frames a second, drawn by the CPU")];
     for (name, fps, hot) in &results {
         lines.push(format!(
@@ -597,7 +626,7 @@ fn main(arg: u64) -> u64 {
         ));
     }
     app.hud(&lines);
-    let _ = app.win.present();
+    app.show();
     while app.events().is_ok() {
         sys::thread_sleep(100);
     }
