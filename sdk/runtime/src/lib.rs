@@ -22,6 +22,7 @@ extern crate alloc;
 pub use aricode_sys as sys;
 
 mod mem;
+pub mod thread;
 
 /// The target's precompiled `core` and `alloc` were built to unwind: their
 /// cleanup paths call `_Unwind_Resume` and their unwind tables name
@@ -67,7 +68,21 @@ mod user_heap {
 
     impl UserHeap {
         fn with<R>(&self, f: impl FnOnce(&mut Heap) -> R) -> R {
-            let mut guard = self.heap.lock();
+            // Spins a little, then yields: with several threads the holder may be
+            // preempted, and contention alone must never end the program (the
+            // lock's own wait panics after 2^26 spins, ADR 0082).
+            let mut spins = 0u32;
+            let mut guard = loop {
+                if let Some(g) = self.heap.try_lock() {
+                    break g;
+                }
+                spins = spins.wrapping_add(1);
+                if spins.is_multiple_of(64) {
+                    crate::sys::thread_yield();
+                } else {
+                    core::hint::spin_loop();
+                }
+            };
             let heap = guard.get_or_insert_with(|| {
                 let mut h = Heap::empty();
                 // SAFETY: static page-aligned region, exclusive to the heap.

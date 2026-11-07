@@ -462,7 +462,7 @@ fn reap() {
     for z in zombies {
         debug!("task: reap {:?} '{}'", z.tid, z.name);
         if let Some(pid) = z.process {
-            crate::user::process::release_address_space(pid);
+            crate::user::process::thread_reaped(pid);
         }
         drop(z);
     }

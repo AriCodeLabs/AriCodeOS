@@ -1,0 +1,18 @@
+# ADR 0082: TLB shootdown for a process's memory. A thread writes a DMA page in a
+# loop on one CPU while another thread of the process unmaps it: the writer must
+# fault (the process ends with #PF write), never go on writing freed memory.
+name = "user.thread_unmap"
+description = "a page unmapped while another thread writes it on another CPU faults that thread"
+level = "full"
+areas = ["user", "smp", "memory"]
+cpus = 4
+cmdline = "qemu_exit test=thread_unmap"
+timeout_secs = 90
+
+[expect]
+exit = 33
+serial_contains = [
+    "unmapped a page another CPU was writing; the writer faulted: OK",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC", "the writer still writes after the unmap"]

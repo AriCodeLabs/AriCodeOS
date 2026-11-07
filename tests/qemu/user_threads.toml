@@ -1,0 +1,23 @@
+# ADR 0082: threads in a process, from ring 3. Threads that compute in floating
+# point and are joined, a futex ping-pong, a pool's rounds, the limit of 8, and
+# join's and futex's refusals. Four CPUs, so the threads really run at once.
+name = "user.threads"
+description = "threads: create, join, futex, a pool, the limit, refusals; on 4 CPUs"
+level = "full"
+areas = ["user", "smp"]
+cpus = 4
+cmdline = "qemu_exit test=user_threads"
+timeout_secs = 60
+
+[expect]
+exit = 33
+serial_contains = [
+    "threads: three threads computed and joined",
+    "threads: a futex ping-pong of 1000 turns",
+    "threads: a pool of 4 ran 200 rounds",
+    "threads: the limit of 8 threads holds, and joining frees a place",
+    "threads: join and futex refuse what they should",
+    "'threads' exited with code 21",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC", "USER FAULT"]

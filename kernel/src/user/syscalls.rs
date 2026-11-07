@@ -111,6 +111,11 @@ pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
         nr::SYSTEM_POWER => system_power(h, frame.rsi),
         nr::INITRD_READ => initrd_read(h, frame.rsi, frame.rdx, frame.r10, frame.r8),
         nr::PS2_READ => ps2_read(h, frame.rsi, frame.rdx),
+        nr::THREAD_CREATE => process::create_thread(frame.rdi, frame.rsi),
+        nr::THREAD_EXIT => process::exit_thread(frame.rdi),
+        nr::THREAD_JOIN => process::join_thread(frame.rdi, deadline_from(frame.rsi)),
+        nr::FUTEX_WAIT => super::futex::wait(frame.rdi, frame.rsi as u32, deadline_from(frame.rdx)),
+        nr::FUTEX_WAKE => super::futex::wake(frame.rdi, frame.rsi),
         n => {
             warn!("unknown syscall {n} from rip={:#x}", frame.user_rip);
             Err(Error::NoSys)
@@ -712,6 +717,7 @@ fn spawn_from_bytes(
 ) -> Result<u64, Error> {
     let handles_len = aricode_abi::spawn_limits::handles(limits) as u64;
     let dma_quota = aricode_abi::spawn_limits::memory_kib(limits) as u64 * 1024;
+    let threads = aricode_abi::spawn_limits::threads(limits);
     let console_first = aricode_abi::spawn_limits::console_first(limits);
     if handles_len as usize > IPC_MAX_HANDLES * 4 {
         return Err(Error::TooBig);
@@ -752,7 +758,8 @@ fn spawn_from_bytes(
         let (taken, _) = extra.remove(0);
         Cap::new(taken.object().clone(), Rights::WRITE)
     });
-    let pid = match process::spawn_with_caps(name, elf, session_console, extra, arg, dma_quota) {
+    let limits = (dma_quota, threads);
+    let pid = match process::spawn_with_caps(name, elf, session_console, extra, arg, limits) {
         Ok(pid) => pid,
         Err(e) => {
             warn!("process_spawn '{name}': {e}");

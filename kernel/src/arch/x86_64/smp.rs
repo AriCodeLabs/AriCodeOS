@@ -417,6 +417,13 @@ pub fn flush_user_range_on(lapic_ids: &[u32], virt: u64, len: u64) {
         assert!(spins < 1 << 30, "smp: user tlb shootdown not answered");
         core::hint::spin_loop();
     }
+    USER_SHOOTDOWNS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// User-range shootdowns that reached another CPU (`test=thread_unmap`).
+static USER_SHOOTDOWNS: AtomicUsize = AtomicUsize::new(0);
+pub fn user_shootdowns() -> usize {
+    USER_SHOOTDOWNS.load(Ordering::Relaxed)
 }
 
 /// `TLB_FLUSH_VECTOR` handler on the receiving CPU.

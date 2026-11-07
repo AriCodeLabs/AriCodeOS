@@ -12,8 +12,11 @@
 //! the handles [`handle::SELF_PROCESS`], [`handle::MAIN_THREAD`] and
 //! [`handle::CONSOLE`].
 //!
-//! During `0.x` the ABI may change (section 74). Current version: 8
-//! (ADR 0075: the `PS2` object, `ps2_read` and `INIT_PS2`). Version 7
+//! During `0.x` the ABI may change (section 74). Current version: 9
+//! (ADR 0082: threads in a process, `thread_create`, `thread_exit`,
+//! `thread_join`, `futex_wait`, `futex_wake`, and the thread limit in
+//! `spawn_limits`). Version 8 (ADR 0075): the `PS2` object, `ps2_read` and
+//! `INIT_PS2`. Version 7
 //! (ADR 0047): `spawn_limits::CONSOLE_FIRST` gives the child a session
 //! console. Version 6 (ADR 0044): `ipc_receive_any` also waits on
 //! interrupt lines. Version 5
@@ -23,7 +26,7 @@
 
 #![no_std]
 
-pub const ABI_VERSION: u32 = 8;
+pub const ABI_VERSION: u32 = 9;
 
 /// Kernel base signature (SHA-512), required to check and verify the origin
 /// and authorship of an AriCodeOS build. It is part of the fixed ABI: it is
@@ -335,6 +338,30 @@ pub mod nr {
     /// can be a member of `ipc_receive_any` (`WAIT`), ready while entries
     /// are queued, and reported like an interrupt line.
     pub const PS2_READ: u64 = 37;
+    /// `thread_create(entry, arg) -> tid` (ADR 0082): a thread of the calling
+    /// process starts at `entry(arg)` in ring 3, on a 64 KiB stack of its own
+    /// the kernel gives it, with a guard page below. It must end with
+    /// `thread_exit`: a return from `entry` faults. [`Error::Limit`] past the
+    /// process's thread limit (`spawn_limits`), the main thread and threads
+    /// ended but not joined counted.
+    pub const THREAD_CREATE: u64 = 38;
+    /// `thread_exit(value)`: ends the calling thread, `value` for whoever joins
+    /// it. From the main thread it ends the process, as `process_exit`, and so
+    /// does any end of the process: every other thread of it ends too.
+    pub const THREAD_EXIT: u64 = 39;
+    /// `thread_join(tid, timeout_ms) -> value`: waits for thread `tid` of the
+    /// calling process to end and forgets it, freeing its place for a new one.
+    /// [`Error::Invalid`] for the main thread or the caller itself,
+    /// [`Error::NotFound`] for a thread not of this process or already joined.
+    pub const THREAD_JOIN: u64 = 40;
+    /// `futex_wait(addr, expected, timeout_ms)`: if the aligned `u32` at `addr`
+    /// holds `expected`, sleeps until a `futex_wake` on `addr`, the timeout
+    /// ([`Error::Timeout`]) or a spurious wake; returns at once if it does not.
+    /// Private to the process; no priority inheritance, no requeue (ADR 0082).
+    pub const FUTEX_WAIT: u64 = 41;
+    /// `futex_wake(addr, count) -> woken`: wakes up to `count` threads of the
+    /// calling process waiting on `addr`, the oldest first.
+    pub const FUTEX_WAKE: u64 = 42;
 }
 
 /// `process_spawn_from` request (48 bytes in caller memory).
@@ -423,6 +450,20 @@ pub mod spawn_limits {
     pub const fn console_first(raw: u64) -> bool {
         raw & CONSOLE_FIRST != 0
     }
+    /// Threads the child may have at once, the main one and those ended but
+    /// not joined counted (ADR 0082): bits 40..47, 0 for [`DEFAULT_THREADS`].
+    pub const fn threads(raw: u64) -> usize {
+        match (raw >> 40) & 0xFF {
+            0 => DEFAULT_THREADS,
+            n => n as usize,
+        }
+    }
+    /// With [`pack`]: the thread limit, at most 255.
+    pub const fn with_threads(raw: u64, threads: u8) -> u64 {
+        raw & !(0xFF << 40) | (threads as u64) << 40
+    }
+    /// Each thread costs the kernel a 32 KiB stack and an FPU area.
+    pub const DEFAULT_THREADS: usize = 8;
 }
 
 /// `system_info` queries and the format of their replies.
