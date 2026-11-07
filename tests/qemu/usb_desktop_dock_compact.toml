@@ -1,0 +1,43 @@
+# Five running applications must fit in the compact dock with distinct icons.
+# Return to the launcher before each search, using the actual launch broker.
+name = "usb.desktop_dock_compact"
+description = "five desktop applications share a compact icon dock"
+level = "release"
+areas = ["gui", "apps", "usb"]
+cmdline = "qemu_exit shell"
+selftest = false
+disk = "usb-image"
+install = ["desktop/launcher", "desktop/terminal", "desktop/files", "desktop/editor", "desktop/settings"]
+stick_profiles = ["desktop:launcher,terminal,files,editor,settings"]
+stdin = ["sleep 18000", "shutdown"]
+timeout_secs = 90
+
+[host_input]
+marker = "launcher: ready"
+keys = ["t", "e", "r", "ret"]
+key_delay_ms = 100
+
+[[host_input_then]]
+marker = "terminal: shell started"
+keys = ["alt+tab", "ctrl+a", "f", "i", "l", "ret"]
+key_delay_ms = 100
+
+[[host_input_then]]
+marker = "files: ready"
+keys = ["alt+tab", "ctrl+a", "e", "d", "ret"]
+key_delay_ms = 100
+
+[[host_input_then]]
+marker = "editor: ready"
+keys = ["alt+tab", "ctrl+a", "s", "e", "t", "ret"]
+key_delay_ms = 100
+
+[[host_input_then]]
+marker = "settings: ready"
+wait_ms = 500
+screendump = "five-apps"
+
+[expect]
+exit = 33
+serial_order = ["launcher: started terminal", "launcher: started files", "launcher: started editor", "launcher: started settings", "ARICODEOS_SHUTDOWN"]
+serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "did not start", "slots are full"]

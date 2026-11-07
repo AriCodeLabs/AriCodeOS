@@ -633,16 +633,30 @@ antialiased strokes, without a path parser, image decoder, allocation or new
 dependency. Drawing is clipped and capped at 64 pixels per icon. General paths
 remain a separate decision; this set does not require tiny-skia.
 
-Dock places are 96x64 pixels, with a 32-pixel icon, a label and a state mark:
-a line for the active window, a dot for another visible window, an outlined dot
-for a minimized one. Long labels end in an ellipsis. Zoom and snap reserve the
-new dock height. The launcher has a heading, 32-pixel application rows, separate
+After the owner's visual review, dock places are 44x40 pixels, with a 28-pixel
+icon and a state mark: a line for the active window, a dot for another visible
+window, an outlined dot for a minimized one. Names appear above the dock on hover;
+long names end in an ellipsis. The bubble is bounded by the screen, and scene
+damage covers its old and new locations. Zoom and snap reserve the new dock
+height. The launcher has a heading, 32-pixel application rows, separate
 open/refresh and leave controls, and an explicit empty-search state with Open
 disabled. The toolkit's optional list icons do not change stored row identifiers
 or activation indices; the file manager uses document icons beside its names.
 
 See the [desktop presentation audit](../audits/2026-11-07-desktop-presentation.md)
 for scope, validation and remaining work.
+
+The follow-up [deeper audit](../audits/2026-11-07-desktop-deep-audit.md) found that
+small snapped launchers hid their actions and that secondary list columns could
+displace filenames. The launcher now scrolls when its controls do not fit; lists
+omit the optional detail column when it would squeeze out the name (incident 0062).
+
+The first icon dock used 96x64 places and permanent labels. Although interaction
+tests passed, the owner found it too large: those tests had not assessed its
+proportions. The compact version reduces the painted bar from 72 to 48 pixels
+high, fits eight entries in 388 pixels at 800x600, and returns 24 vertical pixels
+to the work area. `usb.desktop_dock_compact` captures five real applications open
+together; `gui.window_dock` also captures a name while hovered.
 
 ### The audit of this stage
 
