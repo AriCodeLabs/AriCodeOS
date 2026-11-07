@@ -1,0 +1,173 @@
+# ADR 0083: The GPU engine on the HD 4000
+
+- **Date:** 2026-11-07
+- **Status:** Proposed, as stage A of ADR 0080. Steps 1 to 4 of the device study are
+  done (sources, veterans, read-only probe). Point 1 of the decision, where the code
+  that owns the engine runs, waits for the owner.
+
+## Context
+
+ADR 0080 stage A: a job on the real engine of the reference laptop's HD Graphics 4000
+(Ivy Bridge GT2, `8086:0166`), filling and copying with the blitter, a hung batch reset,
+the GPU's frequency under control. Its decision 4 says no user-space program may write
+the GPU's page tables on a machine without an IOMMU: the kernel writes them, checked
+against the memory a driver presents, and "the driver keeps everything else". This ADR
+finds out what "everything else" may safely be on this family.
+
+## Sources
+
+- **Intel PRM, Ivy Bridge, 2012**, all volumes. Cited by volume, part and section; the
+  licence allows no derivative works, so the code and this record describe it in our own
+  words. Volume 1 Part 4 (blitter) documents the ring, the status page, the blitter
+  commands and the reset bit; Part 2 the GTT and the per-process GTT (PPGTT).
+- **The manual says nothing about forcewake, the GT FIFO, RC6, RPS (frequency) or the
+  pcode mailbox.** It only mentions them in passing (Vol 1 Part 4 2.1.9, Part 2 5.10) and
+  warns that touching MMIO 0x9500 to 0x97FF can keep the GT out of RC6 (Part 6 1.1). The
+  later Haswell register volume, a sibling that documents them, sits behind a filter
+  against automated downloads on x.org, which we did not get around. For these registers
+  the source is Linux i915, read and compared, and each value it predicts was checked
+  against the laptop by the probe below.
+- **Linux i915** (MIT, read, not copied): `intel_ring_submission.c`, `gen6_engine_cs.c`,
+  `gen6_ppgtt.c`, `intel_ggtt.c`, `intel_reset.c`, `intel_uncore.c`, `intel_rps.c`,
+  `intel_rc6.c`, `i915_cmd_parser.c` and the register headers; the commits that bypass the
+  gen7 command parser (311a50e7), withdraw secure batches from user space (44157641) and
+  add the gen9 blitter parser for CVE-2019-0155; the 2020 revert of full PPGTT on gen7.
+- **Genode's GPU multiplexer** (gen8 on): a user-level component owns the GTT, the
+  PPGTTs, contexts and fences; clients submit batches in their own PPGTT.
+- **Fuchsia's Magma**: a privileged system driver programs the hardware; clients send
+  command buffers into a per-connection address space. It runs behind an IOMMU and
+  targets gen9 on, so it is not a precedent for this machine.
+
+## What the hardware showed (read-only probe, 2026-11-07)
+
+A temporary kernel (dev build 39, never merged) read 0:2.0's configuration, the always-on
+registers, the GT registers once the GT was found awake, the fences and all 524,288 GGTT
+entries. Nothing was written.
+
+| Item | Read | Meaning |
+|---|---|---|
+| PCI | command 0x0007; MSI capability present, off; GMS 64 MiB, GTT 2 MiB | Bus mastering already on |
+| GT state | `GT_CORE_STATUS` RC0; RC6 residency 0 | Awake since boot |
+| Forcewake | `FORCEWAKE_MT` and legacy `FORCEWAKE` both held, acks set; `ECOBUS` bit 5 set | The firmware left it held, so the GT never sleeps. Multi-threaded forcewake is available |
+| RC6 | `RC_CONTROL` 0x88060000 (RC6 and RC6p on, hardware mode) | Enabled but never reached, because of the held forcewake |
+| Frequency | `RP_STATE_CAP` RP0 21, RP1 7, RPn 7 (×50 MHz: 1050, 350, 350); `RPNSWREQ` and `RPSTAT1` at 7 | Fixed at 350 MHz. RPS is on (`RP_CONTROL` 0x592) but nobody answers its interrupts, so it never rises. Matches Intel's 350 to 1050 MHz for the i3-3217U |
+| Engines | Render, video and blitter rings: `CTL` 0, `START` 0, status pages 0, idle, no faults or errors | Untouched |
+| PPGTT | Off on every ring; render `GFX_MODE` 0x2800 | The firmware already set the two bits of Linux's IVB TLB workaround on the render ring |
+| Fences | All zero | No tiling set up |
+| Interrupts | GT and PM all masked; `PMINTRMSK` 0 | |
+| **GGTT** | The first 16,383 entries map stolen memory at 0xDBE00000, contiguous; **the remaining 2 GiB of GGTT address space holds uninitialised memory: about 270,000 entries with the valid bit set point at random physical addresses** | Any GPU access outside the firmware's 64 MiB would be DMA to random memory. Linux clears all unused GGTT space at load; so must we, before anything runs |
+
+Raw dump and decoder: `~/aricode-scratch/gpu-reference/probe/` and
+`~/aricode-scratch/laptop/gt-decode.py` on the build host.
+
+## What the study found
+
+1. **On Ivy Bridge a batch's privilege is its address space.** Bit 8 of
+   `MI_BATCH_BUFFER_START` selects the PPGTT, and a PPGTT batch is non-secure. A GGTT
+   batch is secure, and with the PPGTT off the bit must be 0, so every batch is secure
+   (Vol 1 Part 4, `MI_BATCH_BUFFER_START`). A separate privilege bit arrives with
+   Haswell.
+2. **Commands carry no physical addresses**; every address goes through the GGTT or the
+   PPGTT (Vol 1 Part 2 4.6.1). The ways out are therefore: writing GTT entries, page
+   directory entries or page tables; moving or disabling the PPGTT (`PP_DIR_BASE`,
+   `PP_DCLV`, `GFX_MODE` bit 9); privileged commands (`MI_UPDATE_GTT`, stores and
+   register loads with the GGTT bit), which run from the ring and from secure batches;
+   and GPU writes into pages the kernel trusts, such as the ring and the status page.
+3. **In a non-secure batch, privileged commands do not land.** The manual says they
+   become no-ops, or in older text a command error; the write never happens either way.
+   Linux's gen7 command parser only adds permissions; a batch that fails it still runs,
+   non-secure (commit 311a50e7). Its parser became mandatory only on gen9's blitter,
+   whose hardware let non-secure batches write sensitive registers.
+4. **MMIO cannot be shared by page.** The blitter's 4 KiB register page holds its ring
+   registers, `PP_DIR_BASE`, `PP_DCLV` and `GFX_MODE` beside `BCS_SWCTRL`, which a client
+   may set. The rest of the register half holds the display, the PCH, fences, the pcode
+   mailbox and the memory controller's mirror.
+5. **No read-only GPU mappings on this family.** Neither page table format has a write
+   bit (Vol 1 Part 2 2.1.2, 2.2.2); every page mapped for the GPU is writable by it.
+
+So decision 4 holds only if the kernel owns more than the page tables: whoever writes the
+ring, or any register on the blitter's page, can rewrite the GTT.
+
+## Decision (proposed)
+
+1. **Owner's choice: where the engine's owner runs.** The study leaves almost nothing a
+   separate driver could hold without breaking decision 4: the GTT, the PPGTT, the ring,
+   the status page, every register of the engine, reset and interrupts must stay out of
+   reach of any program. The options:
+   - **(a) In the kernel, as a library plus thin glue (recommended)**, as ADR 0079 did for
+     the display: `libs/intel-gt` holds the logic, host-tested against a register bank
+     built from the manual and the probe; the kernel holds the BAR and calls it. Programs
+     reach the engine through a GPU capability. A defect is fixed by a network update
+     with A/B rollback, as the kernel is.
+   - (b) In a privileged user-space service with all of BAR 0, as Genode does. That is the
+     authority decision 4 refused on a machine without an IOMMU.
+   - (c) A user-space driver with filtered MMIO and a kernel that parses every ring
+     command. Linux's parser is 1,600 lines with a history of bypasses; it makes the
+     trusted code larger, not smaller.
+2. **The kernel owns** BAR 0 (registers and GTT) and BAR 2, never mapped to a program;
+   the GGTT, cleared at start to a scratch page except the firmware's display mapping;
+   one PPGTT (page directory in the GTT's own memory, page tables in kernel pages);
+   `GFX_MODE`, `PP_DIR_BASE`, `PP_DCLV`, the status page and ring registers and memory;
+   TLB invalidation; forcewake; RC6 and frequency; interrupts; reset.
+3. **A client gives batches and memory, nothing else.** With a GPU capability (one client
+   at a time on this family, decision 5 of ADR 0080):
+   - `map(memory, gpu_address)`: a memory object the client holds with write rights (the
+     GPU can always write, point 5 above) enters the client's PPGTT;
+   - `unmap(gpu_address)`: returns once the engine is idle on it and the TLB is flushed;
+   - `submit(batch_address, length) -> fence`: the kernel's ring starts the batch with
+     bit 8 set (non-secure, in the PPGTT), then stores the fence's number to the status
+     page and raises an interrupt;
+   - `wait(fence, timeout)`: on timeout the blitter is reset, the ring and PPGTT rebuilt,
+     and the fence fails.
+   At a change of client the PPGTT is emptied. The kernel never reads a batch.
+4. **The GPU's frequency is a parameter** (no hardcoding, ADR 0080): default the floor,
+   350 MHz; a cap the owner or a program can set and read back; RPS stays off until a
+   thermal policy exists. The thermal watch reads the package temperature as today.
+5. **Forcewake is taken and released by the kernel** around its own register writes; the
+   firmware's held bits are cleared at start, as Linux does, so RC6 can work.
+6. **The way back:** `gpu=off` in `cmdline.txt` leaves the GT as the firmware left it.
+   An unknown model, or any state the probe did not see (a ring already running, PPGTT
+   on, forcewake that will not answer), is left alone and reported in `diag`.
+
+## Still to measure on the laptop
+
+From a non-secure batch, before any client relies on it:
+
+1. A register load into the blitter's page (the manual's "22XX" note in Vol 1 Part 4
+   2.1.12 is ambiguous; Linux allows only `BCS_SWCTRL` and the timestamps).
+2. A store with the GGTT bit set, aimed at a canary page: it must not land; record which
+   error bit is raised.
+3. A store-index flush: where does it write in ring mode?
+
+## The resources this device offers
+
+| Resource | Today | Stage A |
+|---|---|---|
+| Blitter engine | Not used | Fill and copy |
+| Render engine, EUs | Not used | Stage B |
+| Video engine | Not used | Not planned |
+| PPGTT | Off | One, for the current client |
+| RC6 | Enabled, never reached (forcewake held) | Reached once forcewake is released |
+| Frequency | Fixed at 350 MHz | Parameter with a cap; measured |
+| Interrupts (MSI) | Off | Fence completion; polling first |
+| Fences, tiling | Unused | Linear surfaces first |
+| Hardware watchdog (`BCS_CTR_THRSH`) | Unused | Studied with reset |
+
+## Order of work
+
+1. `libs/intel-gt`: register model, forcewake, GGTT clear, PPGTT, ring bring-up,
+   completion, reset, frequency, against a fake bank with the probe's state, including
+   every "leave it alone" case.
+2. Kernel glue and the GPU capability, after the owner's choice in point 1.
+3. On the laptop: the three measurements above, then fill and copy with CPU and GPU
+   figures side by side, a looping batch reset, the frequency cap.
+4. Independent audit of the kernel part.
+
+## Consequences
+
+- The kernel grows by the engine's owner, of the order of Genode's multiplexer without
+  contexts; the code that decides lives in a host-tested library.
+- A program with the GPU capability can hang the blitter (reset covers it), and write
+  only memory it presented with write rights.
+- QEMU emulates no Intel GPU: host tests and the laptop are the only coverage, as for
+  ADR 0079.
