@@ -88,7 +88,9 @@ impl Texture {
     pub fn sample(&self, u: f32, v: f32, filter: Filter, level: usize) -> [f32; 3] {
         let level = &self.levels[level.min(self.levels.len() - 1)];
         let n = level.size;
-        let wrap = |i: i64| i.rem_euclid(n as i64) as usize;
+        // Sides are powers of two (`new` refuses others), so repeating is a mask: no
+        // division, which on the laptop's processor is what a sample cost most.
+        let wrap = |i: i64| i as usize & (n - 1);
         let (x, y) = (u * n as f32 - 0.5, v * n as f32 - 0.5);
         if filter == Filter::Nearest {
             let (x, y) = (libm::floorf(x + 0.5) as i64, libm::floorf(y + 0.5) as i64);
@@ -108,7 +110,7 @@ impl Texture {
 }
 
 fn unpack(c: u32) -> [f32; 3] {
-    [16, 8, 0].map(|s| ((c >> s) & 0xff) as f32 / 255.0)
+    [16, 8, 0].map(|s| ((c >> s) & 0xff) as f32 * (1.0 / 255.0))
 }
 
 fn average4(c: [u32; 4]) -> u32 {
@@ -126,6 +128,20 @@ mod tests {
     fn invalid_or_unrepresentable_sizes_fail_without_calling_the_generator() {
         for size in [0, 3, 1usize << (usize::BITS - 1)] {
             assert!(Texture::new(size, |_, _| panic!("invalid size reached generator")).is_none());
+        }
+    }
+
+    #[test]
+    fn coordinates_repeat_on_both_sides() {
+        // Every texel its own colour, so any wrong wrap shows.
+        let t = Texture::new(8, |x, y| (y * 8 + x) as u32 * 0x010101).unwrap();
+        for filter in [Filter::Nearest, Filter::Linear] {
+            for (u, v) in [(0.375, 0.625), (0.0625, 0.9375), (0.0, 0.0), (0.171875, 0.5)] {
+                let at = t.sample(u, v, filter, 0);
+                for (du, dv) in [(-1.0, 0.0), (0.0, -3.0), (2.0, 1.0), (-5.0, 7.0)] {
+                    assert_eq!(t.sample(u + du, v + dv, filter, 0), at, "{filter:?} {u} {v}");
+                }
+            }
         }
     }
 
