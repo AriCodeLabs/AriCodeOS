@@ -28,18 +28,30 @@ pub struct Texture {
 impl Texture {
     /// `texel(x, y)` gives the top level; the rest are averages of four.
     pub fn new(size: usize, texel: impl Fn(usize, usize) -> u32) -> Self {
-        assert!(size.is_power_of_two(), "a texture's side is a power of two");
-        let mut top = Vec::with_capacity(size * size);
+        Self::try_new(size, texel).expect("invalid texture size or no memory")
+    }
+
+    /// Build all levels without aborting on an exhausted heap or an invalid size.
+    /// No temporary decoded image is needed: texels go straight into the top level.
+    pub fn try_new(size: usize, texel: impl Fn(usize, usize) -> u32) -> Option<Self> {
+        if !size.is_power_of_two() {
+            return None;
+        }
+        let mut top = Vec::new();
+        top.try_reserve_exact(size.checked_mul(size)?).ok()?;
         for y in 0..size {
             for x in 0..size {
                 top.push(texel(x, y));
             }
         }
-        let mut levels = alloc::vec![Level { size, texels: top }];
+        let mut levels = Vec::new();
+        levels.try_reserve_exact(size.ilog2() as usize + 1).ok()?;
+        levels.push(Level { size, texels: top });
         while levels.last().is_some_and(|l| l.size > 1) {
             let up = levels.last().unwrap();
             let size = up.size / 2;
-            let mut texels = Vec::with_capacity(size * size);
+            let mut texels = Vec::new();
+            texels.try_reserve_exact(size * size).ok()?;
             for y in 0..size {
                 for x in 0..size {
                     let at = |dx: usize, dy: usize| up.texels[(y * 2 + dy) * up.size + x * 2 + dx];
@@ -48,7 +60,7 @@ impl Texture {
             }
             levels.push(Level { size, texels });
         }
-        Self { levels }
+        Some(Self { levels })
     }
 
     /// A checker of `cells` squares a side, in two colours, with a thin grid: what shows
@@ -111,6 +123,15 @@ fn average4(c: [u32; 4]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_or_unrepresentable_sizes_fail_without_calling_the_generator() {
+        for size in [0, 3, 1usize << (usize::BITS - 1)] {
+            assert!(
+                Texture::try_new(size, |_, _| panic!("invalid size reached generator")).is_none()
+            );
+        }
+    }
 
     #[test]
     fn levels_go_down_to_one_texel_and_average() {
