@@ -105,6 +105,16 @@ pub mod keys {
     /// mode and touches nothing: the way back on the rare machine where the
     /// panel's size goes wrong (ADR 0079).
     pub const VIDEO: &str = "video";
+    /// `gpu=off`: the kernel leaves the GPU's engine as the firmware set it
+    /// and programs get no GPU (ADR 0083): the way back if taking it goes
+    /// wrong on some machine.
+    pub const GPU: &str = "gpu";
+    /// `gpu.mhz=N`: the GPU's clock to ask for, within its limits; by default
+    /// its lowest (ADR 0083).
+    pub const GPU_MHZ: &str = "gpu.mhz";
+    /// `gpu.hang_ms=N`: how long a batch may run without the engine moving
+    /// before it is reset; 2000 by default (ADR 0083).
+    pub const GPU_HANG_MS: &str = "gpu.hang_ms";
     /// `thermal_off=DEGREES`: the CPU temperature at which the kernel's watch powers
     /// the machine off; `0` never does. By default 3 degrees below the CPU's limit.
     pub const THERMAL_OFF: &str = "thermal_off";

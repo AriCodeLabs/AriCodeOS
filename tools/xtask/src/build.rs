@@ -40,6 +40,7 @@ pub const PACKAGES: &[(&str, Option<&str>)] = &[
     ("aricode-x86-paging", None),
     ("aricode-display", None),
     ("aricode-intel-display", None),
+    ("aricode-intel-gt", None),
     ("aricode-text", None),
     ("aricode-render3d", None),
     ("aricode-ui", None),
@@ -85,6 +86,7 @@ pub const PACKAGES: &[(&str, Option<&str>)] = &[
     ("ari-app-notes-reader", Some(USER_TARGET)),
     ("ari-app-installer", Some(USER_TARGET)),
     ("ari-app-bench", Some(USER_TARGET)),
+    ("ari-app-gpu-probe", Some(USER_TARGET)),
     ("wasm-demo", Some(WASM_TARGET)),
     ("user-testprogs", Some(USER_TARGET)),
     ("ariinit", Some(USER_TARGET)),
@@ -196,6 +198,7 @@ pub fn initrd_programs() -> Result<Vec<String>> {
         String::from("notes_reader"),
         String::from("installer"),
         String::from("bench"),
+        String::from("gpu_probe"),
         String::from("shell"),
     ];
     let bins = root().join("user/testprogs/src/bin");
@@ -273,6 +276,7 @@ pub const USER_PACKAGES: &[&str] = &[
     "ari-app-notes-reader",
     "ari-app-installer",
     "ari-app-bench",
+    "ari-app-gpu-probe",
     "ari-shell",
 ];
 

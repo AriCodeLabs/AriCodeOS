@@ -31,22 +31,59 @@ pub fn screen_bytes(info: &FramebufferInfo) -> u64 {
     info.size.min(info.stride as u64 * info.height as u64 * 4)
 }
 
-/// BAR 0 of the graphics device, uncached, for `use_panel_size`: kernel only,
-/// and left mapped since nothing else uses this address.
+/// BAR 0 of the graphics device, uncached: kernel only (ADR 0079, 0083),
+/// mapped once and left mapped since nothing else uses this address.
 const REGS_VIRT: u64 = 0xFFFF_D700_0000_0000;
+static REGS_MAPPED: IrqLock<bool> = IrqLock::new(false);
 
-struct Bar0;
+/// The graphics device's BAR 0, once [`intel_bar0`] mapped it.
+pub(crate) struct Bar0;
 
-impl aricode_intel_display::Regs for Bar0 {
-    fn read(&self, offset: u32) -> u32 {
-        // SAFETY: inside BAR 0, mapped uncached at `REGS_VIRT`, whose size
-        // `use_panel_size` checked.
+/// Maps BAR 0 (`address`, of `aricode_intel_display::BAR0_SIZE` bytes) the
+/// first time, and gives access to it.
+pub(crate) fn intel_bar0(address: u64) -> Option<Bar0> {
+    let mut mapped = REGS_MAPPED.lock();
+    if !*mapped {
+        crate::memory::vmm::with(|m| {
+            m.map_range_2m(
+                REGS_VIRT,
+                address,
+                aricode_intel_display::BAR0_SIZE,
+                WRITABLE | NO_EXECUTE | GLOBAL | CACHE_DISABLE | WRITE_THROUGH,
+            )
+        })
+        .ok()?;
+        *mapped = true;
+    }
+    Some(Bar0)
+}
+
+/// BAR 0, if [`intel_bar0`] has mapped it.
+pub(crate) fn mapped_bar0() -> Option<Bar0> {
+    REGS_MAPPED.lock().then_some(Bar0)
+}
+
+impl Bar0 {
+    pub(crate) fn read(&self, offset: u32) -> u32 {
+        // SAFETY: inside BAR 0, mapped uncached at `REGS_VIRT` by
+        // `intel_bar0`, the only way to get a `Bar0`; callers keep offsets
+        // below its size.
         unsafe { ((REGS_VIRT + offset as u64) as *const u32).read_volatile() }
     }
 
-    fn write(&mut self, offset: u32, value: u32) {
+    pub(crate) fn write(&mut self, offset: u32, value: u32) {
         // SAFETY: as in `read`.
         unsafe { ((REGS_VIRT + offset as u64) as *mut u32).write_volatile(value) }
+    }
+}
+
+impl aricode_intel_display::Regs for Bar0 {
+    fn read(&self, offset: u32) -> u32 {
+        Bar0::read(self, offset)
+    }
+
+    fn write(&mut self, offset: u32, value: u32) {
+        Bar0::write(self, offset, value)
     }
 }
 
@@ -67,17 +104,9 @@ fn plan_panel_size(
     {
         return Err(Refusal::BadBars);
     }
-    crate::memory::vmm::with(|m| {
-        m.map_range_2m(
-            REGS_VIRT,
-            bar0.0,
-            BAR0_SIZE,
-            WRITABLE | NO_EXECUTE | GLOBAL | CACHE_DISABLE | WRITE_THROUGH,
-        )
-    })
-    .map_err(|_| Refusal::BadBars)?;
+    let bar = intel_bar0(bar0.0).ok_or(Refusal::BadBars)?;
     aricode_intel_display::plan(
-        &Bar0,
+        &bar,
         &Request {
             device: d.device,
             panel,
@@ -118,7 +147,10 @@ pub fn use_panel_size(asked: bool) {
         }
         // SAFETY: a fence has no operands and touches no state.
         unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
-        if let Err(why) = aricode_intel_display::apply(&mut Bar0, &plan) {
+        let Some(mut bar) = mapped_bar0() else {
+            return Err(Refusal::BadBars);
+        };
+        if let Err(why) = aricode_intel_display::apply(&mut bar, &plan) {
             // The pipe is back as it was, but the screen is blank.
             crate::console::screen_resized(info);
             return Err(why);

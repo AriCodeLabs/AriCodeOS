@@ -34,6 +34,9 @@ pub enum ObjectKind {
     /// The PS/2 stream (ADR 0075): `ps2_read` (`READ`), and a member of
     /// `ipc_receive_any` (`WAIT`).
     Ps2,
+    /// The GPU's engine (ADR 0083): `gpu_map`, `gpu_unmap`, `gpu_submit`,
+    /// `gpu_wait` (`WRITE`).
+    Gpu,
 }
 
 /// Object shared by every handle that refers to it. Revoking it invalidates
@@ -78,6 +81,7 @@ impl KernelObject {
             ObjectKind::PciRoot => kind::PCI_ROOT,
             ObjectKind::System => kind::SYSTEM,
             ObjectKind::Ps2 => kind::PS2,
+            ObjectKind::Gpu => kind::GPU,
         }
     }
 

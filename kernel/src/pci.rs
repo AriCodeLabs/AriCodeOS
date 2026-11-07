@@ -313,6 +313,11 @@ pub struct IntelDisplay {
     /// measured and passed them; `None` if one was refused or memory decoding
     /// is off.
     pub bars: Option<((u64, u64), (u64, u64))>,
+    /// Configuration registers MGGC0 (0x50: the stolen memory's and the
+    /// GTT's sizes) and BDSM (0x5C: the stolen memory's base), PRM Vol 3
+    /// Part 2.
+    pub mggc0: u32,
+    pub bdsm: u32,
 }
 
 /// The display controller at 00:02.0, where Intel's integrated graphics
@@ -339,6 +344,8 @@ pub fn intel_display() -> Option<IntelDisplay> {
         bars: (read_u16(ecam, d.address, 0x04) & COMMAND_MEMORY != 0)
             .then(|| Some((bar(0)?, bar(2)?)))
             .flatten(),
+        mggc0: read_u32(ecam, d.address, 0x50),
+        bdsm: read_u32(ecam, d.address, 0x5C),
     })
 }
 
@@ -609,6 +616,9 @@ pub fn claim(index: usize) -> Result<Claimed, &'static str> {
 fn claim_locked(index: usize, ecam: &Ecam, d: &mut PciDevice) -> Result<Claimed, &'static str> {
     if d.is_claimed() {
         return Err("pci: already claimed");
+    }
+    if crate::gpu::holds(d.address.bus, d.address.device, d.address.function) {
+        return Err("pci: the kernel drives this device (ADR 0083)");
     }
     let reclaimed = d.claimed.is_some();
     let addr = d.address;
