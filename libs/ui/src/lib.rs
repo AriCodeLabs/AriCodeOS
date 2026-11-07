@@ -2159,16 +2159,25 @@ impl Ui {
                     };
                     // Keep a long name out of the size column and the scroll thumb.
                     let detail_width = text.width(ty.face, ty.size, detail);
+                    let name_min = text.width(ty.face, ty.size, name).min(t.field_min);
+                    let available = (r.right() - t.margin - x).max(0);
+                    // A secondary column is optional. On a narrow view, keep the
+                    // identity readable instead of letting a size erase its name
+                    // or paint over the icon (desktop presentation audit).
+                    let show_detail =
+                        !detail.is_empty() && name_min + t.control_gap + detail_width <= available;
                     let right = r.right()
                         - t.margin
-                        - detail_width
-                        - if detail.is_empty() { 0 } else { t.control_gap };
+                        - if show_detail {
+                            detail_width + t.control_gap
+                        } else {
+                            0
+                        };
                     let mut name_view =
                         view.clipped(&Rect::new(x, y, (right - x).max(0) as u32, row_h as u32));
                     text.draw(&mut name_view, (ty.face, ty.size), name, (x, baseline), ink);
-                    if !detail.is_empty() {
-                        let width = text.width(ty.face, ty.size, detail);
-                        let at = (r.right() - t.margin - width, baseline);
+                    if show_detail {
+                        let at = (r.right() - t.margin - detail_width, baseline);
                         text.draw(&mut view, (ty.face, ty.size), detail, at, ink);
                     }
                 }

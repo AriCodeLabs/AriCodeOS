@@ -1,0 +1,32 @@
+# At 800x600 a quarter-screen launcher has 400x230 pixels of content. Four apps
+# make its controls taller than that. Shift+Tab must reveal Leave, and the same
+# visible control must answer a pointer click, not the clipped Open button.
+name = "usb.desktop_compact"
+description = "the launcher scrolls its controls into view after snapping to a small quarter"
+level = "release"
+areas = ["gui", "apps", "usb"]
+cmdline = "qemu_exit shell video=800x600"
+selftest = false
+disk = "usb-image"
+install = ["desktop/launcher", "desktop/editor", "desktop/files", "desktop/settings", "desktop/terminal"]
+stick_profiles = ["desktop:launcher,editor,files,settings,terminal"]
+stdin = ["sleep 14000", "shutdown"]
+timeout_secs = 90
+
+[host_input]
+marker = "launcher: ready"
+mouse_rel = [-200, -246]
+drag = [-220, -60]
+keys = ["shift+tab"]
+
+[[host_input_then]]
+marker = "compositor: window 1 is now 400x230"
+wait_ms = 300
+screendump = "compact"
+mouse_rel = [90, 267]
+click = "left"
+
+[expect]
+exit = 33
+serial_order = ["launcher: ready", "compositor: window 1 is now 400x230", "launcher: asks to leave the desktop", "ARICODEOS_SHUTDOWN"]
+serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "launcher: started editor", "launcher: started files", "launcher: started settings", "launcher: started terminal"]

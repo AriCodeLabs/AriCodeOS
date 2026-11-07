@@ -25,6 +25,8 @@ click = "left"
 
 [[host_input_then]]
 marker = "gui_demo D: focus gained"
+wait_ms = 200
+screendump = "dock-name"
 click = "left"
 
 [[host_input_then]]

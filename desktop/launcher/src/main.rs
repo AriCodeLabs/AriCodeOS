@@ -96,6 +96,9 @@ impl Launcher {
             Stack::column().pad(Space::Margin).fill(Fill::Window),
             &[title, search, list, empty, status, buttons, exit, hint],
         );
+        // A snapped window can be shorter than the controls' natural height.
+        // Keep every action reachable, and let Tab reveal the focused control.
+        let root = ui.scroll(root);
         ui.set_root(root);
         ui.focus(search);
         let leaving = ui.dialog("Leave", "Stay");
