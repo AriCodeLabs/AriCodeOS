@@ -1,0 +1,23 @@
+# The control of gui.double_buffer (incident 0063, audit M2): the same frames on one
+# buffer (`run gui_demo 5`) must show the colour painted after each present. Should
+# this stop failing the old way, say because the compositor's frame cadence changed,
+# gui.double_buffer would pass without testing anything: both go together.
+name = "gui.double_buffer_control"
+description = "on one buffer, what a program paints after presenting reaches the screen"
+level = "release"
+areas = ["gui"]
+cmdline = "qemu_exit gui shell gui_trace"
+install = ["examples/gui_demo"]
+stdin = ["run gui_demo 5", "shutdown"]
+timeout_secs = 60
+
+[expect]
+exit = 33
+serial_contains = [
+    "compositor: window 1 'Demo E' 200x120",
+    ") = 0xfe0102",
+    ") = 0x00fe01",
+    "gui_demo E: 120 frames presented",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC"]

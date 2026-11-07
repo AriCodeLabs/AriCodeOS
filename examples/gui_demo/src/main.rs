@@ -5,7 +5,8 @@
 //! B, created 300 ms later so it ends up on top), or 2 (Demo C, which never
 //! reads its events: the compositor closes its window for it at the second
 //! click on its close box, ADR 0077), or 3 (Demo D, the window protocol's
-//! events, `events` below). The broker grants what
+//! events, `events` below), or 4 and 5 (Demo E, frames on two buffers or on one,
+//! `frames` below, incident 0063). The broker grants what
 //! its manifest asks for: its compositor session (WRITE, ADR 0052) and
 //! `HARDWARE` for the window's buffer. Demo B also checks that Demo A's
 //! window is out of its reach and leaves without closing its own: the
@@ -217,6 +218,60 @@ fn events(session: Handle, hw: Handle) -> u64 {
     0
 }
 
+/// Modes 4 and 5, incident 0063: frames of one colour each, and right after each
+/// present the buffer just given up is painted `FREED`, as a program starting its
+/// next frame paints over the last. The compositor makes at most one frame each
+/// `FRAME_MS`: the first present of a pair gets one at once, the second, coming
+/// sooner, is left for later, and that later frame is made while the program is
+/// painting `FREED` and pausing, as a game or a benchmark faster than the screen
+/// is. With two buffers (mode 4) the compositor never reads the buffer not shown,
+/// so `FREED` never reaches the screen; with one (mode 5, the old way) it does.
+/// Mode 4 then resizes: the window gets its second buffer again, of the new size,
+/// and its frames still never show `FREED`.
+fn frames(session: Handle, hw: Handle, double: bool) -> u64 {
+    const FRAMES: [u32; 2] = [0xfe0102, 0x0102fe];
+    const FREED: u32 = 0x00fe01;
+    let Ok(mut win) = Window::create(session, hw, 200, 120, "Demo E") else {
+        return 1;
+    };
+    if double && win.double_buffer(hw).is_err() {
+        sys::print(b"gui_demo E: no second buffer\n");
+        return 2;
+    }
+    let pairs = |win: &mut Window, count: usize| {
+        for _ in 0..count {
+            for colour in FRAMES {
+                win.canvas().fill(colour);
+                if win.present().is_err() {
+                    return false;
+                }
+            }
+            win.canvas().fill(FREED);
+            sys::thread_sleep(30);
+        }
+        true
+    };
+    if !pairs(&mut win, 60) {
+        return 3;
+    }
+    sys::print(b"gui_demo E: 120 frames presented\n");
+    if double {
+        if win.resize(hw, 240, 140, |c| c.fill(FRAMES[0])).is_err() {
+            return 4;
+        }
+        if !win.is_double() {
+            sys::print(b"gui_demo E: one buffer after resizing\n");
+            return 5;
+        }
+        if !pairs(&mut win, 10) {
+            return 6;
+        }
+        sys::print(b"gui_demo E: two buffers after resizing, 20 frames presented\n");
+    }
+    let _ = win.close();
+    0
+}
+
 fn main(index: u64) -> u64 {
     let (mut session, mut hw) = (None, None);
     permissions::granted(|h, _| {
@@ -232,6 +287,9 @@ fn main(index: u64) -> u64 {
     };
     if index == 3 {
         return events(session, hw);
+    }
+    if index == 4 || index == 5 {
+        return frames(session, hw, index == 4);
     }
     let (name, title, color) = if index == 0 {
         (b"gui_demo A" as &[u8], "Demo A", rgb(0xc0, 0x40, 0x40))

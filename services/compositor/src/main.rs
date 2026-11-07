@@ -214,7 +214,13 @@ struct Content {
     id: u32,
     /// The session it was created through: slot + 1.
     owner: usize,
+    /// The buffer shown: the only one a frame reads. It is `first` or `second`.
     virt: u64,
+    /// The buffer of `Create` or the last `Resize`: slot 0.
+    first: u64,
+    /// The buffer of `SecondBuffer`, if its program gave one: slot 1. Of the two, the
+    /// one not shown is never read, so its program draws there (ADR 0081).
+    second: Option<u64>,
     width: u32,
     height: u32,
     events: [Option<Event>; QUEUE],
@@ -596,7 +602,10 @@ impl Compositor {
             if let Some((h, _)) = closed.pending {
                 answer(h, Reply::status(Status::BadWindow));
             }
-            self.unmap_unused(closed.virt);
+            self.unmap_unused(closed.first);
+            if let Some(second) = closed.second {
+                self.unmap_unused(second);
+            }
             if let Some(w) = self.desktop.get(closed.id) {
                 self.damage.add(&w.frame());
             }
@@ -1401,7 +1410,10 @@ impl Compositor {
         if let Some((h, _)) = closed.pending {
             answer(h, Reply::status(Status::BadWindow));
         }
-        self.unmap_unused(closed.virt);
+        self.unmap_unused(closed.first);
+        if let Some(second) = closed.second {
+            self.unmap_unused(second);
+        }
         self.desktop.remove(closed.id);
         self.refocus();
     }
@@ -1560,6 +1572,11 @@ impl Compositor {
                 let Ok(virt) = sys::mmio_map(buf) else {
                     return answer(reply_to, Reply::status(Status::BadHandles));
                 };
+                // A buffer of a window with two swaps under it: no other window shows it.
+                // It stays mapped, since that window holds it.
+                if self.in_a_pair(virt) {
+                    return answer(reply_to, Reply::status(Status::Invalid));
+                }
                 let open = self.contents.iter().flatten().filter(|c| c.owner == owner);
                 let Some(slot) = self
                     .contents
@@ -1585,6 +1602,8 @@ impl Compositor {
                     id,
                     owner,
                     virt,
+                    first: virt,
+                    second: None,
                     width: req.width,
                     height: req.height,
                     events: [None; QUEUE],
@@ -1632,6 +1651,24 @@ impl Compositor {
                 }
             }
             Op::Present => {
+                // `width` names the slot to show, plus one; 0 keeps the one shown. Named,
+                // not toggled: a lost answer leaves nothing out of step, since the next
+                // present names its slot again and the answer says which one shows.
+                let Some(c) = self.owned(req.window, owner) else {
+                    return answer(reply_to, Reply::status(Status::BadWindow));
+                };
+                match (req.width, c.second) {
+                    (0, _) => {}
+                    (1, _) => c.virt = c.first,
+                    (2, Some(second)) => c.virt = second,
+                    _ => return answer(reply_to, Reply::status(Status::Invalid)),
+                }
+                let shown = u64::from(c.virt != c.first);
+                // A swap shows a buffer that may differ anywhere from the one before.
+                let mut req = req;
+                if req.width != 0 {
+                    req.damage_len = 0;
+                }
                 let Some((virt, width)) = self.owned(req.window, owner).map(|c| (c.virt, c.width))
                 else {
                     return answer(reply_to, Reply::status(Status::BadWindow));
@@ -1662,9 +1699,10 @@ impl Compositor {
                         });
                     }
                 }
-                answer(reply_to, Reply::ok(0));
+                answer(reply_to, Reply::ok(shown));
             }
             Op::Resize => self.resize(req, owner, reply_to, buf),
+            Op::SecondBuffer => self.second_buffer(req, owner, reply_to, buf),
             Op::MenuAdd => {
                 // What the owner has in front of them does not change under the pointer.
                 if self.menu_open.is_some() && self.desktop.focus == Some(req.window) {
@@ -1922,6 +1960,10 @@ impl Compositor {
         let Ok(virt) = sys::mmio_map(buf) else {
             return answer(reply_to, Reply::status(Status::BadHandles));
         };
+        // As in `Create`: a buffer of a window with two is no one else's.
+        if self.in_a_pair(virt) {
+            return answer(reply_to, Reply::status(Status::Invalid));
+        }
         if let Some(w) = self.desktop.get(req.window) {
             let old = w.frame();
             self.damage.add(&old);
@@ -1934,7 +1976,11 @@ impl Compositor {
         let Some(c) = self.content(req.window) else {
             return answer(reply_to, Reply::status(Status::BadWindow));
         };
-        let old = core::mem::replace(&mut c.virt, virt);
+        // Back to one buffer: the second had the old size, and its program gives a
+        // new one after (ADR 0081).
+        let old = core::mem::replace(&mut c.first, virt);
+        c.virt = virt;
+        let old_second = c.second.take();
         c.width = req.width;
         c.height = req.height;
         c.dirty = None;
@@ -1955,7 +2001,69 @@ impl Compositor {
             self.desktop.move_window(req.window, p.x, p.y);
         }
         self.unmap_unused(old);
+        if let Some(second) = old_second {
+            self.unmap_unused(second);
+        }
         answer(reply_to, Reply::ok(0));
+    }
+
+    /// `Op::SecondBuffer`: the checks of `Create` for a buffer of the window's size,
+    /// which becomes slot 1, not shown until a `Present` names it. Once only: a
+    /// second given while the first one shows could otherwise replace a buffer on
+    /// screen. A buffer that two windows show cannot swap under one of them, and one
+    /// that a window already holds cannot be a second.
+    fn second_buffer(&mut self, req: Request, owner: usize, reply_to: Handle, buf: Option<Handle>) {
+        let Some((first, second, width, height)) = self
+            .owned(req.window, owner)
+            .map(|c| (c.first, c.second, c.width, c.height))
+        else {
+            return answer(reply_to, Reply::status(Status::BadWindow));
+        };
+        let Some(buf) = buf else {
+            return answer(reply_to, Reply::status(Status::BadHandles));
+        };
+        if second.is_some() || self.holders(first) > 1 {
+            return answer(reply_to, Reply::status(Status::Invalid));
+        }
+        if sys::dma_phys(buf).is_err() {
+            return answer(reply_to, Reply::status(Status::BadHandles));
+        }
+        let needed = width as u64 * height as u64 * 4;
+        if sys::region_len(buf).map_or(true, |len| len < needed) {
+            return answer(reply_to, Reply::status(Status::BadHandles));
+        }
+        let Ok(new) = sys::mmio_map(buf) else {
+            return answer(reply_to, Reply::status(Status::BadHandles));
+        };
+        // The kernel maps a buffer once: the same mapping means a buffer some window
+        // already holds, which must stay mapped.
+        if self.holders(new) > 0 {
+            return answer(reply_to, Reply::status(Status::Invalid));
+        }
+        let Some(c) = self.content(req.window) else {
+            self.unmap_unused(new);
+            return answer(reply_to, Reply::status(Status::BadWindow));
+        };
+        c.second = Some(new);
+        answer(reply_to, Reply::ok(0));
+    }
+
+    /// How many windows hold the buffer mapped at `virt`, in either slot.
+    fn holders(&self, virt: u64) -> usize {
+        self.contents
+            .iter()
+            .flatten()
+            .filter(|c| c.first == virt || c.second == Some(virt))
+            .count()
+    }
+
+    /// Whether the buffer at `virt` belongs to a window with two: one no other window
+    /// may show, or a swap would change it under that one (ADR 0081).
+    fn in_a_pair(&self, virt: u64) -> bool {
+        self.contents
+            .iter()
+            .flatten()
+            .any(|c| c.second.is_some() && (c.first == virt || c.second == Some(virt)))
     }
 
     /// Unmaps a content buffer no window shows any more. The mapping is
@@ -1964,7 +2072,7 @@ impl Compositor {
     /// have created several windows on one buffer (the kernel then returns
     /// the same mapping), and those keep it.
     fn unmap_unused(&self, virt: u64) {
-        if !self.contents.iter().flatten().any(|c| c.virt == virt) {
+        if self.holders(virt) == 0 {
             let _ = sys::mmio_unmap(virt);
         }
     }
@@ -2020,7 +2128,9 @@ impl Compositor {
                         return;
                     };
                     let n = (c.width * c.height) as usize;
-                    // SAFETY: client buffer mapped in `Create`, `width*height*4` bytes long.
+                    // SAFETY: the buffer shown, mapped in `Create`, `Resize` or
+                    // `SecondBuffer`, each checked to hold `width*height*4` bytes of
+                    // the size it was given at; a resize drops the second.
                     let pixels = unsafe { core::slice::from_raw_parts_mut(c.virt as *mut u32, n) };
                     if let Some(src) = Canvas::new(pixels, c.width, c.height, c.width) {
                         out.blit(&src, w.content.x, w.content.y);

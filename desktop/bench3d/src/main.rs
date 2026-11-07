@@ -42,17 +42,17 @@ const SCENE_US: u64 = 5_000_000;
 /// A scene starts below this, and stops at that: the method of ADR 0080, 4b.
 const COOL_C: u32 = 70;
 const STOP_C: u32 = 90;
-/// More heap, for the depth buffer, the meshes, the texture, the picture the 2D effects
-/// filter and the frame being drawn: with the window, within the manifest's 8 MiB.
-const MORE_HEAP: usize = 6144 * 1024;
+/// More heap, for the depth buffer, the meshes, the textures and the picture the 2D
+/// effects filter: with the window's two buffers, within the manifest's 8 MiB.
+const MORE_HEAP: usize = 4268 * 1024;
 /// The `memory` of bench3d.manifest, in KiB: what its DMA may take, the window included.
 const QUOTA_KIB: usize = 8 * 1024;
-/// The window's buffer, in whole pages, as the kernel charges it.
+/// One of the window's two buffers, in whole pages, as the kernel charges it.
 const WINDOW_KIB: usize = (W * H * 4).div_ceil(4096) * 4;
-/// What the quota leaves after the window and the extra heap.
-const SPARE_KIB: usize = QUOTA_KIB - WINDOW_KIB - MORE_HEAP / 1024;
+/// What the quota leaves after the window's buffers and the extra heap.
+const SPARE_KIB: usize = QUOTA_KIB - 2 * WINDOW_KIB - MORE_HEAP / 1024;
 // The budget is checked when bench3d is built, not when it runs out on a machine.
-const _: () = assert!(WINDOW_KIB + MORE_HEAP / 1024 <= QUOTA_KIB);
+const _: () = assert!(2 * WINDOW_KIB + MORE_HEAP / 1024 <= QUOTA_KIB);
 const KEY_ESC: u16 = 1;
 
 #[derive(Clone, Copy)]
@@ -149,7 +149,7 @@ fn temperature(system: Handle) -> Option<(u32, u32)> {
 }
 
 /// The line that names a run, as ADR 0080's format asks: build and processors.
-fn header(system: Handle) -> String {
+fn header(system: Handle, double: bool) -> String {
     let mut args = [0u8; sys::CMDLINE_MAX];
     let line = sys::cmdline(system, &mut args).ok().map(CmdLine::new);
     let build = line.as_ref().map_or(String::from("unknown"), |l| {
@@ -167,7 +167,7 @@ fn header(system: Handle) -> String {
         _ => 0,
     };
     // `machine` waits for the firmware's model in `diag` (SMBIOS): until then, unknown.
-    format!("# machine=unknown build={build} clock=tsc cpus={n} scene=bench3d size={W}x{H} renderer=cpu textures=v2")
+    format!("# machine=unknown build={build} clock=tsc cpus={n} scene=bench3d size={W}x{H} renderer=cpu textures=v2 present={}", if double { "double" } else { "single" })
 }
 
 fn camera(eye: Vec3, at: Vec3) -> Camera {
@@ -469,10 +469,6 @@ struct App {
     win: Window,
     system: Handle,
     text: Typesetter,
-    /// The frame being drawn. The compositor reads the window's buffer whenever it
-    /// makes a frame of the screen, so a frame drawn there shows half made: models cut
-    /// and empty zones. Only a finished frame is copied there, by [`App::show`].
-    back: Vec<u32>,
     samples: Vec<u32>,
 }
 
@@ -497,21 +493,19 @@ impl App {
         }
     }
 
-    /// The frame being drawn, to paint on.
+    /// The frame being drawn, to paint on: with two buffers, the one not shown.
     fn screen(&mut self) -> Canvas<'_> {
-        Canvas::new(&mut self.back, W as u32, H as u32, W as u32).expect("frame buffer")
+        self.win.canvas()
     }
 
-    /// Copies the finished frame to the window in one pass and shows it.
+    /// Shows the finished frame: with two buffers, the compositor swaps them.
     fn show(&mut self) {
-        self.win.canvas().pixels.copy_from_slice(&self.back);
         let _ = self.win.present();
     }
 
     /// Words on the frame, on a dark band so they read over any scene.
     fn hud(&mut self, lines: &[String]) {
-        let mut c =
-            Canvas::new(&mut self.back, W as u32, H as u32, W as u32).expect("frame buffer");
+        let mut c = self.win.canvas();
         let band = Rect::new(12, 12, 360, 22 * lines.len() as u32 + 12);
         c.rounded(&band, 8, rgb(0x10, 0x14, 0x1c));
         for (i, l) in lines.iter().enumerate() {
@@ -569,7 +563,7 @@ impl App {
         loop {
             let f0 = now_us(self.system);
             let t = (f0 - start) as f32 / 1e6;
-            let stats = frame(kind, t, a, &mut self.back);
+            let stats = frame(kind, t, a, self.win.canvas().pixels);
             out.stats += stats;
             let n = out.frames.len() as u64;
             let elapsed = (f0 - start).max(1);
@@ -621,15 +615,14 @@ fn buffer<T: Copy>(n: usize, v: T) -> Option<Vec<T>> {
     Some(b)
 }
 
-/// The scenes' meshes and textures, and the frame to draw on.
-fn assets(hw: Handle, system: Handle) -> Option<(Assets, Vec<u32>, Vec<u32>)> {
+/// The scenes' meshes and textures, and room for the frame times.
+fn assets(hw: Handle, system: Handle) -> Option<(Assets, Vec<u32>)> {
     let heap = sys::dma_alloc(hw, MORE_HEAP as u64)
         .ok()
         .and_then(|d| sys::mmio_map(d).ok())?;
     // SAFETY: a new mapping of whole pages, never unmapped, used by nothing else.
     unsafe { aricode_rt::extend_heap(heap as usize, MORE_HEAP) };
     // The large buffers first, so a heap too small says so instead of stopping.
-    let back = buffer(W * H, 0u32)?;
     let depth = buffer(W * H, u16::MAX)?;
     let picture = buffer(W * H, 0u32)?;
     let texture_start = now_us(system);
@@ -655,7 +648,7 @@ fn assets(hw: Handle, system: Handle) -> Option<(Assets, Vec<u32>, Vec<u32>)> {
     // hinting/scratch and small HUD/results strings. Fail here, before any scene.
     let reserve = buffer(256 * 1024, 0u8)?;
     drop(reserve);
-    Some((a, back, samples))
+    Some((a, samples))
 }
 
 fn main(arg: u64) -> u64 {
@@ -675,22 +668,28 @@ fn main(arg: u64) -> u64 {
     };
     say("making its scenes");
     let startup = now_us(system);
-    let Some((mut a, back, samples)) = assets(hw, system) else {
+    let Some((mut a, samples)) = assets(hw, system) else {
         say("no memory for its scenes");
         return 2;
     };
-    let Ok(win) =
+    let Ok(mut win) =
         Window::create_wanting(session, hw, W as u32, H as u32, "Bench3D", wants::KEY_CODES)
     else {
         say("could not create its window");
         return 3;
     };
+    // The compositor reads the buffer shown whenever it makes a frame of the screen, so
+    // a frame drawn there shows half made: models cut and empty zones (incident 0063).
+    // With two, the frame is drawn on the other and shown whole.
+    let double = win.double_buffer(hw).is_ok();
+    if !double {
+        say("this system's compositor has no second buffer: frames may show half drawn");
+    }
     say("window open");
     let mut app = App {
         win,
         system,
         text: Typesetter::new(),
-        back,
         samples,
     };
     say(&format!(
@@ -700,7 +699,7 @@ fn main(arg: u64) -> u64 {
         aricode_rt::heap_stats().free
     ));
     let quick = arg;
-    let head = header(system);
+    let head = header(system, double);
     sys::print(head.as_bytes());
     sys::print(b"\n");
     let mut results: Vec<(&str, u64, bool)> = Vec::new();

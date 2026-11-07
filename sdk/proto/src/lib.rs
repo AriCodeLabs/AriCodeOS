@@ -1179,7 +1179,12 @@ pub mod window {
         /// Creates a `w`x`h` window with `title`; handles `[reply, buffer]`
         /// (the buffer has `w*h*4` bytes in `0x00RRGGBB`); `value` = id.
         Create = 1,
-        /// The buffer content changed: recompose.
+        /// The buffer content changed: recompose. `width` 0 keeps the buffer shown;
+        /// 1 shows the window's first buffer (that of `Create` or `Resize`) and 2 its
+        /// [`SecondBuffer`](Op::SecondBuffer), with the whole window redrawn, and
+        /// the other is its program's to draw on: the compositor never reads a
+        /// buffer while it is not the one shown. `Reply::value` is the one shown,
+        /// 0 or 1, so a program that lost an answer finds its step again.
         Present = 2,
         /// Waits up to `timeout_ms` for a window event.
         Poll = 3,
@@ -1216,6 +1221,13 @@ pub mod window {
         MenuAdd = 12,
         /// Main endpoint only (init): the bar shows `title` for the network.
         Network = 13,
+        /// A second buffer for the window, of its size; handles `[reply, buffer]`,
+        /// as `Create`. Its program draws on the one not shown and presents naming
+        /// it, so no frame shows half drawn (incident 0063, ADR 0081). Once per
+        /// window; `Invalid` for a window that shares its buffer with another and
+        /// for a buffer a window already holds. A resize drops it: the program
+        /// gives a new one after.
+        SecondBuffer = 14,
     }
 
     /// Request (64 bytes).
@@ -1321,6 +1333,7 @@ pub mod window {
                 11 => Op::Timezone,
                 12 => Op::MenuAdd,
                 13 => Op::Network,
+                14 => Op::SecondBuffer,
                 _ => return None,
             };
             let mut req = Self::new(op);
@@ -2090,6 +2103,22 @@ mod tests {
             s.window = 0x0102_0003;
             assert_eq!(Request::decode(&s.encode()), Some(s));
         }
+        // A second buffer, and a present that swaps to it: `width` survives beside
+        // the damage rectangles that take the title's place.
+        let mut second = Request::new(Op::SecondBuffer);
+        second.window = 4;
+        assert_eq!(Request::decode(&second.encode()), Some(second));
+        let mut swap = Request::new(Op::Present);
+        swap.window = 4;
+        swap.width = 2;
+        swap.damage[0] = DamageRect {
+            x: 1,
+            y: 2,
+            width: 30,
+            height: 40,
+        };
+        swap.damage_len = 1;
+        assert_eq!(Request::decode(&swap.encode()), Some(swap));
         assert!(Request::new(Op::Create)
             .with_title(&"t".repeat(25))
             .is_none());
