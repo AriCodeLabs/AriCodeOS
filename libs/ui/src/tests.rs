@@ -769,6 +769,30 @@ fn a_long_file_name_never_paints_over_its_size_column() {
 }
 
 #[test]
+fn narrow_icon_lists_preserve_the_name_instead_of_squeezing_it_out() {
+    for width in [80, 120, 160] {
+        for theme in [Theme::light(), Theme::dark()] {
+            let mut ui = Ui::new(theme, width, 48);
+            let list = ui.list();
+            ui.set_list_icons(list, ListIcons::Documents);
+            ui.set_root(list);
+            ui.set_rows(list, ["annual_report.txt"]);
+            let mut expected = vec![0; width as usize * 48];
+            ui.paint_all(&mut Canvas::new(&mut expected, width, 48, width).unwrap());
+            ui.set_rows(list, ["annual_report.txt\t1048576"]);
+            assert_eq!(ui.row(list, 0), "annual_report.txt\t1048576");
+            assert_eq!(ui.selected(list), Some(0));
+            let mut actual = vec![0; width as usize * 48];
+            ui.paint_all(&mut Canvas::new(&mut actual, width, 48, width).unwrap());
+            assert!(
+                actual == expected,
+                "a secondary size column displaced the name at {width}px"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_row_has_a_second_column_after_a_tab() {
     let mut f = form();
     f.ui.set_rows(f.list, ["name\t123"]);

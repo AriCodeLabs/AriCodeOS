@@ -5,6 +5,9 @@ Scope: shell rendering, launcher layout, shared list presentation, identity and
 damage tracking. This is a source and QEMU review, not a hardware qualification
 or an independent security audit.
 
+Follow-up: the [deeper audit](2026-11-07-desktop-deep-audit.md) found and corrected
+two small-window cases this initial validation did not cover.
+
 ## Findings and resolution
 
 | Finding | Resolution |

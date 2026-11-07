@@ -698,7 +698,9 @@ pub struct Theme {
     pub dock_item: (u32, u32),
     pub dock_icon: u32,
     pub dock_icon_top: i32,
-    pub dock_label_middle: i32,
+    /// Maximum name bubble size, and its gap above the dock.
+    pub dock_hint_size: (u32, u32),
+    pub dock_hint_gap: i32,
     pub dock_indicator_h: u32,
     pub dock_gap: i32,
     /// Inside the dock, around its places.
@@ -738,10 +740,11 @@ impl Theme {
         dock_active: rgb(0xFF, 0xFF, 0xFF),
         dock_ink: rgb(0x26, 0x26, 0x26),
         dock_quiet_ink: rgb(0x80, 0x80, 0x80),
-        dock_item: (96, 64),
-        dock_icon: 32,
-        dock_icon_top: 4,
-        dock_label_middle: 46,
+        dock_item: (44, 40),
+        dock_icon: 28,
+        dock_icon_top: 3,
+        dock_hint_size: (240, 28),
+        dock_hint_gap: 8,
         dock_indicator_h: 3,
         dock_gap: 4,
         dock_pad: 4,
@@ -1409,6 +1412,22 @@ impl Desktop {
         (outer, places)
     }
 
+    /// The hovered program and the maximum area its name may paint. Geometry is
+    /// independent of the font so the scene can invalidate the old and new bubble.
+    fn dock_hint(&self) -> Option<(u32, Rect)> {
+        let (dock, places) = self.dock();
+        let (id, place) = places
+            .into_iter()
+            .flatten()
+            .find(|(_, r)| r.contains(self.pointer.0, self.pointer.1))?;
+        let (w, h) = self.theme.dock_hint_size;
+        let w = w.min(self.screen.w);
+        let x = (place.x + place.w as i32 / 2 - w as i32 / 2).clamp(0, (self.screen.w - w) as i32);
+        let y = dock.y - self.theme.dock_hint_gap - h as i32;
+        // On a very short display there is no room above the dock.
+        (y >= self.bar().bottom()).then_some((id, Rect::new(x, y, w, h)))
+    }
+
     /// Where a menu's title is in the bar: after the focused window's name.
     fn menu_titles(&self, menus: &Menus, labels: &mut impl Labels) -> [Rect; MAX_MENUS] {
         let t = &self.theme;
@@ -1624,6 +1643,7 @@ impl Desktop {
             pointer: self.pointer,
             bar: self.bar(),
             dock: self.dock().0,
+            dock_hint: self.dock_hint(),
             status: self.status,
             notice: self.notice,
             notice_at: self.notice_box(),
@@ -1766,6 +1786,34 @@ impl Desktop {
             let middle = place.y + place.h as i32 / 2;
             labels.draw(&mut inside, text, place.x + t.bar_margin, middle, t.bar_ink);
         }
+        if let Some((id, bounds)) = self.dock_hint() {
+            if let Some(w) = self.get(id).filter(|_| bounds.intersects(clip)) {
+                let pad = t.bar_margin;
+                let width = (labels.width(w.panel_name()) + 2 * pad).max(0) as u32;
+                let width = width.min(bounds.w);
+                let bubble = Rect::new(
+                    bounds.x + (bounds.w - width) as i32 / 2,
+                    bounds.y,
+                    width,
+                    bounds.h,
+                );
+                out.rounded(&bubble, RADIUS, t.bar);
+                let room = Rect::new(
+                    bubble.x + pad,
+                    bubble.y,
+                    bubble.w.saturating_sub((2 * pad) as u32),
+                    bubble.h,
+                );
+                draw_fitted_label(
+                    &mut out.clipped(&room),
+                    labels,
+                    w.panel_name(),
+                    &room,
+                    bubble.y + bubble.h as i32 / 2,
+                    t.bar_ink,
+                );
+            }
+        }
         let (dock, places) = self.dock();
         if !dock.intersects(clip) {
             return;
@@ -1792,16 +1840,6 @@ impl Desktop {
                     size,
                 ),
             );
-            let room = Rect::new(place.x + 4, place.y, place.w.saturating_sub(8), place.h);
-            let mut label = inside.clipped(&room);
-            draw_fitted_label(
-                &mut label,
-                labels,
-                w.panel_name(),
-                &room,
-                place.y + t.dock_label_middle,
-                ink,
-            );
             // A line for the active window, a dot for another visible window,
             // and an outlined dot for a minimized one: colour is not the only cue.
             let width = if self.focus == Some(*id) { 16 } else { 5 };
@@ -1822,7 +1860,7 @@ impl Desktop {
     }
 }
 
-/// Centres a dock label and ends a shortened UTF-8 name with an ellipsis.
+/// Centres a hover label and ends a shortened UTF-8 name with an ellipsis.
 fn draw_fitted_label(
     out: &mut Canvas,
     labels: &mut impl Labels,
@@ -1859,6 +1897,7 @@ pub struct Scene {
     pointer: (i32, i32),
     bar: Rect,
     dock: Rect,
+    dock_hint: Option<(u32, Rect)>,
     status: [u8; STATUS_MAX],
     notice: [u8; STATUS_MAX],
     notice_at: Rect,
@@ -1905,6 +1944,11 @@ impl Scene {
         if !same_for_panels {
             damage.add(&self.dock);
             damage.add(&newer.dock);
+        }
+        if !same_for_panels || self.dock_hint != newer.dock_hint {
+            for (_, area) in [self.dock_hint, newer.dock_hint].into_iter().flatten() {
+                damage.add(&area);
+            }
         }
         if self.notice != newer.notice {
             damage.add(&self.notice_at);
@@ -2201,9 +2245,9 @@ mod tests {
     fn windows_fit_between_the_bar_and_the_dock() {
         let mut d = Desktop::new(1280, 800);
         let work = d.work();
-        assert_eq!((work.y, work.h), (24, 800 - 24 - 84));
+        assert_eq!((work.y, work.h), (24, 800 - 24 - 60));
         let full = snap_content(Snap::Full, &work);
-        assert_eq!((full.x, full.y, full.w, full.h), (0, 24 + 28, 1280, 664));
+        assert_eq!((full.x, full.y, full.w, full.h), (0, 24 + 28, 1280, 688));
         let low = snap_content(Snap::BottomRight, &work);
         assert_eq!(low.bottom(), work.bottom());
         // A title bar never goes under the bar.
@@ -3078,6 +3122,76 @@ mod tests {
                 _ => {}
             }
         }
+    }
+
+    #[test]
+    fn dock_icons_repaint_after_identity_focus_hide_and_slot_reuse() {
+        for theme in [Theme::LIGHT, Theme::DARK] {
+            let mut m = Model::new(800, 600);
+            m.desktop.theme = theme;
+            m.damage = Damage::full(m.desktop.screen);
+            let a = m.create(180, 100, "terminal", 0xffffff);
+            let b = m.create(180, 100, "files", 0xeeeeee);
+            m.frame();
+            for name in [
+                "terminal", "files", "editor", "settings", "pista", "launcher", "other",
+            ] {
+                m.desktop.set_program(a, name.as_bytes());
+                m.desktop.raise(a);
+                m.frame();
+                assert!(m.back == m.full(), "identity {name}");
+                m.desktop.set_hidden(a, true);
+                m.desktop.raise(b);
+                m.frame();
+                assert!(m.back == m.full(), "hidden {name}");
+                m.desktop.set_hidden(a, false);
+                m.desktop.raise(a);
+                m.frame();
+                assert!(m.back == m.full(), "restored {name}");
+            }
+            // The count stays the same across this frame, but an icon and slot change.
+            m.desktop.remove(a);
+            m.contents.retain(|(id, _)| *id != a);
+            let c = m.create(180, 100, "new", 0xdddddd);
+            m.desktop.set_program(c, b"files");
+            m.frame();
+            assert!(m.back == m.full(), "slot reuse");
+            assert_eq!(m.frame(), 0, "a quiet desktop costs no repaint");
+        }
+    }
+
+    #[test]
+    fn compact_dock_hover_is_bounded_and_repaints_when_entering_switching_and_leaving() {
+        let mut m = Model::new(800, 600);
+        for name in [
+            "launcher", "terminal", "files", "editor", "settings", "pista", "other", "last",
+        ] {
+            let id = m.create(100, 80, name, 0xffffff);
+            m.desktop.set_program(id, name.as_bytes());
+        }
+        let (dock, places) = m.desktop.dock();
+        assert_eq!((dock.w, dock.h), (388, 48));
+        m.frame();
+        for (id, place) in places.into_iter().flatten() {
+            m.desktop.pointer = (place.x + place.w as i32 / 2, place.y + 10);
+            let (hint_id, hint) = m.desktop.dock_hint().unwrap();
+            assert_eq!(hint_id, id);
+            assert!(hint.x >= 0 && hint.right() <= 800 && hint.bottom() < dock.y);
+            assert_eq!(
+                m.desktop.hit(m.desktop.pointer.0, m.desktop.pointer.1),
+                Hit::Dock { id }
+            );
+            m.frame();
+            assert!(m.back == m.full(), "hover {id}");
+            m.desktop.set_program(id, b"renamed_app");
+            m.frame();
+            assert!(m.back == m.full(), "identity while hovered {id}");
+        }
+        m.desktop.pointer = (10, 10);
+        assert_eq!(m.desktop.dock_hint(), None);
+        m.frame();
+        assert!(m.back == m.full(), "leaving erases the bubble");
+        assert_eq!(m.frame(), 0);
     }
 
     #[test]

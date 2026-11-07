@@ -198,4 +198,55 @@ mod tests {
             assert_eq!(Icon::application_name(name), name);
         }
     }
+
+    #[test]
+    fn offscreen_odd_rectangles_and_tiles_respect_the_cap_and_stride() {
+        const W: u32 = 80;
+        const H: u32 = 80;
+        const STRIDE: u32 = 87;
+        const SENTINEL: u32 = 0x123456;
+        for icon in [
+            Icon::Application,
+            Icon::Launcher,
+            Icon::Terminal,
+            Icon::Files,
+            Icon::Editor,
+            Icon::Settings,
+            Icon::Pista,
+            Icon::Document,
+        ] {
+            for r in [
+                Rect::new(-17, -15, 40, 31),
+                Rect::new(65, 69, 50, 80),
+                Rect::new(-80, -80, 32, 32),
+                Rect::new(4, 4, 0, 10),
+                Rect::new(4, 4, 17, 29),
+                Rect::new(4, 4, 80, 96),
+            ] {
+                let mut full = std::vec![SENTINEL; (STRIDE * H) as usize];
+                let mut tiled = full.clone();
+                icon.draw(&mut Canvas::new(&mut full, W, H, STRIDE).unwrap(), r);
+                let mut out = Canvas::new(&mut tiled, W, H, STRIDE).unwrap();
+                for y in (0..H as i32).step_by(13) {
+                    for x in (0..W as i32).step_by(11) {
+                        icon.draw(&mut out.clipped(&Rect::new(x, y, 11, 13)), r);
+                    }
+                }
+                assert_eq!(full, tiled, "{icon:?} at {r:?}");
+                let size = r.w.min(r.h).min(64);
+                let painted = Rect::new(r.x, r.y, size, size);
+                for y in 0..H {
+                    for x in 0..STRIDE {
+                        if x >= W || !painted.contains(x as i32, y as i32) {
+                            assert_eq!(
+                                full[(y * STRIDE + x) as usize],
+                                SENTINEL,
+                                "{icon:?} at {r:?} wrote ({x},{y})"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
