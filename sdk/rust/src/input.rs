@@ -35,9 +35,12 @@ impl DriverInstance {
     }
 }
 
-/// The run of this driver, for its replies: its main thread's id, never 0.
+/// The run of this driver, for its replies: its main thread's id, never 0, from
+/// whichever of its threads asks (ADR 0082).
 fn this_instance() -> u16 {
-    (crate::thread_get_tid() as u16).max(1)
+    let main = crate::Handle(aricode_abi::handle::MAIN_THREAD);
+    let id = crate::object_id(main).unwrap_or_else(|_| crate::thread_get_tid());
+    (id as u16).max(1)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

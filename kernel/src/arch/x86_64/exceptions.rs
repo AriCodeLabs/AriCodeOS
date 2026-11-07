@@ -23,7 +23,10 @@ pub fn handle(frame: &mut InterruptFrame) {
             use crate::user::process::{back_on_demand, OnDemand};
             let fetch = frame.error_code & PF_INSTRUCTION != 0;
             match back_on_demand(read_cr2(), fetch) {
-                OnDemand::Backed => {}
+                // Backed now, or by another thread of the process meanwhile: the
+                // instruction runs again. A fault it still makes has the page
+                // present and comes here no more.
+                OnDemand::Backed | OnDemand::Present => {}
                 OnDemand::OutOfMemory => {
                     serial_println!(
                         "USER OUT OF MEMORY: no frame for page {:#x} on first touch",
@@ -35,6 +38,14 @@ pub fn handle(frame: &mut InterruptFrame) {
             }
         }
         0..=31 if frame.cs & 3 == 3 => user_fault(frame),
+        // A user copy whose page went away meanwhile: the copy fails, the kernel
+        // stays (ADR 0082).
+        PAGE_FAULT if super::usercopy::recover(frame) => {
+            log::warn!(
+                "user copy: page {:#x} gone while copying; the call fails",
+                read_cr2()
+            );
+        }
         0..=31 => fatal(frame),
         v => super::apic::handle_interrupt(v, frame.cs & 3 == 3),
     }

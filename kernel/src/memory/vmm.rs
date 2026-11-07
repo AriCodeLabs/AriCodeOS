@@ -190,18 +190,27 @@ pub fn flush_page(virt: u64) {
 }
 
 /// Invalidates the user pages `[virt, virt+len)` of the current address
-/// space on this CPU, before the frames they pointed at may be reused
-/// (ADR 0038). Enough for a process's own pages because a process has one
-/// thread, which is running here: every other CPU that ran it has since
-/// loaded another CR3 (the scheduler switches to a thread of another
-/// address space, or to the kernel's, whenever it leaves this one), and a
-/// CR3 load drops the non-global entries. When processes get more than
-/// one thread this must become a shootdown to the CPUs running them.
-pub fn flush_own_user_range(virt: u64, len: u64) {
-    for page in (virt..virt + len).step_by(PAGE_SIZE as usize) {
-        // SAFETY: invalidation of a TLB entry; no memory effects.
-        unsafe { core::arch::asm!("invlpg [{}]", in(reg) page, options(nostack, preserves_flags)) };
-    }
+/// space, before the frames they pointed at may be reused (ADR 0038): on this
+/// CPU and on every other running the same address space, which another
+/// thread of the process may be doing (ADR 0082). A CPU that ran it and left
+/// has loaded another CR3 since, which dropped the non-global entries. The page
+/// tables must already be changed; interrupts enabled and no locks held.
+pub fn flush_user_range(virt: u64, len: u64) {
+    use crate::arch::x86_64::smp;
+    // This CPU and the list of the others from one and the same CPU.
+    let (ids, n) = crate::sync::without_interrupts(|| {
+        for page in (virt..virt + len).step_by(PAGE_SIZE as usize) {
+            // SAFETY: invalidation of a TLB entry; no memory effects.
+            unsafe {
+                core::arch::asm!("invlpg [{}]", in(reg) page, options(nostack, preserves_flags))
+            };
+        }
+        let cr3: u64;
+        // SAFETY: read of CR3.
+        unsafe { core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack)) };
+        smp::others_running(cr3)
+    });
+    smp::flush_user_range_on(&ids[..n], virt, len);
 }
 
 /// `true` if `addr` falls in the kernel stack guard page.

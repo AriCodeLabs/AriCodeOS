@@ -101,6 +101,47 @@ pub fn thread_get_tid() -> u64 {
     call(nr::THREAD_GET_TID, 0, 0, 0, 0).unwrap_or(0)
 }
 
+/// `thread_create` (ADR 0082): a thread of this process starts at `entry(arg)` on
+/// a stack of its own and must end with [`thread_exit`]; its id.
+/// `aricode_rt::thread::spawn` is the way most programs want.
+pub fn thread_create(entry: extern "C" fn(u64) -> !, arg: u64) -> Result<u64, Error> {
+    call(nr::THREAD_CREATE, entry as usize as u64, arg, 0, 0)
+}
+
+/// Ends the calling thread with `value` for whoever joins it; from the main
+/// thread, ends the process.
+pub fn thread_exit(value: u64) -> ! {
+    let _ = call(nr::THREAD_EXIT, value, 0, 0, 0);
+    unreachable!("thread_exit returned")
+}
+
+/// Waits for thread `tid` of this process to end and gives its value.
+pub fn thread_join(tid: u64, timeout_ms: u64) -> Result<u64, Error> {
+    call(nr::THREAD_JOIN, tid, timeout_ms, 0, 0)
+}
+
+/// Sleeps while `word` holds `expected`, until a [`futex_wake`] on it, the timeout
+/// ([`Error::Timeout`]) or a spurious wake: callers look at the word again.
+pub fn futex_wait(
+    word: &core::sync::atomic::AtomicU32,
+    expected: u32,
+    timeout_ms: u64,
+) -> Result<(), Error> {
+    call(
+        nr::FUTEX_WAIT,
+        word.as_ptr() as u64,
+        expected as u64,
+        timeout_ms,
+        0,
+    )
+    .map(|_| ())
+}
+
+/// Wakes up to `count` threads waiting on `word`; how many it woke.
+pub fn futex_wake(word: &core::sync::atomic::AtomicU32, count: u32) -> u64 {
+    call(nr::FUTEX_WAKE, word.as_ptr() as u64, count as u64, 0, 0).unwrap_or(0)
+}
+
 pub fn abi_version() -> u64 {
     call(nr::ABI_VERSION, 0, 0, 0, 0).unwrap_or(0)
 }

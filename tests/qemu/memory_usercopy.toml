@@ -1,0 +1,16 @@
+# ADR 0082, decision 6: a copy between the kernel and a process whose page went
+# away (another thread unmapped it) fails the call instead of faulting the kernel.
+name = "memory.usercopy"
+description = "test=usercopy: a fault inside a user copy returns an error, not a kernel panic"
+level = "full"
+areas = ["memory"]
+cmdline = "qemu_exit test=usercopy"
+
+[expect]
+exit = 33
+serial_contains = [
+    "user copy: page 0x10 gone while copying; the call fails",
+    "usercopy selftest: a fault in a user copy returns an error: OK",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC"]

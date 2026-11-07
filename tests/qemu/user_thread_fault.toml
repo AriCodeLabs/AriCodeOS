@@ -1,0 +1,22 @@
+# ADR 0082: a fault on a second thread ends the whole process, its main thread
+# included although it waits on a futex for ever: the end wakes it, and the
+# process is reaped once its last thread is.
+name = "user.thread_fault"
+description = "a fault on a second thread ends the process and wakes its waiting main thread"
+level = "full"
+areas = ["user", "smp"]
+cpus = 2
+cmdline = "qemu_exit test=user_thread_fault"
+timeout_secs = 60
+
+[expect]
+exit = 33
+serial_contains = [
+    "thread_fault: the main thread waits for ever",
+    "thread_fault: the second thread writes to page 0",
+    "USER FAULT #PF",
+    "'thread_fault' killed: #PF write",
+    "user: 'thread_fault' exited: Killed(\"#PF write\")",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC", "the main thread woke and went on"]

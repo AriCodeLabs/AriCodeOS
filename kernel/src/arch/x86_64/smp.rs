@@ -320,11 +320,15 @@ extern "C" fn ap_entry(idx: usize) -> ! {
 
 // --- Service IPIs ---------------------------------------------------------
 
-/// Page to invalidate (0 = whole TLB) and CPUs yet to acknowledge.
+/// Page to invalidate (0 = whole TLB, [`RELOAD_CR3`] = this address space's
+/// entries) and CPUs yet to acknowledge.
 static FLUSH_ADDR: AtomicU64 = AtomicU64::new(0);
 static FLUSH_PENDING: AtomicUsize = AtomicUsize::new(0);
 static FLUSH_SENDER: SpinLock<()> = SpinLock::new(());
 static FLUSHES_SERVED: AtomicUsize = AtomicUsize::new(0);
+/// `FLUSH_ADDR` for "reload CR3": drops the non-global entries, those of the user
+/// half. No page address is 1.
+const RELOAD_CR3: u64 = 1;
 
 fn invlpg(virt: u64) {
     // SAFETY: invalidation of a TLB entry; no memory effects.
@@ -371,10 +375,65 @@ pub fn flush_others(virt: Option<u64>) {
     }
 }
 
+/// The LAPIC ids of the other online CPUs running address space `cr3`, after
+/// this one has changed its tables (ADR 0082). From the CPU that changed them,
+/// with interrupts disabled, so that it is still the CPU it excludes.
+pub fn others_running(cr3: u64) -> ([u32; MAX_CPUS], usize) {
+    // The tables' change before looking at who runs them: a CPU missed here sets
+    // its address space after this read, so it loads the changed tables.
+    core::sync::atomic::fence(Ordering::SeqCst);
+    let me = cpu::id() as usize;
+    let mut ids = [0u32; MAX_CPUS];
+    let mut n = 0;
+    for c in cpu::online().filter(|c| c.index() != me && c.cr3() == cr3) {
+        ids[n] = c.lapic_id();
+        n += 1;
+    }
+    (ids, n)
+}
+
+/// Invalidates the user pages `[virt, virt+len)` on the CPUs `lapic_ids` (from
+/// [`others_running`]) and waits for them: one page by its address, more by
+/// reloading their address space. A CPU that has moved to another one since
+/// invalidates in vain. Interrupts enabled and no locks held, as `flush_others`.
+pub fn flush_user_range_on(lapic_ids: &[u32], virt: u64, len: u64) {
+    if lapic_ids.is_empty() {
+        return;
+    }
+    assert!(
+        crate::sync::interrupts_enabled(),
+        "smp: user tlb shootdown with interrupts disabled"
+    );
+    let _sender = FLUSH_SENDER.lock();
+    let one_page = len <= PAGE_SIZE && virt != 0 && virt != RELOAD_CR3;
+    FLUSH_ADDR.store(if one_page { virt } else { RELOAD_CR3 }, Ordering::Relaxed);
+    FLUSH_PENDING.store(lapic_ids.len(), Ordering::SeqCst);
+    for &id in lapic_ids {
+        apic::send_ipi(id, apic::TLB_FLUSH_VECTOR);
+    }
+    let mut spins = 0u64;
+    while FLUSH_PENDING.load(Ordering::Acquire) != 0 {
+        spins += 1;
+        assert!(spins < 1 << 30, "smp: user tlb shootdown not answered");
+        core::hint::spin_loop();
+    }
+    USER_SHOOTDOWNS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// User-range shootdowns that reached another CPU (`test=thread_unmap`).
+static USER_SHOOTDOWNS: AtomicUsize = AtomicUsize::new(0);
+pub fn user_shootdowns() -> usize {
+    USER_SHOOTDOWNS.load(Ordering::Relaxed)
+}
+
 /// `TLB_FLUSH_VECTOR` handler on the receiving CPU.
 pub fn on_tlb_flush_ipi() {
     match FLUSH_ADDR.load(Ordering::Relaxed) {
         0 => flush_all_local(),
+        // SAFETY: reloading CR3 with its own value only drops non-global entries.
+        RELOAD_CR3 => unsafe {
+            asm!("mov cr3, {}", in(reg) read_cr(3), options(nostack));
+        },
         v => invlpg(v),
     }
     FLUSHES_SERVED.fetch_add(1, Ordering::Relaxed);

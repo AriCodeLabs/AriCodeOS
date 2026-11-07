@@ -14,6 +14,10 @@ use aricode_handles::{Handle, Rights};
 use log::warn;
 
 pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
+    // A thread of a process whose end began does nothing more (ADR 0082, audit M1).
+    if let Some(why) = process::current_kill_reason() {
+        process::kill_current(why);
+    }
     let h = Handle(frame.rdi as u32);
     let result: Result<u64, Error> = match frame.number {
         nr::PROCESS_EXIT => process::exit_current(frame.rdi),
@@ -111,6 +115,11 @@ pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
         nr::SYSTEM_POWER => system_power(h, frame.rsi),
         nr::INITRD_READ => initrd_read(h, frame.rsi, frame.rdx, frame.r10, frame.r8),
         nr::PS2_READ => ps2_read(h, frame.rsi, frame.rdx),
+        nr::THREAD_CREATE => process::create_thread(frame.rdi, frame.rsi),
+        nr::THREAD_EXIT => process::exit_thread(frame.rdi),
+        nr::THREAD_JOIN => process::join_thread(frame.rdi, deadline_from(frame.rsi)),
+        nr::FUTEX_WAIT => super::futex::wait(frame.rdi, frame.rsi as u32, deadline_from(frame.rdx)),
+        nr::FUTEX_WAKE => super::futex::wake(frame.rdi, frame.rsi),
         n => {
             warn!("unknown syscall {n} from rip={:#x}", frame.user_rip);
             Err(Error::NoSys)
@@ -492,7 +501,13 @@ fn ipc_send(
         unreachable!()
     };
     endpoint.send_with(timeout_ms, || {
+        // Looked at again and taken in one hold of the table: another thread of
+        // the process may have closed one since the early check, and a take that
+        // failed half-way would lose those taken before it (ADR 0082).
         let handles: Vec<(Cap, Rights)> = with_handles(|t| {
+            for uh in &user_handles {
+                lookup(t, *uh, Rights::TRANSFER)?;
+            }
             user_handles
                 .iter()
                 .map(|uh| t.take(*uh).map_err(abi_error))
@@ -537,8 +552,28 @@ fn ipc_receive(
             .collect())
     })?;
     let raw: Vec<u8> = received.iter().flat_map(|h| h.to_le_bytes()).collect();
-    process::copy_to_user(out_ptr, &raw)?;
+    copy_handles_out(out_ptr, &raw)?;
     Ok(n as u64 | ((received.len() as u64) << 32))
+}
+
+/// The numbers of handles just inserted, to the program: should the copy fail
+/// (another thread unmapped the buffer since it was checked, ADR 0082), the
+/// handles are taken back, so the program holds none it does not know of (audit
+/// L2). They drop after the table's lock.
+fn copy_handles_out(out_ptr: u64, raw: &[u8]) -> Result<(), Error> {
+    let Err(e) = process::copy_to_user(out_ptr, raw) else {
+        return Ok(());
+    };
+    let taken: Vec<_> = with_handles(|t| {
+        Ok(raw
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter_map(|b| t.remove(Handle(u32::from_le_bytes(*b))).ok())
+            .collect())
+    })?;
+    drop(taken);
+    Err(e)
 }
 
 /// A member of an `ipc_receive_any` set (ADR 0044): an interrupt line the
@@ -623,7 +658,7 @@ fn ipc_receive_any(
             .collect())
     })?;
     let raw: Vec<u8> = received.iter().flat_map(|h| h.to_le_bytes()).collect();
-    process::copy_to_user(out_ptr, &raw)?;
+    copy_handles_out(out_ptr, &raw)?;
     Ok(receive_any::message(index, n, received.len()))
 }
 
@@ -706,6 +741,7 @@ fn spawn_from_bytes(
 ) -> Result<u64, Error> {
     let handles_len = aricode_abi::spawn_limits::handles(limits) as u64;
     let dma_quota = aricode_abi::spawn_limits::memory_kib(limits) as u64 * 1024;
+    let threads = aricode_abi::spawn_limits::threads(limits);
     let console_first = aricode_abi::spawn_limits::console_first(limits);
     if handles_len as usize > IPC_MAX_HANDLES * 4 {
         return Err(Error::TooBig);
@@ -746,7 +782,8 @@ fn spawn_from_bytes(
         let (taken, _) = extra.remove(0);
         Cap::new(taken.object().clone(), Rights::WRITE)
     });
-    let pid = match process::spawn_with_caps(name, elf, session_console, extra, arg, dma_quota) {
+    let limits = (dma_quota, threads);
+    let pid = match process::spawn_with_caps(name, elf, session_console, extra, arg, limits) {
         Ok(pid) => pid,
         Err(e) => {
             warn!("process_spawn '{name}': {e}");
@@ -793,11 +830,19 @@ fn pci_claim(root: Handle, index: usize, out_ptr: u64) -> Result<u64, Error> {
         warn!("pci_claim {index}: {e}");
         Error::NotFound
     })?;
+    // Room looked at again in the hold that inserts: another thread of the
+    // process may have filled the table since (ADR 0082). What is not inserted
+    // stays in `slots` and drops after the table's lock: the claim's drop takes
+    // the PCI locks.
+    let mut slots = claimed.handles;
     let raw: Vec<u8> = with_handles(|t| {
+        if t.room() < aricode_abi::PCI_CLAIM_HANDLES {
+            return Err(Error::Limit);
+        }
         let mut out = Vec::with_capacity(aricode_abi::PCI_CLAIM_HANDLES * 4);
-        for slot in claimed.handles {
-            let value = match slot {
-                // Room was checked above; this process is single-threaded.
+        for slot in slots.iter_mut() {
+            let value = match slot.take() {
+                // Room for all of them was checked in this hold.
                 Some((obj, rights)) => insert(t, obj, rights)?.0,
                 None => 0,
             };
@@ -805,6 +850,7 @@ fn pci_claim(root: Handle, index: usize, out_ptr: u64) -> Result<u64, Error> {
         }
         Ok(out)
     })?;
+    drop(slots);
     if let Err(e) = process::copy_to_user(out_ptr, &raw) {
         // The caller never learns the handles: take them back (dropped
         // here, outside the table's lock: the claim's drop takes the PCI

@@ -57,6 +57,11 @@ pub struct Cpu {
     online: AtomicBool,
     idle_running: AtomicBool,
     idle_tid: AtomicU32,
+    /// The address space this CPU runs or is about to load (ADR 0082): written
+    /// before the CR3 load, so a CPU that unmaps a process's memory and then reads
+    /// it either sees this CPU among those to invalidate, or this CPU loads the
+    /// tables after the change.
+    cr3: AtomicU64,
     tables: PerCpuCell<Tables>,
     /// TSC cycles with the idle thread running (`sysinfo::IDLE`, incident
     /// 0020): written by this CPU in `set_current`, read by any CPU.
@@ -90,6 +95,7 @@ impl Cpu {
             online: AtomicBool::new(false),
             idle_running: AtomicBool::new(false),
             idle_tid: AtomicU32::new(u32::MAX),
+            cr3: AtomicU64::new(0),
             tables: PerCpuCell::new(Tables::new()),
             idle: IrqLock::new(IdleClock::new()),
         }
@@ -162,6 +168,14 @@ impl Cpu {
         let (left, expired) = aricode_sched::quantum_tick(left, quantum);
         self.quantum_left.store(left, Ordering::Relaxed);
         expired
+    }
+    /// The address space about to be loaded here (owning CPU only, before the load).
+    pub fn set_cr3(&self, cr3: u64) {
+        self.cr3.store(cr3, Ordering::SeqCst);
+    }
+    /// The address space this CPU runs or is about to load.
+    pub fn cr3(&self) -> u64 {
+        self.cr3.load(Ordering::SeqCst)
     }
     /// Kernel stack of the current thread for `syscall` (owning CPU only).
     pub fn set_kernel_rsp(&self, top: u64) {
