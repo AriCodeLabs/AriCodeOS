@@ -90,6 +90,12 @@ pub fn wait(addr: u64, expected: u32, deadline: Option<u64>) -> Result<u64, Erro
     }
 }
 
+/// Words some thread waits on now, of every process (`test=thread_kill`: none is
+/// left behind by threads that were killed).
+pub fn words_waited_on() -> usize {
+    WAITING.lock().len()
+}
+
 /// `futex_wake`: wakes up to `count` threads waiting on the word at `addr`.
 pub fn wake(addr: u64, count: u64) -> Result<u64, Error> {
     let key = key(addr)?;

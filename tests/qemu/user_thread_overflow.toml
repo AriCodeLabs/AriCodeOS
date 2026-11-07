@@ -1,0 +1,17 @@
+# ADR 0082: a thread's stack that overflows into its guard page ends the process,
+# named as a stack overflow.
+name = "user.thread_overflow"
+description = "a thread's stack overflow hits its guard page and is named"
+level = "full"
+areas = ["user"]
+cmdline = "qemu_exit test=user_thread_overflow"
+timeout_secs = 60
+
+[expect]
+exit = 33
+serial_contains = [
+    "USER STACK OVERFLOW: the user stack hit its guard page",
+    "'thread_overflow' killed: stack overflow",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC", "the thread came back"]

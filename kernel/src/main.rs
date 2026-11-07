@@ -383,6 +383,7 @@ fn run_requested_test(cmdline: &CmdLine) {
         "spawn_oom" => user::process::spawn_oom_selftest(),
         "dma_lifetime" => user::process::dma_lifetime_selftest(),
         "thread_unmap" => user::process::thread_unmap_selftest(),
+        "thread_kill" => user::process::thread_kill_selftest(),
         "pci_reap" => pci::reap_selftest(),
         "pci_stale_line" => pci::stale_line_selftest(),
         "fpu" => arch::x86_64::fpu::selftest(),

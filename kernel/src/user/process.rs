@@ -262,10 +262,13 @@ pub fn current_kill_reason() -> Option<&'static str> {
     let pid = current_pid()?;
     let procs = PROCESSES.lock();
     let p = procs.get(&pid)?;
-    // A process that has ended takes its other threads with it (ADR 0082).
-    match p.status {
-        Some(_) => Some(PROCESS_ENDED),
-        None => p.kill_requested,
+    // A process that is ending takes its other threads with it (ADR 0082), from
+    // the moment its end begins: a thread that went on would redo what the end
+    // undoes (audit M1). The thread running the end never asks.
+    if p.ending || p.status.is_some() {
+        Some(PROCESS_ENDED)
+    } else {
+        p.kill_requested
     }
 }
 
@@ -281,11 +284,12 @@ struct UserThread {
 }
 
 impl Process {
-    /// Its threads that have not ended.
+    /// Its threads that have not ended; not a place still being made, whose
+    /// thread does not exist yet (audit L1).
     fn live_tids(&self) -> Vec<aricode_sched::Tid> {
         self.threads
             .iter()
-            .filter(|t| t.ended.is_none())
+            .filter(|t| t.ended.is_none() && t.tid.0 != 0)
             .map(|t| t.tid)
             .collect()
     }
@@ -640,7 +644,8 @@ pub fn create_thread(entry: u64, arg: u64) -> Result<u64, aricode_abi::Error> {
         if p.ending || p.status.is_some() {
             return Err(Error::Invalid);
         }
-        if p.threads.len() >= p.threads_max {
+        // Threads joined but not yet reaped still hold a kernel stack (audit L3).
+        if p.threads.len().max(p.unreaped) >= p.threads_max {
             return Err(Error::Limit);
         }
         let cr3 = p.mapper.as_ref().ok_or(Error::Invalid)?.root_phys();
@@ -889,6 +894,10 @@ pub fn thread_reaped(pid: u32) {
 /// capabilities go, freeing memory a device could otherwise still write;
 /// a device left unclaimed is reset last.
 pub fn release_address_space(pid: u32) {
+    // Again, now that no thread of the process can run: one that was inside a
+    // call when the end began may have claimed the console or the PS/2 stream
+    // after `finish` let them go (ADR 0082, audit M1).
+    crate::console_input::process_gone(pid);
     // The capabilities are taken out now, before anything is freed, so the
     // devices they claim can be stopped first; they are dropped below.
     let handles = PROCESSES
@@ -1203,6 +1212,36 @@ pub fn thread_unmap_selftest() {
         }
     }
     panic!("thread_unmap selftest: in 10 runs the writer never ran on another CPU at the unmap");
+}
+
+/// Self-test `test=thread_kill` (ADR 0082): a process whose threads all wait for
+/// ever, three on a futex and the main one to join one of them, is ended by a
+/// kill from outside; the wait for it returns, and no futex wait is left.
+pub fn thread_kill_selftest() {
+    let code =
+        crate::user::programs::by_name("thread_waiters").expect("thread_waiters in the initrd");
+    let pid = spawn("thread_waiters", code).expect("spawn");
+    // Time for its threads to start waiting.
+    scheduler::sleep_ms(300);
+    assert!(
+        request_kill(pid, KILLED_BY_REQUEST),
+        "thread_kill: the process should be alive"
+    );
+    let status = wait_until(
+        pid,
+        Some(crate::time::ticks() + 5_000 / crate::time::MS_PER_TICK),
+    );
+    assert_eq!(
+        status,
+        Some(ExitStatus::Killed(KILLED_BY_REQUEST)),
+        "thread_kill: the process did not end within 5 s of its kill"
+    );
+    assert_eq!(
+        crate::user::futex::words_waited_on(),
+        0,
+        "thread_kill: a killed thread left its futex wait behind"
+    );
+    info!("thread_kill selftest: four waiting threads ended by one kill, no wait left: OK");
 }
 
 pub fn dma_lifetime_selftest() {

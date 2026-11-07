@@ -96,7 +96,7 @@ fn ping_pong() -> Result<(), u64> {
 }
 
 fn pool_rounds() -> Result<(), u64> {
-    let pool = Pool::new(3);
+    let mut pool = Pool::new(3);
     if pool.size() != 4 {
         return Err(8);
     }
@@ -113,10 +113,28 @@ fn pool_rounds() -> Result<(), u64> {
             }
         }
     }
+    // First touches at once: four threads write the same page of zero-fill
+    // memory none has touched yet, page after page; a thread that lost the race
+    // to back it must be told to retry, never killed (ADR 0082).
+    for page in 0..TOUCH_PAGES {
+        pool.run(4, &|part| {
+            TOUCH[page * 512 + part].store(part as u64 + 1, Ordering::Relaxed);
+        });
+    }
+    let touched = (0..TOUCH_PAGES).all(|page| {
+        (0..4).all(|part| TOUCH[page * 512 + part].load(Ordering::Relaxed) == part as u64 + 1)
+    });
+    if !touched {
+        return Err(24);
+    }
     drop(pool);
-    say("a pool of 4 ran 200 rounds");
+    say("a pool of 4 ran 200 rounds and touched 32 new pages at once");
     Ok(())
 }
+
+/// Zero-fill memory backed on first touch: 32 pages of 512 words.
+const TOUCH_PAGES: usize = 32;
+static TOUCH: [AtomicU64; TOUCH_PAGES * 512] = [const { AtomicU64::new(0) }; TOUCH_PAGES * 512];
 
 /// Threads up to the default limit of 8, the main one counted, then `Limit`.
 fn limit() -> Result<(), u64> {

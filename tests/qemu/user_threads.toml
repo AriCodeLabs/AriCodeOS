@@ -14,7 +14,7 @@ exit = 33
 serial_contains = [
     "threads: three threads computed and joined",
     "threads: a futex ping-pong of 1000 turns",
-    "threads: a pool of 4 ran 200 rounds",
+    "threads: a pool of 4 ran 200 rounds and touched 32 new pages at once",
     "threads: the limit of 8 threads holds, and joining frees a place",
     "threads: join and futex refuse what they should",
     "'threads' exited with code 21",

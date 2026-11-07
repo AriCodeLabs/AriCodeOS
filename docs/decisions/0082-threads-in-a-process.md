@@ -122,3 +122,8 @@ exit rules that leave threads behind.
   ADR 0080 if measurement asks for it.
 - Programs written for one thread keep working: nothing changes until they call
   `thread_create`.
+- Audited (`docs/audits/2026-11-07-user-threads.md`): no High; two Medium and
+  five Low fixed. A process's end is seen by its other threads from its first
+  moment, and the console and PS/2 cleanup runs again once its last thread is
+  reaped. Tests: `user.threads`, `user.thread_fault`, `user.thread_unmap`,
+  `user.thread_kill`, `user.thread_overflow`, `memory.usercopy`.

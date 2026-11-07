@@ -107,8 +107,12 @@ impl Pool {
     }
 
     /// Runs `f(0)` to `f(parts - 1)` and returns when all have: part `i` on pool
-    /// thread `i`, and part 0 and any beyond the pool on the caller.
-    pub fn run(&self, parts: usize, f: &(dyn Fn(usize) + Sync)) {
+    /// thread `i`, and part 0 and any beyond the pool on the caller. `&mut`: one
+    /// job at a time, from one thread, never from inside `f` (audit M2).
+    pub fn run(&mut self, parts: usize, f: &(dyn Fn(usize) + Sync)) {
+        if parts == 0 {
+            return;
+        }
         let s = &*self.shared;
         let n = self.threads.len();
         if n > 0 && parts > 1 {

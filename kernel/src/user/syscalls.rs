@@ -14,6 +14,10 @@ use aricode_handles::{Handle, Rights};
 use log::warn;
 
 pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
+    // A thread of a process whose end began does nothing more (ADR 0082, audit M1).
+    if let Some(why) = process::current_kill_reason() {
+        process::kill_current(why);
+    }
     let h = Handle(frame.rdi as u32);
     let result: Result<u64, Error> = match frame.number {
         nr::PROCESS_EXIT => process::exit_current(frame.rdi),
@@ -548,8 +552,28 @@ fn ipc_receive(
             .collect())
     })?;
     let raw: Vec<u8> = received.iter().flat_map(|h| h.to_le_bytes()).collect();
-    process::copy_to_user(out_ptr, &raw)?;
+    copy_handles_out(out_ptr, &raw)?;
     Ok(n as u64 | ((received.len() as u64) << 32))
+}
+
+/// The numbers of handles just inserted, to the program: should the copy fail
+/// (another thread unmapped the buffer since it was checked, ADR 0082), the
+/// handles are taken back, so the program holds none it does not know of (audit
+/// L2). They drop after the table's lock.
+fn copy_handles_out(out_ptr: u64, raw: &[u8]) -> Result<(), Error> {
+    let Err(e) = process::copy_to_user(out_ptr, raw) else {
+        return Ok(());
+    };
+    let taken: Vec<_> = with_handles(|t| {
+        Ok(raw
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter_map(|b| t.remove(Handle(u32::from_le_bytes(*b))).ok())
+            .collect())
+    })?;
+    drop(taken);
+    Err(e)
 }
 
 /// A member of an `ipc_receive_any` set (ADR 0044): an interrupt line the
@@ -634,7 +658,7 @@ fn ipc_receive_any(
             .collect())
     })?;
     let raw: Vec<u8> = received.iter().flat_map(|h| h.to_le_bytes()).collect();
-    process::copy_to_user(out_ptr, &raw)?;
+    copy_handles_out(out_ptr, &raw)?;
     Ok(receive_any::message(index, n, received.len()))
 }
 
