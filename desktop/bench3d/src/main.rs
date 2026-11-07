@@ -36,6 +36,7 @@ use aricode_rt::sys::{self, abi, kind, permissions, Handle};
 use aricode_rt::thread::Pool;
 use aricode_sync::SpinLock;
 use aricode_text::{Face, Typesetter, INTER_REGULAR, INTER_SEMIBOLD};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 const W: usize = 800;
 const H: usize = 600;
@@ -201,7 +202,13 @@ fn material(shading: Shading, color: [f32; 3]) -> Material<'static> {
 
 /// One frame of a scene at `t` seconds into it, onto `pixels`: the frame being drawn,
 /// never the window's buffer, which the compositor may read at any moment.
-fn frame(kind: Kind, t: f32, a: &mut Assets, pixels: &mut [u32], pool: &mut Pool) -> Stats {
+fn frame(
+    kind: Kind,
+    t: f32,
+    a: &mut Assets,
+    pixels: &mut [u32],
+    (pool, split, system): (&mut Pool, &mut Split, Handle),
+) -> Stats {
     const SKY: u32 = 0x182030;
     let mut stats = Stats::default();
     match kind {
@@ -215,7 +222,7 @@ fn frame(kind: Kind, t: f32, a: &mut Assets, pixels: &mut [u32], pool: &mut Pool
             }
             let picture = &a.picture;
             let kernel = &kernel[..size * size];
-            in_bands(pixels, pool, &|rows, band| {
+            in_bands(pixels, (pool, split, system), &|rows, band| {
                 convolve_rows(picture, band, (W, H, W), rows, kernel, size);
             });
             return stats;
@@ -228,7 +235,7 @@ fn frame(kind: Kind, t: f32, a: &mut Assets, pixels: &mut [u32], pool: &mut Pool
             );
             let view = ((0.0, 0.0), 1.8 + 0.5 * libm::sinf(t * 0.5));
             let colours = effects::palette(t * 0.1);
-            in_bands(pixels, pool, &|rows, band| {
+            in_bands(pixels, (pool, split, system), &|rows, band| {
                 effects::julia_rows(band, (W, H, W), rows, c, view, 128, &colours);
             });
             stats.pixels = (W * H) as u64;
@@ -282,21 +289,22 @@ fn frame(kind: Kind, t: f32, a: &mut Assets, pixels: &mut [u32], pool: &mut Pool
         _ => None,
     };
     let scene_assets: &Assets = a;
-    let parts = pool.size();
-    let rows = H.div_ceil(parts);
-    let bands: Vec<SpinLock<Band>> = pixels
-        .chunks_mut(rows * W)
-        .zip(depth.chunks_mut(rows * W))
+    let bands: Vec<SpinLock<Band>> = split
+        .slices(pixels)
+        .into_iter()
+        .zip(split.slices(&mut depth))
         .map(|(c, d)| SpinLock::new((c, d, Stats::default())))
         .collect();
+    let took: Vec<AtomicU64> = bands.iter().map(|_| AtomicU64::new(0)).collect();
     pool.run(bands.len(), &|b| {
+        let start = now_us(system);
         // Each band's lock is only ever taken by the thread drawing it.
         let mut band = bands[b].lock();
         let (color, depth, stats) = &mut *band;
-        let lines = b * rows..((b + 1) * rows).min(H);
-        let mut target = Target::band(color, depth, (W, H, W), lines);
+        let mut target = Target::band(color, depth, (W, H, W), split.rows(b));
         target.clear(SKY);
         *stats = scene(kind, t, scene_assets, &mut target, shadow.as_ref());
+        took[b].store(now_us(system) - start, Ordering::Relaxed);
     });
     // Every band drew every triangle it was given: the triangles once, the pixels
     // of all.
@@ -309,9 +317,85 @@ fn frame(kind: Kind, t: f32, a: &mut Assets, pixels: &mut [u32], pool: &mut Pool
     // The bands borrow `depth` until they go; the map's borrow of `picture` ends
     // with its last use above.
     drop(bands);
+    split.learn(&took);
     a.depth = depth;
     a.picture = picture;
     stats
+}
+
+/// Where a frame's bands end, one band per thread. A picture's work is not spread
+/// evenly over its rows (sky above, the objects in the middle, a fractal's deep
+/// spirals) and a frame lasts as long as its slowest band, so after each frame the
+/// ends move toward where every band would have taken as long as the others: half
+/// the way, so that they settle instead of swinging. Bands of any rows give the
+/// same picture.
+struct Split {
+    /// `ends[b]..ends[b + 1]` are band `b`'s rows: 0 first, `H` last.
+    ends: Vec<usize>,
+}
+
+/// The fewest rows a band keeps.
+const BAND_MIN_ROWS: usize = 8;
+
+impl Split {
+    /// `parts` bands of equal rows.
+    fn even(parts: usize) -> Self {
+        let parts = parts.clamp(1, H / BAND_MIN_ROWS);
+        Self {
+            ends: (0..=parts).map(|b| b * H / parts).collect(),
+        }
+    }
+
+    fn rows(&self, band: usize) -> core::ops::Range<usize> {
+        self.ends[band]..self.ends[band + 1]
+    }
+
+    /// `buf`, `W` per row, cut into the bands' rows.
+    fn slices<'a, T>(&self, mut buf: &'a mut [T]) -> Vec<&'a mut [T]> {
+        let mut out = Vec::with_capacity(self.ends.len() - 1);
+        for b in 0..self.ends.len() - 1 {
+            let (band, rest) = buf.split_at_mut(self.rows(b).len() * W);
+            out.push(band);
+            buf = rest;
+        }
+        out
+    }
+
+    /// After a frame whose band `b` took `took[b]` microseconds.
+    fn learn(&mut self, took: &[AtomicU64]) {
+        let parts = self.ends.len() - 1;
+        let us: Vec<f32> = took
+            .iter()
+            .map(|t| t.load(Ordering::Relaxed).max(1) as f32)
+            .collect();
+        let total: f32 = us.iter().sum();
+        if parts < 2 {
+            return;
+        }
+        // The cost of the picture down to each row, as each band's cost spread
+        // evenly over its rows; the new ends where it reaches 1/parts, 2/parts...
+        let mut ends = self.ends.clone();
+        let (mut band, mut before) = (0, 0.0f32);
+        for (i, end) in ends.iter_mut().enumerate().take(parts).skip(1) {
+            let want = total * i as f32 / parts as f32;
+            while band < parts - 1 && before + us[band] < want {
+                before += us[band];
+                band += 1;
+            }
+            let rows = self.rows(band);
+            let into = ((want - before) / us[band]).clamp(0.0, 1.0);
+            let at = rows.start as f32 + into * rows.len() as f32;
+            // Half the way from where it was.
+            *end = ((self.ends[i] as f32 + at) / 2.0) as usize;
+        }
+        // Every band keeps some rows, in order.
+        for i in 1..parts {
+            let low = ends[i - 1] + BAND_MIN_ROWS;
+            let high = H - (parts - i) * BAND_MIN_ROWS;
+            ends[i] = ends[i].clamp(low, high);
+        }
+        self.ends = ends;
+    }
 }
 
 /// A band's rows of the picture and of the depth buffer, and what drawing it did.
@@ -346,15 +430,23 @@ impl ShadowScene {
 /// `draw(rows, band)` for each band of `pixels`, one band per thread of `pool`.
 fn in_bands(
     pixels: &mut [u32],
-    pool: &mut Pool,
+    (pool, split, system): (&mut Pool, &mut Split, Handle),
     draw: &(dyn Fn(core::ops::Range<usize>, &mut [u32]) + Sync),
 ) {
-    let rows = H.div_ceil(pool.size());
-    let bands: Vec<SpinLock<&mut [u32]>> = pixels.chunks_mut(rows * W).map(SpinLock::new).collect();
+    let bands: Vec<SpinLock<&mut [u32]>> = split
+        .slices(pixels)
+        .into_iter()
+        .map(SpinLock::new)
+        .collect();
+    let took: Vec<AtomicU64> = bands.iter().map(|_| AtomicU64::new(0)).collect();
     pool.run(bands.len(), &|b| {
+        let start = now_us(system);
         let mut band = bands[b].lock();
-        draw(b * rows..((b + 1) * rows).min(H), &mut band);
+        draw(split.rows(b), &mut band);
+        took[b].store(now_us(system) - start, Ordering::Relaxed);
     });
+    drop(bands);
+    split.learn(&took);
 }
 
 /// A 3D scene at `t` onto `target`, a band or the whole picture.
@@ -570,6 +662,8 @@ struct App {
     /// Threads that draw a frame's bands with the main one (ADR 0082): one for
     /// each other processor.
     pool: Pool,
+    /// Where the bands of the scene under way end.
+    split: Split,
 }
 
 /// The owner asked to stop: the close box or Esc.
@@ -657,13 +751,16 @@ impl App {
             stopped_hot: false,
             stats: Stats::default(),
         };
+        // Each scene's work lies in its own rows: its bands start even.
+        self.split = Split::even(self.pool.size());
         let start = now_us(self.system);
         let mut next_look = start;
         let mut current = String::new();
         loop {
             let f0 = now_us(self.system);
             let t = (f0 - start) as f32 / 1e6;
-            let stats = frame(kind, t, a, self.win.canvas().pixels, &mut self.pool);
+            let tools = (&mut self.pool, &mut self.split, self.system);
+            let stats = frame(kind, t, a, self.win.canvas().pixels, tools);
             out.stats += stats;
             let n = out.frames.len() as u64;
             let elapsed = (f0 - start).max(1);
@@ -792,6 +889,7 @@ fn main(arg: u64) -> u64 {
         text: Typesetter::new(),
         samples,
         pool: Pool::new(cpus(system).saturating_sub(1)),
+        split: Split::even(1),
     };
     say(&format!(
         "startup_us={} texture_us={} heap_free_bytes={} dma_free_kib={SPARE_KIB}",
@@ -812,7 +910,9 @@ fn main(arg: u64) -> u64 {
             // What the 2D effects filter: a frame of the heaviest scene, made outside
             // the measured frames, since the shadow scenes use the same memory.
             let mut picture = core::mem::take(&mut a.picture);
-            frame(Kind::Everything, 1.0, &mut a, &mut picture, &mut app.pool);
+            let mut split = Split::even(app.pool.size());
+            let tools = (&mut app.pool, &mut split, system);
+            frame(Kind::Everything, 1.0, &mut a, &mut picture, tools);
             a.picture = picture;
         }
         let Ok(mut out) = app.run(name, kind, &mut a, quick) else {
