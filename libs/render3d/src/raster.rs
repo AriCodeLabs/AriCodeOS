@@ -14,25 +14,67 @@ use crate::texture::{Filter, Texture};
 /// Sub-pixel steps per pixel, per axis.
 const SUB: i64 = 16;
 
-/// Where a frame is drawn: `stride` pixels from one row to the next in both buffers.
+/// Where a frame is drawn: a picture `width` x `height`, or a band of its rows,
+/// `stride` pixels from one row to the next in both buffers. Bands of one picture
+/// drawn apart, each on its own thread, give exactly the picture drawn whole: the
+/// same projection, and the same rule for the pixels on an edge.
 pub struct Target<'a> {
     pub color: &'a mut [u32],
     pub depth: &'a mut [u16],
     pub width: usize,
     pub height: usize,
     pub stride: usize,
+    /// The rows the buffers hold: their first row is row `rows.start`.
+    rows: core::ops::Range<usize>,
 }
 
-impl Target<'_> {
+impl<'a> Target<'a> {
+    /// The whole picture.
+    pub fn new(
+        color: &'a mut [u32],
+        depth: &'a mut [u16],
+        width: usize,
+        height: usize,
+        stride: usize,
+    ) -> Self {
+        Self::band(color, depth, (width, height, stride), 0..height)
+    }
+
+    /// Rows `rows` of a picture `width` x `height`, held from the buffers' start.
+    pub fn band(
+        color: &'a mut [u32],
+        depth: &'a mut [u16],
+        (width, height, stride): (usize, usize, usize),
+        rows: core::ops::Range<usize>,
+    ) -> Self {
+        Self {
+            color,
+            depth,
+            width,
+            height,
+            stride,
+            rows,
+        }
+    }
+
+    /// The rows this target holds.
+    pub fn rows(&self) -> core::ops::Range<usize> {
+        self.rows.clone()
+    }
+
     /// `None` if a buffer does not cover the rows.
     pub fn check(&self) -> Option<()> {
-        let need = self.stride * self.height;
-        (self.stride >= self.width && self.color.len() >= need && self.depth.len() >= need)
+        let need = self.stride * self.rows.len();
+        (self.stride >= self.width
+            && self.rows.start <= self.rows.end
+            && self.rows.end <= self.height
+            && self.color.len() >= need
+            && self.depth.len() >= need)
             .then_some(())
     }
 
     pub fn clear(&mut self, color: u32) {
-        for y in 0..self.height {
+        for y in 0..self.rows.len() {
             let row = y * self.stride;
             self.color[row..row + self.width].fill(color);
             self.depth[row..row + self.width].fill(u16::MAX);
@@ -337,8 +379,8 @@ fn fill(
     };
     let inv_area = 1.0 / area as f32;
     let mut written = 0;
-    let (width, height, stride) = (target.width, target.height, target.stride);
-    cover(p, width, height, stride, |at, [e0, e1, e2]| {
+    let (width, stride) = (target.width, target.stride);
+    cover(p, width, target.rows(), stride, |at, [e0, e1, e2]| {
         let l = [
             e0 as f32 * inv_area,
             e1 as f32 * inv_area,
@@ -389,21 +431,22 @@ fn fill(
 }
 
 /// Calls `pixel(at, edges)` for each pixel centre inside the triangle `p` (in
-/// sixteenths, counter-clockwise on screen) within `width` x `height`, `at` its index
-/// `stride` apart. The one rule both passes share: of two triangles with a common edge,
-/// exactly one takes the pixels on it. `None` when no pixel of its box is on screen.
+/// sixteenths, counter-clockwise on screen) within columns `0..width` and `rows`,
+/// `at` its index in buffers that start at row `rows.start`, `stride` apart. The one
+/// rule both passes and every band share: of two triangles with a common edge,
+/// exactly one takes the pixels on it. `None` when no pixel of its box is there.
 #[inline(always)]
 pub(crate) fn cover(
     p: [(i64, i64); 3],
     width: usize,
-    height: usize,
+    rows: core::ops::Range<usize>,
     stride: usize,
     mut pixel: impl FnMut(usize, [i64; 3]),
 ) -> Option<()> {
     let x0 = (p.iter().map(|q| q.0).min()? / SUB).max(0);
     let x1 = ((p.iter().map(|q| q.0).max()? + SUB - 1) / SUB).min(width as i64);
-    let y0 = (p.iter().map(|q| q.1).min()? / SUB).max(0);
-    let y1 = ((p.iter().map(|q| q.1).max()? + SUB - 1) / SUB).min(height as i64);
+    let y0 = (p.iter().map(|q| q.1).min()? / SUB).max(rows.start as i64);
+    let y1 = ((p.iter().map(|q| q.1).max()? + SUB - 1) / SUB).min(rows.end as i64);
     if x0 >= x1 || y0 >= y1 {
         return None;
     }
@@ -418,7 +461,7 @@ pub(crate) fn cover(
     let first = (x0 * SUB + SUB / 2, y0 * SUB + SUB / 2);
     let mut row_e = sides.map(|(a, b)| edge(a, b, first));
     for y in y0..y1 {
-        let row = y as usize * stride;
+        let row = (y as usize - rows.start) * stride;
         let mut next = row_e;
         row_e = core::array::from_fn(|k| row_e[k] + step_y[k]);
         for x in x0..x1 {
@@ -493,13 +536,7 @@ mod tests {
             }
         }
         fn target(&mut self) -> Target<'_> {
-            Target {
-                color: &mut self.color,
-                depth: &mut self.depth,
-                width: W,
-                height: H,
-                stride: W,
-            }
+            Target::new(&mut self.color, &mut self.depth, W, H, W)
         }
     }
 
@@ -686,13 +723,7 @@ mod tests {
         // A target whose buffers are too small is refused, not overrun.
         let mut short = vec![0u32; 10];
         let mut depth = vec![0u16; 10];
-        let mut t = Target {
-            color: &mut short,
-            depth: &mut depth,
-            width: W,
-            height: H,
-            stride: W,
-        };
+        let mut t = Target::new(&mut short, &mut depth, W, H, W);
         assert_eq!(
             draw(
                 &mut t,
@@ -722,13 +753,7 @@ mod dump {
         let (w, h) = (800usize, 600usize);
         let mut color = vec![0u32; w * h];
         let mut depth = vec![u16::MAX; w * h];
-        let mut t = Target {
-            color: &mut color,
-            depth: &mut depth,
-            width: w,
-            height: h,
-            stride: w,
-        };
+        let mut t = Target::new(&mut color, &mut depth, w, h, w);
         t.clear(0x182030);
         let eye = Vec3::new(0.0, 4.0, -9.0);
         let view = Mat4::look_at(eye, Vec3::new(0.0, 0.5, 0.0), Vec3::new(0.0, 1.0, 0.0));

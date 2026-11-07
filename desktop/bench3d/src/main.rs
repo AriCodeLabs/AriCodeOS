@@ -240,13 +240,7 @@ fn frame(kind: Kind, t: f32, a: &mut Assets, pixels: &mut [u32]) -> Stats {
         }
         _ => {}
     }
-    let mut target = Target {
-        color: pixels,
-        depth: &mut a.depth,
-        width: W,
-        height: H,
-        stride: W,
-    };
+    let mut target = Target::new(pixels, &mut a.depth, W, H, W);
     target.clear(SKY);
     let spin = Mat4::rotate_y(t * 0.9) * Mat4::rotate_x(t * 0.6);
     let near = camera(Vec3::new(0.0, 0.8, -4.2), Vec3::default());

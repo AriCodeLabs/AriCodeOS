@@ -82,7 +82,7 @@ impl<'a> ShadowMap<'a> {
             let p = [(a.x, a.y), (c.x, c.y), (b.x, b.y)];
             let z = [a.z, c.z, b.z];
             let inv = 1.0 / (-area) as f32;
-            let reached = cover(p, n, n, n, |at, e| {
+            let reached = cover(p, n, 0..n, n, |at, e| {
                 let l = (e[0] as f32 * z[0] + e[1] as f32 * z[1] + e[2] as f32 * z[2]) * inv;
                 let d = (l.clamp(0.0, 1.0) * ONE) as u32;
                 if d < depth[at] {
