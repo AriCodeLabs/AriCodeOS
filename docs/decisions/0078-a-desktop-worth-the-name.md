@@ -565,7 +565,24 @@ Menus move to stage 3, with the menu bar that uses them: built now, nothing woul
 
 ## Stage 3: results so far
 
-The launcher searches as the owner types, and Enter opens the first match. The rest of this stage,
-the menu bar, the dock, notifications and the manifests' names and icons, is still to come.
+The launcher searches as the owner types, and Enter opens the first match.
+
+**The dock** at the bottom shows every running program, in the order they opened. A click brings
+one forward, or minimizes it if it is already there, which replaces the row of minimized windows of
+stage 1. Windows that fit themselves (zoom, snap) stop at the bar and the dock, and sizes come from
+the theme.
+
+**The bar** at the top names the program with the keys and shows the date and time. The compositor
+draws both, so a program cannot paint over them or pretend to be another. Nothing shows if the
+kernel could not read the real-time clock.
+
+**The clock's zone** is a whole number of hours from UTC, chosen in settings and kept in the file
+`timezone`. It has no summer time, so a place that changes must be chosen again twice a year. On a
+machine that also runs Windows the firmware's clock is usually local time, not UTC, so the right
+choice there is UTC: the kernel's own clock is then off, as it already was for what checks
+certificates. Tying this to real time zones needs their rules on the stick: to decide later.
+
+To come in this stage: the programs' menus in the bar, the network in the bar, notifications, and
+the manifests' names and icons.
 
 Next: those, then the shell (stage 3).

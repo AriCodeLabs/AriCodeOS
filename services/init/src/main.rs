@@ -2773,6 +2773,9 @@ impl Broker {
         if req.op == Op::SetAppearance && (req.item != Item::Appearance || req.value > 1) {
             return refuse(b"an appearance that does not exist");
         }
+        if req.op == Op::SetTimezone && (req.item != Item::Timezone || req.value > 26) {
+            return refuse(b"a time zone that does not exist");
+        }
         let mut text = alloc::string::String::new();
         let net = self.net;
         let comp = self.compositor;
@@ -2790,6 +2793,11 @@ impl Broker {
                     Status::Ok
                 }
                 (Op::SetAppearance, _) => set_appearance(fs, comp, req.value == 1, &mut text),
+                (Op::Get, Item::Timezone) => {
+                    zone_text(saved_zone(fs), &mut text);
+                    Status::Ok
+                }
+                (Op::SetTimezone, _) => set_zone(fs, comp, req.value as i32 - 12, &mut text),
                 (Op::Get, Item::UpdateSource) => sources_text(fs, &mut text),
                 (Op::Get, Item::Address) => match net {
                     Some(net) => address_text(net, &mut text),
@@ -3359,6 +3367,53 @@ fn set_appearance(
         }
     }
     text.push_str(name);
+    Status::Ok
+}
+
+/// The file that keeps the clock's zone: hours from UTC, as text. None is UTC.
+const ZONE_FILE: &str = "timezone";
+
+fn saved_zone(fs: &mut FsClient) -> i32 {
+    let mut buf = [0u8; 8];
+    let Ok(Some(n)) = read_small(fs, ZONE_FILE, &mut buf) else {
+        return 0;
+    };
+    core::str::from_utf8(&buf[..n])
+        .ok()
+        .and_then(|t| t.trim().parse::<i32>().ok())
+        .filter(|h| (-12..=14).contains(h))
+        .unwrap_or(0)
+}
+
+/// `UTC`, or `UTC+1`, `UTC-5`.
+fn zone_text(hours: i32, text: &mut alloc::string::String) {
+    use core::fmt::Write;
+    text.push_str("UTC");
+    if hours != 0 {
+        let _ = write!(text, "{hours:+}");
+    }
+}
+
+/// Keeps the zone and sets the clock, as `set_appearance` does.
+fn set_zone(
+    fs: &mut FsClient,
+    compositor: Option<Handle>,
+    hours: i32,
+    text: &mut alloc::string::String,
+) -> aricode_proto::settings::Status {
+    use aricode_proto::settings::Status;
+    let saved = alloc::format!("{hours}");
+    if update_index::client::save(fs, ZONE_FILE, saved.as_bytes()).is_err() {
+        text.push_str("the time zone file cannot be saved");
+        return Status::Failed;
+    }
+    if let Some(compositor) = compositor {
+        if sys::window::set_timezone(compositor, hours * 60).is_err() {
+            text.push_str("saved; the desktop did not answer: from the next boot");
+            return Status::Failed;
+        }
+    }
+    zone_text(hours, text);
     Status::Ok
 }
 
@@ -4345,6 +4400,10 @@ fn main(arg: u64) -> u64 {
                         && sys::window::set_appearance(g.endpoint, true).is_err()
                     {
                         say(b"the compositor did not take the appearance");
+                    }
+                    let zone = fs_client.as_mut().map_or(0, saved_zone);
+                    if zone != 0 && sys::window::set_timezone(g.endpoint, zone * 60).is_err() {
+                        say(b"the compositor did not take the time zone");
                     }
                     gui = Some(g);
                     say(b"desktop session: compositor started");

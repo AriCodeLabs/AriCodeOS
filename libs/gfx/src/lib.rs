@@ -486,13 +486,53 @@ pub const SHADOW: i32 = 24;
 pub const RESIZE_BAND: i32 = 6;
 /// The smallest content a window is dragged to.
 pub const MIN_CONTENT: (u32, u32) = (160, 80);
-/// A minimized window's place at the bottom of the screen: how to get it back with the
-/// pointer. Its size at most, the space between places, and from the screen's edge.
-pub const SHELF_ITEM: (u32, u32) = (140, 28);
-pub const SHELF_GAP: i32 = 8;
-pub const SHELF_MARGIN: i32 = 12;
-/// The minimized windows' places: id and rectangle.
-pub type Shelf = [Option<(u32, Rect)>; MAX_WINDOWS];
+/// A running program's place in the dock: its window and rectangle.
+pub type Dock = [Option<(u32, Rect)>; MAX_WINDOWS];
+/// The longest text the bar shows at its right end, in bytes.
+pub const STATUS_MAX: usize = 32;
+
+/// A minute since the Unix epoch, already in the owner's time, as the bar shows it:
+/// `Fri 6 Nov  23:40`, in `out`. How many bytes.
+pub fn clock_text(minute: i64, out: &mut [u8; STATUS_MAX]) -> usize {
+    const DAYS: [&[u8; 3]; 7] = [b"Thu", b"Fri", b"Sat", b"Sun", b"Mon", b"Tue", b"Wed"];
+    const MONTHS: [&[u8; 3]; 12] = [
+        b"Jan", b"Feb", b"Mar", b"Apr", b"May", b"Jun", b"Jul", b"Aug", b"Sep", b"Oct", b"Nov",
+        b"Dec",
+    ];
+    let days = minute.div_euclid(24 * 60);
+    let in_day = minute.rem_euclid(24 * 60);
+    // Civil from days, proleptic Gregorian.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let mut n = 0;
+    let mut put = |bytes: &[u8]| {
+        out[n..n + bytes.len()].copy_from_slice(bytes);
+        n += bytes.len();
+    };
+    put(DAYS[days.rem_euclid(7) as usize]);
+    put(b" ");
+    if day >= 10 {
+        put(&[b'0' + (day / 10) as u8]);
+    }
+    put(&[b'0' + (day % 10) as u8, b' ']);
+    put(MONTHS[(month - 1) as usize]);
+    let (h, m) = (in_day / 60, in_day % 60);
+    put(b"  ");
+    put(&[
+        b'0' + (h / 10) as u8,
+        b'0' + (h % 10) as u8,
+        b':',
+        b'0' + (m / 10) as u8,
+        b'0' + (m % 10) as u8,
+    ]);
+    n
+}
 
 /// How near the screen's edge a dragged title bar snaps.
 pub const SNAP_MARGIN: i32 = 8;
@@ -513,6 +553,25 @@ pub struct Theme {
     /// The shadow's strength at the frame, of 256, with and without the focus.
     pub shadow_active: u32,
     pub shadow_inactive: u32,
+    /// The bar at the top of the screen.
+    pub bar: Color,
+    pub bar_ink: Color,
+    pub bar_h: u32,
+    /// How far text stays from the bar's ends.
+    pub bar_margin: i32,
+    /// The dock at the bottom: its background, a running program's place in it, and the
+    /// one with the keys.
+    pub dock: Color,
+    pub dock_active: Color,
+    pub dock_ink: Color,
+    /// A minimized program's title in the dock.
+    pub dock_quiet_ink: Color,
+    pub dock_item: (u32, u32),
+    pub dock_gap: i32,
+    /// Inside the dock, around its places.
+    pub dock_pad: i32,
+    /// From the screen's edge to the dock.
+    pub dock_margin: i32,
 }
 
 impl Theme {
@@ -528,6 +587,18 @@ impl Theme {
         circle_off: rgb(0xCC, 0xCC, 0xCC),
         shadow_active: 77,
         shadow_inactive: 38,
+        bar: rgb(0xF4, 0xF4, 0xF4),
+        bar_ink: rgb(0x26, 0x26, 0x26),
+        bar_h: 24,
+        bar_margin: 12,
+        dock: rgb(0xE4, 0xE4, 0xE4),
+        dock_active: rgb(0xFF, 0xFF, 0xFF),
+        dock_ink: rgb(0x26, 0x26, 0x26),
+        dock_quiet_ink: rgb(0x80, 0x80, 0x80),
+        dock_item: (140, 32),
+        dock_gap: 4,
+        dock_pad: 4,
+        dock_margin: 6,
     };
 
     /// The dark theme of ADR 0078: the frame on #323232, over a darker desktop.
@@ -539,6 +610,12 @@ impl Theme {
         circle_off: rgb(0x55, 0x55, 0x55),
         shadow_active: 110,
         shadow_inactive: 60,
+        bar: rgb(0x24, 0x24, 0x24),
+        bar_ink: rgb(0xE6, 0xE6, 0xE6),
+        dock: rgb(0x3A, 0x3A, 0x3A),
+        dock_active: rgb(0x55, 0x55, 0x55),
+        dock_ink: rgb(0xE6, 0xE6, 0xE6),
+        dock_quiet_ink: rgb(0x8C, 0x8C, 0x8C),
         ..Self::LIGHT
     };
 
@@ -685,8 +762,9 @@ pub fn snap_at(x: i32, y: i32, width: u32, height: u32) -> Option<Snap> {
     }
 }
 
-/// The content rectangle a snap gives on a screen of that size.
-pub fn snap_content(snap: Snap, width: u32, height: u32) -> Rect {
+/// The content rectangle a snap gives in the area windows may fill.
+pub fn snap_content(snap: Snap, work: &Rect) -> Rect {
+    let (width, height) = (work.w, work.h);
     let (half_w, half_h) = (width / 2, height / 2);
     let (x, y, w, h) = match snap {
         Snap::Left => (0, 0, half_w, height),
@@ -697,7 +775,12 @@ pub fn snap_content(snap: Snap, width: u32, height: u32) -> Rect {
         Snap::BottomRight => (half_w, half_h, width - half_w, height - half_h),
         Snap::Full => (0, 0, width, height),
     };
-    Rect::new(x as i32, (y + TITLE_H) as i32, w, h.saturating_sub(TITLE_H))
+    Rect::new(
+        work.x + x as i32,
+        work.y + (y + TITLE_H) as i32,
+        w,
+        h.saturating_sub(TITLE_H),
+    )
 }
 
 /// The content a drag of (dx, dy) on the `edges` of `start` asks for, kept above
@@ -855,8 +938,10 @@ fn band_edges(frame: &Rect, x: i32, y: i32) -> u8 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hit {
     Desktop,
-    /// A minimized window's place at the bottom of the screen.
-    Shelf {
+    /// The bar at the top, or the dock around its places: nothing below takes the click.
+    Panel,
+    /// A running program's place in the dock.
+    Dock {
         id: u32,
     },
     /// Window and coordinates relative to the content (negative on the frame).
@@ -916,6 +1001,8 @@ pub struct Desktop {
     pub focus: Option<u32>,
     pub pointer: (i32, i32),
     next_id: u32,
+    status: [u8; STATUS_MAX],
+    status_len: u8,
     pub theme: Theme,
 }
 
@@ -929,6 +1016,8 @@ impl Desktop {
             focus: None,
             pointer: (width as i32 / 2, height as i32 / 2),
             next_id: 1,
+            status: [0; STATUS_MAX],
+            status_len: 0,
             theme: Theme::LIGHT,
         }
     }
@@ -948,8 +1037,8 @@ impl Desktop {
         self.next_id += 1;
         let step = 40 * self.count as i32;
         let x = (40 + step).min((self.screen.w as i32 - w as i32).max(0));
-        let y =
-            (40 + TITLE_H as i32 + step).min((self.screen.h as i32 - h as i32).max(TITLE_H as i32));
+        let top = (self.theme.bar_h + TITLE_H) as i32;
+        let y = (40 + TITLE_H as i32 + step).min((self.screen.h as i32 - h as i32).max(top));
         let mut t = [0u8; 24];
         let n = title.len().min(24);
         t[..n].copy_from_slice(&title.as_bytes()[..n]);
@@ -1021,10 +1110,12 @@ impl Desktop {
 
     /// Topmost window under `(x, y)` (frame included).
     pub fn hit(&self, x: i32, y: i32) -> Hit {
-        for (id, place) in self.shelf().into_iter().flatten() {
-            if place.contains(x, y) {
-                return Hit::Shelf { id };
-            }
+        let (dock, places) = self.dock();
+        if let Some((id, _)) = places.iter().flatten().find(|(_, p)| p.contains(x, y)) {
+            return Hit::Dock { id: *id };
+        }
+        if dock.contains(x, y) || self.bar().contains(x, y) {
+            return Hit::Panel;
         }
         for w in self.iter().collect_rev() {
             if w.hidden {
@@ -1077,9 +1168,11 @@ impl Desktop {
         let Some(w) = self.windows.iter_mut().flatten().find(|w| w.id == id) else {
             return false;
         };
-        let (left, top) = (BORDER as i32, (TITLE_H + BORDER) as i32);
+        let left = BORDER as i32;
+        let title = (TITLE_H + BORDER) as i32;
+        let top = self.theme.bar_h as i32 + title;
         w.content.x = x.clamp(left, (self.screen.w as i32 - 1 + left).max(left));
-        w.content.y = y.clamp(top, (self.screen.h as i32 - 1 + top).max(top));
+        w.content.y = y.clamp(top, (self.screen.h as i32 - 1 + title).max(top));
         true
     }
 
@@ -1089,24 +1182,59 @@ impl Desktop {
         }
     }
 
-    /// Where the minimized windows show, centred at the bottom of the screen, narrower
-    /// when many would not fit.
-    pub fn shelf(&self) -> Shelf {
-        let mut shelf = [None; MAX_WINDOWS];
-        let n = self.iter().filter(|w| w.hidden).count() as i32;
+    /// The bar at the top of the screen.
+    pub fn bar(&self) -> Rect {
+        Rect::new(0, 0, self.screen.w, self.theme.bar_h)
+    }
+
+    /// Where windows may go when they are fitted to something: the screen, less the bar
+    /// and the dock.
+    pub fn work(&self) -> Rect {
+        let t = &self.theme;
+        let dock = t.dock_item.1 as i32 + 2 * t.dock_pad + 2 * t.dock_margin;
+        let h = (self.screen.h as i32 - t.bar_h as i32 - dock).max(0);
+        Rect::new(0, t.bar_h as i32, self.screen.w, h as u32)
+    }
+
+    /// The dock, and each running program's place in it: centred, in the order they
+    /// opened, narrower when many would not fit. Empty with nothing running.
+    pub fn dock(&self) -> (Rect, Dock) {
+        let t = &self.theme;
+        let mut places = [None; MAX_WINDOWS];
+        let n = self.count as i32;
         if n == 0 {
-            return shelf;
+            return (Rect::new(0, 0, 0, 0), places);
         }
-        let room = self.screen.w as i32 - 2 * SHELF_MARGIN - (n - 1) * SHELF_GAP;
-        let w = (room / n).clamp(1, SHELF_ITEM.0 as i32);
-        let all = n * w + (n - 1) * SHELF_GAP;
-        let y = self.screen.h as i32 - SHELF_MARGIN - SHELF_ITEM.1 as i32;
+        let around = 2 * (t.dock_pad + t.dock_margin);
+        let room = self.screen.w as i32 - around - (n - 1) * t.dock_gap;
+        let w = (room / n).clamp(1, t.dock_item.0 as i32);
+        let all = n * w + (n - 1) * t.dock_gap;
+        let y = self.screen.h as i32 - t.dock_margin - t.dock_pad - t.dock_item.1 as i32;
         let mut x = (self.screen.w as i32 - all) / 2;
-        for (slot, window) in shelf.iter_mut().zip(self.iter().filter(|w| w.hidden)) {
-            *slot = Some((window.id, Rect::new(x, y, w as u32, SHELF_ITEM.1)));
-            x += w + SHELF_GAP;
+        let open = self.windows.iter().flatten();
+        for (slot, window) in places.iter_mut().zip(open) {
+            *slot = Some((window.id, Rect::new(x, y, w as u32, t.dock_item.1)));
+            x += w + t.dock_gap;
         }
-        shelf
+        let outer = Rect::new(
+            (self.screen.w as i32 - all) / 2 - t.dock_pad,
+            y - t.dock_pad,
+            (all + 2 * t.dock_pad) as u32,
+            t.dock_item.1 + 2 * t.dock_pad as u32,
+        );
+        (outer, places)
+    }
+
+    /// What the bar says at its right end: the clock.
+    pub fn set_status(&mut self, text: &str) {
+        let n = text.floor_char_boundary(self.status.len());
+        self.status = [0; STATUS_MAX];
+        self.status[..n].copy_from_slice(&text.as_bytes()[..n]);
+        self.status_len = n as u8;
+    }
+
+    fn status_str(&self) -> &str {
+        core::str::from_utf8(&self.status[..self.status_len as usize]).unwrap_or("")
     }
 
     /// Hides or shows a window. A hidden one is neither drawn nor hit, and takes
@@ -1157,7 +1285,9 @@ impl Desktop {
             count: self.count,
             focus: self.focus,
             pointer: self.pointer,
-            shelf: self.shelf(),
+            bar: self.bar(),
+            dock: self.dock().0,
+            status: self.status,
         }
     }
 
@@ -1264,21 +1394,48 @@ impl Desktop {
                 draw_content(w, &mut out.clipped(&line));
             }
         }
-        for (id, place) in self.shelf().into_iter().flatten() {
-            if !place.intersects(&clip) {
-                continue;
-            }
-            out.rounded(&place, RADIUS, self.theme.window);
-            if let Some(w) = self.get(id) {
-                let mut inside = out.clipped(&place);
-                let name = labels.width(w.title_str());
-                let x = place.x + (place.w as i32 - name).max(0) / 2;
-                let middle = place.y + place.h as i32 / 2;
-                let ink = self.theme.title_active;
-                labels.draw(&mut inside, w.title_str(), x, middle, ink);
+        self.compose_panels(&mut out, labels, &clip);
+        out.cursor(self.pointer.0, self.pointer.1);
+    }
+
+    /// The bar and the dock, over the windows.
+    fn compose_panels(&self, out: &mut Canvas, labels: &mut impl Labels, clip: &Rect) {
+        let t = &self.theme;
+        let bar = self.bar();
+        if bar.intersects(clip) {
+            out.fill_rect(&bar, t.bar);
+            let middle = bar.y + bar.h as i32 / 2;
+            let status = self.status_str();
+            let at = bar.right() - t.bar_margin - labels.width(status);
+            labels.draw(out, status, at, middle, t.bar_ink);
+            if let Some(w) = self.focus.and_then(|id| self.get(id)) {
+                // Short of the clock: a long title never covers the time.
+                let room = Rect::new(0, 0, (at - t.bar_margin).max(0) as u32, bar.h);
+                let mut inside = out.clipped(&room);
+                labels.draw(&mut inside, w.title_str(), t.bar_margin, middle, t.bar_ink);
             }
         }
-        out.cursor(self.pointer.0, self.pointer.1);
+        let (dock, places) = self.dock();
+        if !dock.intersects(clip) {
+            return;
+        }
+        out.rounded(&dock, RADIUS, t.dock);
+        for (id, place) in places.iter().flatten() {
+            let Some(w) = self.get(*id) else { continue };
+            if self.focus == Some(*id) {
+                out.rounded(place, RADIUS - t.dock_pad, t.dock_active);
+            }
+            let ink = if w.hidden {
+                t.dock_quiet_ink
+            } else {
+                t.dock_ink
+            };
+            let mut inside = out.clipped(place);
+            let name = labels.width(w.title_str());
+            let x = place.x + (place.w as i32 - name).max(0) / 2;
+            let middle = place.y + place.h as i32 / 2;
+            labels.draw(&mut inside, w.title_str(), x, middle, ink);
+        }
     }
 }
 
@@ -1293,7 +1450,9 @@ pub struct Scene {
     count: usize,
     focus: Option<u32>,
     pointer: (i32, i32),
-    shelf: Shelf,
+    bar: Rect,
+    dock: Rect,
+    status: [u8; STATUS_MAX],
 }
 
 impl Scene {
@@ -1317,10 +1476,22 @@ impl Scene {
             damage.add(&cursor_rect(self.pointer.0, self.pointer.1));
             damage.add(&cursor_rect(newer.pointer.0, newer.pointer.1));
         }
-        if self.shelf != newer.shelf {
-            for (_, place) in self.shelf.iter().chain(&newer.shelf).flatten() {
-                damage.add(place);
-            }
+        // The bar names the focused window and the dock shows each one: a window that
+        // came, went, changed its title or hid changes them.
+        let same_for_panels = self.count == newer.count
+            && self.focus == newer.focus
+            && self.iter().all(|old| {
+                newer.iter().any(|new| {
+                    new.id == old.id && new.title == old.title && new.hidden == old.hidden
+                })
+            });
+        if !same_for_panels || self.status != newer.status {
+            damage.add(&self.bar);
+            damage.add(&newer.bar);
+        }
+        if !same_for_panels {
+            damage.add(&self.dock);
+            damage.add(&newer.dock);
         }
         let focused = |s: &Scene, id: u32| s.focus == Some(id);
         for old in self.iter() {
@@ -1522,40 +1693,86 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_minimized_window_has_a_place_at_the_bottom_that_brings_it_back() {
+    fn the_dock_shows_each_program_and_panels_take_the_clicks() {
         let mut d = Desktop::new(800, 600);
+        let (empty, places) = d.dock();
+        assert!(empty.is_empty(), "nothing running, nothing shown");
+        assert_eq!(places, [None; MAX_WINDOWS]);
         let a = d.create(100, 100, "A").unwrap();
-        let b = d.create(100, 100, "B").unwrap();
-        assert_eq!(
-            d.shelf(),
-            [None; MAX_WINDOWS],
-            "nothing minimized, nothing shown"
-        );
+        let (dock, places) = d.dock();
+        let (id, place) = places[0].unwrap();
+        assert_eq!(id, a);
+        let t = Theme::LIGHT;
+        assert_eq!(dock.bottom(), 600 - t.dock_margin);
+        assert_eq!(dock.x + dock.right(), 800, "centred");
+        assert_eq!(d.hit(place.x + 1, place.y + 1), Hit::Dock { id: a });
+        assert_eq!(d.hit(dock.x + 1, dock.y + 1), Hit::Panel);
+        assert_eq!(d.hit(300, 3), Hit::Panel, "the bar");
+        // A window under them does not take a click on them.
+        d.move_window(a, 0, 500);
+        assert_eq!(d.hit(place.x + 1, place.y + 1), Hit::Dock { id: a });
+        // Hiding keeps its place, and marks the dock as changed.
         let before = d.scene();
         d.set_hidden(a, true);
-        let (id, place) = d.shelf()[0].unwrap();
-        assert_eq!(id, a);
-        assert_eq!(place.bottom(), 600 - SHELF_MARGIN);
-        assert_eq!(place.x + place.right(), 800, "centred");
-        assert_eq!(d.hit(place.x + 1, place.y + 1), Hit::Shelf { id: a });
-        // Its place is damage, and pixels match a full composition.
+        assert_eq!(d.dock().1[0], Some((a, place)));
         let mut damage = Damage::new(Rect::new(0, 0, 800, 600));
         before.damage(&d.scene(), &mut damage);
         assert!(damage.rects().iter().any(|r| r.intersects(&place)));
         // Many at once stay on the screen and apart.
-        for i in 0..6 {
-            let id = d.create(100, 100, "x").unwrap();
-            assert!(i < 6);
-            d.set_hidden(id, true);
+        for _ in 0..7 {
+            d.create(100, 100, "x").unwrap();
         }
-        d.set_hidden(b, true);
-        let places: [Option<(u32, Rect)>; MAX_WINDOWS] = d.shelf();
+        let (_, places) = d.dock();
         let mut last_right = 0;
         for (_, p) in places.into_iter().flatten() {
             assert!(p.x >= last_right && p.right() <= 800, "{p:?}");
             last_right = p.right();
         }
         assert_eq!(places.iter().flatten().count(), 8);
+    }
+
+    #[test]
+    fn windows_fit_between_the_bar_and_the_dock() {
+        let mut d = Desktop::new(1280, 800);
+        let work = d.work();
+        assert_eq!((work.y, work.h), (24, 800 - 24 - 52));
+        let full = snap_content(Snap::Full, &work);
+        assert_eq!((full.x, full.y, full.w, full.h), (0, 24 + 28, 1280, 696));
+        let low = snap_content(Snap::BottomRight, &work);
+        assert_eq!(low.bottom(), work.bottom());
+        // A title bar never goes under the bar.
+        let a = d.create(100, 100, "A").unwrap();
+        d.move_window(a, 10, 0);
+        assert_eq!(d.get(a).unwrap().frame().y, 24);
+    }
+
+    #[test]
+    fn the_clock_reads_as_a_calendar_does() {
+        let text = |minute| {
+            let mut out = [0; STATUS_MAX];
+            let n = clock_text(minute, &mut out);
+            std::string::String::from_utf8(out[..n].to_vec()).unwrap()
+        };
+        assert_eq!(text(0), "Thu 1 Jan  00:00");
+        // 2026-11-06 23:40 UTC.
+        assert_eq!(text(29_900_140), "Fri 6 Nov  23:40");
+        // A leap day, and the last minute of a day.
+        assert_eq!(text(951_782_400 / 60 + 1439), "Tue 29 Feb  23:59");
+        // Before the epoch still reads.
+        assert_eq!(text(-1), "Wed 31 Dec  23:59");
+    }
+
+    #[test]
+    fn a_new_status_marks_the_bar_only() {
+        let mut d = Desktop::new(800, 600);
+        let before = d.scene();
+        d.set_status("12:00");
+        let mut damage = Damage::new(Rect::new(0, 0, 800, 600));
+        before.damage(&d.scene(), &mut damage);
+        assert_eq!(damage.rects(), [d.bar()]);
+        // Too long is cut between characters.
+        d.set_status(&"é".repeat(40));
+        assert!(d.status_str().chars().all(|c| c == 'é'));
     }
 
     #[test]
@@ -1666,12 +1883,13 @@ mod tests {
         assert_eq!(snap_at(600, 300, w, h), None);
         assert_eq!(snap_at(600, 767, w, h), None, "the bottom alone is no snap");
         // The content leaves room for its title bar, and quarters tile.
-        let left = snap_content(Snap::Left, w, h);
-        let right = snap_content(Snap::Right, w, h);
+        let screen = Rect::new(0, 0, w, h);
+        let left = snap_content(Snap::Left, &screen);
+        let right = snap_content(Snap::Right, &screen);
         assert_eq!(left, Rect::new(0, TITLE_H as i32, 683, 768 - TITLE_H));
         assert_eq!(left.right(), right.x);
         assert_eq!(right.right(), 1366);
-        let low = snap_content(Snap::BottomLeft, w, h);
+        let low = snap_content(Snap::BottomLeft, &screen);
         assert_eq!(low.y, 384 + TITLE_H as i32);
         assert_eq!(low.bottom(), 768);
     }
@@ -1716,8 +1934,7 @@ mod tests {
         let near = out.get(f.x - 1, f.y + 40).unwrap();
         assert_ne!(near, t.desktop);
         assert_eq!(near, blend(t.desktop, 0, near_strength(&t)));
-        let top = (f.y - SHADOW - 1).max(0);
-        assert_eq!(out.get(f.x + 40, top), Some(t.desktop));
+        assert_eq!(out.get(f.x - SHADOW - 1, f.y + 40), Some(t.desktop));
     }
 
     /// The shadow's strength one pixel outside a straight edge.
@@ -1958,7 +2175,8 @@ mod tests {
             screen.get(wa.content.x + 1, wa.content.y - 5),
             Some(Theme::LIGHT.window)
         );
-        assert_eq!(screen.get(300, 230), Some(Theme::LIGHT.desktop));
+        let right = screen.width as i32 - 1;
+        assert_eq!(screen.get(right, 30), Some(Theme::LIGHT.desktop));
         assert_eq!(screen.get(5, 5), Some(rgb(0, 0, 0)), "cursor tip");
     }
 
@@ -2290,7 +2508,8 @@ mod tests {
         d.compose(&mut out, |_, c| c.fill(0xffffff));
         for y in 0..100 {
             for x in 0..200 {
-                if !outer.contains(x, y) && !cursor_rect(190, 90).contains(x, y) {
+                let panels = d.bar().contains(x, y) || d.dock().0.contains(x, y);
+                if !panels && !outer.contains(x, y) && !cursor_rect(190, 90).contains(x, y) {
                     assert_eq!(out.get(x, y), Some(Theme::LIGHT.desktop), "({x},{y})");
                 }
             }
@@ -2306,7 +2525,7 @@ mod tests {
         d.move_window(id, -500, -500);
         assert_eq!(
             (d.get(id).unwrap().frame().x, d.get(id).unwrap().frame().y),
-            (0, 0)
+            (0, Theme::LIGHT.bar_h as i32)
         );
         d.move_window(id, 5000, 5000);
         assert_eq!(

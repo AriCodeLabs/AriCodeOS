@@ -301,6 +301,17 @@ pub fn poll_reply(msg: &[u8]) -> Result<Option<Event>, WindowError> {
 pub fn set_appearance(compositor: Handle, dark: bool) -> Result<(), WindowError> {
     let mut req = Request::new(Op::Appearance);
     req.width = u32::from(dark);
+    main_request(compositor, req)
+}
+
+/// Init only, over the compositor's main endpoint: the clock's minutes from UTC.
+pub fn set_timezone(compositor: Handle, minutes: i32) -> Result<(), WindowError> {
+    let mut req = Request::new(Op::Timezone);
+    req.width = minutes as u32;
+    main_request(compositor, req)
+}
+
+fn main_request(compositor: Handle, req: Request) -> Result<(), WindowError> {
     let mut msg = [0u8; Reply::LEN];
     let len = rpc::call(
         compositor,
