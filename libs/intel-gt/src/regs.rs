@@ -136,6 +136,77 @@ pub mod bcs {
     pub const DCLV_2G: u32 = 0xFFFF_FFFF;
 }
 
+/// One engine's ring registers: the same offsets from its base on every
+/// engine (PRM Vol 1 Parts 3 and 4, 2.1; Linux `intel_engine_regs.h`), its
+/// status page register, page fault register and reset bit apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Engine {
+    pub base: u32,
+    /// The status page's GTT address; not at `base + 0x80` on this family.
+    pub hws_pga: u32,
+    /// Page fault status (Linux `RING_FAULT_REG`).
+    pub fault: u32,
+    /// Its bit in `GDRST`.
+    pub reset: u32,
+}
+
+impl Engine {
+    pub const fn tail(&self) -> u32 {
+        self.base + 0x30
+    }
+    pub const fn head(&self) -> u32 {
+        self.base + 0x34
+    }
+    pub const fn start(&self) -> u32 {
+        self.base + 0x38
+    }
+    pub const fn ctl(&self) -> u32 {
+        self.base + 0x3C
+    }
+    pub const fn acthd(&self) -> u32 {
+        self.base + 0x74
+    }
+    pub const fn hwstam(&self) -> u32 {
+        self.base + 0x98
+    }
+    pub const fn mi_mode(&self) -> u32 {
+        self.base + 0x9C
+    }
+    pub const fn eir(&self) -> u32 {
+        self.base + 0xB0
+    }
+    pub const fn instpm(&self) -> u32 {
+        self.base + 0xC0
+    }
+    pub const fn pp_dir_dclv(&self) -> u32 {
+        self.base + 0x220
+    }
+    pub const fn pp_dir_base(&self) -> u32 {
+        self.base + 0x228
+    }
+    /// The mode register: bit 9 turns the PPGTT on.
+    pub const fn mode(&self) -> u32 {
+        self.base + 0x29C
+    }
+}
+
+/// The blitter (PRM Vol 1 Part 4, 2.1).
+pub const BLITTER: Engine = Engine {
+    base: bcs::BASE,
+    hws_pga: bcs::HWS_PGA,
+    fault: bcs::FAULT,
+    reset: GDRST_BLITTER,
+};
+
+/// The render engine (PRM Vol 1 Part 3; Linux `RENDER_RING_BASE`,
+/// `RENDER_HWS_PGA_GEN7`, `_RING_FAULT_REG_RCS`, `GEN6_GRDOM_RENDER`).
+pub const RENDER: Engine = Engine {
+    base: 0x2000,
+    hws_pga: 0x4080,
+    fault: 0x4094,
+    reset: 1 << 1,
+};
+
 /// The value that sets `bits` in a masked register (upper half selects).
 pub const fn masked_on(bits: u32) -> u32 {
     (bits << 16) | bits

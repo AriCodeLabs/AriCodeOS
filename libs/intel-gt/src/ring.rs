@@ -9,7 +9,7 @@
 use crate::cmd;
 use crate::gtt::{Layout, PAGE};
 use crate::power::Awake;
-use crate::regs::{self, bcs, masked_off, masked_on};
+use crate::regs::{self, bcs, masked_off, masked_on, Engine};
 use crate::{Clock, Refusal, Regs, Timeouts};
 
 /// The dword of the status page that receives each request's number
@@ -146,103 +146,106 @@ pub fn prepare<R: Regs + ?Sized>(awake: &mut Awake<'_, R>) {
 
 /// Empties and turns off the ring (Linux `stop_ring`); true if the head
 /// went back to 0.
-fn stop_ring<R: Regs + ?Sized>(awake: &mut Awake<'_, R>) -> bool {
-    let tail = awake.read(bcs::TAIL);
-    awake.write(bcs::HEAD, tail);
-    awake.read(bcs::HEAD);
-    awake.write(bcs::CTL, 0);
-    awake.read(bcs::CTL);
-    awake.write(bcs::HEAD, 0);
-    awake.write(bcs::TAIL, 0);
-    awake.read(bcs::HEAD) & bcs::HEAD_ADDR == 0
+fn stop_ring<R: Regs + ?Sized>(awake: &mut Awake<'_, R>, e: &Engine) -> bool {
+    let tail = awake.read(e.tail());
+    awake.write(e.head(), tail);
+    awake.read(e.head());
+    awake.write(e.ctl(), 0);
+    awake.read(e.ctl());
+    awake.write(e.head(), 0);
+    awake.write(e.tail(), 0);
+    awake.read(e.head()) & bcs::HEAD_ADDR == 0
 }
 
-/// Starts the blitter on an empty ring with the PPGTT on (Linux
-/// `xcs_resume`). The status page and the ring must be mapped at `layout`'s
+/// Starts `e` on an empty ring with the PPGTT on (Linux `xcs_resume`, for
+/// every engine). Its status page and ring must be mapped at `layout`'s
 /// entries, and the page directory written, before this.
 pub fn start<R: Regs + ?Sized>(
     awake: &mut Awake<'_, R>,
     clock: &dyn Clock,
     t: &Timeouts,
+    e: &Engine,
     layout: &Layout,
     ring: &mut Ring,
 ) -> Result<(), Refusal> {
-    if !stop_ring(awake) {
+    if !stop_ring(awake, e) {
         return Err(Refusal::RingRunning);
     }
     ring.rewind();
-    awake.write(bcs::HWS_PGA, layout.status * PAGE as u32);
-    awake.read(bcs::HWS_PGA);
-    awake.write(bcs::HWSTAM, !0);
+    let (status, at) = layout.placement(e);
+    awake.write(e.hws_pga, status * PAGE as u32);
+    awake.read(e.hws_pga);
+    awake.write(e.hwstam(), !0);
     // A synchronizing flush with a TLB invalidation; the ring must be idle.
-    if awake.read(bcs::MI_MODE) & bcs::MODE_IDLE == 0 {
+    if awake.read(e.mi_mode()) & bcs::MODE_IDLE == 0 {
         return Err(Refusal::NotIdle);
     }
     awake.write(
-        bcs::INSTPM,
+        e.instpm(),
         masked_on(bcs::INSTPM_TLB_INVALIDATE | bcs::INSTPM_SYNC_FLUSH),
     );
     awake
-        .wait(clock, bcs::INSTPM, t.reset, |v| {
+        .wait(clock, e.instpm(), t.reset, |v| {
             v & bcs::INSTPM_SYNC_FLUSH == 0
         })
         .map_err(|_| Refusal::Timeout)?;
-    awake.read(bcs::HEAD);
-    awake.write(bcs::START, layout.ring * PAGE as u32);
-    awake.write(bcs::PP_DIR_DCLV, bcs::DCLV_2G);
-    awake.write(bcs::PP_DIR_BASE, layout.pp_dir_base());
-    awake.write(bcs::MODE, masked_on(bcs::PPGTT_ENABLE));
+    awake.read(e.head());
+    awake.write(e.start(), at * PAGE as u32);
+    awake.write(e.pp_dir_dclv(), bcs::DCLV_2G);
+    awake.write(e.pp_dir_base(), layout.pp_dir_base());
+    awake.write(e.mode(), masked_on(bcs::PPGTT_ENABLE));
     // The head may not take at the first write (Linux: "experimented ...
     // 50ms works best").
     let start = clock.now_us();
     loop {
-        awake.write(bcs::HEAD, 0);
-        if awake.read(bcs::HEAD) == 0 {
+        awake.write(e.head(), 0);
+        if awake.read(e.head()) == 0 {
             break;
         }
         if clock.now_us().saturating_sub(start) > t.readback {
             return Err(Refusal::Timeout);
         }
     }
-    awake.write(bcs::TAIL, 0);
-    if awake.read(bcs::HEAD) != awake.read(bcs::TAIL) {
+    awake.write(e.tail(), 0);
+    if awake.read(e.head()) != awake.read(e.tail()) {
         return Err(Refusal::Timeout);
     }
-    awake.write(bcs::CTL, (layout.ring_pages - 1) << 12 | bcs::CTL_VALID);
+    awake.write(e.ctl(), (layout.ring_pages - 1) << 12 | bcs::CTL_VALID);
     awake
-        .wait(clock, bcs::CTL, 5_000, |v| v & bcs::CTL_VALID != 0)
+        .wait(clock, e.ctl(), 5_000, |v| v & bcs::CTL_VALID != 0)
         .map_err(|_| Refusal::Timeout)?;
-    awake.write(bcs::MI_MODE, masked_off(bcs::MODE_STOP));
-    awake.read(bcs::MI_MODE);
+    awake.write(e.mi_mode(), masked_off(bcs::MODE_STOP));
+    awake.read(e.mi_mode());
     Ok(())
 }
 
-/// Hands the engine everything up to `tail`. The kernel makes its writes
-/// to the ring's memory visible first.
-pub fn submit<R: Regs + ?Sized>(awake: &mut Awake<'_, R>, tail: u32) {
-    awake.write(bcs::TAIL, tail & bcs::TAIL_ADDR);
-    awake.read(bcs::TAIL);
+/// Hands `e` everything up to `tail`. The kernel makes its writes to the
+/// ring's memory visible first.
+pub fn submit<R: Regs + ?Sized>(awake: &mut Awake<'_, R>, e: &Engine, tail: u32) {
+    awake.write(e.tail(), tail & bcs::TAIL_ADDR);
+    awake.read(e.tail());
 }
 
-/// Stops the blitter and resets its domain alone (Linux `__intel_engine_
-/// reset_bh`: stop, then `GDRST` twice). The ring must be started again
-/// after, which also invalidates the TLB: a soft reset does not (PRM Vol 1
-/// Part 4, 2.1.7.4).
+/// Stops `e` and resets its domain alone (Linux `__intel_engine_reset_bh`:
+/// stop, then `GDRST` twice). The ring must be started again after, which
+/// also invalidates the TLB: a soft reset does not (PRM Vol 1 Part 4,
+/// 2.1.7.4). A render reset also clears the render engine's settings and
+/// the blitter's TLB mode bits, which live in its mode register (ADR 0086):
+/// they must be applied again.
 pub fn reset<R: Regs + ?Sized>(
     awake: &mut Awake<'_, R>,
     clock: &dyn Clock,
     t: &Timeouts,
+    e: &Engine,
 ) -> Result<(), Refusal> {
-    awake.write(bcs::MI_MODE, masked_on(bcs::MODE_STOP));
+    awake.write(e.mi_mode(), masked_on(bcs::MODE_STOP));
     // Linux goes on if the engine does not stop: the reset is the remedy.
-    let _ = awake.wait(clock, bcs::MI_MODE, t.idle, |v| v & bcs::MODE_IDLE != 0);
-    stop_ring(awake);
+    let _ = awake.wait(clock, e.mi_mode(), t.idle, |v| v & bcs::MODE_IDLE != 0);
+    stop_ring(awake, e);
     for _ in 0..2 {
-        awake.write(regs::GDRST, regs::GDRST_BLITTER);
+        awake.write(regs::GDRST, e.reset);
         awake
-            .wait(clock, regs::GDRST, t.reset, |v| {
-                v & regs::GDRST_BLITTER == 0
-            })
+            .wait(clock, regs::GDRST, t.reset, |v| v & e.reset == 0)
             .map_err(|_| Refusal::Timeout)?;
     }
     Ok(())

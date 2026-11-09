@@ -228,7 +228,15 @@ fn the_layout_keeps_clear_of_the_firmware_and_aligns_the_directory() {
         "past the firmware's run"
     );
     assert_eq!(l.ring, l.status + 1);
-    assert_eq!(l.end, l.ring + 4);
+    assert_eq!(
+        l.render_status,
+        l.ring + 4,
+        "the render engine's pages after"
+    );
+    assert_eq!(l.render_ring, l.render_status + 1);
+    assert_eq!(l.end, l.render_ring + 4);
+    assert_eq!(l.placement(&regs::RENDER), (l.render_status, l.render_ring));
+    assert_eq!(l.placement(&regs::BLITTER), (l.status, l.ring));
     assert_eq!(l.directory, fake::ENTRIES - 512);
     assert_eq!(l.directory % 16, 0);
     assert_eq!(l.pp_dir_base(), (l.directory * 4) << 10);
@@ -475,7 +483,15 @@ mod blitter {
         {
             let mut awake = fw.hold(&mut bank, &clock).unwrap();
             ring::prepare(&mut awake);
-            ring::start(&mut awake, &clock, &Timeouts::default(), &layout, &mut ring).unwrap();
+            ring::start(
+                &mut awake,
+                &clock,
+                &Timeouts::default(),
+                &regs::BLITTER,
+                &layout,
+                &mut ring,
+            )
+            .unwrap();
         }
         assert_eq!(bank.get(bcs::HWS_PGA), layout.status * 4096);
         assert_eq!(bank.get(bcs::START), layout.ring * 4096);
@@ -502,7 +518,14 @@ mod blitter {
         bank.stuck_head = true;
         let mut ring = Ring::new(4);
         let mut awake = fw.hold(&mut bank, &clock).unwrap();
-        let r = ring::start(&mut awake, &clock, &Timeouts::default(), &layout, &mut ring);
+        let r = ring::start(
+            &mut awake,
+            &clock,
+            &Timeouts::default(),
+            &regs::BLITTER,
+            &layout,
+            &mut ring,
+        );
         assert_eq!(r, Err(Refusal::RingRunning));
         drop(awake);
         assert_eq!(bank.get(bcs::CTL) & 1, 0, "never turned on");
@@ -514,7 +537,7 @@ mod blitter {
         let clock = Ticks::new();
         {
             let mut awake = fw.hold(&mut bank, &clock).unwrap();
-            ring::reset(&mut awake, &clock, &Timeouts::default()).unwrap();
+            ring::reset(&mut awake, &clock, &Timeouts::default(), &regs::BLITTER).unwrap();
         }
         assert_eq!(bank.writes_to(regs::GDRST), [regs::GDRST_BLITTER; 2]);
         assert_eq!(bank.get(bcs::CTL), 0);
@@ -522,7 +545,7 @@ mod blitter {
         bank.completes = false;
         let mut awake = fw.hold(&mut bank, &clock).unwrap();
         assert_eq!(
-            ring::reset(&mut awake, &clock, &Timeouts::default()),
+            ring::reset(&mut awake, &clock, &Timeouts::default(), &regs::BLITTER),
             Err(Refusal::Timeout)
         );
     }
@@ -805,10 +828,7 @@ mod batches {
     #[test]
     fn a_batch_must_end_within_itself() {
         let f = cmd::fill(&DST, &ALL, 1).unwrap();
-        assert_eq!(
-            check(&mut { f }[..5], START, &MAPS),
-            Err(Fault::Unended(0))
-        );
+        assert_eq!(check(&mut { f }[..5], START, &MAPS), Err(Fault::Unended(0)));
         assert_eq!(check(&mut { f }, START, &MAPS), Err(Fault::Unended(6)));
         assert_eq!(check(&mut [], START, &MAPS), Err(Fault::Unended(0)));
         assert_eq!(
@@ -968,4 +988,47 @@ mod render_engine {
             1 << 18 | 1 << 2 | 1 << 20
         );
     }
+}
+
+#[test]
+fn the_render_ring_starts_and_resets_on_its_own_registers() {
+    use crate::gtt::Layout;
+    use crate::ring::{self, Ring};
+    let mut bank = Bank::probed();
+    let clock = Ticks::new();
+    let fw = Forcewake::init(&mut bank, &clock, Timeouts::default()).unwrap();
+    let layout = Layout::new(fake::FIRMWARE_RUN, fake::ENTRIES, 4, (256 << 20) / 4096).unwrap();
+    let mut ring = Ring::new(4);
+    {
+        let mut awake = fw.hold(&mut bank, &clock).unwrap();
+        ring::start(
+            &mut awake,
+            &clock,
+            &Timeouts::default(),
+            &regs::RENDER,
+            &layout,
+            &mut ring,
+        )
+        .unwrap();
+        ring::reset(&mut awake, &clock, &Timeouts::default(), &regs::RENDER).unwrap();
+    }
+    assert_eq!(
+        bank.get(0x4080),
+        layout.render_status * 4096,
+        "status page at 0x4080"
+    );
+    assert_eq!(bank.get(0x2038), layout.render_ring * 4096);
+    assert_eq!(bank.get(0x2228), layout.pp_dir_base());
+    assert_eq!(
+        bank.get(0x229C) & (1 << 9 | 0x2800),
+        1 << 9 | 0x2800,
+        "PPGTT on, TLB bits kept"
+    );
+    assert_eq!(
+        bank.writes_to(regs::GDRST),
+        [1 << 1, 1 << 1],
+        "the render domain, twice"
+    );
+    // Nothing of the blitter's touched.
+    assert!(bank.writes_to(regs::bcs::CTL).is_empty());
 }

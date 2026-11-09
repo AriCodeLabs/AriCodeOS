@@ -101,11 +101,14 @@ pub fn flush<R: Regs + ?Sized>(regs: &mut R) {
 /// high and aligned to 16 pages: `intel_ring_pin`, `GEN6_PD_ALIGN`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Layout {
-    /// The status page.
+    /// The blitter's status page.
     pub status: u32,
-    /// The ring's first page, and its pages.
+    /// The blitter's ring's first page, and each ring's pages.
     pub ring: u32,
     pub ring_pages: u32,
+    /// The render engine's status page and ring (ADR 0086).
+    pub render_status: u32,
+    pub render_ring: u32,
     /// The first of the entries that hold the PPGTT's page directory, and
     /// the directory's entries, each covering 4 MiB.
     pub directory: u32,
@@ -133,21 +136,34 @@ impl Layout {
         }
         let status = kept.max(aperture).checked_add(1)?;
         let ring = status + 1;
-        let end = ring.checked_add(ring_pages)?;
+        let render_status = ring.checked_add(ring_pages)?;
+        let render_ring = render_status + 1;
+        let end = render_ring.checked_add(ring_pages)?;
         let directory = entries.checked_sub(DIRECTORY_ENTRIES)? & !15;
-        // The ring's start must sit below 512 MiB (PRM Vol 1 Part 4, 2.1.9).
-        if end > directory || (ring as u64 + ring_pages as u64) * PAGE > 512 << 20 {
+        // A ring's start must sit below 512 MiB (PRM Vol 1 Part 4, 2.1.9).
+        if end > directory || end as u64 * PAGE > 512 << 20 {
             return None;
         }
         Some(Layout {
             status,
             ring,
             ring_pages,
+            render_status,
+            render_ring,
             directory,
             directory_entries: DIRECTORY_ENTRIES,
             kept,
             end,
         })
+    }
+
+    /// `engine`'s status page and ring, as entries of the table.
+    pub fn placement(&self, engine: &crate::regs::Engine) -> (u32, u32) {
+        if *engine == crate::regs::RENDER {
+            (self.render_status, self.render_ring)
+        } else {
+            (self.status, self.ring)
+        }
     }
 
     /// The value of `PP_DIR_BASE`: the directory's byte offset in the table,

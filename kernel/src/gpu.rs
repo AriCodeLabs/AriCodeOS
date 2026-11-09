@@ -29,7 +29,7 @@ use aricode_intel_gt::gtt::{self, Cache, Layout};
 use aricode_intel_gt::power::{self, Forcewake, Limits};
 use aricode_intel_gt::regs::{bcs, masked_off, masked_on};
 use aricode_intel_gt::ring::{self, Ring};
-use aricode_intel_gt::{self as gt, ppgtt, Refusal, Timeouts};
+use aricode_intel_gt::{self as gt, ppgtt, regs, Refusal, Timeouts};
 use aricode_pmm::FRAME_SIZE;
 use log::{info, warn};
 
@@ -371,7 +371,14 @@ fn bring_up(
         ppgtt::flush_directory(&mut regs);
         let mut awake = fw.hold(&mut regs, &clock)?;
         ring::prepare(&mut awake);
-        ring::start(&mut awake, &clock, &timeouts, &layout, &mut ring)?;
+        ring::start(
+            &mut awake,
+            &clock,
+            &timeouts,
+            &regs::BLITTER,
+            &layout,
+            &mut ring,
+        )?;
         power::quiet_rps_interrupts(&mut awake);
         power::set_frequency(&mut awake, &found.limits, step);
         Ok(())
@@ -576,8 +583,16 @@ fn idle(e: &Engine, regs: &mut Bar0) -> bool {
 fn reset(e: &mut Engine, regs: &mut Bar0) {
     let before = stored(e);
     let ok = e.fw.hold(regs, &Clock).is_ok_and(|mut awake| {
-        ring::reset(&mut awake, &Clock, &e.timeouts).is_ok()
-            && ring::start(&mut awake, &Clock, &e.timeouts, &e.layout, &mut e.ring).is_ok()
+        ring::reset(&mut awake, &Clock, &e.timeouts, &regs::BLITTER).is_ok()
+            && ring::start(
+                &mut awake,
+                &Clock,
+                &e.timeouts,
+                &regs::BLITTER,
+                &e.layout,
+                &mut e.ring,
+            )
+            .is_ok()
     });
     dwords(phys(&e.pages.status), 1)[ring::SEQNO_INDEX as usize] = e.submitted;
     e.lost = (before, e.submitted);
@@ -817,7 +832,7 @@ pub fn submit(ptr: u64, len: u64) -> Result<u64, Error> {
     // told of them.
     // SAFETY: a fence touches no memory.
     unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
-    ring::submit(&mut awake, tail);
+    ring::submit(&mut awake, &regs::BLITTER, tail);
     if idle_before {
         e.progress = (finished, crate::time::uptime_us());
     }
