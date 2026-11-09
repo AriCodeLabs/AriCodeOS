@@ -17,6 +17,7 @@
 
 pub mod check;
 pub mod cmd;
+pub mod compute;
 pub mod gtt;
 pub mod power;
 pub mod ppgtt;

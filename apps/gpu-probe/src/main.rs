@@ -4,7 +4,9 @@
 //! with the GPU's blitter and with the CPU, timed side by side and checked
 //! pixel by pixel; checks that the commands a non-secure batch could use to
 //! reach the blitter's registers are refused; hangs the engine on purpose
-//! and checks it is reset and works again.
+//! and checks it is reset and works again. Then stage B (ADR 0086): EU
+//! kernels assembled here run on the render engine, igt's fill first, then
+//! one that writes each thread group's number, both checked byte by byte.
 //!
 //! Exit codes: 0 all as expected; 2 no GPU engine here, and its calls
 //! refused cleanly; 10 setup failed; 11 a fill was wrong; 12 a copy was
@@ -12,11 +14,16 @@
 //! changed; 14 a hang was not caught; 15 the engine did not work after its
 //! reset; 16 a call on an absent GPU was not refused as documented; 17 the
 //! GPU's clock could not be asked for, was given above what was asked, or
-//! did not speed the work up.
+//! did not speed the work up; 18 a dispatch could not be set up or did not
+//! finish; 19 a dispatch wrote the wrong bytes; 20 a dispatch the hardware
+//! would not take was not refused.
 #![no_std]
 #![no_main]
 
+use aricode_gen7_eu::{g, Asm, ExecSize::*, Imm, Inst, Message, Reg};
 use aricode_intel_gt::cmd::{self, Rect, Surface};
+use aricode_intel_gt::compute::{self, Descriptor};
+use aricode_rt::sys::abi::gpu::{Dispatch, DISPATCH_NUMBER};
 use aricode_rt::sys::abi::sysinfo::{self, GpuReport};
 use aricode_rt::sys::{self, kind, permissions, time, Error, Handle};
 use aricode_rt::{fmt_hex, fmt_u64};
@@ -28,6 +35,9 @@ const BYTES: u64 = PITCH as u64 * HEIGHT as u64;
 /// Where each surface sits in the GPU's address space.
 const SRC_AT: u64 = 0x10_0000;
 const DST_AT: u64 = 0x50_0000;
+/// Stage B: the dispatch's state and EU code, and the surface it writes.
+const STATE_AT: u64 = 0xA0_0000;
+const OUT_AT: u64 = 0xB0_0000;
 const RUNS: usize = 8;
 const WAIT_MS: u64 = 5_000;
 
@@ -217,6 +227,7 @@ fn main(_arg: u64) -> u64 {
         let refused = sys::gpu_submit(gpu, &end) == Err(Error::NotFound)
             && sys::gpu_wait(gpu, 1, 0) == Err(Error::NotFound)
             && sys::gpu_frequency(gpu, 650) == Err(Error::NotFound)
+            && sys::gpu_dispatch(gpu, &Dispatch::default()) == Err(Error::NotFound)
             && sys::gpu_unmap(gpu, SRC_AT) == Err(Error::NotFound);
         let mapped = sys::dma_alloc(hardware, 4096).map(|d| sys::gpu_map(gpu, d, SRC_AT));
         if !refused || mapped != Ok(Err(Error::NotFound)) {
@@ -497,8 +508,246 @@ fn main(_arg: u64) -> u64 {
             return 15;
         }
     }
+    if let Err(code) = dispatches(&mut g, hardware) {
+        return code;
+    }
     say(&[b"done"]);
     0
+}
+
+/// Where each piece of a dispatch's state sits in its page (offsets from
+/// the bases, which are all the page's address).
+const CODE: usize = 0x000;
+const CURBE: usize = 0x200;
+const BINDING_TABLE: usize = 0x240;
+const SURFACE_STATE: usize = 0x280;
+const DESCRIPTOR: usize = 0x2C0;
+/// The surface: 16 by 16 thread groups, each writing 16 bytes of a row.
+const OUT_WIDTH: u32 = 256;
+const OUT_HEIGHT: u32 = 16;
+const GROUPS: u32 = OUT_WIDTH / 16;
+
+/// Assembles a kernel that writes one 16-byte row block per thread group,
+/// at x = group X * 16 and y = group Y, of the byte `value` leaves in g1.0
+/// (igt's `gpgpu_fill.gxa`, from its second instruction).
+fn row_block_kernel(code: &mut [[u32; 4]], value: impl FnOnce(&mut Asm)) -> Option<usize> {
+    let write = Message::media_block_write(0, 2).ok()?.desc_as_d();
+    let eot = Message::thread_spawner_eot().desc_as_d();
+    let mut asm = Asm::new(code);
+    value(&mut asm);
+    asm.mul(E1, g(2).ud(), g(0).ud().sub(1).scalar(), Imm::ud(0x10))
+        .mov(E1, g(2).ud().sub(1), g(0).ud().sub(6).scalar())
+        .mov(E8, g(4).ud(), g(0).ud())
+        .mov(E2, g(4).ud(), g(2).ud().region(2, 2, 1))
+        .mov(E1, g(4).ud().sub(2), Imm::ud(0xf))
+        .mov(E16, g(5).ud(), g(1).ud().scalar())
+        .emit(Inst::send(E16, Reg::acc0().uw(), g(4).d().scalar(), write))
+        .mov(E8, g(112).ud(), g(0).ud())
+        .emit(Inst::send(E16, Reg::null().uw(), g(112).d().scalar(), eot));
+    asm.finish().ok().map(|p| p.len())
+}
+
+/// igt's fill: the byte from the CURBE data (g1), replicated.
+fn fill_kernel(code: &mut [[u32; 4]]) -> Option<usize> {
+    row_block_kernel(code, |asm| {
+        asm.mov(E4, g(1).ub(), g(1).ub().scalar());
+    })
+}
+
+/// Each group writes its number, X + 16 * Y, replicated.
+fn group_kernel(code: &mut [[u32; 4]]) -> Option<usize> {
+    row_block_kernel(code, |asm| {
+        asm.shl(E1, g(1).ud(), g(0).ud().sub(6).scalar(), Imm::ud(4))
+            .add(E1, g(1).ud(), g(1).ud().scalar(), g(0).ud().sub(1).scalar())
+            .mov(E4, g(1).ub(), g(1).ub().scalar());
+    })
+}
+
+/// The dispatch every kernel here runs with: one SIMD16 thread a group,
+/// GROUPS by OUT_HEIGHT groups, one CURBE register.
+fn out_dispatch() -> Dispatch {
+    Dispatch {
+        general_base: 0,
+        surface_base: STATE_AT as u32,
+        dynamic_base: STATE_AT as u32,
+        instruction_base: STATE_AT as u32,
+        scratch: 0,
+        max_threads: 1,
+        urb_entries: 0,
+        urb_entry_regs: 0,
+        curbe_regs: 1,
+        curbe_offset: CURBE as u32,
+        curbe_len: 32,
+        descriptor_offset: DESCRIPTOR as u32,
+        descriptors: 1,
+        descriptor: 0,
+        simd: 16,
+        group: [1, 1, 1],
+        start: [0, 0, 0],
+        groups: [GROUPS, OUT_HEIGHT, 1],
+        right_mask: 0xFFFF,
+        bottom_mask: 0xFFFF_FFFF,
+    }
+}
+
+/// Writes the state of a dispatch of `code` into `state`, its CURBE data
+/// `curbe`.
+fn write_state(state: &mut [u32], code: &[[u32; 4]], curbe: u32) -> Option<()> {
+    state.fill(0);
+    for (i, inst) in code.iter().enumerate() {
+        state[CODE / 4 + 4 * i..CODE / 4 + 4 * i + 4].copy_from_slice(inst);
+    }
+    state[CURBE / 4] = curbe;
+    state[BINDING_TABLE / 4] = SURFACE_STATE as u32;
+    let surface = compute::surface_2d(
+        compute::FORMAT_R8_UNORM,
+        OUT_AT as u32,
+        OUT_WIDTH,
+        OUT_HEIGHT,
+        OUT_WIDTH,
+    )?;
+    state[SURFACE_STATE / 4..SURFACE_STATE / 4 + 8].copy_from_slice(&surface);
+    let descriptor = Descriptor {
+        kernel: CODE as u32,
+        binding_table: BINDING_TABLE as u32,
+        binding_entries: 1,
+        curbe_regs: 1,
+        slm_blocks: 0,
+        barrier: false,
+    }
+    .encode()?;
+    state[DESCRIPTOR / 4..DESCRIPTOR / 4 + 8].copy_from_slice(&descriptor);
+    Some(())
+}
+
+/// Stage B (ADR 0086): EU kernels on the render engine.
+fn dispatches(g: &mut Gpu, hardware: Handle) -> Result<(), u64> {
+    let before = g.report();
+    if before.render != 1 {
+        say(&[
+            b"no render ring here (state ",
+            n(before.render as u64).s(),
+            b")",
+        ]);
+        let refused = sys::gpu_dispatch(g.gpu, &out_dispatch()) == Err(Error::NotFound);
+        if !refused {
+            say(&[b"a dispatch without a render ring was not refused with NotFound"]);
+            return Err(20);
+        }
+        return Ok(());
+    }
+    let state = map(Some(hardware), g.gpu, STATE_AT, 4096).map_err(|e| {
+        say(&[b"compute setup failed: ", error_name(e)]);
+        18u64
+    })?;
+    let out = map(None, g.gpu, OUT_AT, 4096).map_err(|e| {
+        say(&[b"compute setup failed: ", error_name(e)]);
+        18u64
+    })?;
+    let mut code = [[0u32; 4]; 32];
+    let run = |g: &mut Gpu, d: &Dispatch| -> Result<u64, Error> {
+        let t0 = g.now();
+        let number = sys::gpu_dispatch(g.gpu, d)?;
+        sys::gpu_wait(g.gpu, number, WAIT_MS)?;
+        Ok(g.now() - t0)
+    };
+
+    // 5. igt's fill, every byte the CURBE's.
+    let Some(len) = fill_kernel(&mut code) else {
+        say(&[b"the fill kernel did not assemble"]);
+        return Err(18);
+    };
+    if write_state(state, &code[..len], 0xA5).is_none() {
+        say(&[b"the dispatch's state did not encode"]);
+        return Err(18);
+    }
+    out.fill(0);
+    let took = run(g, &out_dispatch()).map_err(|e| {
+        say(&[b"the fill dispatch failed: ", error_name(e)]);
+        18u64
+    })?;
+    if let Some(i) = out.iter().position(|&w| w != 0xA5A5_A5A5) {
+        say(&[
+            b"FILL WRONG at byte ",
+            n(4 * i as u64).s(),
+            b": ",
+            hex(out[i] as u64).s(),
+        ]);
+        return Err(19);
+    }
+    say(&[
+        b"EU fill: ",
+        n((GROUPS * OUT_HEIGHT) as u64).s(),
+        b" thread groups, every byte right, in ",
+        n(took).s(),
+        b" us",
+    ]);
+
+    // 6. Each group's number, so a group run twice, not at all, or in the
+    // wrong place shows.
+    let Some(len) = group_kernel(&mut code) else {
+        say(&[b"the group kernel did not assemble"]);
+        return Err(18);
+    };
+    write_state(state, &code[..len], 0).ok_or(18u64)?;
+    out.fill(0);
+    let took = run(g, &out_dispatch()).map_err(|e| {
+        say(&[b"the group dispatch failed: ", error_name(e)]);
+        18u64
+    })?;
+    let bytes = out.iter().flat_map(|w| w.to_le_bytes());
+    for (i, b) in bytes.enumerate() {
+        let (x, y) = (i as u32 % OUT_WIDTH, i as u32 / OUT_WIDTH);
+        let want = (x / 16 + GROUPS * y) as u8;
+        if b != want {
+            say(&[
+                b"GROUP WRONG at x ",
+                n(x as u64).s(),
+                b" y ",
+                n(y as u64).s(),
+                b": ",
+                n(b as u64).s(),
+                b", want ",
+                n(want as u64).s(),
+            ]);
+            return Err(19);
+        }
+    }
+    say(&[
+        b"EU groups: each of ",
+        n((GROUPS * OUT_HEIGHT) as u64).s(),
+        b" wrote its own number, in ",
+        n(took).s(),
+        b" us",
+    ]);
+
+    // 7. Descriptors the hardware would not take are refused, and a number
+    // never given is not waited for.
+    let mut bad = [out_dispatch(); 4];
+    bad[0].descriptor_offset += 8;
+    bad[1].simd = 4;
+    bad[2].max_threads = 0;
+    bad[3].groups[0] = 0;
+    for d in &bad {
+        if sys::gpu_dispatch(g.gpu, d) != Err(Error::Invalid) {
+            say(&[b"a dispatch the hardware would not take was not refused"]);
+            return Err(20);
+        }
+    }
+    let never = DISPATCH_NUMBER | 0xFFFF_FF00;
+    if sys::gpu_wait(g.gpu, never, 0) != Err(Error::Invalid) {
+        say(&[b"a dispatch number never given was waited for"]);
+        return Err(20);
+    }
+    say(&[b"4 bad descriptors refused as invalid"]);
+
+    // The EU threads reached nothing of the kernel's.
+    let r = g.report();
+    if r.canary != before.canary || r.watchdog != before.watchdog {
+        say(&[b"REACHED: the status page or the blitter's registers changed"]);
+        return Err(13);
+    }
+    Ok(())
 }
 
 aricode_rt::entry!(main);

@@ -12,8 +12,9 @@
 //! the handles [`handle::SELF_PROCESS`], [`handle::MAIN_THREAD`] and
 //! [`handle::CONSOLE`].
 //!
-//! During `0.x` the ABI may change (section 74). Current version: 12
-//! (ADR 0083: `gpu_frequency`). Version 11 (ADR 0084: the `MEM` object, `mem_create`, and `mmio_map` and `gpu_map`
+//! During `0.x` the ABI may change (section 74). Current version: 13
+//! (ADR 0086: `gpu_dispatch` and [`gpu::Dispatch`]; `gpu_wait` takes its
+//! numbers too). Version 12 (ADR 0083: `gpu_frequency`). Version 11 (ADR 0084: the `MEM` object, `mem_create`, and `mmio_map` and `gpu_map`
 //! taking it). Version 10 (ADR 0083: the `GPU` object at `INIT_GPU`, which moves `INIT_PS2` one
 //! on; `gpu_map`, `gpu_unmap`, `gpu_submit`, `gpu_wait`; `Error::Busy` and
 //! `Error::Hung`; `sysinfo::GPU`). Version 9 (ADR 0082: threads in a
@@ -29,7 +30,7 @@
 
 #![no_std]
 
-pub const ABI_VERSION: u32 = 12;
+pub const ABI_VERSION: u32 = 13;
 
 /// Kernel base signature (SHA-512), required to check and verify the origin
 /// and authorship of an AriCodeOS build. It is part of the fixed ABI: it is
@@ -176,6 +177,128 @@ pub mod gpu {
     pub const FIRST: u64 = 0x1_0000;
     /// Mappings are made of whole pages of this size.
     pub const PAGE: u64 = 4096;
+    /// Numbers `gpu_dispatch` returns carry this bit, so `gpu_wait` knows
+    /// them from the blitter's.
+    pub const DISPATCH_NUMBER: u64 = 1 << 32;
+
+    /// A compute dispatch on the render engine's GPGPU pipe (ADR 0086):
+    /// what `gpu_dispatch` runs. The kernel writes the commands from it; the
+    /// state it points at (interface descriptors, CURBE data, binding tables,
+    /// surface states, EU code) is the client's, in its mappings. Addresses
+    /// are in the client's GPU address space; offsets are from the base
+    /// named. Field names follow Intel's PRM (Vol 2 Part 2, 1.8).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct Dispatch {
+        /// `STATE_BASE_ADDRESS`: 4 KiB-aligned bases.
+        pub general_base: u32,
+        pub surface_base: u32,
+        pub dynamic_base: u32,
+        pub instruction_base: u32,
+        /// `MEDIA_VFE_STATE`: the scratch space, a 1 KiB-aligned offset from
+        /// the general base with each thread's size in bits 3:0 (0 is 1 KiB,
+        /// up to 11, 12 KiB); 0 when no kernel spills.
+        pub scratch: u32,
+        /// Threads that may run at once, from 1 to the GPU's.
+        pub max_threads: u16,
+        /// URB entries (at most 64) and each one's size in 256-bit
+        /// registers (at least 1 when there are entries).
+        pub urb_entries: u8,
+        pub urb_entry_regs: u16,
+        /// The URB space for CURBE data, in 256-bit registers.
+        pub curbe_regs: u16,
+        /// `MEDIA_CURBE_LOAD`: the CURBE data's offset from the dynamic base
+        /// and its length in bytes, both multiples of 32; length 0 loads
+        /// none.
+        pub curbe_offset: u32,
+        pub curbe_len: u32,
+        /// `MEDIA_INTERFACE_DESCRIPTOR_LOAD`: the descriptors' offset from
+        /// the dynamic base (a multiple of 32) and their number (1 to 32).
+        pub descriptor_offset: u32,
+        pub descriptors: u8,
+        /// `GPGPU_WALKER`: the descriptor it uses, the SIMD width (8, 16 or
+        /// 32), the threads of a group in width, height and depth (each from
+        /// 1, at most 64 in all, 32 at SIMD32), the first group and the
+        /// number of groups on each axis, and the channels on in the last
+        /// thread of a row and of a column.
+        pub descriptor: u8,
+        pub simd: u8,
+        pub group: [u8; 3],
+        pub start: [u32; 3],
+        pub groups: [u32; 3],
+        pub right_mask: u32,
+        pub bottom_mask: u32,
+    }
+
+    impl Dispatch {
+        /// Bytes `gpu_dispatch` reads.
+        pub const LEN: usize = 80;
+
+        pub fn encode(&self) -> [u8; Self::LEN] {
+            let w: [u32; Self::LEN / 4] = [
+                self.general_base,
+                self.surface_base,
+                self.dynamic_base,
+                self.instruction_base,
+                self.scratch,
+                self.max_threads as u32
+                    | (self.urb_entries as u32) << 16
+                    | (self.descriptors as u32) << 24,
+                self.urb_entry_regs as u32 | (self.curbe_regs as u32) << 16,
+                self.curbe_offset,
+                self.curbe_len,
+                self.descriptor_offset,
+                self.simd as u32 | (self.descriptor as u32) << 8,
+                self.group[0] as u32 | (self.group[1] as u32) << 8 | (self.group[2] as u32) << 16,
+                self.start[0],
+                self.start[1],
+                self.start[2],
+                self.groups[0],
+                self.groups[1],
+                self.groups[2],
+                self.right_mask,
+                self.bottom_mask,
+            ];
+            let mut b = [0u8; Self::LEN];
+            for (i, v) in w.iter().enumerate() {
+                b[4 * i..4 * i + 4].copy_from_slice(&v.to_le_bytes());
+            }
+            b
+        }
+
+        pub fn decode(b: &[u8]) -> Option<Self> {
+            if b.len() != Self::LEN {
+                return None;
+            }
+            let w =
+                |i: usize| u32::from_le_bytes([b[4 * i], b[4 * i + 1], b[4 * i + 2], b[4 * i + 3]]);
+            // Bits no field uses must be clear, so a later field can take them.
+            if w(10) >> 16 != 0 || w(11) >> 24 != 0 {
+                return None;
+            }
+            Some(Self {
+                general_base: w(0),
+                surface_base: w(1),
+                dynamic_base: w(2),
+                instruction_base: w(3),
+                scratch: w(4),
+                max_threads: w(5) as u16,
+                urb_entries: (w(5) >> 16) as u8,
+                descriptors: (w(5) >> 24) as u8,
+                urb_entry_regs: w(6) as u16,
+                curbe_regs: (w(6) >> 16) as u16,
+                curbe_offset: w(7),
+                curbe_len: w(8),
+                descriptor_offset: w(9),
+                simd: w(10) as u8,
+                descriptor: (w(10) >> 8) as u8,
+                group: [w(11) as u8, (w(11) >> 8) as u8, (w(11) >> 16) as u8],
+                start: [w(12), w(13), w(14)],
+                groups: [w(15), w(16), w(17)],
+                right_mask: w(18),
+                bottom_mask: w(19),
+            })
+        }
+    }
 }
 
 /// The PS/2 stream (ADR 0075): `ps2_read` copies entries of two bytes, a
@@ -444,6 +567,17 @@ pub mod nr {
     /// `Busy` if another process is the client or the GPU could not be told;
     /// `Hung` once a reset has failed; `NotFound` without a GPU engine.
     pub const GPU_FREQUENCY: u64 = 48;
+    /// `gpu_dispatch(gpu, ptr, len) -> number` (ADR 0086): runs the
+    /// [`gpu::Dispatch`](crate::gpu::Dispatch) of `len` bytes at `ptr`
+    /// (`Dispatch::LEN`) on the render engine; its number carries
+    /// [`gpu::DISPATCH_NUMBER`](crate::gpu::DISPATCH_NUMBER), for `gpu_wait`.
+    /// The kernel writes every command; the state and the EU code it names
+    /// are the client's, in its mappings, and its EU threads can write any
+    /// page mapped there. Requires `WRITE`; makes the caller the client.
+    /// `Invalid` for a descriptor the hardware would not take; `Busy` while
+    /// the ring is full; `Hung` once a reset of the render engine has failed;
+    /// `NotFound` without a GPU engine or a render ring.
+    pub const GPU_DISPATCH: u64 = 49;
 }
 
 /// `process_spawn_from` request (48 bytes in caller memory).
@@ -2022,6 +2156,42 @@ mod tests {
         // Never negative: an error is `-4095..=-1` in the same register.
         assert!((irq(last, u32::MAX) as i64) > 0);
         assert!((message(last, IPC_MAX_DATA, IPC_MAX_HANDLES) as i64) > 0);
+    }
+
+    #[test]
+    fn dispatch_round_trip() {
+        use super::gpu::Dispatch;
+        let d = Dispatch {
+            general_base: 0x1_0000,
+            surface_base: 0x2_0000,
+            dynamic_base: 0x3_0000,
+            instruction_base: 0x4_0000,
+            scratch: 0x400 | 3,
+            max_threads: 128,
+            urb_entries: 64,
+            urb_entry_regs: 2,
+            curbe_regs: 1,
+            curbe_offset: 0x40,
+            curbe_len: 32,
+            descriptor_offset: 0x80,
+            descriptors: 32,
+            descriptor: 31,
+            simd: 16,
+            group: [4, 2, 1],
+            start: [1, 2, 3],
+            groups: [u32::MAX, 5, 6],
+            right_mask: 0xFF,
+            bottom_mask: u32::MAX,
+        };
+        assert_eq!(Dispatch::decode(&d.encode()), Some(d));
+        assert_eq!(Dispatch::decode(&d.encode()[..79]), None);
+        // Unused bits must be clear.
+        let mut b = d.encode();
+        b[10 * 4 + 2] = 1;
+        assert_eq!(Dispatch::decode(&b), None);
+        let mut b = d.encode();
+        b[11 * 4 + 3] = 1;
+        assert_eq!(Dispatch::decode(&b), None);
     }
 
     #[test]

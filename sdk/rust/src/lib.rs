@@ -434,6 +434,19 @@ pub fn gpu_submit(gpu: Handle, batch: &[u32]) -> Result<u64, Error> {
     )
 }
 
+/// Runs `dispatch` on the render engine's GPGPU pipe; its number, for
+/// [`gpu_wait`] (see `abi::nr::GPU_DISPATCH`).
+pub fn gpu_dispatch(gpu: Handle, dispatch: &aricode_abi::gpu::Dispatch) -> Result<u64, Error> {
+    let bytes = dispatch.encode();
+    call(
+        nr::GPU_DISPATCH,
+        gpu.0 as u64,
+        bytes.as_ptr() as u64,
+        bytes.len() as u64,
+        0,
+    )
+}
+
 /// Asks for the GPU's clock in MHz; the clock set (see
 /// `abi::nr::GPU_FREQUENCY`).
 pub fn gpu_frequency(gpu: Handle, mhz: u64) -> Result<u64, Error> {

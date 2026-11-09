@@ -1064,3 +1064,256 @@ fn the_ring_emits_whole_quadwords_and_wraps() {
         "never the whole ring"
     );
 }
+
+/// igt's `gen7_gpgpu_fillfunc` for a 64 x 4 fill at the origin, with its
+/// state 4 KiB-aligned at 0x10000: one thread a group, SIMD16, one CURBE
+/// register.
+fn igt_fill() -> aricode_abi::gpu::Dispatch {
+    aricode_abi::gpu::Dispatch {
+        general_base: 0,
+        surface_base: 0x1_0000,
+        dynamic_base: 0x1_0000,
+        instruction_base: 0x1_0000,
+        scratch: 0,
+        max_threads: 1,
+        urb_entries: 0,
+        urb_entry_regs: 0,
+        curbe_regs: 1,
+        curbe_offset: 0x40,
+        curbe_len: 32,
+        descriptor_offset: 0x200,
+        descriptors: 1,
+        descriptor: 0,
+        simd: 16,
+        group: [1, 1, 1],
+        start: [0, 0, 0],
+        groups: [4, 4, 1],
+        right_mask: 0xFFFF,
+        bottom_mask: 0xFFFF_FFFF,
+    }
+}
+
+#[test]
+fn a_dispatch_is_igts_gpgpu_fill_between_linuxs_flushes() {
+    extern crate std;
+    use crate::compute;
+    use crate::render::*;
+    let (w, n) = compute::emit(&igt_fill(), 128).unwrap();
+    let w = &w[..n];
+    let invalidate = [
+        PIPE_CONTROL,
+        PC_STALL_AT_SCOREBOARD | PC_CS_STALL,
+        0,
+        0,
+        PIPE_CONTROL,
+        PC_STATE_INVALIDATE,
+        0,
+        0,
+    ];
+    let flush = [
+        PIPE_CONTROL,
+        PC_RENDER_TARGET_FLUSH | PC_DEPTH_FLUSH | PC_DC_FLUSH | PC_CS_STALL,
+        0,
+        0,
+    ];
+    let mut want: std::vec::Vec<u32> = std::vec::Vec::new();
+    want.extend(invalidate);
+    want.extend([0x6904_0002, 0]);
+    want.extend(invalidate);
+    want.extend(flush);
+    // igt's `gen7_emit_state_base_address`, with the bases relocated.
+    want.extend([0x6101_0008, 1, 0x1_0001, 0x1_0001, 0, 0x1_0001, 0, 1, 0, 1]);
+    want.extend(invalidate);
+    // `gen7_emit_vfe_state(THREADS 1, URB entries 0, URB size 0, CURBE 1,
+    // GPGPU mode)`.
+    want.extend([0x7000_0006, 0, 1 << 2, 0, 1, 0, 0, 0]);
+    want.extend([0x7001_0002, 0, 32, 0x40]);
+    want.extend([0x7002_0002, 0, 32, 0x200]);
+    // `gen7_emit_gpgpu_walk(0, 0, 64, 4)`.
+    want.extend([
+        0x7105_0009,
+        0,
+        1 << 30,
+        0,
+        4,
+        0,
+        4,
+        0,
+        1,
+        0xFFFF,
+        0xFFFF_FFFF,
+    ]);
+    want.extend([0x7004_0000, 0]);
+    assert_eq!(w, &want[..]);
+    assert!(n <= compute::MAX_DWORDS);
+    // Nothing that reaches registers: the gateway's MMIO bits, the walker's
+    // indirect and predicate bits stay clear.
+    let vfe = w
+        .iter()
+        .position(|&x| x == compute::MEDIA_VFE_STATE)
+        .unwrap();
+    assert_eq!(w[vfe + 2] & 3 << 3, 0);
+    let walker = w.iter().position(|&x| x == compute::GPGPU_WALKER).unwrap();
+    assert_eq!(w[walker] & (1 << 10 | 1 << 8), 0);
+    // It fits a render request.
+    let mut out = [0u32; 256];
+    let r = request(0x80, 0x100, 7, w, &mut out).unwrap();
+    // `REQUEST_EXTRA` counts the no-op that may pad to a quadword.
+    assert_eq!(r, (n + REQUEST_EXTRA - 1).next_multiple_of(2));
+}
+
+#[test]
+fn a_dispatch_carries_its_geometry_and_sizes() {
+    use crate::compute;
+    let mut d = igt_fill();
+    d.max_threads = 128;
+    d.urb_entries = 2;
+    d.urb_entry_regs = 3;
+    d.curbe_len = 0;
+    d.scratch = 0x1400 | 2;
+    d.descriptors = 4;
+    d.descriptor = 3;
+    d.simd = 8;
+    d.group = [4, 2, 2];
+    d.start = [1, 2, 3];
+    d.groups = [10, 20, 30];
+    let (w, n) = compute::emit(&d, 128).unwrap();
+    let w = &w[..n];
+    // No CURBE load without data.
+    assert!(!w.contains(&compute::MEDIA_CURBE_LOAD));
+    let vfe = w
+        .iter()
+        .position(|&x| x == compute::MEDIA_VFE_STATE)
+        .unwrap();
+    assert_eq!(
+        &w[vfe + 1..vfe + 5],
+        &[0x1402, 127 << 16 | 2 << 8 | 1 << 2, 0, 2 << 16 | 1]
+    );
+    let idl = w
+        .iter()
+        .position(|&x| x == compute::MEDIA_INTERFACE_DESCRIPTOR_LOAD)
+        .unwrap();
+    assert_eq!(w[idl + 2], 4 * 32);
+    let walker = w.iter().position(|&x| x == compute::GPGPU_WALKER).unwrap();
+    assert_eq!(
+        &w[walker + 1..walker + 9],
+        &[3, 1 << 16 | 1 << 8 | 3, 1, 10, 2, 20, 3, 30]
+    );
+    // GT1 has 36 threads.
+    assert_eq!(compute::threads(0x0156), Some(36));
+    assert_eq!(compute::threads(0x0166), Some(128));
+    assert_eq!(compute::emit(&d, 36), Err(compute::Bad::Threads));
+}
+
+#[test]
+fn a_dispatch_the_hardware_would_not_take_is_refused() {
+    use crate::compute::{validate, Bad};
+    let ok = igt_fill();
+    assert_eq!(validate(&ok, 128), Ok(()));
+    let cases: [(fn(&mut aricode_abi::gpu::Dispatch), Bad); 18] = [
+        (|d| d.surface_base = 0x1_0800, Bad::Base),
+        (|d| d.general_base = 1, Bad::Base),
+        (|d| d.scratch = 0x10, Bad::Scratch),
+        (|d| d.scratch = 12, Bad::Scratch),
+        (|d| d.max_threads = 0, Bad::Threads),
+        (|d| d.max_threads = 129, Bad::Threads),
+        (|d| d.urb_entries = 65, Bad::Urb),
+        (|d| d.urb_entries = 1, Bad::Urb),
+        (
+            |d| {
+                d.urb_entries = 64;
+                d.urb_entry_regs = 32;
+            },
+            Bad::Urb,
+        ),
+        (|d| d.curbe_len = 64, Bad::Curbe),
+        (|d| d.curbe_offset = 0x50, Bad::Curbe),
+        (|d| d.descriptors = 0, Bad::Descriptor),
+        (|d| d.descriptor = 1, Bad::Descriptor),
+        (|d| d.descriptor_offset = 0x210, Bad::Descriptor),
+        (|d| d.simd = 4, Bad::Simd),
+        (|d| d.group = [8, 8, 2], Bad::Group),
+        (
+            |d| {
+                d.simd = 32;
+                d.group = [8, 8, 1];
+            },
+            Bad::Group,
+        ),
+        (|d| d.start = [4, 0, 0], Bad::Groups),
+    ];
+    for (i, (change, bad)) in cases.iter().enumerate() {
+        let mut d = ok;
+        change(&mut d);
+        assert_eq!(validate(&d, 128), Err(*bad), "case {i}");
+    }
+    let mut d = ok;
+    d.groups[2] = 0;
+    assert_eq!(validate(&d, 128), Err(Bad::Groups));
+    let mut d = ok;
+    d.right_mask = 0;
+    assert_eq!(validate(&d, 128), Err(Bad::Groups));
+    let mut d = ok;
+    d.group = [0, 1, 1];
+    assert_eq!(validate(&d, 128), Err(Bad::Group));
+}
+
+#[test]
+fn descriptors_and_surfaces_are_igts() {
+    use crate::compute::{surface_2d, Descriptor, FORMAT_R8_UNORM};
+    // igt's `gen7_fill_interface_descriptor`: the kernel at 0x100, the
+    // binding table at 0xC0, one CURBE register.
+    let d = Descriptor {
+        kernel: 0x100,
+        binding_table: 0xC0,
+        binding_entries: 0,
+        curbe_regs: 1,
+        slm_blocks: 0,
+        barrier: false,
+    };
+    assert_eq!(
+        d.encode(),
+        Some([0x100, 1 << 18, 0, 0xC0, 1 << 16, 0, 0, 0])
+    );
+    let slm = Descriptor {
+        slm_blocks: 16,
+        barrier: true,
+        ..d
+    };
+    assert_eq!(slm.encode().unwrap()[5], 1 << 21 | 16 << 16);
+    for bad in [
+        Descriptor { kernel: 0x120, ..d },
+        Descriptor {
+            binding_table: 0xC8,
+            ..d
+        },
+        Descriptor {
+            binding_table: 0x1_0000,
+            ..d
+        },
+        Descriptor {
+            binding_entries: 32,
+            ..d
+        },
+        Descriptor { slm_blocks: 3, ..d },
+    ] {
+        assert_eq!(bad.encode(), None, "{bad:?}");
+    }
+    // igt's `gen7_fill_surface_state` for a linear 64 x 4 R8 buffer
+    // (without the Haswell channel selects igt also sets).
+    assert_eq!(
+        surface_2d(FORMAT_R8_UNORM, 0x2_0000, 64, 4, 64),
+        Some([
+            1 << 29 | 0x140 << 18 | 1 << 8,
+            0x2_0000,
+            3 << 16 | 63,
+            63,
+            0,
+            0,
+            0,
+            0
+        ])
+    );
+    assert_eq!(surface_2d(FORMAT_R8_UNORM, 0, 0, 4, 64), None);
+    assert_eq!(surface_2d(FORMAT_R8_UNORM, 0, 64, 4, 1 << 18 | 1), None);
+}

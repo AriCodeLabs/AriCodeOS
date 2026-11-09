@@ -9,6 +9,4 @@ description = "The GT (render, blitter, page tables, power) of Intel Ivy Bridge 
 path = "src/lib.rs"
 
 [dependencies]
-
-[dev-dependencies]
 aricode-abi = { path = "../../sdk/abi" }
