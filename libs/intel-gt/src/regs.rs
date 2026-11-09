@@ -55,8 +55,14 @@ pub const RPNSWREQ: u32 = 0xA008;
 pub const RP_INTERRUPT_LIMITS: u32 = 0xA014;
 /// The frequency in use, bits 14:8 (Linux `GEN6_RPSTAT1`, `GEN6_CAGF`).
 pub const RPSTAT1: u32 = 0xA01C;
-/// RPS control; 0 is off (Linux `GEN6_RP_CONTROL`).
+/// RPS control (Linux `GEN6_RP_CONTROL`).
 pub const RP_CONTROL: u32 = 0xA024;
+/// RPS on as Linux sets it on this family (`rps_set_power`): media turbo,
+/// hardware normal mode, media counted as graphics, enabled, busy and idle
+/// averaged. With it off (0) the GPU ignores `RPNSWREQ`: the laptop stayed at
+/// 350 MHz whatever was asked (ADR 0083). Its up and down interrupts stay
+/// masked, so only a request changes the clock.
+pub const RP_CONTROL_ON: u32 = 1 << 11 | 2 << 9 | 1 << 8 | 1 << 7 | 0x2 | 0x10;
 /// RC6 control (Linux `GEN6_RC_CONTROL`).
 pub const RC_CONTROL: u32 = 0xA090;
 /// Bit 2 must stay clear on this family: masked, a looping batch can hang

@@ -252,7 +252,7 @@ fn the_layout_keeps_clear_of_the_firmware_and_aligns_the_directory() {
 }
 
 #[test]
-fn the_frequency_is_asked_with_rps_off_and_within_the_limits() {
+fn the_frequency_is_asked_with_rps_on_and_within_the_limits() {
     let mut bank = Bank::probed();
     let clock = Ticks::new();
     let fw = Forcewake::init(&mut bank, &clock, Timeouts::default()).unwrap();
@@ -264,7 +264,7 @@ fn the_frequency_is_asked_with_rps_off_and_within_the_limits() {
         assert_eq!(power::set_frequency(&mut awake, &limits, 1), 7);
         assert_eq!(power::set_frequency(&mut awake, &limits, 13), 13);
     }
-    assert_eq!(bank.get(regs::RP_CONTROL), 0);
+    assert_eq!(bank.get(regs::RP_CONTROL), 0xD92, "on, as Linux sets it");
     assert_eq!(bank.get(regs::RPNSWREQ), 13 << 25);
     assert_eq!(bank.get(regs::RP_INTERRUPT_LIMITS), 13 << 24 | 7 << 16);
     assert_eq!(13 * power::STEP_MHZ, 650);

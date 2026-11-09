@@ -182,12 +182,13 @@ impl Limits {
     }
 }
 
-/// Asks for `step` (clamped to `limits`) with RPS off, and caps RPS there
-/// should it ever be turned on. Returns the step asked for. The hardware
-/// decides when it takes it: read [`frequency`] (Linux `gen6_rps_set`).
+/// Asks for `step` (clamped to `limits`), with RPS on as Linux has it and
+/// its limits at the step. Returns the step asked for. The hardware decides
+/// when it takes it: read [`frequency`] (Linux `gen6_rps_set`,
+/// `rps_set_power`).
 pub fn set_frequency<R: Regs + ?Sized>(awake: &mut Awake<'_, R>, limits: &Limits, step: u8) -> u8 {
     let step = limits.clamp(step);
-    awake.write(regs::RP_CONTROL, 0);
+    awake.write(regs::RP_CONTROL, regs::RP_CONTROL_ON);
     awake.write(
         regs::RP_INTERRUPT_LIMITS,
         (step as u32) << 24 | (limits.lowest as u32) << 16,
