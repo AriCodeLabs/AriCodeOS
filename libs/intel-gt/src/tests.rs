@@ -843,7 +843,7 @@ fn rps_interrupts_are_quieted_whatever_the_firmware_left() {
     assert_eq!(
         bank.get(regs::PMINTRMSK),
         0xFFFF_FFFB,
-        "bit 2 clear, the rest masked"
+        "bit 2 clear, the rest masked, as Linux"
     );
     assert_eq!(bank.get(regs::PMIER), 0);
     assert_eq!(bank.get(regs::PMIMR), 0xFFFF_FFFF);

@@ -200,10 +200,11 @@ pub fn set_frequency<R: Regs + ?Sized>(awake: &mut Awake<'_, R>, limits: &Limits
 }
 
 /// Keeps every RPS interrupt from reaching the CPU, as Linux does with RPS
-/// interrupts off (`rps_disable_interrupts`): all masked at the source but
-/// the one this family must keep unmasked, which a looping batch would
-/// otherwise hang on, and none enabled or unmasked toward the CPU. Whatever
-/// the firmware left (audit of the GPU's clock, M2).
+/// interrupts off (`rps_disable_interrupts`), whatever the firmware left
+/// (audit of the GPU's clock, M2): at the GT, all masked but the up-EI bit
+/// this family must keep unmasked or a looping batch can hang it; none
+/// enabled or unmasked toward the CPU. Requested clocks still take: measured
+/// on the laptop (ADR 0083).
 pub fn quiet_rps_interrupts<R: Regs + ?Sized>(awake: &mut Awake<'_, R>) {
     awake.write(regs::PMINTRMSK, !regs::PM_UP_EI_EXPIRED);
     awake.write(regs::PMIER, 0);

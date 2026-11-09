@@ -289,3 +289,23 @@ CPU is free; copies are bound by memory, which both share. These bursts are too 
 heat the laptop; the heat brake's decision is host-tested, and it has not yet been seen to
 act on the laptop.
 
+**What the GPU says its clock is, is a sample** (`RPSTAT1`): low as soon as it idles, and
+slow to rise when work starts. A test that compared one reading with the clock asked for
+failed although the clock was taken (dev builds 48 to 52, diagnosed by reading the request,
+the status and the performance status registers around the work); `gpu_probe` now checks
+that the work speeds up, and prints the sample only as a figure. RPS's interrupts are quiet
+from boot as Linux keeps them with RPS interrupts off: `PMINTRMSK` all masked but bit 2,
+`PMIER` 0, `PMIMR` all masked, whatever the firmware left (audit of this section, M2); the
+clock is taken with them so (dev build 53).
+
+With `gpu_probe` checking every pixel between runs, the CPU's reads leave the surface in its
+caches and the GPU's writes must take it back, so the same work is slower than above:
+
+| Clock | Fill | Copy |
+|---|---|---|
+| 350 MHz | 966 us | 1,618 us |
+| 650 MHz | 589 us | 974 us |
+| 1050 MHz | 496 us | 814 us |
+
+The table above, without those reads between runs, is the GPU's own speed.
+

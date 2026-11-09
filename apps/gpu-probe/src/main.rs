@@ -12,7 +12,7 @@
 //! changed; 14 a hang was not caught; 15 the engine did not work after its
 //! reset; 16 a call on an absent GPU was not refused as documented; 17 the
 //! GPU's clock could not be asked for, was given above what was asked, or
-//! was not reached.
+//! did not speed the work up.
 #![no_std]
 #![no_main]
 
@@ -309,8 +309,13 @@ fn main(_arg: u64) -> u64 {
     line(b"copy 3 MiB", spread(&mut gpu_t), spread(&mut cpu_t));
 
     // 2b. The same fill and copy at each clock asked for, with the CPU
-    // package's temperature after: what each costs in heat (ADR 0083).
-    for mhz in [350u64, 650, 1050] {
+    // package's temperature after: what each costs in heat (ADR 0083). The
+    // CPU only reads between runs (each fill has a colour of its own), so its
+    // dirty cache lines do not slow the GPU. The clock the GPU reports is a
+    // sample of the moment, low while it idles: the test is that work goes
+    // faster, not one reading.
+    let mut fill_at = [0u64; 3];
+    for (k, mhz) in [350u64, 650, 1050].into_iter().enumerate() {
         let set = match sys::gpu_frequency(g.gpu, mhz) {
             Ok(m) => m,
             Err(e) => {
@@ -325,9 +330,10 @@ fn main(_arg: u64) -> u64 {
         sys::thread_sleep(50);
         let (mut fill_t, mut copy_t) = ([0u64; RUNS], [0u64; RUNS]);
         for i in 0..RUNS {
-            g.dst.fill(0);
-            fill_t[i] = match g.run(&fill, WAIT_MS) {
-                Ok(us) if g.dst.iter().all(|&p| p == colour) => us,
+            let shade = 0x0010_2030 + (k * RUNS + i) as u32;
+            let each = cmd::fill(&surface(DST_AT), &WHOLE, shade).expect("a valid fill");
+            fill_t[i] = match g.run(&each, WAIT_MS) {
+                Ok(us) if g.dst.iter().all(|&p| p == shade) => us,
                 Ok(_) => {
                     say(&[b"fill wrong at ", n(set).s(), b" MHz"]);
                     return 11;
@@ -349,16 +355,7 @@ fn main(_arg: u64) -> u64 {
                 }
             };
         }
-        let running = g.report().mhz as u64;
-        if running != set {
-            say(&[
-                b"asked ",
-                n(set).s(),
-                b" MHz, the GPU runs at ",
-                n(running).s(),
-            ]);
-            return 17;
-        }
+        let sampled = g.report().mhz as u64;
         let mut t = [0u8; 8];
         let degrees = match sys::system_info(g.system, sysinfo::TEMPERATURE, &mut t) {
             Ok(8) => u32::from_le_bytes([t[0], t[1], t[2], t[3]]) as u64,
@@ -366,14 +363,15 @@ fn main(_arg: u64) -> u64 {
         };
         let (fill_best, _) = spread(&mut fill_t);
         let (copy_best, _) = spread(&mut copy_t);
+        fill_at[k] = fill_best;
         say(&[
             b"asked ",
             n(mhz).s(),
             b" MHz, set ",
             n(set).s(),
-            b", running ",
-            n(running).s(),
-            b": fill ",
+            b" (sampled ",
+            n(sampled).s(),
+            b"): fill ",
             n(fill_best).s(),
             b" us (",
             n(rate(fill_best)).s(),
@@ -385,6 +383,12 @@ fn main(_arg: u64) -> u64 {
             n(degrees).s(),
             b" C",
         ]);
+    }
+    // The highest clock must do the fill in at most three quarters of the
+    // lowest's time (a third of it is what the clocks' ratio allows).
+    if fill_at[2] * 4 > fill_at[0] * 3 {
+        say(&[b"the clock did not speed the work up"]);
+        return 17;
     }
     let _ = sys::gpu_frequency(g.gpu, 350);
 
