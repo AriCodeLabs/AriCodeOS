@@ -1060,20 +1060,18 @@ const SGEMM_C_AT: u64 = 0x400_0000;
 /// Runs a clock and how many products at it.
 const SGEMM_RUNS: usize = 10;
 const SGEMM_CODE: u32 = 0x0000;
-const SGEMM_TABLE: u32 = 0x2000;
-const SGEMM_SURFACES: u32 = 0x2040;
-const SGEMM_DESCRIPTOR: u32 = 0x2100;
+const SGEMM_TABLE: u32 = 0x1000;
+const SGEMM_SURFACES: u32 = 0x1040;
+const SGEMM_DESCRIPTOR: u32 = 0x1100;
 
 /// Assembles the EU program: each thread computes an 8 by 16 tile of C at
 /// row 8 * group Y and column 16 * group X. For each step of 8 along k it
 /// reads A's 8 by 8 block and B's 8 by 16 (two media block reads of 32
 /// bytes by 8 rows), then makes 128 `mad(8)`: each of C's rows (two
-/// registers) gains A's element times B's row. With `rows_first` the
-/// walker's X (which moves fastest) picks the tile's rows, so the threads in
-/// flight share B's column strip; otherwise its columns, and they share A's
-/// row strip. (Dev 64 measured a version that fetched the next step while
-/// multiplying: slower, so not kept.)
-fn sgemm_program(code: &mut [[u32; 4]], n: u32, rows_first: bool) -> Option<usize> {
+/// registers) gains A's element times B's row. Measured against two
+/// variants on the laptop (ADR 0086, B7) and faster than both: fetching the
+/// next step while multiplying, and the walker's X picking the tile's rows.
+fn sgemm_program(code: &mut [[u32; 4]], n: u32) -> Option<usize> {
     use aricode_gen7_eu::{g as r, CondMod, Flag, Pred};
     let read = Message::media_block_read(0, 8).ok()?;
     let read_b = Message::media_block_read(1, 8).ok()?;
@@ -1081,15 +1079,8 @@ fn sgemm_program(code: &mut [[u32; 4]], n: u32, rows_first: bool) -> Option<usiz
     // 32 bytes by 8 rows.
     let block = 0x0007_001F;
     let mut asm = Asm::new(code);
-    // g6.0: the tile's column in bytes (16 floats a tile); g6.1: its row.
-    let (column, row) = if rows_first { (6, 1) } else { (1, 6) };
-    asm.shl(E1, r(6).ud(), r(0).ud().sub(column).scalar(), Imm::ud(6))
-        .shl(
-            E1,
-            r(6).ud().sub(1),
-            r(0).ud().sub(row).scalar(),
-            Imm::ud(3),
-        )
+    asm.shl(E1, r(6).ud(), r(0).ud().sub(1).scalar(), Imm::ud(6))
+        .shl(E1, r(6).ud().sub(1), r(0).ud().sub(6).scalar(), Imm::ud(3))
         // Headers: g2 for A (x = k * 4, y = tile row), g3 and g4 for B's
         // halves (x = tile column bytes, + 32; y = k).
         .mov(E8, r(2).ud(), r(0).ud())
@@ -1178,7 +1169,7 @@ fn sgemm(g: &mut Gpu, hardware: Handle) -> Result<(), u64> {
         say(&[b"sgemm setup failed: ", error_name(e)]);
         18u64
     };
-    let state = map(Some(hardware), g.gpu, SGEMM_STATE_AT, 12288).map_err(fail)?;
+    let state = map(Some(hardware), g.gpu, SGEMM_STATE_AT, 8192).map_err(fail)?;
     let a = map(None, g.gpu, SGEMM_A_AT, bytes).map_err(fail)?;
     let b = map(None, g.gpu, SGEMM_B_AT, bytes).map_err(fail)?;
     let c = map(None, g.gpu, SGEMM_C_AT, bytes).map_err(fail)?;
@@ -1191,31 +1182,14 @@ fn sgemm(g: &mut Gpu, hardware: Handle) -> Result<(), u64> {
     }
     // The state: code, binding table (A, B, C), surfaces, descriptor.
     state.fill(0);
-    // Two programs, one for each walker order, at 0 and 4 KiB, with a
-    // descriptor each.
-    for (k, rows_first) in [false, true].into_iter().enumerate() {
-        let mut code = [[0u32; 4]; 256];
-        let Some(len) = sgemm_program(&mut code, size, rows_first) else {
-            say(&[b"the sgemm kernel did not assemble"]);
-            return Err(18);
-        };
-        let kernel = SGEMM_CODE + 0x1000 * k as u32;
-        for (i, inst) in code[..len].iter().enumerate() {
-            let at = (kernel / 4) as usize + 4 * i;
-            state[at..at + 4].copy_from_slice(inst);
-        }
-        let descriptor = Descriptor {
-            kernel,
-            binding_table: SGEMM_TABLE,
-            binding_entries: 3,
-            curbe_regs: 0,
-            slm_blocks: 0,
-            barrier: false,
-        }
-        .encode()
-        .ok_or(18u64)?;
-        let at = (SGEMM_DESCRIPTOR / 4) as usize + 8 * k;
-        state[at..at + 8].copy_from_slice(&descriptor);
+    let mut code = [[0u32; 4]; 256];
+    let Some(len) = sgemm_program(&mut code, size) else {
+        say(&[b"the sgemm kernel did not assemble"]);
+        return Err(18);
+    };
+    for (i, inst) in code[..len].iter().enumerate() {
+        let at = (SGEMM_CODE / 4) as usize + 4 * i;
+        state[at..at + 4].copy_from_slice(inst);
     }
     for (k, at) in [SGEMM_A_AT, SGEMM_B_AT, SGEMM_C_AT].iter().enumerate() {
         let surface = compute::surface_2d(
@@ -1230,28 +1204,35 @@ fn sgemm(g: &mut Gpu, hardware: Handle) -> Result<(), u64> {
         state[(s / 4) as usize..(s / 4) as usize + 8].copy_from_slice(&surface);
         state[(SGEMM_TABLE / 4) as usize + k] = s;
     }
-    let dispatch = |rows_first: bool| Dispatch {
+    let descriptor = Descriptor {
+        kernel: SGEMM_CODE,
+        binding_table: SGEMM_TABLE,
+        binding_entries: 3,
+        curbe_regs: 0,
+        slm_blocks: 0,
+        barrier: false,
+    }
+    .encode()
+    .ok_or(18u64)?;
+    let at = (SGEMM_DESCRIPTOR / 4) as usize;
+    state[at..at + 8].copy_from_slice(&descriptor);
+    let d = Dispatch {
         surface_base: SGEMM_STATE_AT as u32,
         dynamic_base: SGEMM_STATE_AT as u32,
         instruction_base: SGEMM_STATE_AT as u32,
         max_threads: threads,
         descriptor_offset: SGEMM_DESCRIPTOR,
-        descriptors: 2,
-        descriptor: rows_first as u8,
+        descriptors: 1,
         simd: 16,
         group: [1, 1, 1],
-        groups: if rows_first {
-            [size / 8, size / 16, 1]
-        } else {
-            [size / 16, size / 8, 1]
-        },
+        groups: [size / 16, size / 8, 1],
         right_mask: 0xFFFF,
         bottom_mask: 0xFFFF_FFFF,
         ..Dispatch::default()
     };
-    let run = |g: &mut Gpu, rows_first: bool| -> Result<u64, u64> {
+    let run = |g: &mut Gpu| -> Result<u64, u64> {
         let t0 = g.now();
-        let number = sys::gpu_dispatch(g.gpu, &dispatch(rows_first)).map_err(|e| {
+        let number = sys::gpu_dispatch(g.gpu, &d).map_err(|e| {
             say(&[b"the sgemm dispatch was refused: ", error_name(e)]);
             18u64
         })?;
@@ -1295,72 +1276,63 @@ fn sgemm(g: &mut Gpu, hardware: Handle) -> Result<(), u64> {
         b" C",
     ]);
 
-    // The GPU's, in each order, checked to the bit.
-    let mut first = 0;
-    for rows_first in [false, true] {
-        c.fill(0xFFFF_FFFF);
-        first = run(g, rows_first)?;
-        if let Some(i) = (0..c.len()).find(|&i| c[i] != cpu[i]) {
-            say(&[
-                b"SGEMM WRONG at row ",
-                n((i / size as usize) as u64).s(),
-                b" column ",
-                n((i % size as usize) as u64).s(),
-                b": gpu ",
-                hex(c[i] as u64).s(),
-                b", cpu ",
-                hex(cpu[i] as u64).s(),
-            ]);
-            return Err(22);
-        }
+    // The GPU's, checked to the bit.
+    c.fill(0xFFFF_FFFF);
+    let first = run(g)?;
+    if let Some(i) = (0..c.len()).find(|&i| c[i] != cpu[i]) {
+        say(&[
+            b"SGEMM WRONG at row ",
+            n((i / size as usize) as u64).s(),
+            b" column ",
+            n((i % size as usize) as u64).s(),
+            b": gpu ",
+            hex(c[i] as u64).s(),
+            b", cpu ",
+            hex(cpu[i] as u64).s(),
+        ]);
+        return Err(22);
     }
     say(&[
-        b"gpu product equal to the cpu's to the bit in both orders (",
+        b"gpu product equal to the cpu's to the bit (",
         n((size / 16 * size / 8) as u64).s(),
         b" threads of 8x16), first run ",
         n(first / 1000).s(),
         b" ms",
     ]);
 
-    // Each clock and order: the runs, then the heat.
+    // Each clock: the runs, then the heat.
     for mhz in [350u64, 650, 1050] {
         let set = sys::gpu_frequency(g.gpu, mhz).map_err(|e| {
             say(&[b"the clock was not set: ", error_name(e)]);
             17u64
         })?;
-        for rows_first in [false, true] {
-            let mut times = [0u64; SGEMM_RUNS];
-            for t in times.iter_mut() {
-                *t = run(g, rows_first)?;
-            }
-            let (best, median) = spread(&mut times);
-            say(&[
-                b"gpu at ",
-                n(set).s(),
-                if rows_first {
-                    b" MHz, rows first: best ".as_slice()
-                } else {
-                    b" MHz, columns first: best "
-                },
-                n(best / 1000).s(),
-                b".",
-                n(best % 1000 / 100).s(),
-                b" ms (",
-                n(rate(best)).s(),
-                b" MFLOP/s), median ",
-                n(median / 1000).s(),
-                b" ms, ",
-                n(SGEMM_RUNS as u64).s(),
-                b" runs; ",
-                n(temperature(g)).s(),
-                b" C; ",
-                n(rate(best) / rate(cpu_us).max(1)).s(),
-                b".",
-                n(rate(best) * 100 / rate(cpu_us).max(1) % 100 / 10).s(),
-                n(rate(best) * 100 / rate(cpu_us).max(1) % 10).s(),
-                b"x the cpu's speed",
-            ]);
+        let mut times = [0u64; SGEMM_RUNS];
+        for t in times.iter_mut() {
+            *t = run(g)?;
         }
+        let (best, median) = spread(&mut times);
+        say(&[
+            b"gpu at ",
+            n(set).s(),
+            b" MHz: best ",
+            n(best / 1000).s(),
+            b".",
+            n(best % 1000 / 100).s(),
+            b" ms (",
+            n(rate(best)).s(),
+            b" MFLOP/s), median ",
+            n(median / 1000).s(),
+            b" ms, ",
+            n(SGEMM_RUNS as u64).s(),
+            b" runs; ",
+            n(temperature(g)).s(),
+            b" C; ",
+            n(rate(best) / rate(cpu_us).max(1)).s(),
+            b".",
+            n(rate(best) * 100 / rate(cpu_us).max(1) % 100 / 10).s(),
+            n(rate(best) * 100 / rate(cpu_us).max(1) % 10).s(),
+            b"x the cpu's speed",
+        ]);
     }
     let _ = sys::gpu_frequency(g.gpu, 350);
     Ok(())
