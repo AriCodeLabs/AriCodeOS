@@ -188,7 +188,8 @@ outstanding, and stop waiting for a program that does not answer after a timeout
     corner reach (the cursor said `up-down` and the window became 400x320), a
     request for every move ("a storm"), and no screen bounds (440x356 instead of
     440x336).
-  - The scenario takes 14 s, under the 15 s of the `full` level.
+  - The scenario takes 14 to 15 s with 10 scenarios at a time, as the other
+    `full` scenarios of the area do.
   - The compositor's deepest stack path is unchanged (45.5 of 48 KiB).
 - **The log** no longer grows with each step of a drag, which closes what the
   audit of stage 3 of ADR 0078 left open.
