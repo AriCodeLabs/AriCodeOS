@@ -129,3 +129,19 @@ heat. B8 audit.
   of the CURBE (PRM Vol 2 Part 2, 1.3.3), so the number is now an immediate in code
   assembled for each clear. Not cleared, as in Linux: the architecture registers
   (accumulators, flags, address).
+- **B7** (dev builds 62 to 65, 2026-11-09): `run gpu_probe 3` multiplies two 1024 x 1024
+  float matrices on the EUs, each thread an 8 x 16 tile of C (media block reads of A's 8 x 8
+  and B's 8 x 16 a step, 128 `mad(8)`), with eighths as inputs so every sum is exact: the
+  GPU's product equals the CPU's to the bit. The CPU (one core of the i3-3217U, the loop in
+  i-k-j order) took 422 ms, 5.1 GFLOP/s. The GPU, best of 10 runs: 600 ms (3.6 GFLOP/s) at
+  350 MHz, 420 ms (5.1) at 650, 320 to 340 ms (6.3 to 6.7) at 1050, the package at 63, 67
+  and 76 to 78 C after each clock's runs. That is about 2 % of the GT2's peak: this kernel
+  is the correct first one, not a fast one. Two variants measured slower and were dropped:
+  fetching the next step while multiplying (380 ms at 1050 MHz), and the walker's X picking
+  tile rows, so the threads in flight share B's strip (460 ms). The bottleneck is not one
+  thread's latency nor the DRAM traffic modelled; finding it is a study of its own (Intel's
+  and others' SGEMM work on gen7, larger register tiles, L3 use), before the next change.
+- **B8** (2026-11-09): an independent read-only audit of B3 to B6
+  (`docs/audits/2026-11-09-gpu-compute.md`) found no High issue; its two Medium and three
+  Low findings were fixed in `b8c25df` and checked on the laptop (dev build 64). Open: the
+  L3 cache and a freed, reused frame are not measured yet.
