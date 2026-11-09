@@ -104,10 +104,24 @@ impl Ring {
         put(cmd::USER_INTERRUPT);
         put(cmd::NOOP);
         debug_assert_eq!(n, REQUEST_DWORDS);
-        let need = (REQUEST_DWORDS * 4) as u32;
+        self.emit(mem, head, &words)
+    }
+
+    /// Writes `words`, a whole number of quadwords (TAIL moves in them),
+    /// and returns the new tail, or `None` if the ring has no room for them
+    /// yet. Words that would cross the ring's end start again at 0, the rest
+    /// filled with no-ops.
+    pub fn emit(&mut self, mem: &mut [u32], head: u32, words: &[u32]) -> Option<u32> {
+        if !words.len().is_multiple_of(2) {
+            return None;
+        }
+        let need = (words.len() * 4) as u32;
         let to_end = self.bytes - self.tail;
         let wrap = if need > to_end { to_end } else { 0 };
-        if self.space(head) < need + wrap || mem.len() * 4 < self.bytes as usize {
+        if need >= self.bytes
+            || self.space(head) < need + wrap
+            || mem.len() * 4 < self.bytes as usize
+        {
             return None;
         }
         let mut at = (self.tail / 4) as usize;
@@ -115,8 +129,8 @@ impl Ring {
             mem[at..(self.bytes / 4) as usize].fill(cmd::NOOP);
             at = 0;
         }
-        mem[at..at + REQUEST_DWORDS].copy_from_slice(&words);
-        self.tail = ((at + REQUEST_DWORDS) * 4) as u32 % self.bytes;
+        mem[at..at + words.len()].copy_from_slice(words);
+        self.tail = ((at + words.len()) * 4) as u32 % self.bytes;
         Some(self.tail)
     }
 

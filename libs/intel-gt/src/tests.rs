@@ -1032,3 +1032,35 @@ fn the_render_ring_starts_and_resets_on_its_own_registers() {
     // Nothing of the blitter's touched.
     assert!(bank.writes_to(regs::bcs::CTL).is_empty());
 }
+
+#[test]
+fn a_render_request_flushes_loads_its_settings_and_stores_its_number() {
+    use crate::render;
+    let mut out = [0u32; 64];
+    let n = render::request(0x1000_0200, 0x1000_0100, 5, &[], &mut out).unwrap();
+    assert_eq!(n, render::REQUEST_EXTRA);
+    assert_eq!(n % 2, 0, "whole quadwords");
+    assert_eq!(&out[..4], &render::stall());
+    assert_eq!(&out[4..8], &render::flush_invalidate(0x1000_0200));
+    assert_eq!(out[8], 0x22 << 23 | 5, "the context settings");
+    assert_eq!(&out[15..21], &render::breadcrumb(0x1000_0100, 5));
+    // An odd body is padded; too small an output is refused.
+    let n = render::request(0, 0, 1, &[0, 0, 0], &mut out).unwrap();
+    assert_eq!(n % 2, 0);
+    assert_eq!(render::request(0, 0, 1, &[], &mut out[..10]), None);
+}
+
+#[test]
+fn the_ring_emits_whole_quadwords_and_wraps() {
+    use crate::ring::Ring;
+    let mut mem = [0xAAAA_AAAAu32; 1024];
+    let mut ring = Ring::new(1);
+    assert_eq!(ring.emit(&mut mem, 0, &[1, 2, 3]), None, "odd");
+    assert_eq!(ring.emit(&mut mem, 0, &[1, 2]), Some(8));
+    assert_eq!(&mem[..3], &[1, 2, 0xAAAA_AAAA]);
+    assert_eq!(
+        ring.emit(&mut mem, 0, &[0; 1024]),
+        None,
+        "never the whole ring"
+    );
+}

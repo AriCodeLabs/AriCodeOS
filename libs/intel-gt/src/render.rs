@@ -222,3 +222,39 @@ pub const fn breadcrumb(address: u32, seqno: u32) -> [u32; 6] {
         crate::cmd::NOOP,
     ]
 }
+
+/// Dwords of a render request around its body: a stall, a flush and
+/// invalidation, the context settings, the end, and a no-op to keep whole
+/// quadwords.
+pub const REQUEST_EXTRA: usize = 4 + 4 + 7 + 6 + 1;
+
+/// A render request: `body` (commands the kernel wrote) between a full flush
+/// and invalidation, with the context settings loaded, and the store of
+/// `seqno` at `seqno_at` (both addresses in the global GTT, `scratch` a dword
+/// the flush may write). Returns the dwords written to `out`, a whole number
+/// of quadwords, or `None` if `out` is too small.
+pub fn request(
+    scratch: u32,
+    seqno_at: u32,
+    seqno: u32,
+    body: &[u32],
+    out: &mut [u32],
+) -> Option<usize> {
+    fn put(out: &mut [u32], n: &mut usize, words: &[u32]) -> Option<()> {
+        out.get_mut(*n..*n + words.len())?.copy_from_slice(words);
+        *n += words.len();
+        Some(())
+    }
+    let mut n = 0;
+    put(out, &mut n, &stall())?;
+    put(out, &mut n, &flush_invalidate(scratch))?;
+    let mut lri = [0u32; 7];
+    load_masked(&CONTEXT, &mut lri)?;
+    put(out, &mut n, &lri)?;
+    put(out, &mut n, body)?;
+    put(out, &mut n, &breadcrumb(seqno_at, seqno))?;
+    if n % 2 == 1 {
+        put(out, &mut n, &[crate::cmd::NOOP])?;
+    }
+    Some(n)
+}
