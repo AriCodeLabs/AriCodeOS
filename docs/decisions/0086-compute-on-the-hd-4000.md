@@ -112,3 +112,20 @@ heat. B8 audit.
   heartbeat caught it and reset the render domain after 2117 ms (`gpu.hang_ms` 2000);
   then an EU fill and a blitter fill were both right. Every engine's number, loss and
   heartbeat are its own.
+- **B6** (dev builds 60 and 61, 2026-11-09): the residue clear. Linux's runs 128 media
+  objects whose threads wait in a loop so that, it hopes, every slot gets one, and does not
+  check. Ours, `intel-gt`'s `clear`, runs a GPGPU group as large as a half-slice holds on each
+  half-slice (64 threads twice on this GT2); every thread zeroes g1 to g126, writes Linux's
+  512 bytes through the render cache, and marks its slot (half-slice, EU and thread, from
+  `sr0`) with the clear's number, so the kernel counts the slots it reached. It runs when a
+  client that dispatched EU work goes, from pages mapped in the PPGTT only meanwhile; the
+  scratch page is zeroed; a failed clear, or the shared local memory on (checked at boot and
+  at each clear: the firmware leaves it off and nothing a client runs can turn it on), leaves
+  the render engine off. On the laptop: a pattern written into every register by one client
+  was read back by its next threads on 128 of 128 slots (the residue is real here), and
+  still after 5 s idle (the GT sleeping does not clear it); the clear reached 128 of 128
+  slots in 68 us; a second client then saw the pattern on none of 128. Dev 60's clear took
+  its number from the CURBE and marked 2 slots: each thread of a group gets its own section
+  of the CURBE (PRM Vol 2 Part 2, 1.3.3), so the number is now an immediate in code
+  assembled for each clear. Not cleared, as in Linux: the architecture registers
+  (accumulators, flags, address).
