@@ -18,7 +18,9 @@
 //! did not speed the work up; 18 a dispatch could not be set up or did not
 //! finish; 19 a dispatch wrote the wrong bytes; 20 a dispatch the hardware
 //! would not take was not refused; 21 (`run gpu_probe 2`, the second client
-//! of the residue test) a register showed what the last client left.
+//! of the residue test) a register showed what the last client left; 22
+//! (`run gpu_probe 3`, the matrix multiply) the GPU's product differed
+//! from the CPU's.
 #![no_std]
 #![no_main]
 
@@ -260,6 +262,14 @@ fn main(arg: u64) -> u64 {
     // B6), after a whole run left a pattern in the EU registers.
     if arg == 2 {
         return match residue_after_change(&mut g, hardware) {
+            Ok(()) => 0,
+            Err(code) => code,
+        };
+    }
+    // `run gpu_probe 3`: a matrix multiply on the EUs against the CPU, at
+    // each clock, with the heat (ADR 0086, B7).
+    if arg == 3 {
+        return match sgemm(&mut g, hardware) {
             Ok(()) => 0,
             Err(code) => code,
         };
@@ -1037,3 +1047,286 @@ fn residue_after_change(g: &mut Gpu, hardware: Handle) -> Result<(), u64> {
 }
 
 aricode_rt::entry!(main);
+
+/// The matrix multiply of stage B7: `C = A * B`, square float matrices of
+/// `SGEMM_N`, laid out in rows.
+const SGEMM_N: u32 = 1024;
+const SGEMM_STATE_AT: u64 = 0x100_0000;
+const SGEMM_A_AT: u64 = 0x200_0000;
+const SGEMM_B_AT: u64 = 0x300_0000;
+const SGEMM_C_AT: u64 = 0x400_0000;
+/// Runs a clock and how many products at it.
+const SGEMM_RUNS: usize = 10;
+const SGEMM_CODE: u32 = 0x0000;
+const SGEMM_TABLE: u32 = 0x1000;
+const SGEMM_SURFACES: u32 = 0x1040;
+const SGEMM_DESCRIPTOR: u32 = 0x1100;
+
+/// Assembles the EU program: each thread computes an 8 by 16 tile of C at
+/// row 8 * group Y and column 16 * group X. For each step of 8 along k it
+/// reads A's 8 by 8 block and B's 8 by 16 (two media block reads of 32
+/// bytes by 8 rows), then makes 128 `mad(8)`: each of C's rows (two
+/// registers) gains A's element times B's row.
+fn sgemm_program(code: &mut [[u32; 4]], n: u32) -> Option<usize> {
+    use aricode_gen7_eu::{g as r, CondMod, Flag, Pred};
+    let read = Message::media_block_read(0, 8).ok()?;
+    let read_b = Message::media_block_read(1, 8).ok()?;
+    let write = Message::media_block_write(2, 8).ok()?;
+    // 32 bytes by 8 rows.
+    let block = 0x0007_001F;
+    let mut asm = Asm::new(code);
+    asm.shl(E1, r(6).ud(), r(0).ud().sub(1).scalar(), Imm::ud(6))
+        .shl(E1, r(6).ud().sub(1), r(0).ud().sub(6).scalar(), Imm::ud(3))
+        // Headers: g2 for A (x = k * 4, y = tile row), g3 and g4 for B's
+        // halves (x = tile column bytes, + 32; y = k).
+        .mov(E8, r(2).ud(), r(0).ud())
+        .mov(E1, r(2).ud(), Imm::ud(0))
+        .mov(E1, r(2).ud().sub(1), r(6).ud().sub(1).scalar())
+        .mov(E1, r(2).ud().sub(2), Imm::ud(block))
+        .mov(E8, r(3).ud(), r(0).ud())
+        .mov(E1, r(3).ud(), r(6).ud().scalar())
+        .mov(E1, r(3).ud().sub(1), Imm::ud(0))
+        .mov(E1, r(3).ud().sub(2), Imm::ud(block))
+        .mov(E8, r(4).ud(), r(3).ud())
+        .add(E1, r(4).ud(), r(6).ud().scalar(), Imm::ud(32))
+        .mov(E1, r(5).ud(), Imm::ud(0));
+    for c in (16..32).step_by(2) {
+        asm.mov(E16, r(c).ud(), Imm::ud(0));
+    }
+    let top = asm.label();
+    asm.send(E8, r(32).ud(), r(2).ud(), read)
+        .send(E8, r(40).ud(), r(3).ud(), read_b)
+        .send(E8, r(48).ud(), r(4).ud(), read_b);
+    for kk in 0..8u8 {
+        for row in 0..8u8 {
+            let a = r(32 + row).f().sub(kk).scalar();
+            for (c, b) in [(16 + row, 40 + kk), (24 + row, 48 + kk)] {
+                asm.emit(Inst::mad(E8, r(c).f(), r(c).f().vec4(), a, r(b).f().vec4()));
+            }
+        }
+    }
+    asm.add(E1, r(2).ud(), r(2).ud().scalar(), Imm::ud(32))
+        .add(E1, r(3).ud().sub(1), r(3).ud().sub(1).scalar(), Imm::ud(8))
+        .add(E1, r(4).ud().sub(1), r(4).ud().sub(1).scalar(), Imm::ud(8))
+        .add(E1, r(5).ud(), r(5).ud().scalar(), Imm::ud(8))
+        .emit(Inst::cmp(
+            E1,
+            CondMod::L,
+            Flag::F0_0,
+            Reg::null().ud(),
+            r(5).ud().scalar(),
+            Imm::ud(n),
+        ))
+        .jmpi(Some(Pred::new(Flag::F0_0)), top);
+    // C's tile: the left 8 columns from g16, the right 8 copied after a
+    // header of their own.
+    asm.mov(E8, r(15).ud(), r(0).ud())
+        .mov(E1, r(15).ud(), r(6).ud().scalar())
+        .mov(E1, r(15).ud().sub(1), r(6).ud().sub(1).scalar())
+        .mov(E1, r(15).ud().sub(2), Imm::ud(block))
+        .send(E8, Reg::null().ud(), r(15).ud(), write)
+        .mov(E8, r(56).ud(), r(15).ud())
+        .add(E1, r(56).ud(), r(6).ud().scalar(), Imm::ud(32));
+    for row in 0..8u8 {
+        asm.mov(E8, r(57 + row).ud(), r(24 + row).ud());
+    }
+    asm.send(E8, Reg::null().ud(), r(56).ud(), write)
+        .mov(E8, r(127).ud(), r(0).ud())
+        .send(
+            E8,
+            Reg::null().ud(),
+            r(127).ud(),
+            Message::thread_spawner_eot(),
+        );
+    asm.finish().ok().map(|p| p.len())
+}
+
+/// The value at `(i, j)` of matrix `m`: eighths from -1 to 1, so every
+/// product and sum is exact in single precision and the GPU's and the
+/// CPU's results must match to the bit, whatever their order.
+fn sgemm_value(m: u32, i: u32, j: u32) -> f32 {
+    ((i * 7 + j * 3 + m * 5) % 17) as f32 / 8.0 - 1.0
+}
+
+fn temperature(g: &Gpu) -> u64 {
+    let mut t = [0u8; 8];
+    match sys::system_info(g.system, sysinfo::TEMPERATURE, &mut t) {
+        Ok(8) => u32::from_le_bytes([t[0], t[1], t[2], t[3]]) as u64,
+        _ => 0,
+    }
+}
+
+/// Stage B7 (ADR 0086): the product on the EUs, checked against the CPU's
+/// to the bit, then timed at each clock with the heat after.
+fn sgemm(g: &mut Gpu, hardware: Handle) -> Result<(), u64> {
+    let size = SGEMM_N;
+    let bytes = size as u64 * size as u64 * 4;
+    let fail = |e: Error| {
+        say(&[b"sgemm setup failed: ", error_name(e)]);
+        18u64
+    };
+    let state = map(Some(hardware), g.gpu, SGEMM_STATE_AT, 8192).map_err(fail)?;
+    let a = map(None, g.gpu, SGEMM_A_AT, bytes).map_err(fail)?;
+    let b = map(None, g.gpu, SGEMM_B_AT, bytes).map_err(fail)?;
+    let c = map(None, g.gpu, SGEMM_C_AT, bytes).map_err(fail)?;
+    let threads = g.report().threads;
+    for i in 0..size {
+        for j in 0..size {
+            a[(i * size + j) as usize] = sgemm_value(0, i, j).to_bits();
+            b[(i * size + j) as usize] = sgemm_value(1, i, j).to_bits();
+        }
+    }
+    // The state: code, binding table (A, B, C), surfaces, descriptor.
+    state.fill(0);
+    let mut code = [[0u32; 4]; 256];
+    let Some(len) = sgemm_program(&mut code, size) else {
+        say(&[b"the sgemm kernel did not assemble"]);
+        return Err(18);
+    };
+    for (i, inst) in code[..len].iter().enumerate() {
+        let at = (SGEMM_CODE / 4) as usize + 4 * i;
+        state[at..at + 4].copy_from_slice(inst);
+    }
+    for (k, at) in [SGEMM_A_AT, SGEMM_B_AT, SGEMM_C_AT].iter().enumerate() {
+        let surface = compute::surface_2d(
+            compute::FORMAT_R8_UNORM,
+            *at as u32,
+            size * 4,
+            size,
+            size * 4,
+        )
+        .ok_or(18u64)?;
+        let s = SGEMM_SURFACES + 32 * k as u32;
+        state[(s / 4) as usize..(s / 4) as usize + 8].copy_from_slice(&surface);
+        state[(SGEMM_TABLE / 4) as usize + k] = s;
+    }
+    let descriptor = Descriptor {
+        kernel: SGEMM_CODE,
+        binding_table: SGEMM_TABLE,
+        binding_entries: 3,
+        curbe_regs: 0,
+        slm_blocks: 0,
+        barrier: false,
+    }
+    .encode()
+    .ok_or(18u64)?;
+    let at = (SGEMM_DESCRIPTOR / 4) as usize;
+    state[at..at + 8].copy_from_slice(&descriptor);
+    let d = Dispatch {
+        surface_base: SGEMM_STATE_AT as u32,
+        dynamic_base: SGEMM_STATE_AT as u32,
+        instruction_base: SGEMM_STATE_AT as u32,
+        max_threads: threads,
+        descriptor_offset: SGEMM_DESCRIPTOR,
+        descriptors: 1,
+        simd: 16,
+        group: [1, 1, 1],
+        groups: [size / 16, size / 8, 1],
+        right_mask: 0xFFFF,
+        bottom_mask: 0xFFFF_FFFF,
+        ..Dispatch::default()
+    };
+    let run = |g: &mut Gpu| -> Result<u64, u64> {
+        let t0 = g.now();
+        let number = sys::gpu_dispatch(g.gpu, &d).map_err(|e| {
+            say(&[b"the sgemm dispatch was refused: ", error_name(e)]);
+            18u64
+        })?;
+        sys::gpu_wait(g.gpu, number, WAIT_MS).map_err(|e| {
+            say(&[b"the sgemm dispatch failed: ", error_name(e)]);
+            18u64
+        })?;
+        Ok(g.now() - t0)
+    };
+    let flops = 2 * size as u64 * size as u64 * size as u64;
+    // MFLOP/s from microseconds.
+    let rate = |us: u64| flops / us.max(1);
+
+    // The CPU's product, one core, the loop in i-k-j order (rows of B and
+    // C streamed, as a compiler vectorizes it), into a buffer of its own.
+    let cpu = map(None, g.gpu, 0x500_0000, bytes).map_err(fail)?;
+    cpu.fill(0);
+    let t0 = g.now();
+    for i in 0..size as usize {
+        let row = &mut cpu[i * size as usize..(i + 1) * size as usize];
+        for k in 0..size as usize {
+            let aik = f32::from_bits(a[i * size as usize + k]);
+            let brow = &b[k * size as usize..(k + 1) * size as usize];
+            for (cv, bv) in row.iter_mut().zip(brow) {
+                *cv = (f32::from_bits(*cv) + aik * f32::from_bits(*bv)).to_bits();
+            }
+        }
+    }
+    let cpu_us = g.now() - t0;
+    say(&[
+        b"sgemm ",
+        n(size as u64).s(),
+        b"x",
+        n(size as u64).s(),
+        b": cpu ",
+        n(cpu_us / 1000).s(),
+        b" ms (",
+        n(rate(cpu_us)).s(),
+        b" MFLOP/s), ",
+        n(temperature(g)).s(),
+        b" C",
+    ]);
+
+    // The GPU's, checked to the bit.
+    c.fill(0xFFFF_FFFF);
+    let first = run(g)?;
+    if let Some(i) = (0..c.len()).find(|&i| c[i] != cpu[i]) {
+        say(&[
+            b"SGEMM WRONG at row ",
+            n((i / size as usize) as u64).s(),
+            b" column ",
+            n((i % size as usize) as u64).s(),
+            b": gpu ",
+            hex(c[i] as u64).s(),
+            b", cpu ",
+            hex(cpu[i] as u64).s(),
+        ]);
+        return Err(22);
+    }
+    say(&[
+        b"gpu product equal to the cpu's to the bit (",
+        n((size / 16 * size / 8) as u64).s(),
+        b" threads of 8x16), first run ",
+        n(first / 1000).s(),
+        b" ms",
+    ]);
+
+    // Each clock: the runs, then the heat.
+    for mhz in [350u64, 650, 1050] {
+        let set = sys::gpu_frequency(g.gpu, mhz).map_err(|e| {
+            say(&[b"the clock was not set: ", error_name(e)]);
+            17u64
+        })?;
+        let mut times = [0u64; SGEMM_RUNS];
+        for t in times.iter_mut() {
+            *t = run(g)?;
+        }
+        let (best, median) = spread(&mut times);
+        say(&[
+            b"gpu at ",
+            n(set).s(),
+            b" MHz: best ",
+            n(best / 1000).s(),
+            b".",
+            n(best % 1000 / 100).s(),
+            b" ms (",
+            n(rate(best)).s(),
+            b" MFLOP/s), median ",
+            n(median / 1000).s(),
+            b" ms, ",
+            n(SGEMM_RUNS as u64).s(),
+            b" runs; ",
+            n(temperature(g)).s(),
+            b" C; ",
+            n(rate(best) * 100 / rate(cpu_us).max(1) / 100).s(),
+            b"x the cpu",
+        ]);
+    }
+    let _ = sys::gpu_frequency(g.gpu, 350);
+    Ok(())
+}
