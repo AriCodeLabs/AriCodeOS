@@ -101,3 +101,14 @@ heat. B8 audit.
   with wrap-around on both engines, so it reads as done: the probe now waits on one far
   ahead (dev 58). Until B4, a client's EU threads can write the blitter's checked batch
   copies: the branch is not merged.
+- **B4** (dev build 59, 2026-11-09): the check returns the commands before
+  `MI_BATCH_BUFFER_END`, and the kernel writes them into the blitter's ring between its
+  TLB flush and its closing stores; `MI_BATCH_BUFFER_START` is refused (ABI 13), and the
+  copy pages are gone from the PPGTT and from memory. On the laptop the blits address the
+  client's PPGTT from the ring as the PRM says (fill and copy checked pixel by pixel, at
+  the same speeds as from a batch: fill 972 us at 350 MHz, 504 us at 1050), and a jump
+  is refused with the four batches of ADR 0083.
+- **B5** (dev build 59): the hang test is now an EU thread that jumps to itself. The
+  heartbeat caught it and reset the render domain after 2117 ms (`gpu.hang_ms` 2000);
+  then an EU fill and a blitter fill were both right. Every engine's number, loss and
+  heartbeat are its own.
