@@ -435,10 +435,14 @@ pub mod nr {
     /// 0 or not whole pages. `dma_phys` refuses it.
     pub const MEM_CREATE: u64 = 47;
     /// `gpu_frequency(gpu, mhz) -> mhz` (ADR 0083): asks for the GPU's clock;
-    /// the answer is the clock set, within the GPU's limits and
-    /// `gpu.max_mhz`, and the lowest while the machine is hot (`gpu.hot_c`).
-    /// Requires `WRITE`; makes the caller the client, like `gpu_map`. The
-    /// next client starts at the boot's clock.
+    /// the answer is the clock asked of the GPU, within its limits and
+    /// `gpu.max_mhz`, and the lowest while the machine is hot (`gpu.hot_c`);
+    /// the GPU takes it within moments (`sysinfo::GPU` says the one it runs
+    /// at). Without a heat brake (no sensor) the most is the boot's clock
+    /// unless `gpu.max_mhz` is set. Requires `WRITE`; makes the caller the
+    /// client, like `gpu_map`. The next client starts at the boot's clock.
+    /// `Busy` if another process is the client or the GPU could not be told;
+    /// `Hung` once a reset has failed; `NotFound` without a GPU engine.
     pub const GPU_FREQUENCY: u64 = 48;
 }
 

@@ -827,3 +827,24 @@ fn the_heat_brake_holds_until_the_margin_below() {
     assert!(too_hot(true, 80, 85, 5));
     assert!(!too_hot(true, 79, 85, 5), "let go below it");
 }
+
+#[test]
+fn rps_interrupts_are_quieted_whatever_the_firmware_left() {
+    let mut bank = Bank::probed();
+    bank.regs.insert(regs::PMINTRMSK, regs::PM_UP_EI_EXPIRED);
+    bank.regs.insert(regs::PMIER, 0x0300_0076);
+    bank.regs.insert(regs::PMIMR, 0);
+    let clock = Ticks::new();
+    let fw = Forcewake::init(&mut bank, &clock, Timeouts::default()).unwrap();
+    {
+        let mut awake = fw.hold(&mut bank, &clock).unwrap();
+        power::quiet_rps_interrupts(&mut awake);
+    }
+    assert_eq!(
+        bank.get(regs::PMINTRMSK),
+        0xFFFF_FFFB,
+        "bit 2 clear, the rest masked"
+    );
+    assert_eq!(bank.get(regs::PMIER), 0);
+    assert_eq!(bank.get(regs::PMIMR), 0xFFFF_FFFF);
+}

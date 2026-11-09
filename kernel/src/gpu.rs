@@ -67,6 +67,9 @@ const COOL_MARGIN: u32 = 5;
 static HOT_AT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(HOT_C);
 /// The GPU is held at its lowest clock for heat.
 static HOT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// The brake's state last applied to the GPU: the thread retries until it
+/// matches `HOT` (audit M1).
+static BRAKE_APPLIED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 impl gt::Regs for Bar0 {
     fn read(&self, offset: u32) -> u32 {
@@ -234,9 +237,12 @@ pub fn init(
     max_mhz: Option<u32>,
     hot_c: Option<u32>,
 ) {
-    if let Some(c) = hot_c {
-        HOT_AT.store(c.clamp(50, 100), core::sync::atomic::Ordering::Relaxed);
-    }
+    // Below the thermal watch's power-off point, or the brake would never
+    // act first (audit L5).
+    let power_off = crate::arch::x86_64::thermal::off_at();
+    let ceiling = if power_off > 55 { power_off - 5 } else { 100 };
+    let hot = hot_c.unwrap_or(HOT_C).clamp(50, ceiling.min(100));
+    HOT_AT.store(hot, core::sync::atomic::Ordering::Relaxed);
     let Some(d) = crate::pci::intel_display() else {
         return;
     };
@@ -252,19 +258,31 @@ pub fn init(
         let t0 = crate::time::uptime_us();
         match bring_up(&d, mhz, max_mhz, hang_ms * 1000) {
             Ok(e) => {
+                let mut e = e;
+                // Without the thread or a sensor there is no brake: no
+                // clock above the boot's unless gpu.max_mhz says so (M3).
+                let thread = crate::task::scheduler::spawn("gpu", reaper, 0);
+                let sensor = crate::arch::x86_64::thermal::read().is_some();
+                if (thread.is_err() || !sensor) && max_mhz.is_none() {
+                    e.cap = e.boot_step;
+                    warn!(
+                        "gpu: no heat brake (thread: {}, sensor: {sensor}): clock capped at {} MHz",
+                        thread.is_ok(),
+                        e.cap as u32 * power::STEP_MHZ
+                    );
+                }
                 info!(
                     "gpu: blitter ready in {} us; GTT entries 0..{} kept for the screen, \
-                     ring at {:#x}, PPGTT directory at entry {}, {} MHz",
+                     ring at {:#x}, PPGTT directory at entry {}; {} MHz, at most {}, \
+                     the lowest from {hot} C",
                     crate::time::uptime_us() - t0,
                     e.layout.kept,
                     e.layout.ring * FRAME_SIZE as u32,
                     e.layout.directory,
-                    e.limits.lowest as u32 * power::STEP_MHZ,
+                    e.step as u32 * power::STEP_MHZ,
+                    e.cap as u32 * power::STEP_MHZ,
                 );
                 GPU.lock().engine = Some(e);
-                if let Err(why) = crate::task::scheduler::spawn("gpu", reaper, 0) {
-                    warn!("gpu: no thread to let go of ended clients ({why}); the next call will");
-                }
                 Status::Ready
             }
             Err(Refusal::Partial) => Status::Refused(Refusal::Partial),
@@ -354,6 +372,7 @@ fn bring_up(
         let mut awake = fw.hold(&mut regs, &clock)?;
         ring::prepare(&mut awake);
         ring::start(&mut awake, &clock, &timeouts, &layout, &mut ring)?;
+        power::quiet_rps_interrupts(&mut awake);
         power::set_frequency(&mut awake, &found.limits, step);
         Ok(())
     })();
@@ -465,32 +484,39 @@ extern "C" fn reaper(_arg: usize) {
         let hot_at = HOT_AT.load(Ordering::Relaxed);
         let was = HOT.load(Ordering::Relaxed);
         let now = power::too_hot(was, degrees, hot_at, COOL_MARGIN);
-        if now != was {
-            HOT.store(now, Ordering::Relaxed);
+        HOT.store(now, Ordering::Relaxed);
+        // Until the GPU has taken the brake's state, every tick tries again.
+        if now != BRAKE_APPLIED.load(Ordering::Relaxed) {
             if let (Ok((mut e, _)), Some(mut regs)) = (take(), framebuffer::mapped_bar0()) {
-                apply_frequency(&mut e, &mut regs);
-                warn!(
-                    "gpu: {degrees} C: clock {} MHz",
-                    e.step as u32 * power::STEP_MHZ
-                );
+                if apply_frequency(&mut e, &mut regs) {
+                    BRAKE_APPLIED.store(now, Ordering::Relaxed);
+                    warn!(
+                        "gpu: {degrees} C: clock {} MHz",
+                        e.step as u32 * power::STEP_MHZ
+                    );
+                }
             }
         }
     }
 }
 
 /// Sets the clock the client asked for, within the cap, or the lowest
-/// while the machine is hot.
-fn apply_frequency(e: &mut Engine, regs: &mut Bar0) {
+/// while the machine is hot; `false` if the GPU could not be told.
+fn apply_frequency(e: &mut Engine, regs: &mut Bar0) -> bool {
     let want = if HOT.load(core::sync::atomic::Ordering::Relaxed) {
         e.limits.lowest
     } else {
         e.asked.min(e.cap)
     };
     if want == e.step {
-        return;
+        return true;
     }
-    if let Ok(mut awake) = e.fw.hold(regs, &Clock) {
-        e.step = power::set_frequency(&mut awake, &e.limits, want);
+    match e.fw.hold(regs, &Clock) {
+        Ok(mut awake) => {
+            e.step = power::set_frequency(&mut awake, &e.limits, want);
+            true
+        }
+        Err(_) => false,
     }
 }
 
@@ -507,7 +533,9 @@ pub fn frequency(mhz: u64) -> Result<u64, Error> {
     e.asked = e
         .limits
         .clamp((mhz / power::STEP_MHZ as u64).min(255) as u8);
-    apply_frequency(&mut e, &mut regs);
+    if !apply_frequency(&mut e, &mut regs) {
+        return Err(Error::Busy);
+    }
     Ok(e.step as u64 * power::STEP_MHZ as u64)
 }
 
@@ -583,7 +611,7 @@ fn release_client(e: &mut Engine) -> Vec<Mapping> {
     }
     // The next client starts at the boot's clock.
     e.asked = e.boot_step;
-    apply_frequency(e, &mut regs);
+    let _ = apply_frequency(e, &mut regs);
     if e.dead {
         for m in maps {
             let bytes = crate::hw::quarantine(m.dma);

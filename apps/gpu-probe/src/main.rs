@@ -11,7 +11,8 @@
 //! wrong; 13 a batch that must be refused was not, or something it aimed at
 //! changed; 14 a hang was not caught; 15 the engine did not work after its
 //! reset; 16 a call on an absent GPU was not refused as documented; 17 the
-//! GPU's clock could not be asked for.
+//! GPU's clock could not be asked for, was given above what was asked, or
+//! was not reached.
 #![no_std]
 #![no_main]
 
@@ -317,13 +318,47 @@ fn main(_arg: u64) -> u64 {
                 return 17;
             }
         };
+        if set > mhz.max(350) {
+            say(&[b"asked ", n(mhz).s(), b" MHz, given more: ", n(set).s()]);
+            return 17;
+        }
         sys::thread_sleep(50);
         let (mut fill_t, mut copy_t) = ([0u64; RUNS], [0u64; RUNS]);
         for i in 0..RUNS {
-            fill_t[i] = g.run(&fill, WAIT_MS).unwrap_or(0);
-            copy_t[i] = g.run(&copy, WAIT_MS).unwrap_or(0);
+            g.dst.fill(0);
+            fill_t[i] = match g.run(&fill, WAIT_MS) {
+                Ok(us) if g.dst.iter().all(|&p| p == colour) => us,
+                Ok(_) => {
+                    say(&[b"fill wrong at ", n(set).s(), b" MHz"]);
+                    return 11;
+                }
+                Err(e) => {
+                    say(&[b"fill at ", n(set).s(), b" MHz: ", error_name(e)]);
+                    return 11;
+                }
+            };
+            copy_t[i] = match g.run(&copy, WAIT_MS) {
+                Ok(us) if g.dst == g.src => us,
+                Ok(_) => {
+                    say(&[b"copy wrong at ", n(set).s(), b" MHz"]);
+                    return 12;
+                }
+                Err(e) => {
+                    say(&[b"copy at ", n(set).s(), b" MHz: ", error_name(e)]);
+                    return 12;
+                }
+            };
         }
         let running = g.report().mhz as u64;
+        if running != set {
+            say(&[
+                b"asked ",
+                n(set).s(),
+                b" MHz, the GPU runs at ",
+                n(running).s(),
+            ]);
+            return 17;
+        }
         let mut t = [0u8; 8];
         let degrees = match sys::system_info(g.system, sysinfo::TEMPERATURE, &mut t) {
             Ok(8) => u32::from_le_bytes([t[0], t[1], t[2], t[3]]) as u64,

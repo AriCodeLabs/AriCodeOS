@@ -188,6 +188,8 @@ impl Limits {
 /// `rps_set_power`).
 pub fn set_frequency<R: Regs + ?Sized>(awake: &mut Awake<'_, R>, limits: &Limits, step: u8) -> u8 {
     let step = limits.clamp(step);
+    // RPS's own evaluation intervals and thresholds stay the firmware's:
+    // with its interrupts quiet they only decide interrupts nobody takes.
     awake.write(regs::RP_CONTROL, regs::RP_CONTROL_ON);
     awake.write(
         regs::RP_INTERRUPT_LIMITS,
@@ -195,6 +197,17 @@ pub fn set_frequency<R: Regs + ?Sized>(awake: &mut Awake<'_, R>, limits: &Limits
     );
     awake.write(regs::RPNSWREQ, (step as u32) << 25);
     step
+}
+
+/// Keeps every RPS interrupt from reaching the CPU, as Linux does with RPS
+/// interrupts off (`rps_disable_interrupts`): all masked at the source but
+/// the one this family must keep unmasked, which a looping batch would
+/// otherwise hang on, and none enabled or unmasked toward the CPU. Whatever
+/// the firmware left (audit of the GPU's clock, M2).
+pub fn quiet_rps_interrupts<R: Regs + ?Sized>(awake: &mut Awake<'_, R>) {
+    awake.write(regs::PMINTRMSK, !regs::PM_UP_EI_EXPIRED);
+    awake.write(regs::PMIER, 0);
+    awake.write(regs::PMIMR, !0);
 }
 
 /// Whether the GPU is to be held at its lowest clock for heat: from

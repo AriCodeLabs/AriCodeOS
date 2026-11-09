@@ -126,9 +126,9 @@ ring, or any register on the blitter's page, can rewrite the GTT.
    engine if it still works for it, points its pages back at the scratch page and lets
    its buffers go.
 4. **The GPU's frequency is a parameter** (no hardcoding, ADR 0080): the floor, 350 MHz,
-   by default; `gpu.mhz=N` asks for another, within the limits. RPS stays off until a
-   thermal policy exists. A call for a program to set and read it back comes with the
-   thermal watch's GPU side (next step), not before.
+   by default (`gpu.mhz` at boot); a program asks for another with `gpu_frequency`, within
+   the limits and `gpu.max_mhz`; the `gpu` thread holds the lowest while the CPU package is
+   at `gpu.hot_c`. RPS is on as Linux has it, its interrupts quiet. See "The GPU's clock".
 5. **Forcewake is taken and released by the kernel** around its own register writes; the
    firmware's held bits are cleared at start, as Linux does, so RC6 can work.
 6. **The way back:** `gpu=off` in `cmdline.txt` leaves the GT as the firmware left it.
