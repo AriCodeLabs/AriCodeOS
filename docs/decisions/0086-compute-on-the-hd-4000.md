@@ -87,3 +87,17 @@ heat. B8 audit.
   `gpu_probe` then passed whole on the blitter (fill, copy, clocks, every refusal, the
   hang reset): neither the settings nor the render reset disturbed it. `diag` says
   `render ring ready (3 us)`.
+- **B3** (dev builds 57 and 58, 2026-11-09): `gpu_dispatch` (ABI 13) takes a
+  `gpu::Dispatch`; `intel-gt`'s `compute` checks it and writes igt's gen7 GPGPU commands
+  between Linux's gen7 flushes, gateway MMIO, walker indirect and predicate forced off
+  (host tests against igt's `gen7_gpgpu_fillfunc`, each forced bit seen to fail them).
+  The kernel tracks each engine's numbers, losses and heartbeat apart; a render reset
+  applies its settings again. On the laptop, two kernels assembled by `gen7-eu` ran on
+  256 thread groups of one SIMD16 thread: igt's fill, every byte right, in 142 us from
+  call to wait; one writing each group's number, every byte right, in 159 us. Four bad
+  descriptors were refused, the status page's canary and the blitter's watchdog
+  register did not change, and the blitter's probe passed whole before them. Dev 57's
+  probe expected a wait on a number far behind the last to be refused; numbers compare
+  with wrap-around on both engines, so it reads as done: the probe now waits on one far
+  ahead (dev 58). Until B4, a client's EU threads can write the blitter's checked batch
+  copies: the branch is not merged.
