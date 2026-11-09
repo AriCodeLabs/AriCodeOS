@@ -860,6 +860,15 @@ fn gpu() {
             print(b" batches, ");
             num(r.resets);
             print(b" resets");
+            match r.render {
+                1 => {
+                    print(b"; render ring ready (");
+                    num(r.render_us as u64);
+                    print(b" us)");
+                }
+                2 => print(b"; render ring left off"),
+                _ => {}
+            }
             if r.client != 0 {
                 print(b"; client pid ");
                 num(r.client as u64);

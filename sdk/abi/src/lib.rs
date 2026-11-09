@@ -646,6 +646,11 @@ pub mod sysinfo {
         pub status_page: u32,
         /// KiB the client has mapped.
         pub mapped_kib: u32,
+        /// The render engine's ring (ADR 0086): 0 not taken, 1 ready, 2 left
+        /// off after its boot check failed; and the time its boot check's
+        /// empty request took, in microseconds.
+        pub render: u8,
+        pub render_us: u16,
     }
 
     /// No Intel GPU of a supported family.
@@ -663,6 +668,8 @@ pub mod sysinfo {
             let mut b = [0u8; Self::LEN];
             b[0] = self.state;
             b[1] = self.refusal;
+            b[2] = self.render;
+            b[14..16].copy_from_slice(&self.render_us.to_le_bytes());
             b[4..8].copy_from_slice(&self.client.to_le_bytes());
             b[8..10].copy_from_slice(&self.mhz.to_le_bytes());
             b[10..12].copy_from_slice(&self.mhz_lowest.to_le_bytes());
@@ -686,6 +693,8 @@ pub mod sysinfo {
             Some(Self {
                 state: b[0],
                 refusal: b[1],
+                render: b[2],
+                render_us: u16_at(14),
                 client: u32_at(4),
                 mhz: u16_at(8),
                 mhz_lowest: u16_at(10),

@@ -164,6 +164,9 @@ struct Engine {
     render_ring: Ring,
     render_next: u32,
     render_ok: bool,
+    /// What the boot check of the render ring reported (`GpuReport`).
+    render_state: u8,
+    render_us: u16,
 }
 
 enum Status {
@@ -276,12 +279,15 @@ pub fn init(
                     match render_bring_up(&mut e, &mut regs) {
                         Ok((first, again)) => {
                             e.render_ok = true;
+                            e.render_state = 1;
+                            e.render_us = first.min(u16::MAX as u64) as u16;
                             info!(
                                 "gpu: render ring ready: an empty request in {first} us; \
                                  reset and started again, another in {again} us"
                             );
                         }
                         Err(why) => {
+                            e.render_state = 2;
                             if let Ok(mut awake) = e.fw.hold(&mut regs, &Clock) {
                                 awake.write(regs::RENDER.ctl(), 0);
                                 awake.write(regs::RENDER.mi_mode(), masked_on(bcs::MODE_STOP));
@@ -472,6 +478,8 @@ fn bring_up(
         render_ring: Ring::new(RING_PAGES),
         render_next: 1,
         render_ok: false,
+        render_state: 0,
+        render_us: 0,
     }))
 }
 
@@ -1082,6 +1090,8 @@ pub fn report() -> GpuReport {
     };
     let mhz = |step: u8| (step as u32 * power::STEP_MHZ) as u16;
     r.mhz_lowest = mhz(e.limits.lowest);
+    r.render = e.render_state;
+    r.render_us = e.render_us;
     r.mhz_highest = mhz(e.limits.highest);
     r.requests = e.requests;
     r.resets = e.resets;
