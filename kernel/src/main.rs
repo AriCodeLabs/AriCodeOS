@@ -226,6 +226,8 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
         cmdline.get(keys::GPU) == Some("off"),
         cmdline.get(keys::GPU_MHZ).and_then(|v| v.parse().ok()),
         cmdline.get(keys::GPU_HANG_MS).and_then(|v| v.parse().ok()),
+        cmdline.get(keys::GPU_MAX_MHZ).and_then(|v| v.parse().ok()),
+        cmdline.get(keys::GPU_HOT_C).and_then(|v| v.parse().ok()),
     );
     if cmdline.get(keys::PCI_FLR) == Some("off") {
         pci::set_flr_enabled(false);

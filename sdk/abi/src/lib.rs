@@ -12,8 +12,8 @@
 //! the handles [`handle::SELF_PROCESS`], [`handle::MAIN_THREAD`] and
 //! [`handle::CONSOLE`].
 //!
-//! During `0.x` the ABI may change (section 74). Current version: 11
-//! (ADR 0084: the `MEM` object, `mem_create`, and `mmio_map` and `gpu_map`
+//! During `0.x` the ABI may change (section 74). Current version: 12
+//! (ADR 0083: `gpu_frequency`). Version 11 (ADR 0084: the `MEM` object, `mem_create`, and `mmio_map` and `gpu_map`
 //! taking it). Version 10 (ADR 0083: the `GPU` object at `INIT_GPU`, which moves `INIT_PS2` one
 //! on; `gpu_map`, `gpu_unmap`, `gpu_submit`, `gpu_wait`; `Error::Busy` and
 //! `Error::Hung`; `sysinfo::GPU`). Version 9 (ADR 0082: threads in a
@@ -29,7 +29,7 @@
 
 #![no_std]
 
-pub const ABI_VERSION: u32 = 11;
+pub const ABI_VERSION: u32 = 12;
 
 /// Kernel base signature (SHA-512), required to check and verify the origin
 /// and authorship of an AriCodeOS build. It is part of the fixed ABI: it is
@@ -434,6 +434,16 @@ pub mod nr {
     /// quota or what the machine can promise; `Invalid` for a size that is
     /// 0 or not whole pages. `dma_phys` refuses it.
     pub const MEM_CREATE: u64 = 47;
+    /// `gpu_frequency(gpu, mhz) -> mhz` (ADR 0083): asks for the GPU's clock;
+    /// the answer is the clock asked of the GPU, within its limits and
+    /// `gpu.max_mhz`, and the lowest while the machine is hot (`gpu.hot_c`);
+    /// the GPU takes it within moments (`sysinfo::GPU` says the one it runs
+    /// at). Without a heat brake (no sensor) the most is the boot's clock
+    /// unless `gpu.max_mhz` is set. Requires `WRITE`; makes the caller the
+    /// client, like `gpu_map`. The next client starts at the boot's clock.
+    /// `Busy` if another process is the client or the GPU could not be told;
+    /// `Hung` once a reset has failed; `NotFound` without a GPU engine.
+    pub const GPU_FREQUENCY: u64 = 48;
 }
 
 /// `process_spawn_from` request (48 bytes in caller memory).

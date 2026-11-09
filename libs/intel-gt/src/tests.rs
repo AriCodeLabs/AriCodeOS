@@ -252,7 +252,7 @@ fn the_layout_keeps_clear_of_the_firmware_and_aligns_the_directory() {
 }
 
 #[test]
-fn the_frequency_is_asked_with_rps_off_and_within_the_limits() {
+fn the_frequency_is_asked_with_rps_on_and_within_the_limits() {
     let mut bank = Bank::probed();
     let clock = Ticks::new();
     let fw = Forcewake::init(&mut bank, &clock, Timeouts::default()).unwrap();
@@ -264,7 +264,7 @@ fn the_frequency_is_asked_with_rps_off_and_within_the_limits() {
         assert_eq!(power::set_frequency(&mut awake, &limits, 1), 7);
         assert_eq!(power::set_frequency(&mut awake, &limits, 13), 13);
     }
-    assert_eq!(bank.get(regs::RP_CONTROL), 0);
+    assert_eq!(bank.get(regs::RP_CONTROL), 0xD92, "on, as Linux sets it");
     assert_eq!(bank.get(regs::RPNSWREQ), 13 << 25);
     assert_eq!(bank.get(regs::RP_INTERRUPT_LIMITS), 13 << 24 | 7 << 16);
     assert_eq!(13 * power::STEP_MHZ, 650);
@@ -816,4 +816,35 @@ mod batches {
             Err(Fault::Unended(0))
         );
     }
+}
+
+#[test]
+fn the_heat_brake_holds_until_the_margin_below() {
+    use crate::power::too_hot;
+    assert!(!too_hot(false, 84, 85, 5));
+    assert!(too_hot(false, 85, 85, 5), "on at the threshold");
+    assert!(too_hot(true, 81, 85, 5), "held within the margin");
+    assert!(too_hot(true, 80, 85, 5));
+    assert!(!too_hot(true, 79, 85, 5), "let go below it");
+}
+
+#[test]
+fn rps_interrupts_are_quieted_whatever_the_firmware_left() {
+    let mut bank = Bank::probed();
+    bank.regs.insert(regs::PMINTRMSK, regs::PM_UP_EI_EXPIRED);
+    bank.regs.insert(regs::PMIER, 0x0300_0076);
+    bank.regs.insert(regs::PMIMR, 0);
+    let clock = Ticks::new();
+    let fw = Forcewake::init(&mut bank, &clock, Timeouts::default()).unwrap();
+    {
+        let mut awake = fw.hold(&mut bank, &clock).unwrap();
+        power::quiet_rps_interrupts(&mut awake);
+    }
+    assert_eq!(
+        bank.get(regs::PMINTRMSK),
+        0xFFFF_FFFB,
+        "bit 2 clear, the rest masked, as Linux"
+    );
+    assert_eq!(bank.get(regs::PMIER), 0);
+    assert_eq!(bank.get(regs::PMIMR), 0xFFFF_FFFF);
 }

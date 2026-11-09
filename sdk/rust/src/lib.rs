@@ -434,6 +434,12 @@ pub fn gpu_submit(gpu: Handle, batch: &[u32]) -> Result<u64, Error> {
     )
 }
 
+/// Asks for the GPU's clock in MHz; the clock set (see
+/// `abi::nr::GPU_FREQUENCY`).
+pub fn gpu_frequency(gpu: Handle, mhz: u64) -> Result<u64, Error> {
+    call(nr::GPU_FREQUENCY, gpu.0 as u64, mhz, 0, 0)
+}
+
 /// Waits for batch `number`: `Timeout`, or `Hung` if the engine was reset.
 pub fn gpu_wait(gpu: Handle, number: u64, timeout_ms: u64) -> Result<(), Error> {
     call(nr::GPU_WAIT, gpu.0 as u64, number, timeout_ms, 0).map(|_| ())

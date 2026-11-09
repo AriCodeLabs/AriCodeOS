@@ -115,6 +115,13 @@ pub mod keys {
     /// `gpu.hang_ms=N`: how long a batch may run without the engine moving
     /// before it is reset; 2000 by default (ADR 0083).
     pub const GPU_HANG_MS: &str = "gpu.hang_ms";
+    /// `gpu.max_mhz=N`: the most a program may ask the GPU's clock to be;
+    /// by default its highest (ADR 0083).
+    pub const GPU_MAX_MHZ: &str = "gpu.max_mhz";
+    /// `gpu.hot_c=N`: the CPU package temperature, 50 to 100, at which the
+    /// GPU drops to its lowest clock until 5 degrees below; 85 by default
+    /// (ADR 0083).
+    pub const GPU_HOT_C: &str = "gpu.hot_c";
     /// `mem.app_max_pct=N`: the share of the machine's usable memory, 1 to
     /// 100, one application may hold at most, whatever its manifest asks; 50
     /// by default (ADR 0084, the owner's choice).

@@ -50,6 +50,12 @@ static OFF_AT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::ne
 /// it can a reading from outside. `off_at` is the degrees that power it off, from
 /// the command line; `None` for the default; 0 turns that off, leaving the CPU's own
 /// throttling and the events. Without a sensor there is nothing to watch.
+/// The temperature at which the watch powers the machine off, 0 for never
+/// or before `start_watch`.
+pub fn off_at() -> u32 {
+    OFF_AT.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn start_watch(off_at: Option<u32>) {
     let Some((_, limit)) = read() else {
         return;

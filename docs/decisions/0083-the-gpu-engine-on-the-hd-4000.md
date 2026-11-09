@@ -126,9 +126,9 @@ ring, or any register on the blitter's page, can rewrite the GTT.
    engine if it still works for it, points its pages back at the scratch page and lets
    its buffers go.
 4. **The GPU's frequency is a parameter** (no hardcoding, ADR 0080): the floor, 350 MHz,
-   by default; `gpu.mhz=N` asks for another, within the limits. RPS stays off until a
-   thermal policy exists. A call for a program to set and read it back comes with the
-   thermal watch's GPU side (next step), not before.
+   by default (`gpu.mhz` at boot); a program asks for another with `gpu_frequency`, within
+   the limits and `gpu.max_mhz`; the `gpu` thread holds the lowest while the CPU package is
+   at `gpu.hot_c`. RPS is on as Linux has it, its interrupts quiet. See "The GPU's clock".
 5. **Forcewake is taken and released by the kernel** around its own register writes; the
    firmware's held bits are cleared at start, as Linux does, so RC6 can work.
 6. **The way back:** `gpu=off` in `cmdline.txt` leaves the GT as the firmware left it.
@@ -263,4 +263,49 @@ GPU at its lowest clock, 350 MHz; each GPU time includes the submit and the wait
   time, and narrowing it to signed packages is the owner's call.
 - Dev build 43 on the laptop after the fixes: the same figures, every refusal, the hang
   reset after 2,011 ms; the client released by the `gpu` thread when it ended.
+
+## The GPU's clock (2026-11-09)
+
+`gpu_frequency(gpu, mhz)` (ABI 12) asks for the clock, granted within the GPU's limits and
+`gpu.max_mhz`; the `gpu` thread drops it to the lowest while the CPU package, which carries
+the GPU too, is at `gpu.hot_c` (85 C by default) until 5 degrees below; the next client
+starts at the boot's clock.
+
+**Measured first, wrong:** asking with RPS off (`RP_CONTROL` 0), as the study inferred was
+safe, left the GPU at 350 MHz whatever was asked (dev build 46). Linux asks with RPS on in
+hardware normal mode (`rps_set_power`) and writes 0 only to turn RPS off for good; with its
+interrupts masked here, only a request moves the clock. With that (dev build 47), each run
+`gpu_probe`'s 3 MiB surfaces, eight runs, best time:
+
+| Clock | Fill | Copy | CPU package after |
+|---|---|---|---|
+| 350 MHz | 712 us, 4.4 GB/s | 1,344 us, 2.3 GB/s | 57 C |
+| 650 MHz | 385 us, 8.2 GB/s | 780 us, 4.0 GB/s | 57 C |
+| 1050 MHz | 241 us, 13.1 GB/s | 598 us, 5.3 GB/s | 58 C |
+| The CPU | 273 us, 11.5 GB/s | 575 us, 5.5 GB/s | |
+
+At its highest clock the blitter fills faster than the CPU and copies as fast, while the
+CPU is free; copies are bound by memory, which both share. These bursts are too short to
+heat the laptop; the heat brake's decision is host-tested, and it has not yet been seen to
+act on the laptop.
+
+**What the GPU says its clock is, is a sample** (`RPSTAT1`): low as soon as it idles, and
+slow to rise when work starts. A test that compared one reading with the clock asked for
+failed although the clock was taken (dev builds 48 to 52, diagnosed by reading the request,
+the status and the performance status registers around the work); `gpu_probe` now checks
+that the work speeds up, and prints the sample only as a figure. RPS's interrupts are quiet
+from boot as Linux keeps them with RPS interrupts off: `PMINTRMSK` all masked but bit 2,
+`PMIER` 0, `PMIMR` all masked, whatever the firmware left (audit of this section, M2); the
+clock is taken with them so (dev build 53).
+
+With `gpu_probe` checking every pixel between runs, the CPU's reads leave the surface in its
+caches and the GPU's writes must take it back, so the same work is slower than above:
+
+| Clock | Fill | Copy |
+|---|---|---|
+| 350 MHz | 966 us | 1,618 us |
+| 650 MHz | 589 us | 974 us |
+| 1050 MHz | 496 us | 814 us |
+
+The table above, without those reads between runs, is the GPU's own speed.
 

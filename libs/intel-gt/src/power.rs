@@ -182,18 +182,44 @@ impl Limits {
     }
 }
 
-/// Asks for `step` (clamped to `limits`) with RPS off, and caps RPS there
-/// should it ever be turned on. Returns the step asked for. The hardware
-/// decides when it takes it: read [`frequency`] (Linux `gen6_rps_set`).
+/// Asks for `step` (clamped to `limits`), with RPS on as Linux has it and
+/// its limits at the step. Returns the step asked for. The hardware decides
+/// when it takes it: read [`frequency`] (Linux `gen6_rps_set`,
+/// `rps_set_power`).
 pub fn set_frequency<R: Regs + ?Sized>(awake: &mut Awake<'_, R>, limits: &Limits, step: u8) -> u8 {
     let step = limits.clamp(step);
-    awake.write(regs::RP_CONTROL, 0);
+    // RPS's own evaluation intervals and thresholds stay the firmware's:
+    // with its interrupts quiet they only decide interrupts nobody takes.
+    awake.write(regs::RP_CONTROL, regs::RP_CONTROL_ON);
     awake.write(
         regs::RP_INTERRUPT_LIMITS,
         (step as u32) << 24 | (limits.lowest as u32) << 16,
     );
     awake.write(regs::RPNSWREQ, (step as u32) << 25);
     step
+}
+
+/// Keeps every RPS interrupt from reaching the CPU, as Linux does with RPS
+/// interrupts off (`rps_disable_interrupts`), whatever the firmware left
+/// (audit of the GPU's clock, M2): at the GT, all masked but the up-EI bit
+/// this family must keep unmasked or a looping batch can hang it; none
+/// enabled or unmasked toward the CPU. Requested clocks still take: measured
+/// on the laptop (ADR 0083).
+pub fn quiet_rps_interrupts<R: Regs + ?Sized>(awake: &mut Awake<'_, R>) {
+    awake.write(regs::PMINTRMSK, !regs::PM_UP_EI_EXPIRED);
+    awake.write(regs::PMIER, 0);
+    awake.write(regs::PMIMR, !0);
+}
+
+/// Whether the GPU is to be held at its lowest clock for heat: from
+/// `hot_at` degrees of the CPU package, which carries the GPU too, until
+/// `margin` degrees below it, so the clock does not flap at the threshold.
+pub fn too_hot(was: bool, degrees: u32, hot_at: u32, margin: u32) -> bool {
+    if was {
+        degrees + margin >= hot_at
+    } else {
+        degrees >= hot_at
+    }
 }
 
 /// The step the GPU runs at now.

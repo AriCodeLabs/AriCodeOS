@@ -50,18 +50,29 @@ pub const GFX_FLSH_CNTL: u32 = 0x10_1008;
 
 /// Requested frequency, bits 31:25 (Linux `GEN6_RPNSWREQ`, `gen6_rps_set`).
 pub const RPNSWREQ: u32 = 0xA008;
-/// Bits 31:24 the highest and 23:16 the lowest frequency RPS may ask for
-/// (Linux `GEN6_RP_INTERRUPT_LIMITS`).
+/// Bits 31:24 and 23:16: the clocks above and below which RPS raises no up
+/// or down interrupt (Linux `GEN6_RP_INTERRUPT_LIMITS`). Not a limit on the
+/// clock itself, which only a request moves on this family.
 pub const RP_INTERRUPT_LIMITS: u32 = 0xA014;
 /// The frequency in use, bits 14:8 (Linux `GEN6_RPSTAT1`, `GEN6_CAGF`).
 pub const RPSTAT1: u32 = 0xA01C;
-/// RPS control; 0 is off (Linux `GEN6_RP_CONTROL`).
+/// RPS control (Linux `GEN6_RP_CONTROL`).
 pub const RP_CONTROL: u32 = 0xA024;
+/// RPS on as Linux sets it on this family (`rps_set_power`): media turbo,
+/// hardware normal mode, media counted as graphics, enabled, busy and idle
+/// averaged. With it off (0) the GPU ignores `RPNSWREQ`: the laptop stayed at
+/// 350 MHz whatever was asked (ADR 0083). Its up and down interrupts stay
+/// masked, so only a request changes the clock.
+pub const RP_CONTROL_ON: u32 = 1 << 11 | 2 << 9 | 1 << 8 | 1 << 7 | 0x2 | 0x10;
 /// RC6 control (Linux `GEN6_RC_CONTROL`).
 pub const RC_CONTROL: u32 = 0xA090;
 /// Bit 2 must stay clear on this family: masked, a looping batch can hang
 /// the GPU (Linux `intel_rps_init`, `GEN6_PMINTRMSK`).
 pub const PMINTRMSK: u32 = 0xA168;
+pub const PM_UP_EI_EXPIRED: u32 = 1 << 2;
+/// The GT's power-management interrupts (Linux `GEN6_PMIMR`, `GEN6_PMIER`).
+pub const PMIMR: u32 = 0x4_4024;
+pub const PMIER: u32 = 0x4_402C;
 /// Engine resets: bit 0 all, 3 the blitter; each clears itself when done
 /// (PRM Vol 1 Part 6, 1.4.8).
 pub const GDRST: u32 = 0x941C;

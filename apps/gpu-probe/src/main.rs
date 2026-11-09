@@ -10,7 +10,9 @@
 //! refused cleanly; 10 setup failed; 11 a fill was wrong; 12 a copy was
 //! wrong; 13 a batch that must be refused was not, or something it aimed at
 //! changed; 14 a hang was not caught; 15 the engine did not work after its
-//! reset; 16 a call on an absent GPU was not refused as documented.
+//! reset; 16 a call on an absent GPU was not refused as documented; 17 the
+//! GPU's clock could not be asked for, was given above what was asked, or
+//! did not speed the work up.
 #![no_std]
 #![no_main]
 
@@ -214,6 +216,7 @@ fn main(_arg: u64) -> u64 {
         let end = [cmd::BATCH_END, cmd::NOOP];
         let refused = sys::gpu_submit(gpu, &end) == Err(Error::NotFound)
             && sys::gpu_wait(gpu, 1, 0) == Err(Error::NotFound)
+            && sys::gpu_frequency(gpu, 650) == Err(Error::NotFound)
             && sys::gpu_unmap(gpu, SRC_AT) == Err(Error::NotFound);
         let mapped = sys::dma_alloc(hardware, 4096).map(|d| sys::gpu_map(gpu, d, SRC_AT));
         if !refused || mapped != Ok(Err(Error::NotFound)) {
@@ -304,6 +307,90 @@ fn main(_arg: u64) -> u64 {
         cpu_t[i] = g.now() - t0;
     }
     line(b"copy 3 MiB", spread(&mut gpu_t), spread(&mut cpu_t));
+
+    // 2b. The same fill and copy at each clock asked for, with the CPU
+    // package's temperature after: what each costs in heat (ADR 0083). The
+    // CPU only reads between runs (each fill has a colour of its own), so its
+    // dirty cache lines do not slow the GPU. The clock the GPU reports is a
+    // sample of the moment, low while it idles: the test is that work goes
+    // faster, not one reading.
+    let mut fill_at = [0u64; 3];
+    for (k, mhz) in [350u64, 650, 1050].into_iter().enumerate() {
+        let set = match sys::gpu_frequency(g.gpu, mhz) {
+            Ok(m) => m,
+            Err(e) => {
+                say(&[b"frequency: ", error_name(e)]);
+                return 17;
+            }
+        };
+        if set > mhz.max(350) {
+            say(&[b"asked ", n(mhz).s(), b" MHz, given more: ", n(set).s()]);
+            return 17;
+        }
+        sys::thread_sleep(50);
+        let (mut fill_t, mut copy_t) = ([0u64; RUNS], [0u64; RUNS]);
+        for i in 0..RUNS {
+            let shade = 0x0010_2030 + (k * RUNS + i) as u32;
+            let each = cmd::fill(&surface(DST_AT), &WHOLE, shade).expect("a valid fill");
+            fill_t[i] = match g.run(&each, WAIT_MS) {
+                Ok(us) if g.dst.iter().all(|&p| p == shade) => us,
+                Ok(_) => {
+                    say(&[b"fill wrong at ", n(set).s(), b" MHz"]);
+                    return 11;
+                }
+                Err(e) => {
+                    say(&[b"fill at ", n(set).s(), b" MHz: ", error_name(e)]);
+                    return 11;
+                }
+            };
+            copy_t[i] = match g.run(&copy, WAIT_MS) {
+                Ok(us) if g.dst == g.src => us,
+                Ok(_) => {
+                    say(&[b"copy wrong at ", n(set).s(), b" MHz"]);
+                    return 12;
+                }
+                Err(e) => {
+                    say(&[b"copy at ", n(set).s(), b" MHz: ", error_name(e)]);
+                    return 12;
+                }
+            };
+        }
+        let sampled = g.report().mhz as u64;
+        let mut t = [0u8; 8];
+        let degrees = match sys::system_info(g.system, sysinfo::TEMPERATURE, &mut t) {
+            Ok(8) => u32::from_le_bytes([t[0], t[1], t[2], t[3]]) as u64,
+            _ => 0,
+        };
+        let (fill_best, _) = spread(&mut fill_t);
+        let (copy_best, _) = spread(&mut copy_t);
+        fill_at[k] = fill_best;
+        say(&[
+            b"asked ",
+            n(mhz).s(),
+            b" MHz, set ",
+            n(set).s(),
+            b" (sampled ",
+            n(sampled).s(),
+            b"): fill ",
+            n(fill_best).s(),
+            b" us (",
+            n(rate(fill_best)).s(),
+            b" MB/s), copy ",
+            n(copy_best).s(),
+            b" us (",
+            n(rate(copy_best)).s(),
+            b" MB/s), ",
+            n(degrees).s(),
+            b" C",
+        ]);
+    }
+    // The highest clock must do the fill in at most three quarters of the
+    // lowest's time (a third of it is what the clocks' ratio allows).
+    if fill_at[2] * 4 > fill_at[0] * 3 {
+        say(&[b"the clock did not speed the work up"]);
+        return 17;
+    }
+    let _ = sys::gpu_frequency(g.gpu, 350);
 
     // 3. What reached the blitter's registers and the status page on the
     // laptop (ADR 0083), each in a batch of its own, and a blit past the
