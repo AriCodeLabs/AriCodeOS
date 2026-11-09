@@ -197,6 +197,17 @@ pub fn set_frequency<R: Regs + ?Sized>(awake: &mut Awake<'_, R>, limits: &Limits
     step
 }
 
+/// Whether the GPU is to be held at its lowest clock for heat: from
+/// `hot_at` degrees of the CPU package, which carries the GPU too, until
+/// `margin` degrees below it, so the clock does not flap at the threshold.
+pub fn too_hot(was: bool, degrees: u32, hot_at: u32, margin: u32) -> bool {
+    if was {
+        degrees + margin >= hot_at
+    } else {
+        degrees >= hot_at
+    }
+}
+
 /// The step the GPU runs at now.
 pub fn frequency<R: Regs + ?Sized>(awake: &Awake<'_, R>) -> u8 {
     ((awake.read(regs::RPSTAT1) >> 8) & 0x7F) as u8

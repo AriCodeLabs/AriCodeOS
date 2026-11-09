@@ -464,11 +464,7 @@ extern "C" fn reaper(_arg: usize) {
         };
         let hot_at = HOT_AT.load(Ordering::Relaxed);
         let was = HOT.load(Ordering::Relaxed);
-        let now = if was {
-            degrees + COOL_MARGIN >= hot_at
-        } else {
-            degrees >= hot_at
-        };
+        let now = power::too_hot(was, degrees, hot_at, COOL_MARGIN);
         if now != was {
             HOT.store(now, Ordering::Relaxed);
             if let (Ok((mut e, _)), Some(mut regs)) = (take(), framebuffer::mapped_bar0()) {

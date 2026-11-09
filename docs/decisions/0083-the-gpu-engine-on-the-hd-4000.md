@@ -264,3 +264,28 @@ GPU at its lowest clock, 350 MHz; each GPU time includes the submit and the wait
 - Dev build 43 on the laptop after the fixes: the same figures, every refusal, the hang
   reset after 2,011 ms; the client released by the `gpu` thread when it ended.
 
+## The GPU's clock (2026-11-09)
+
+`gpu_frequency(gpu, mhz)` (ABI 12) asks for the clock, granted within the GPU's limits and
+`gpu.max_mhz`; the `gpu` thread drops it to the lowest while the CPU package, which carries
+the GPU too, is at `gpu.hot_c` (85 C by default) until 5 degrees below; the next client
+starts at the boot's clock.
+
+**Measured first, wrong:** asking with RPS off (`RP_CONTROL` 0), as the study inferred was
+safe, left the GPU at 350 MHz whatever was asked (dev build 46). Linux asks with RPS on in
+hardware normal mode (`rps_set_power`) and writes 0 only to turn RPS off for good; with its
+interrupts masked here, only a request moves the clock. With that (dev build 47), each run
+`gpu_probe`'s 3 MiB surfaces, eight runs, best time:
+
+| Clock | Fill | Copy | CPU package after |
+|---|---|---|---|
+| 350 MHz | 712 us, 4.4 GB/s | 1,344 us, 2.3 GB/s | 57 C |
+| 650 MHz | 385 us, 8.2 GB/s | 780 us, 4.0 GB/s | 57 C |
+| 1050 MHz | 241 us, 13.1 GB/s | 598 us, 5.3 GB/s | 58 C |
+| The CPU | 273 us, 11.5 GB/s | 575 us, 5.5 GB/s | |
+
+At its highest clock the blitter fills faster than the CPU and copies as fast, while the
+CPU is free; copies are bound by memory, which both share. These bursts are too short to
+heat the laptop; the heat brake's decision is host-tested, and it has not yet been seen to
+act on the laptop.
+

@@ -817,3 +817,13 @@ mod batches {
         );
     }
 }
+
+#[test]
+fn the_heat_brake_holds_until_the_margin_below() {
+    use crate::power::too_hot;
+    assert!(!too_hot(false, 84, 85, 5));
+    assert!(too_hot(false, 85, 85, 5), "on at the threshold");
+    assert!(too_hot(true, 81, 85, 5), "held within the margin");
+    assert!(too_hot(true, 80, 85, 5));
+    assert!(!too_hot(true, 79, 85, 5), "let go below it");
+}
