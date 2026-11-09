@@ -71,3 +71,19 @@ group's id. B4 blits written by the kernel, copies out of the PPGTT; EU writes o
 client's mappings land on the scratch page. B5 an endless EU loop caught and reset. B6 the
 residue clear, checked by a second client. B7 SGEMM against the CPU at each clock, with the
 heat. B8 audit.
+
+## Progress
+
+- **B0** (dev build 55, read only): the render ring off and idle, the PPGTT off, the
+  firmware's L3 and render settings not Linux's (raw dump on the build host,
+  `~/aricode-scratch/gpu-reference/stage-b/`).
+- **B1** (host): `intel-gt`'s rings work on either engine; Linux's settings are tables
+  named after its workarounds, applied through MMIO or loaded from the ring; the render
+  engine's `PIPE_CONTROL`s and request are encoded as Linux emits them. 34 host tests,
+  each change of behaviour seen to fail them.
+- **B2** (dev build 56, 2026-11-09): with Linux's settings applied at boot, the render
+  ring started; an empty request finished in 3 us; the render domain was reset, its
+  settings applied again and its ring started again; a second empty request finished.
+  `gpu_probe` then passed whole on the blitter (fill, copy, clocks, every refusal, the
+  hang reset): neither the settings nor the render reset disturbed it. `diag` says
+  `render ring ready (3 us)`.
