@@ -96,8 +96,10 @@ outstanding, and stop waiting for a program that does not answer after a timeout
    - each corner reaches 16 px along both of its sides (the radius and 6 px more),
      and never more than half a side, so a small window keeps four corners;
    - the notch a rounded corner leaves inside the frame's rectangle grabs that
-     corner;
-   - only windows whose program asked for `wants::RESIZE` have grips.
+     corner. On a window that cannot be resized, a click there goes to what shows
+     there, under the window;
+   - only windows whose program asked for `wants::RESIZE` have grips;
+   - the band and the reach count for 256 px at most, whatever the value says.
 2. **The cursor says what a press does.** Over a grip, and through the whole drag,
    the pointer is a double arrow: left-right, up-down, or one of the two diagonals
    (`aricode_gfx::Cursor`). The compositor draws them, white outlined in black like
@@ -109,7 +111,8 @@ outstanding, and stop waiting for a program that does not answer after a timeout
    - The content is never smaller than 160x80: room for a line and a button, and
      for the title bar's circles.
    - A dragged side stops at the screen's edge, and the title bar at the bar's.
-   - The frame is never larger than the screen under the bar.
+   - The frame never grows larger than the screen under the bar. A window that is
+     already larger only shrinks: grabbing its side does not make it jump.
 4. **The exchange (`aricode_gfx::Placing`).**
    - The compositor sends `Configure`, the program paints a buffer of that size
      and answers with `Resize`. The window takes the new size, and the place asked
@@ -117,8 +120,9 @@ outstanding, and stop waiting for a program that does not answer after a timeout
    - Meanwhile, the window shows its old content at its old size and place: never
      cut, stretched, black or half painted.
    - One request at a time. While one is waiting, the latest place the owner wants
-     waits behind it, and goes when the answer comes. A drag asks for no more sizes
-     than the program can paint.
+     waits behind it, and goes when the answer comes. Any `Resize` counts as that
+     answer, even of another size, as from a program that rounds sizes to its text
+     cells. A drag asks for no more sizes than the program can paint.
    - **A program that does not answer** is asked again after 250 ms
      (`PATIENCE_MS`), for the latest place only, and then left alone until the
      owner wants another. It blocks nothing: the compositor never waits for it, and
@@ -128,20 +132,25 @@ outstanding, and stop waiting for a program that does not answer after a timeout
      takes the window to the place asked with that size, the way a Wayland serial
      does. So the right side stays still while the left one is dragged. An answer
      to a size not asked, such as one the program chose, leaves the window where
-     it is.
+     it is. When the title bar moves the window, the places asked move with it, so
+     a late answer does not take it back.
    - Going back to the size shown while another is asked moves the window at once,
-     forgets the older requests, and asks the program for this size again.
+     forgets the older requests, and asks the program for this size again once it
+     answers. An answer of the size the owner wants now, before it is asked, also
+     forgets the older requests: they cannot take the window back.
 5. **Programs that do not resize keep working.** Without `wants::RESIZE` a window
    has no grips, gets no `Configure`, and zoom and snapping leave it as it is. The
    protocol is unchanged, so the 0.18 apps run as they did.
 6. **Limits.**
-   - Every size asked lies within the screen and `MAX_SIDE`.
+   - Every size asked lies within the screen under the bar and `MAX_SIDE`, also when
+     zoom or a snap restores an earlier place.
    - The program allocates each buffer from its own DMA quota, so the compositor
      allocates nothing for a resize.
    - `Resize` keeps the checks of `Create`: a refused size leaves the window as it
      was.
    - The log says "window N is now WxH" where an edge drag ends, not at each step.
-     Sizes a program chooses for itself are said at most once a second.
+     Sizes a program chooses for itself are said at most once a second for each
+     window, so one program cannot hide another's.
 7. **The apps.**
    - The editor, files, settings, launcher and terminal already ask for resizing
      and repaint at each size (stage 2 of ADR 0078). They gain the grips and
@@ -161,7 +170,7 @@ outstanding, and stop waiting for a program that does not answer after a timeout
     - the cursor of each grab, and the cursor shapes;
     - the exchange: one request at a time, the latest after the answer, a left
       edge that never jumps, a program that never answers, a late answer, going
-      back, and a size the program chose.
+      back, a size the program chose or rounded, and a title-bar move meanwhile.
   - The randomized test of damage against full composition now also changes the
     cursor's picture.
   - A new scenario, `gui.window_resize`, checks in QEMU that:
@@ -172,6 +181,15 @@ outstanding, and stop waiting for a program that does not answer after a timeout
     - the other window resizes after that;
     - a top edge dragged into the bar stops under it.
   - The runner gains `drag_steps`: a drag made of many moves, as a hand makes it.
+- **Measured** in `gui.window_resize` (QEMU, 1280x800):
+  - a stroke of 40 moves on a window that never answers asked it 3 times;
+  - with a request for every move (a build broken on purpose) it asked 41 times.
+  - Each of the scenario's three checks failed on a build broken on purpose: no
+    corner reach (the cursor said `up-down` and the window became 400x320), a
+    request for every move ("a storm"), and no screen bounds (440x356 instead of
+    440x336).
+  - The scenario takes 14 s, under the 15 s of the `full` level.
+  - The compositor's deepest stack path is unchanged (45.5 of 48 KiB).
 - **The log** no longer grows with each step of a drag, which closes what the
   audit of stage 3 of ADR 0078 left open.
 - **Not done.**
@@ -181,3 +199,36 @@ outstanding, and stop waiting for a program that does not answer after a timeout
   - No outline for a program that does not answer: the cursor shows the drag, and
     the window stays as it is.
   - No resizing from the keyboard.
+- **Seen, not changed here:** a change of focus repaints the whole screen. The bar,
+  the dock and the window merge into one damage rectangle (1,024,000 px at
+  1280x800 in the scenario's trace). It is correct, but it costs a full flip.
+
+## Audit
+
+An independent read-only review found no high findings: no client can make the
+compositor allocate, loop or panic through this path, and none can reach another
+window's requests. It found three medium findings and seven low ones, all fixed:
+
+- **M1.** An answer of the size the owner had gone back to left older requests
+  kept, and a later answer to one of them took the window to a size already left.
+  Such an answer now forgets them.
+- **M2.** A title-bar move was undone by a late answer, which took the window back
+  to the place asked before. The places asked now move with the window.
+- **M3.** Grabbing a side of a window larger than the screen made it jump to the
+  screen's size at once. It now only shrinks.
+- **L1.** An answer of another size than asked did not free the program for the
+  next request, so such a program was asked at most 4 times a second, and a drag's
+  end was never logged. Any answer frees it now.
+- **L2.** One program resizing in a loop hid the size lines of every other. The
+  limit is now per window.
+- **L3.** Zoom and snap could restore a place larger than the screen. Every size
+  asked is now within it.
+- **L4.** A drag outlived its window, and the resize cursor stayed until the button
+  came up. It ends with the window.
+- **L5.** The notch of a window that cannot be resized still took clicks for it. A
+  click there now goes to what shows there.
+- **L6.** A band or reach of any size could overflow the frame's sums. They count
+  for 256 px at most, and are unsigned.
+- **L7.** A comment said queued requests always merge, and Demo F ended with 0 even
+  after a storm. The comment now says when they merge, and a storm ends Demo F
+  with 7.

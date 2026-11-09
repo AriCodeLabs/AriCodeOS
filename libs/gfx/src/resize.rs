@@ -13,21 +13,24 @@ pub struct Grips {
     /// The band outside the frame that grabs its side. The frame has no border to
     /// grab, so the band lies over the shadow, as in GNOME (mutter's
     /// `draggable-border-width`, 10 px) and Windows 10 (8 px of invisible border).
-    pub band: i32,
+    pub band: u32,
     /// How far from a corner, along either side, a grab takes both sides: a corner
     /// is a square of `band` otherwise, too small to find with a touchpad, and the
     /// rounded corner leaves the visible window `RADIUS` short of it.
-    pub corner: i32,
+    pub corner: u32,
     /// The smallest content a drag asks for: room for a line of text and a button,
     /// and for the title bar's three circles.
     pub min_content: (u32, u32),
 }
 
+/// The most a band or a corner's reach counts for, whatever the policy says.
+const MAX_GRIP: u32 = 256;
+
 impl Grips {
     /// 8 px of band, as Windows; corners reach the radius and the band beyond it.
     pub const DEFAULT: Grips = Grips {
         band: 8,
-        corner: RADIUS + 6,
+        corner: RADIUS as u32 + 6,
         min_content: (160, 80),
     };
 
@@ -35,12 +38,13 @@ impl Grips {
     /// outside it, or in the notch a rounded corner leaves inside it, where nothing
     /// of the window shows. Near a corner, both of its sides. 0 elsewhere.
     pub fn edges_at(&self, frame: &Rect, x: i32, y: i32) -> u8 {
-        let band = self.band;
+        // Within what any screen holds: a policy cannot overflow the sums below.
+        let band = self.band.min(MAX_GRIP);
         let wide = Rect::new(
-            frame.x - band,
-            frame.y - band,
-            frame.w + 2 * band as u32,
-            frame.h + 2 * band as u32,
+            frame.x - band as i32,
+            frame.y - band as i32,
+            frame.w.saturating_add(2 * band),
+            frame.h.saturating_add(2 * band),
         );
         if !wide.contains(x, y) {
             return 0;
@@ -64,7 +68,8 @@ impl Grips {
         // Along a side, near a corner: that corner. Half the side at most, so a
         // small window still has both.
         let near = |at: i32, low: i32, len: u32| {
-            let reach = self.corner.min(len as i32 / 2);
+            let reach = self.corner.min(MAX_GRIP) as i32;
+            let reach = reach.min(len as i32 / 2);
             (at < low + reach, at >= low + len as i32 - reach)
         };
         if edges & (edge::LEFT | edge::RIGHT) == 0 {
@@ -110,7 +115,8 @@ impl Grips {
 
 /// One axis of a drag: `span` with its low or high end moved by `d`, at least `min`
 /// long, the moved end inside `bounds`, and never longer than `bounds` unless `min`
-/// is.
+/// or the span already is: a drag never grows it past the screen, and never makes it
+/// jump smaller either.
 fn drag_span(
     (lo, hi): (i32, i32),
     (low, high): (bool, bool),
@@ -118,7 +124,7 @@ fn drag_span(
     min: i32,
     (floor, ceil): (i32, i32),
 ) -> (i32, i32) {
-    let room = (ceil - floor).max(min);
+    let room = (ceil - floor).max(min).max(hi - lo);
     let (mut a, mut b) = (lo, hi);
     if high {
         b = (hi + d).min(ceil).max(a + min).min(a + room);
@@ -131,7 +137,7 @@ fn drag_span(
 
 /// The corner whose notch, inside `frame` but outside its rounded shape, holds the
 /// point: both its sides, or 0.
-fn notch_edges(frame: &Rect, x: i32, y: i32) -> u8 {
+pub(crate) fn notch_edges(frame: &Rect, x: i32, y: i32) -> u8 {
     let r = RADIUS.min(frame.w as i32 / 2).min(frame.h as i32 / 2);
     let (from_left, from_right) = (x - frame.x, frame.right() - 1 - x);
     let (from_top, from_bottom) = (y - frame.y, frame.bottom() - 1 - y);
@@ -261,22 +267,26 @@ pub struct Step {
 /// when the program answers with a buffer of that size, so it is never shown cut,
 /// stretched or half painted. One request at a time: while one waits, the latest
 /// place the owner wants waits behind it, and a drag sends no more than the program
-/// can follow. A program that does not answer is asked again after `PATIENCE_MS`,
-/// for the latest only; it blocks nothing and gets nothing more.
+/// can follow. Any `Resize` frees the program for the next request, whatever its
+/// size. A program that does not answer is asked again after `PATIENCE_MS`, for the
+/// latest only; it blocks nothing and gets nothing more.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Placing {
-    /// Places asked, oldest first, not yet answered.
+    /// Places asked, oldest first, whose answers have not come: an answer of one's
+    /// size takes the window there.
     sent: [Option<Rect>; KEPT],
-    /// When the newest of them was asked (ms since boot).
+    /// A request went since the program last answered.
+    waiting: bool,
+    /// When the newest request was sent (ms since boot).
     sent_ms: u64,
     /// The place the owner wants that has not been asked yet.
     wanted: Option<Rect>,
 }
 
 impl Placing {
-    /// No size is asked or waiting.
+    /// No request is waiting for an answer, and none for its turn.
     pub fn is_idle(&self) -> bool {
-        self.sent[0].is_none() && self.wanted.is_none()
+        !self.waiting && self.wanted.is_none()
     }
 
     fn newest(&self) -> Option<Rect> {
@@ -288,6 +298,8 @@ impl Placing {
     pub fn want(&mut self, current: Rect, to: Rect, resizable: bool, now_ms: u64) -> Step {
         let same = (current.w, current.h) == (to.w, to.h);
         if same && self.is_idle() {
+            // Placed now: no answer still to come may move it after.
+            self.sent = [None; KEPT];
             return Step {
                 move_to: Some((to.x, to.y)),
                 ask: None,
@@ -308,11 +320,25 @@ impl Placing {
         step
     }
 
+    /// The owner moved the window by its title bar: what is asked or wanted moves
+    /// with it, so an answer that comes later does not take it back.
+    pub fn moved(&mut self, dx: i32, dy: i32) {
+        let places = self
+            .sent
+            .iter_mut()
+            .chain(core::iter::once(&mut self.wanted));
+        for r in places.flatten() {
+            r.x += dx;
+            r.y += dy;
+        }
+    }
+
     /// The program answered with a buffer of `width` x `height`: where the window
     /// goes with it, if anywhere (an answer to a size not asked leaves it where it
     /// is), whether it was asked, and the next size to ask, if one waits.
     pub fn answered(&mut self, width: u32, height: u32, now_ms: u64) -> Answer {
         let mut answer = Answer::default();
+        self.waiting = false;
         let found = (0..KEPT)
             .rev()
             .find(|&i| self.sent[i].is_some_and(|r| (r.w, r.h) == (width, height)));
@@ -324,15 +350,15 @@ impl Placing {
             self.sent.copy_within(i + 1.., 0);
             self.sent[KEPT - 1 - i..].fill(None);
         }
-        // A size the owner went back to while it was asked: its place is the newer.
+        // The size the owner wants now, not asked yet: its place is the newest, and
+        // every answer still to come is older than it.
         if let Some(w) = self.wanted.filter(|w| (w.w, w.h) == (width, height)) {
             self.wanted = None;
+            self.sent = [None; KEPT];
             answer.asked = true;
             answer.move_to = Some((w.x, w.y));
         }
-        if self.sent[0].is_none() {
-            answer.ask = self.send(now_ms);
-        }
+        answer.ask = self.send(now_ms);
         answer
     }
 
@@ -347,11 +373,11 @@ impl Placing {
             .map(|_| self.sent_ms.saturating_add(PATIENCE_MS))
     }
 
-    /// Asks for the wanted place, if the program has answered the last request or
-    /// was given `PATIENCE_MS` for it.
+    /// Asks for the wanted place, if the program has answered since the last
+    /// request or was given `PATIENCE_MS` for it.
     fn send(&mut self, now_ms: u64) -> Option<(u32, u32)> {
         let to = self.wanted?;
-        if self.sent[0].is_some() && now_ms < self.sent_ms.saturating_add(PATIENCE_MS) {
+        if self.waiting && now_ms < self.sent_ms.saturating_add(PATIENCE_MS) {
             return None;
         }
         self.wanted = None;
@@ -365,6 +391,7 @@ impl Placing {
             .position(Option::is_none)
             .unwrap_or(KEPT - 1);
         self.sent[free] = Some(to);
+        self.waiting = true;
         self.sent_ms = now_ms;
         Some((to.w, to.h))
     }
@@ -392,23 +419,26 @@ mod tests {
         let f = Rect::new(100, 100, 400, 300);
         let (r, b) = (f.right(), f.bottom());
         assert_eq!(G.edges_at(&f, r, 250), edge::RIGHT);
-        assert_eq!(G.edges_at(&f, r + G.band - 1, 250), edge::RIGHT);
-        assert_eq!(G.edges_at(&f, r + G.band, 250), 0, "past the band");
+        assert_eq!(G.edges_at(&f, r + (G.band as i32) - 1, 250), edge::RIGHT);
+        assert_eq!(G.edges_at(&f, r + (G.band as i32), 250), 0, "past the band");
         assert_eq!(G.edges_at(&f, 99, 250), edge::LEFT);
         assert_eq!(G.edges_at(&f, 300, 99), edge::TOP);
         assert_eq!(G.edges_at(&f, 300, b), edge::BOTTOM);
         // The square beyond the corner, and along each side up to `corner`.
         assert_eq!(G.edges_at(&f, r + 2, b + 2), edge::RIGHT | edge::BOTTOM);
-        let near = r - G.corner;
+        let near = r - (G.corner as i32);
         assert_eq!(G.edges_at(&f, near, b + 2), edge::RIGHT | edge::BOTTOM);
         assert_eq!(G.edges_at(&f, near - 1, b + 2), edge::BOTTOM);
         assert_eq!(
-            G.edges_at(&f, r + 2, b - G.corner),
+            G.edges_at(&f, r + 2, b - (G.corner as i32)),
             edge::RIGHT | edge::BOTTOM
         );
-        assert_eq!(G.edges_at(&f, r + 2, b - G.corner - 1), edge::RIGHT);
         assert_eq!(
-            G.edges_at(&f, 100 + G.corner - 1, 98),
+            G.edges_at(&f, r + 2, b - (G.corner as i32) - 1),
+            edge::RIGHT
+        );
+        assert_eq!(
+            G.edges_at(&f, 100 + (G.corner as i32) - 1, 98),
             edge::LEFT | edge::TOP
         );
         assert_eq!(G.edges_at(&f, 98, 399), edge::LEFT | edge::BOTTOM);
@@ -667,17 +697,87 @@ mod tests {
         p.want(now, at(100, 100, 440, 300), true, 0);
         let back = p.want(now, at(120, 100, 400, 300), true, 5);
         assert_eq!(back.move_to, Some((120, 100)), "it moves at once");
-        assert_eq!(
-            back.ask,
-            Some((400, 300)),
-            "and the program is asked for it"
-        );
-        // The answer to the size abandoned is not one asked any more.
+        assert_eq!(back.ask, None, "behind the request the program has");
+        // The answer to the size abandoned is not one asked any more: it moves
+        // nothing, and the program is asked for the size shown.
         let a = p.answered(440, 300, 10);
         assert_eq!((a.move_to, a.asked), (None, false));
+        assert_eq!(a.ask, Some((400, 300)));
         let a = p.answered(400, 300, 20);
         assert_eq!(a.move_to, Some((120, 100)));
         assert!(p.is_idle());
+    }
+
+    #[test]
+    fn a_late_answer_does_not_undo_the_size_the_owner_went_back_to() {
+        let mut p = Placing::default();
+        let now = at(100, 100, 400, 300);
+        p.want(now, at(100, 100, 410, 300), true, 0);
+        p.want(now, at(100, 100, 420, 300), true, 1);
+        assert_eq!(p.due(PATIENCE_MS), Some((420, 300)));
+        // Back to 410, further right; the program answers 410, then 420.
+        p.want(now, at(110, 100, 410, 300), true, PATIENCE_MS + 1);
+        let a = p.answered(410, 300, PATIENCE_MS + 2);
+        assert_eq!(a.move_to, Some((110, 100)));
+        let a = p.answered(420, 300, PATIENCE_MS + 3);
+        assert_eq!(
+            (a.move_to, a.asked),
+            (None, false),
+            "older than what is shown"
+        );
+    }
+
+    #[test]
+    fn a_window_moved_by_its_title_takes_what_was_asked_along() {
+        let mut p = Placing::default();
+        let now = at(100, 100, 400, 300);
+        p.want(now, at(90, 100, 410, 300), true, 0);
+        p.want(now, at(80, 100, 420, 300), true, 1);
+        p.moved(200, 50);
+        let a = p.answered(410, 300, 2);
+        assert_eq!(a.move_to, Some((290, 150)));
+        assert_eq!(a.ask, Some((420, 300)));
+        assert_eq!(p.answered(420, 300, 3).move_to, Some((280, 150)));
+    }
+
+    #[test]
+    fn any_answer_frees_the_program_for_the_next_request() {
+        // A program that rounds sizes to its own cells.
+        let mut p = Placing::default();
+        let now = at(100, 100, 400, 300);
+        p.want(now, at(100, 100, 413, 300), true, 0);
+        p.want(now, at(100, 100, 427, 300), true, 1);
+        let a = p.answered(408, 300, 2);
+        assert_eq!((a.move_to, a.asked, a.ask), (None, false, Some((427, 300))));
+        let a = p.answered(424, 300, 3);
+        assert_eq!(a.ask, None);
+        assert!(p.is_idle(), "the drag can say where it ended");
+    }
+
+    #[test]
+    fn a_grabbed_side_never_jumps_on_a_window_larger_than_the_screen() {
+        let screen = Rect::new(0, 24, 800, 576);
+        let start = Rect::new(50, 100, 1200, 200);
+        let r = G.resized(start, edge::LEFT, (0, 0), &screen);
+        assert_eq!(r, start, "a press alone changes nothing");
+        let r = G.resized(start, edge::LEFT, (-40, 0), &screen);
+        assert_eq!(r, start, "and it grows no further");
+        let r = G.resized(start, edge::LEFT, (30, 0), &screen);
+        assert_eq!((r.x, r.right()), (80, start.right()), "but it shrinks");
+    }
+
+    #[test]
+    fn any_policy_keeps_the_grips_bounded() {
+        let wild = Grips {
+            band: u32::MAX,
+            corner: u32::MAX,
+            min_content: (160, 80),
+        };
+        let f = Rect::new(100, 100, 400, 300);
+        // The corners reach half of each side at most: the left band is two corners.
+        let left = wild.edges_at(&f, 100 - MAX_GRIP as i32, 250);
+        assert_eq!(left, edge::LEFT | edge::BOTTOM);
+        assert_eq!(wild.edges_at(&f, 99 - MAX_GRIP as i32, 250), 0);
     }
 
     #[test]

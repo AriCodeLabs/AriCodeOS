@@ -302,11 +302,11 @@ fn stubborn(session: Handle, hw: Handle) -> u64 {
             Ok(Some(Event::Key(b'q') | Event::Close)) => {
                 sys::print(b"gui_demo F: asked ");
                 num_i32(asked as i32);
-                sys::print(if asked <= FEW_ASKS {
-                    b" times: a few\n" as &[u8]
-                } else {
-                    b" times: a storm\n"
-                });
+                if asked > FEW_ASKS {
+                    sys::print(b" times: a storm\n");
+                    return 7;
+                }
+                sys::print(b" times: a few\n");
                 return 0;
             }
             Ok(_) => {}

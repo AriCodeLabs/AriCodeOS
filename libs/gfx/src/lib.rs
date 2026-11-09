@@ -1285,7 +1285,9 @@ impl Desktop {
                     return Hit::Edge { id: w.id, edges };
                 }
             }
-            if !f.contains(x, y) {
+            // Outside the frame, or in a rounded corner's notch, which shows what is
+            // under the window: what is under it takes the point.
+            if !f.contains(x, y) || resize::notch_edges(&f, x, y) != 0 {
                 continue;
             }
             let inside = |b: Option<Rect>| b.is_some_and(|b| b.contains(x, y));
@@ -2490,16 +2492,20 @@ mod tests {
         assert_eq!(d.hit(right.0, right.1), Hit::Edge { id, edges });
         let edges = edge::LEFT | edge::TOP;
         assert_eq!(d.hit(f.x - 2, f.y - 2), Hit::Edge { id, edges });
-        assert_eq!(d.hit(f.right() + d.grips.band, f.y + 50), Hit::Desktop);
-        // The notch of a rounded corner grabs it; the same pixel of a window that
-        // cannot be resized is still its own.
+        assert_eq!(
+            d.hit(f.right() + d.grips.band as i32, f.y + 50),
+            Hit::Desktop
+        );
+        // The notch of a rounded corner grabs it. The same pixel of a window that
+        // cannot be resized shows what is under it, and is what is under it.
         let corner = (f.right() - 1, f.bottom() - 1);
         let edges = edge::RIGHT | edge::BOTTOM;
         assert_eq!(d.hit(corner.0, corner.1), Hit::Edge { id, edges });
         let fixed = d.create(300, 200, "fixed").unwrap();
         let f = d.get(fixed).unwrap().frame();
         let (x, y) = (f.right() - 1, f.bottom() - 1);
-        assert!(matches!(d.hit(x, y), Hit::Window { id, .. } if id == fixed));
+        assert_eq!(d.hit(x, y), Hit::Desktop);
+        assert!(matches!(d.hit(x - RADIUS, y), Hit::Window { id, .. } if id == fixed));
     }
 
     #[test]

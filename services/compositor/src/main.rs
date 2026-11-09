@@ -246,6 +246,9 @@ struct Content {
     /// window goes to one when its size arrives, and any other size leaves it
     /// where it is.
     placing: Placing,
+    /// Sizes its program chose itself, said at most once a second: a program that
+    /// resizes in a loop must not fill the log, nor hide another's (ADR 0085).
+    said_size: aricode_faults::Meter<1>,
     /// When a request to close was handed to the client, queued or as the
     /// answer to its poll (ms since boot), while it has not polled since:
     /// it has not come back from it (ADR 0077, audit L4).
@@ -489,9 +492,6 @@ struct Compositor {
     last_sweep_ms: u64,
     /// Late input events, recorded at most once a second (`LATE_MS`).
     late: aricode_faults::Meter<1>,
-    /// Sizes programs chose themselves, said at most once a second: a program
-    /// that resizes in a loop must not fill the log (ADR 0085).
-    resizes: aricode_faults::Meter<1>,
 }
 
 #[derive(Clone, Copy)]
@@ -624,6 +624,7 @@ impl Compositor {
             if let Some(w) = self.desktop.get(closed.id) {
                 self.damage.add(&w.frame());
             }
+            self.forget_drag(closed.id);
             self.desktop.remove(closed.id);
             closed_windows += 1;
         }
@@ -633,6 +634,14 @@ impl Compositor {
         num(closed_windows);
         sys::print(b" window(s) closed\n");
         self.refocus();
+    }
+
+    /// Window `id` is gone: a drag of it is over.
+    fn forget_drag(&mut self, id: u32) {
+        if self.pointer.drag.is_some_and(|d| d.id == id) {
+            self.pointer.drag = None;
+            self.pointer.moved = true;
+        }
     }
 
     /// `deliver` if the window asked for this kind of event.
@@ -696,8 +705,17 @@ impl Compositor {
         let Some(w) = self.desktop.get(id).copied() else {
             return;
         };
-        // No size a program can be asked for is outside these.
-        let to = Rect::new(to.x, to.y, to.w.clamp(1, MAX_SIDE), to.h.clamp(1, MAX_SIDE));
+        // No size a program can be asked for is larger than the screen under the
+        // bar, less the title bar, or than `MAX_SIDE`.
+        let room = self.desktop.drag_bounds();
+        let max_w = room.w.min(MAX_SIDE);
+        let max_h = room.h.saturating_sub(aricode_gfx::TITLE_H).min(MAX_SIDE);
+        let to = Rect::new(
+            to.x,
+            to.y,
+            to.w.clamp(1, max_w.max(1)),
+            to.h.clamp(1, max_h.max(1)),
+        );
         let Some(c) = self.content(id) else {
             return;
         };
@@ -710,8 +728,8 @@ impl Compositor {
         }
     }
 
-    /// Asks window `id`'s program for this size. Queued `Configure`s merge, so a
-    /// program behind takes only the latest.
+    /// Asks window `id`'s program for this size. A `Configure` queued right behind
+    /// another replaces it; `Placing` keeps more from being sent meanwhile.
     fn configure(&mut self, id: u32, width: u32, height: u32) {
         self.deliver_wanted(id, wants::RESIZE, Event::Configure { width, height });
     }
@@ -735,8 +753,17 @@ impl Compositor {
         let (dx, dy) = (px - d.from.0, py - d.from.1);
         match d.edges {
             None => {
+                let Some(was) = self.desktop.get(d.id).map(|w| w.content) else {
+                    return;
+                };
                 self.desktop
                     .move_window(d.id, d.start.x + dx, d.start.y + dy);
+                let Some(now) = self.desktop.get(d.id).map(|w| w.content) else {
+                    return;
+                };
+                if let Some(c) = self.content(d.id) {
+                    c.placing.moved(now.x - was.x, now.y - was.y);
+                }
             }
             Some(edges) => {
                 let bounds = self.desktop.drag_bounds();
@@ -1472,6 +1499,7 @@ impl Compositor {
         if let Some(second) = closed.second {
             self.unmap_unused(second);
         }
+        self.forget_drag(closed.id);
         self.desktop.remove(closed.id);
         self.refocus();
     }
@@ -1670,6 +1698,7 @@ impl Compositor {
                     wants: req.events,
                     dirty: None,
                     placing: Placing::default(),
+                    said_size: aricode_faults::Meter::new(),
                     close_waiting: None,
                     said_clipboard: 0,
                     menus: None,
@@ -2052,6 +2081,7 @@ impl Compositor {
         // A size asked for goes to its place. Any other, say one the program chose,
         // stays where it is.
         let placed = c.placing.answered(req.width, req.height, now_ms);
+        let say = placed.asked || c.said_size.report(0, now_ms) > 0;
         if let Some((x, y)) = placed.move_to {
             self.desktop.move_window(req.window, x, y);
         }
@@ -2064,11 +2094,7 @@ impl Compositor {
             .pointer
             .drag
             .is_some_and(|d| d.id == req.window && d.edges.is_some());
-        if placed.asked {
-            if !dragging {
-                say_size(req.window, req.width, req.height);
-            }
-        } else if self.resizes.report(0, now_ms) > 0 {
+        if say && !(placed.asked && dragging) {
             say_size(req.window, req.width, req.height);
         }
         self.unmap_unused(old);
@@ -2341,7 +2367,6 @@ fn main(inputs: u64) -> u64 {
         first: 0,
         last_sweep_ms: 0,
         late: aricode_faults::Meter::new(),
-        resizes: aricode_faults::Meter::new(),
     };
     if test_notice {
         comp.show_notice("Hot: 95 C, and the processor slows at 105 C", now(SYSTEM));
