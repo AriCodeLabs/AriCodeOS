@@ -96,6 +96,8 @@ fn error_name(e: Error) -> &'static [u8] {
         Error::Busy => b"busy",
         Error::Invalid => b"invalid",
         Error::NotFound => b"no GPU",
+        Error::Limit => b"over a limit (the manifest's memory?)",
+        Error::TooBig => b"too big",
         _ => b"another error",
     }
 }
