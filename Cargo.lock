@@ -465,6 +465,7 @@ name = "aricode-intel-gt"
 version = "0.18.0"
 dependencies = [
  "aricode-abi",
+ "aricode-gen7-eu",
 ]
 
 [[package]]

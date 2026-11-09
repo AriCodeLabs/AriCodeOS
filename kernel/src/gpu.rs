@@ -33,12 +33,17 @@ use aricode_intel_gt::gtt::{self, Cache, Layout};
 use aricode_intel_gt::power::{self, Forcewake, Limits};
 use aricode_intel_gt::regs::{bcs, masked_off, masked_on};
 use aricode_intel_gt::ring::{self, Ring};
-use aricode_intel_gt::{self as gt, compute, ppgtt, regs, render, Refusal, Timeouts};
+use aricode_intel_gt::{self as gt, clear, compute, ppgtt, regs, render, Refusal, Timeouts};
 use aricode_pmm::FRAME_SIZE;
 use log::{info, warn};
 
 /// Pages of the ring (Linux's 16 KiB).
 const RING_PAGES: u32 = 4;
+/// Where the residue clear's pages are mapped while it runs, between two
+/// clients, when the PPGTT holds nothing else (ADR 0086, B6).
+const CLEAR_AT: u32 = aricode_abi::gpu::FIRST as u32;
+/// How long the clear may take before the render engine is left off.
+const CLEAR_LIMIT_US: u64 = 200_000;
 /// Mappings a client may hold (audit M4): bounds the kernel's memory and the
 /// check's work per batch.
 const MAX_MAPS: usize = 256;
@@ -108,10 +113,12 @@ struct Pages {
     /// The render engine's status page and ring (ADR 0086).
     render_status: ObjectRef,
     render_ring: ObjectRef,
+    /// The residue clear's state, marks and sweep surface (`clear::PAGES`).
+    clear: ObjectRef,
 }
 
 impl Pages {
-    fn all(self) -> [ObjectRef; 6] {
+    fn all(self) -> [ObjectRef; 7] {
         [
             self.scratch,
             self.status,
@@ -119,6 +126,7 @@ impl Pages {
             self.tables,
             self.render_status,
             self.render_ring,
+            self.clear,
         ]
     }
 }
@@ -196,8 +204,15 @@ struct Engine {
     /// Requests on either engine, and resets of either, since boot.
     requests: u64,
     resets: u64,
-    /// The GPU's hardware threads, for dispatches (ADR 0086).
+    /// The GPU's hardware threads, for dispatches and the residue clear
+    /// (ADR 0086).
     threads: u16,
+    /// The client ran EU threads: its residue is cleared when it goes.
+    eu_used: bool,
+    /// Clears done, and the last one's reach and time.
+    clears: u32,
+    cleared_threads: u16,
+    clear_us: u32,
     /// A reset failed: the engine takes no more work, and what it could
     /// reach is never freed.
     dead: bool,
@@ -424,6 +439,7 @@ fn bring_up(
         tables: alloc(layout.directory_entries)?,
         render_status: alloc(1)?,
         render_ring: alloc(RING_PAGES)?,
+        clear: alloc(clear::PAGES)?,
     };
     let scratch_pte = gtt::encode(phys(&pages.scratch), Cache::Uncached).ok_or(Refusal::GttSize)?;
     // From the first write to the tables on, a failure stops the engine and
@@ -520,6 +536,10 @@ fn bring_up(
         requests: 0,
         resets: 0,
         threads: compute::threads(d.device).ok_or(Refusal::NotThisFamily)?,
+        eu_used: false,
+        clears: 0,
+        cleared_threads: 0,
+        clear_us: 0,
         dead: false,
         boot_step: step,
         asked: step,
@@ -601,6 +621,14 @@ fn render_bring_up(e: &mut Engine, regs: &mut Bar0) -> Result<(u64, u64), &'stat
             &mut e.render_ring,
         )
         .map_err(|_| "the ring did not start")?;
+    }
+    {
+        let awake = fw.hold(regs, &Clock).map_err(|_| "forcewake")?;
+        // Nothing clears the shared local memory between clients: it must
+        // stay off, as the firmware leaves it (ADR 0086, B6).
+        if clear::slm_on(awake.read(clear::L3CNTLREG2)) {
+            return Err("the shared local memory is on");
+        }
     }
     let first = render_request(e, regs, &[]).ok_or("no room in the ring")?;
     let took = render_wait(e, first, LIMIT_US).ok_or("an empty request did not finish")?;
@@ -858,6 +886,15 @@ fn release_client(e: &mut Engine) -> Vec<Mapping> {
     for m in &maps {
         set_pages(e, m.address, m.pages, None);
     }
+    // Before the next client, and before the buffers go back to be used
+    // again: what EU threads left in registers and caches.
+    if core::mem::take(&mut e.eu_used) && e.render_ok && !e.dead {
+        if let Err(why) = clear_residue(e, &mut regs) {
+            e.render_ok = false;
+            e.render_state = 2;
+            warn!("gpu: residue clear failed ({why}): the render engine takes no more work");
+        }
+    }
     // The next client starts at the boot's clock.
     e.asked = e.boot_step;
     let _ = apply_frequency(e, &mut regs);
@@ -869,6 +906,69 @@ fn release_client(e: &mut Engine) -> Vec<Mapping> {
         return Vec::new();
     }
     maps
+}
+
+/// Clears what the last client's EU threads left (ADR 0086, B6): a dispatch
+/// of `clear::program` on every thread slot, counted by its marks; the
+/// scratch page zeroed. The PPGTT holds nothing of a client's.
+fn clear_residue(e: &mut Engine, regs: &mut Bar0) -> Result<(), &'static str> {
+    {
+        let awake = e.fw.hold(regs, &Clock).map_err(|_| "forcewake")?;
+        if clear::slm_on(awake.read(clear::L3CNTLREG2)) {
+            return Err("the shared local memory is on");
+        }
+    }
+    let base = phys(&e.pages.clear);
+    let page = |p: u32| base + p as u64 * FRAME_SIZE;
+    e.clears = e.clears.wrapping_add(1).max(1);
+    let number = e.clears;
+    let d = clear::prepare(
+        dwords(page(clear::STATE_PAGE), 1),
+        CLEAR_AT,
+        number,
+        e.threads,
+    )
+    .ok_or("no clear for this GPU")?;
+    let marks = dwords(page(clear::MARKS_PAGE), 1);
+    marks.fill(0);
+    let (body, n) = compute::emit(&d, e.threads).map_err(|_| "the clear's dispatch")?;
+    let frame = |i: u32| Some(base + i as u64 * FRAME_SIZE);
+    if !set_pages(e, CLEAR_AT, clear::PAGES, Some(&frame)) {
+        return Err("its pages could not be mapped");
+    }
+    let t0 = crate::time::uptime_us();
+    let ran = render_request(e, regs, &body[..n])
+        .ok_or("no room in the ring")
+        .and_then(|seqno| render_wait(e, seqno, CLEAR_LIMIT_US).ok_or("it did not finish"));
+    if ran.is_err() {
+        reset(e, regs, Which::Render);
+    }
+    set_pages(e, CLEAR_AT, clear::PAGES, None);
+    ran?;
+    e.clear_us = (crate::time::uptime_us() - t0).min(u32::MAX as u64) as u32;
+    let mut seen = [0u32; (clear::MARKS_WIDTH / 4 * clear::MARKS_HEIGHT) as usize];
+    for (s, m) in seen.iter_mut().zip(marks.iter()) {
+        // SAFETY: inside the marks page; a volatile read of memory the GPU
+        // wrote.
+        *s = unsafe { core::ptr::read_volatile(m) };
+    }
+    let reached = clear::covered(&seen, number);
+    e.cleared_threads = reached as u16;
+    let scratch = dwords(phys(&e.pages.scratch), 1);
+    scratch.fill(0);
+    flush_lines(scratch.as_ptr(), scratch.len() * 4);
+    if reached < e.threads as u32 {
+        warn!(
+            "gpu: residue clear reached {reached} of {} threads in {} us",
+            e.threads, e.clear_us
+        );
+    } else {
+        info!(
+            "gpu: residue cleared on {reached} threads in {} us",
+            e.clear_us
+        );
+    }
+    Ok(())
 }
 
 /// Points the PPGTT's pages from `address` at `frame(i)`, or at the
@@ -1103,6 +1203,7 @@ pub fn dispatch(ptr: u64, len: u64) -> Result<u64, Error> {
     let (body, n) = compute::emit(&d, e.threads).map_err(|_| Error::Invalid)?;
     let mut regs = framebuffer::mapped_bar0().ok_or(Error::NotFound)?;
     let e = &mut *e;
+    e.eu_used = true;
     if !ensure_ppgtt(e, &mut regs, Which::Render) {
         return Err(Error::Hung);
     }
@@ -1224,6 +1325,9 @@ pub fn report() -> GpuReport {
     r.mhz_lowest = mhz(e.limits.lowest);
     r.render = e.render_state;
     r.render_us = e.render_us;
+    r.threads = e.threads;
+    r.cleared_threads = e.cleared_threads;
+    r.clear_us = e.clear_us;
     r.mhz_highest = mhz(e.limits.highest);
     r.requests = e.requests;
     r.resets = e.resets;

@@ -16,6 +16,7 @@
 #![no_std]
 
 pub mod check;
+pub mod clear;
 pub mod cmd;
 pub mod compute;
 pub mod gtt;

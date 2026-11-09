@@ -785,6 +785,12 @@ pub mod sysinfo {
         /// empty request took, in microseconds.
         pub render: u8,
         pub render_us: u16,
+        /// The GPU's EU threads; and of the last residue clear at a change
+        /// of client (ADR 0086), the threads it reached (0 before any) and
+        /// its time in microseconds.
+        pub threads: u16,
+        pub cleared_threads: u16,
+        pub clear_us: u32,
     }
 
     /// No Intel GPU of a supported family.
@@ -796,7 +802,7 @@ pub mod sysinfo {
     pub const GPU_OFF: u8 = 3;
 
     impl GpuReport {
-        pub const LEN: usize = 48;
+        pub const LEN: usize = 56;
 
         pub fn encode(&self) -> [u8; Self::LEN] {
             let mut b = [0u8; Self::LEN];
@@ -814,6 +820,9 @@ pub mod sysinfo {
             b[36..40].copy_from_slice(&self.watchdog.to_le_bytes());
             b[40..44].copy_from_slice(&self.status_page.to_le_bytes());
             b[44..48].copy_from_slice(&self.mapped_kib.to_le_bytes());
+            b[48..50].copy_from_slice(&self.threads.to_le_bytes());
+            b[50..52].copy_from_slice(&self.cleared_threads.to_le_bytes());
+            b[52..56].copy_from_slice(&self.clear_us.to_le_bytes());
             b
         }
 
@@ -839,6 +848,9 @@ pub mod sysinfo {
                 watchdog: u32_at(36),
                 status_page: u32_at(40),
                 mapped_kib: u32_at(44),
+                threads: u16_at(48),
+                cleared_threads: u16_at(50),
+                clear_us: u32_at(52),
             })
         }
     }
@@ -2156,6 +2168,31 @@ mod tests {
         // Never negative: an error is `-4095..=-1` in the same register.
         assert!((irq(last, u32::MAX) as i64) > 0);
         assert!((message(last, IPC_MAX_DATA, IPC_MAX_HANDLES) as i64) > 0);
+    }
+
+    #[test]
+    fn gpu_report_round_trip() {
+        use super::sysinfo::GpuReport;
+        let r = GpuReport {
+            state: 1,
+            refusal: 2,
+            client: 77,
+            mhz: 650,
+            mhz_lowest: 350,
+            mhz_highest: 1050,
+            requests: 1 << 40,
+            resets: 3,
+            canary: 0xDEAD_BEEF,
+            watchdog: 0x15_0000,
+            status_page: 0x1234_5000,
+            mapped_kib: 6144,
+            render: 1,
+            render_us: 3,
+            threads: 128,
+            cleared_threads: 127,
+            clear_us: 70_000,
+        };
+        assert_eq!(GpuReport::decode(&r.encode()), Some(r));
     }
 
     #[test]

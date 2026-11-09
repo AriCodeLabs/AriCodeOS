@@ -1324,3 +1324,46 @@ fn descriptors_and_surfaces_are_igts() {
     assert_eq!(surface_2d(FORMAT_R8_UNORM, 0, 0, 4, 64), None);
     assert_eq!(surface_2d(FORMAT_R8_UNORM, 0, 64, 4, 1 << 18 | 1), None);
 }
+
+#[test]
+fn the_residue_clear_fills_every_slot_of_a_gt2() {
+    use crate::clear;
+    use crate::compute;
+    let mut code = [[0u32; 4]; 192];
+    let n = clear::program(&mut code).unwrap();
+    // g127 to keep the header, the slot, 63 zeroings, the sweep, the mark,
+    // the last zeroings and the end.
+    assert!(n < 192, "{n} instructions");
+    let last = code[n - 1];
+    assert_eq!(last[0] & 0x7F, 0x31, "a send ends it");
+    assert_ne!(last[3] & 1 << 31, 0, "with the end of thread");
+    let mut state = [0u32; 1024];
+    let base = 0x1_0000;
+    let d = clear::prepare(&mut state, base, 7, 128).unwrap();
+    // A half-slice's 64 threads a group, one group a half-slice.
+    assert_eq!(d.group, [64, 1, 1]);
+    assert_eq!(d.groups, [2, 1, 1]);
+    assert_eq!(d.max_threads, 128);
+    assert_eq!(compute::validate(&d, 128), Ok(()));
+    // The program, then the two surfaces, the sweep's and the marks'.
+    assert_eq!(&state[..4], &code[0]);
+    assert_eq!(state[0xC00 / 4..0xC00 / 4 + 2], [0xC40, 0xC80]);
+    assert_eq!(state[0xC40 / 4 + 1], base + 2 * 4096);
+    assert_eq!(state[0xC80 / 4 + 1], base + 4096);
+    assert_eq!(state[0xD40 / 4], 7, "the clear's number in the CURBE");
+    // GT1: one group of 36.
+    let d = clear::prepare(&mut state, base, 1, 36).unwrap();
+    assert_eq!((d.group, d.groups), ([36, 1, 1], [1, 1, 1]));
+    assert_eq!(clear::prepare(&mut state, base, 1, 130), None);
+    assert_eq!(clear::groups(0), None);
+    assert_eq!(clear::groups(127), None);
+    // Counting: only this clear's number counts.
+    let mut marks = [0u32; 1024];
+    marks[0] = 7;
+    marks[9] = 7;
+    marks[10] = 6;
+    marks[300] = 7; // past the 256 slots
+    assert_eq!(clear::covered(&marks, 7), 2);
+    assert!(clear::slm_on(1) && !clear::slm_on(0x0008_0040));
+    assert_eq!(clear::PAGES, 34);
+}

@@ -17,7 +17,8 @@
 //! GPU's clock could not be asked for, was given above what was asked, or
 //! did not speed the work up; 18 a dispatch could not be set up or did not
 //! finish; 19 a dispatch wrote the wrong bytes; 20 a dispatch the hardware
-//! would not take was not refused.
+//! would not take was not refused; 21 (`run gpu_probe 2`, the second client
+//! of the residue test) a register showed what the last client left.
 #![no_std]
 #![no_main]
 
@@ -196,7 +197,7 @@ fn map(
     Ok(unsafe { core::slice::from_raw_parts_mut(virt as *mut u32, (bytes / 4) as usize) })
 }
 
-fn main(_arg: u64) -> u64 {
+fn main(arg: u64) -> u64 {
     let (mut gpu, mut system, mut hardware) = (None, None, None);
     permissions::granted(|h, _| {
         if permissions::is(h, kind::GPU) {
@@ -255,6 +256,14 @@ fn main(_arg: u64) -> u64 {
             return 10;
         }
     };
+    // `run gpu_probe 2`: the second client of the residue test (ADR 0086,
+    // B6), after a whole run left a pattern in the EU registers.
+    if arg == 2 {
+        return match residue_after_change(&mut g, hardware) {
+            Ok(()) => 0,
+            Err(code) => code,
+        };
+    }
     let r = g.report();
     say(&[
         b"engine ready at ",
@@ -784,6 +793,228 @@ fn dispatches(g: &mut Gpu, hardware: Handle) -> Result<(), u64> {
     if r.canary != before.canary || r.watchdog != before.watchdog {
         say(&[b"REACHED: the status page or the blitter's registers changed"]);
         return Err(13);
+    }
+
+    // 9. Residue (ADR 0086, B6), within this client: a pattern left in
+    // every register, then read back by threads that write nothing first.
+    // What they see is what any program would; the kernel clears it only
+    // when the client changes (`run gpu_probe 2` checks that).
+    let mut res = Residue::new(g, hardware)?;
+    res.write(g)?;
+    let (ran, seen) = res.read(g)?;
+    say(&[
+        b"residue within a client: the pattern seen on ",
+        n(seen as u64).s(),
+        b" of ",
+        n(ran as u64).s(),
+        b" thread slots read",
+    ]);
+    res.write(g)?;
+    say(&[b"pattern left for the next client: run gpu_probe 2"]);
+    Ok(())
+}
+
+/// What one thread writes into every register in the residue test.
+const PATTERN: u32 = 0xA5C3_5A3C;
+/// The residue test's memory: its state page, and a surface of 256 bytes
+/// by 64 rows: a row of 8 slots of 32 bytes a thread for each of 32 EUs
+/// (what a reader saw), then 32 rows of 8 dwords (which slots ran).
+const RESIDUE_AT: u64 = 0xC0_0000;
+const RESIDUE_OUT_AT: u64 = 0xC1_0000;
+const RESIDUE_BYTES: u64 = 256 * 64;
+
+struct Residue {
+    state: &'static mut [u32],
+    out: &'static mut [u32],
+    threads: u16,
+}
+
+impl Residue {
+    fn new(g: &mut Gpu, hardware: Handle) -> Result<Self, u64> {
+        let threads = g.report().threads;
+        let fail = |e: Error| {
+            say(&[b"residue setup failed: ", error_name(e)]);
+            18u64
+        };
+        Ok(Residue {
+            state: map(Some(hardware), g.gpu, RESIDUE_AT, 4096).map_err(fail)?,
+            out: map(None, g.gpu, RESIDUE_OUT_AT, RESIDUE_BYTES).map_err(fail)?,
+            threads,
+        })
+    }
+
+    /// Runs `code` on every thread slot, the groups the kernel's clear uses.
+    fn run(&mut self, g: &mut Gpu, code: &[[u32; 4]]) -> Result<(), u64> {
+        let (per_group, groups) = aricode_intel_gt::clear::groups(self.threads).ok_or(18u64)?;
+        self.state.fill(0);
+        for (i, inst) in code.iter().enumerate() {
+            self.state[4 * i..4 * i + 4].copy_from_slice(inst);
+        }
+        let surface = compute::surface_2d(
+            compute::FORMAT_R8_UNORM,
+            RESIDUE_OUT_AT as u32,
+            256,
+            64,
+            256,
+        )
+        .ok_or(18u64)?;
+        self.state[0xC40 / 4..0xC40 / 4 + 8].copy_from_slice(&surface);
+        self.state[0xC00 / 4] = 0xC40;
+        let descriptor = Descriptor {
+            kernel: 0,
+            binding_table: 0xC00,
+            binding_entries: 1,
+            curbe_regs: 0,
+            slm_blocks: 0,
+            barrier: false,
+        }
+        .encode()
+        .ok_or(18u64)?;
+        self.state[0xD00 / 4..0xD00 / 4 + 8].copy_from_slice(&descriptor);
+        let d = Dispatch {
+            surface_base: RESIDUE_AT as u32,
+            dynamic_base: RESIDUE_AT as u32,
+            instruction_base: RESIDUE_AT as u32,
+            max_threads: self.threads,
+            descriptor_offset: 0xD00,
+            descriptors: 1,
+            simd: 16,
+            group: [per_group as u8, 1, 1],
+            groups: [groups as u32, 1, 1],
+            right_mask: 0xFFFF,
+            bottom_mask: 0xFFFF_FFFF,
+            ..Dispatch::default()
+        };
+        let number = sys::gpu_dispatch(g.gpu, &d).map_err(|e| {
+            say(&[b"a residue dispatch was refused: ", error_name(e)]);
+            18u64
+        })?;
+        sys::gpu_wait(g.gpu, number, WAIT_MS).map_err(|e| {
+            say(&[b"a residue dispatch failed: ", error_name(e)]);
+            18u64
+        })
+    }
+
+    /// Every register but g0 (the payload) and g127 (the header kept for
+    /// the end) to the pattern.
+    fn write(&mut self, g: &mut Gpu) -> Result<(), u64> {
+        let mut code = [[0u32; 4]; 80];
+        let mut asm = Asm::new(&mut code);
+        asm.mov(E8, aricode_gen7_eu::g(127).ud(), aricode_gen7_eu::g(0).ud())
+            .mov(E8, aricode_gen7_eu::g(1).ud(), Imm::ud(PATTERN));
+        for r in (2..126).step_by(2) {
+            asm.mov(E16, aricode_gen7_eu::g(r).ud(), Imm::ud(PATTERN));
+        }
+        asm.mov(E8, aricode_gen7_eu::g(126).ud(), Imm::ud(PATTERN))
+            .send(
+                E8,
+                Reg::null().ud(),
+                aricode_gen7_eu::g(127).ud(),
+                Message::thread_spawner_eot(),
+            );
+        let len = asm.finish().map_err(|_| 18u64)?.len();
+        self.run(g, &code[..len])
+    }
+
+    /// Threads that OR every register they did not write (g1 to g126) and
+    /// write it at their slot, with a mark that they ran. The slots that
+    /// ran, and those that saw the pattern.
+    fn read(&mut self, g: &mut Gpu) -> Result<(u32, u32), u64> {
+        use aricode_gen7_eu::g as r;
+        let write = Message::media_block_write(0, 1).map_err(|_| 18u64)?;
+        let mut code = [[0u32; 4]; 160];
+        let mut asm = Asm::new(&mut code);
+        asm.mov(E8, r(127).ud(), r(0).ud());
+        for k in 2..127 {
+            asm.or(E8, r(1).ud(), r(1).ud(), r(k).ud());
+        }
+        asm.and(E1, r(126).ud(), Reg::sr0().ud().scalar(), Imm::ud(7))
+            .shl(E1, r(126).ud(), r(126).ud().scalar(), Imm::ud(2))
+            .shr(E1, r(126).ud().sub(1), Reg::sr0().ud().scalar(), Imm::ud(8))
+            .and(
+                E1,
+                r(126).ud().sub(1),
+                r(126).ud().sub(1).scalar(),
+                Imm::ud(0x1F),
+            )
+            // What it saw: 32 bytes at x = thread * 32, y = row.
+            .mov(E8, r(2).ud(), r(127).ud())
+            .shl(E1, r(2).ud(), r(126).ud().scalar(), Imm::ud(3))
+            .mov(E1, r(2).ud().sub(1), r(126).ud().sub(1).scalar())
+            .mov(E1, r(2).ud().sub(2), Imm::ud(31))
+            .mov(E8, r(3).ud(), r(1).ud())
+            .send(E8, Reg::null().ud(), r(2).ud(), write)
+            // That it ran: 1 at x = thread * 4, y = 32 + row.
+            .mov(E8, r(4).ud(), r(127).ud())
+            .mov(E1, r(4).ud(), r(126).ud().scalar())
+            .add(
+                E1,
+                r(4).ud().sub(1),
+                r(126).ud().sub(1).scalar(),
+                Imm::ud(32),
+            )
+            .mov(E1, r(4).ud().sub(2), Imm::ud(3))
+            .mov(E8, r(5).ud(), Imm::ud(1))
+            .send(E8, Reg::null().ud(), r(4).ud(), write)
+            .send(
+                E8,
+                Reg::null().ud(),
+                r(127).ud(),
+                Message::thread_spawner_eot(),
+            );
+        let len = asm.finish().map_err(|_| 18u64)?.len();
+        self.out.fill(0);
+        self.run(g, &code[..len])?;
+        let (mut ran, mut seen) = (0, 0);
+        for row in 0..32usize {
+            for t in 0..8usize {
+                if self.out[(32 + row) * 64 + t] != 1 {
+                    continue;
+                }
+                ran += 1;
+                let at = row * 64 + t * 8;
+                if self.out[at..at + 8].iter().all(|&w| w == PATTERN) {
+                    seen += 1;
+                }
+                if self.out[at..at + 8].iter().any(|&w| w != 0 && w != PATTERN) {
+                    say(&[
+                        b"a slot saw neither zero nor the pattern: ",
+                        hex(self.out[at] as u64).s(),
+                    ]);
+                }
+            }
+        }
+        Ok((ran, seen))
+    }
+}
+
+/// The second client of the residue test: the kernel cleared what the last
+/// one left, so no register shows the pattern.
+fn residue_after_change(g: &mut Gpu, hardware: Handle) -> Result<(), u64> {
+    let r = g.report();
+    if r.render != 1 {
+        say(&[b"no render ring here"]);
+        return Err(18);
+    }
+    let mut res = Residue::new(g, hardware)?;
+    let (ran, seen) = res.read(g)?;
+    let r = g.report();
+    say(&[
+        b"the kernel's last clear reached ",
+        n(r.cleared_threads as u64).s(),
+        b" of ",
+        n(r.threads as u64).s(),
+        b" threads in ",
+        n(r.clear_us as u64).s(),
+        b" us; the pattern seen on ",
+        n(seen as u64).s(),
+        b" of ",
+        n(ran as u64).s(),
+        b" slots read",
+    ]);
+    if seen != 0 || ran == 0 {
+        say(&[b"RESIDUE: a new client saw the last one's registers"]);
+        return Err(21);
     }
     Ok(())
 }

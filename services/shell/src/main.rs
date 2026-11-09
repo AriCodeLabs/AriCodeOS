@@ -864,7 +864,16 @@ fn gpu() {
                 1 => {
                     print(b"; render ring ready (");
                     num(r.render_us as u64);
-                    print(b" us)");
+                    print(b" us), ");
+                    num(r.threads as u64);
+                    print(b" EU threads");
+                    if r.cleared_threads != 0 {
+                        print(b", last residue clear ");
+                        num(r.cleared_threads as u64);
+                        print(b" in ");
+                        num(r.clear_us as u64);
+                        print(b" us");
+                    }
                 }
                 2 => print(b"; render ring left off"),
                 _ => {}
