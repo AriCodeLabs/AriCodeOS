@@ -1327,10 +1327,11 @@ fn descriptors_and_surfaces_are_igts() {
 
 #[test]
 fn the_residue_clear_fills_every_slot_of_a_gt2() {
+    extern crate std;
     use crate::clear;
     use crate::compute;
     let mut code = [[0u32; 4]; 192];
-    let n = clear::program(&mut code).unwrap();
+    let n = clear::program(&mut code, 7).unwrap();
     // g127 to keep the header, the slot, 63 zeroings, the sweep, the mark,
     // the last zeroings and the end.
     assert!(n < 192, "{n} instructions");
@@ -1350,7 +1351,14 @@ fn the_residue_clear_fills_every_slot_of_a_gt2() {
     assert_eq!(state[0xC00 / 4..0xC00 / 4 + 2], [0xC40, 0xC80]);
     assert_eq!(state[0xC40 / 4 + 1], base + 2 * 4096);
     assert_eq!(state[0xC80 / 4 + 1], base + 4096);
-    assert_eq!(state[0xD40 / 4], 7, "the clear's number in the CURBE");
+    // The number is in the code, not the CURBE, which hands each thread of
+    // a group a section of its own.
+    assert_eq!((d.curbe_len, d.curbe_regs), (0, 0));
+    let mut other = [[0u32; 4]; 192];
+    clear::program(&mut other, 8).unwrap();
+    let differ: std::vec::Vec<usize> = (0..n).filter(|&i| code[i] != other[i]).collect();
+    assert_eq!(differ.len(), 1, "only the mark's immediate differs");
+    assert_eq!(code[differ[0]][3], 7);
     // GT1: one group of 36.
     let d = clear::prepare(&mut state, base, 1, 36).unwrap();
     assert_eq!((d.group, d.groups), ([36, 1, 1], [1, 1, 1]));

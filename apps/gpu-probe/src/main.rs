@@ -809,11 +809,28 @@ fn dispatches(g: &mut Gpu, hardware: Handle) -> Result<(), u64> {
         n(ran as u64).s(),
         b" thread slots read",
     ]);
+    // The same after the GPU sat idle longer than a change of client
+    // takes, so a clean second client owes nothing to the GT sleeping.
+    res.write(g)?;
+    sys::thread_sleep(IDLE_MS);
+    let (ran, seen) = res.read(g)?;
+    say(&[
+        b"residue after ",
+        n(IDLE_MS).s(),
+        b" ms idle: the pattern seen on ",
+        n(seen as u64).s(),
+        b" of ",
+        n(ran as u64).s(),
+        b" slots",
+    ]);
     res.write(g)?;
     say(&[b"pattern left for the next client: run gpu_probe 2"]);
     Ok(())
 }
 
+/// The idle time of the residue control, longer than `run gpu_probe 2`
+/// takes to start over SSH.
+const IDLE_MS: u64 = 5_000;
 /// What one thread writes into every register in the residue test.
 const PATTERN: u32 = 0xA5C3_5A3C;
 /// The residue test's memory: its state page, and a surface of 256 bytes

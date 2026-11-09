@@ -14,7 +14,10 @@
 //! blocks of zeros through the render cache, the 512 bytes Linux writes a
 //! thread to push the last client's lines out, and zeroes every register
 //! but g127, which holds its own header for the end. The program is
-//! assembled here by `aricode-gen7-eu`.
+//! assembled here by `aricode-gen7-eu`, for each clear, with the clear's
+//! number as an immediate: CURBE data would not do, since a group's
+//! threads each get their own section of it (PRM Vol 2 Part 2, 1.3.3; on
+//! the laptop only the first thread of each group got the number).
 //!
 //! The shared local memory keeps residue too, and nothing here clears it:
 //! it exists only while `L3CNTLREG2` turns it on, which the firmware leaves
@@ -48,7 +51,6 @@ const BINDING_TABLE: u32 = 0xC00;
 const SWEEP_STATE: u32 = 0xC40;
 const MARKS_STATE: u32 = 0xC80;
 const DESCRIPTOR: u32 = 0xD00;
-const CURBE: u32 = 0xD40;
 
 /// `GEN7_L3CNTLREG2` and its shared local memory enable (Mesa
 /// `genxml/gen70.xml`).
@@ -72,16 +74,16 @@ pub fn groups(threads: u16) -> Option<(u16, u16)> {
     }
 }
 
-/// Assembles the clear's EU program into `code`; its instructions.
-pub fn program(code: &mut [[u32; 4]]) -> Option<usize> {
+/// Assembles the clear's EU program, which marks its slots with `number`,
+/// into `code`; its instructions.
+pub fn program(code: &mut [[u32; 4]], number: u32) -> Option<usize> {
     let sweep = Message::media_block_write(0, 8).ok()?;
     let mark = Message::media_block_write(1, 1).ok()?;
     let mut asm = Asm::new(code);
     // g127: this thread's header, for the messages and the end.
     asm.mov(E8, g(127).ud(), g(0).ud())
         // g126.0: the slot's column in bytes (thread number * 4);
-        // g126.1: its row (half-slice and EU number); g126.2: the clear's
-        // number, from the CURBE (g1.0).
+        // g126.1: its row (half-slice and EU number).
         .and(E1, g(126).ud(), Reg::sr0().ud().scalar(), Imm::ud(7))
         .shl(E1, g(126).ud(), g(126).ud().scalar(), Imm::ud(2))
         .shr(E1, g(126).ud().sub(1), Reg::sr0().ud().scalar(), Imm::ud(8))
@@ -90,8 +92,7 @@ pub fn program(code: &mut [[u32; 4]]) -> Option<usize> {
             g(126).ud().sub(1),
             g(126).ud().sub(1).scalar(),
             Imm::ud(0x1F),
-        )
-        .mov(E1, g(126).ud().sub(2), g(1).ud().scalar());
+        );
     // Every register from g1 to g125 to zero.
     asm.mov(E8, g(1).ud(), Imm::ud(0));
     for r in (2..126).step_by(2) {
@@ -116,7 +117,7 @@ pub fn program(code: &mut [[u32; 4]]) -> Option<usize> {
         .mov(E1, g(11).ud(), g(126).ud().scalar())
         .mov(E1, g(11).ud().sub(1), g(126).ud().sub(1).scalar())
         .mov(E1, g(11).ud().sub(2), Imm::ud(3))
-        .mov(E8, g(12).ud(), g(126).ud().sub(2).scalar())
+        .mov(E8, g(12).ud(), Imm::ud(number))
         .send(E8, Reg::null().ud(), g(11).ud(), mark);
     // What held the slot, the number and the headers, to zero too; the
     // hardware has read each message's registers when it took it.
@@ -143,7 +144,7 @@ pub fn prepare(state: &mut [u32], base: u32, number: u32, threads: u16) -> Optio
     }
     state[..1024].fill(0);
     let mut code = [[0u32; 4]; CODE_SLOTS];
-    let n = program(&mut code)?;
+    let n = program(&mut code, number)?;
     for (i, inst) in code[..n].iter().enumerate() {
         let at = (CODE / 4) as usize + 4 * i;
         state[at..at + 4].copy_from_slice(inst);
@@ -173,13 +174,12 @@ pub fn prepare(state: &mut [u32], base: u32, number: u32, threads: u16) -> Optio
         kernel: CODE,
         binding_table: BINDING_TABLE,
         binding_entries: 2,
-        curbe_regs: 1,
+        curbe_regs: 0,
         slm_blocks: 0,
         barrier: false,
     }
     .encode()?;
     put(state, DESCRIPTOR, &descriptor);
-    put(state, CURBE, &[number]);
     let at = page(STATE_PAGE);
     Some(Dispatch {
         general_base: 0,
@@ -190,9 +190,9 @@ pub fn prepare(state: &mut [u32], base: u32, number: u32, threads: u16) -> Optio
         max_threads: threads,
         urb_entries: 0,
         urb_entry_regs: 0,
-        curbe_regs: 1,
-        curbe_offset: CURBE,
-        curbe_len: 32,
+        curbe_regs: 0,
+        curbe_offset: 0,
+        curbe_len: 0,
         descriptor_offset: DESCRIPTOR,
         descriptors: 1,
         descriptor: 0,
