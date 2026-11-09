@@ -294,7 +294,7 @@ mod blitter {
     use crate::gtt::Layout;
     use crate::power::Forcewake;
     use crate::regs::{self, bcs, masked_on};
-    use crate::ring::{self, Ring, REQUEST_DWORDS, SEQNO_INDEX};
+    use crate::ring::{self, Ring, REQUEST_EXTRA, SEQNO_INDEX};
     use crate::{Refusal, Timeouts};
 
     const SCREEN: Surface = Surface {
@@ -424,45 +424,62 @@ mod blitter {
     }
 
     #[test]
-    fn a_request_runs_the_batch_non_secure_then_stores_its_number() {
+    fn a_request_writes_the_commands_then_stores_its_number() {
         let mut mem = [0xDEAD_BEEFu32; 1024];
         let mut ring = Ring::new(1);
-        let tail = ring.request(&mut mem, 0, 0x40_0000, 7).unwrap();
-        assert_eq!(tail as usize, REQUEST_DWORDS * 4);
+        let body = [cmd::NOOP, cmd::FLUSH_DW, 0, 0];
+        let tail = ring.request(&mut mem, 0, &body, 7).unwrap();
+        // The odd-length no-op is not needed.
+        let len = body.len() + REQUEST_EXTRA - 1;
+        assert_eq!(tail as usize, len * 4);
         assert_eq!(tail % 8, 0, "TAIL moves in quadwords");
-        // First the TLB, so a page unmapped since the last batch is gone.
+        // First the TLB, so a page unmapped since the last request is gone.
         assert_eq!(mem[0], 0x26 << 23 | 1 | 1 << 21 | 1 << 18 | 1 << 14);
         assert_eq!(mem[1], (0x80 * 4) | (1 << 2));
         assert_eq!(&mem[2..4], &[0, 0]);
-        let m = &mem[4..];
-        assert_eq!(m[0], 0x31 << 23 | 1 << 8);
-        assert_eq!(m[1], 0x40_0000);
-        assert_eq!(m[2], 0x26 << 23 | 1 | 1 << 21 | 1 << 18 | 1 << 14);
-        assert_eq!(m[3], (SEQNO_INDEX * 4) | (1 << 2));
-        assert_eq!(m[4], 7);
-        assert_eq!(&m[5..8], &[0x21 << 23 | 1, SEQNO_INDEX * 4, 7]);
-        assert_eq!(&mem[REQUEST_DWORDS - 2..REQUEST_DWORDS], &[0x02 << 23, 0]);
-        assert_eq!(mem[REQUEST_DWORDS], 0xDEAD_BEEF, "nothing past the request");
+        // The commands themselves, never a jump to memory a client reaches.
+        assert_eq!(&mem[4..8], &body);
+        assert!(!mem[..len].contains(&(cmd::BATCH_START | cmd::BATCH_PPGTT)));
+        let m = &mem[8..];
+        assert_eq!(m[0], 0x26 << 23 | 1 | 1 << 21 | 1 << 18 | 1 << 14);
+        assert_eq!(m[1], (SEQNO_INDEX * 4) | (1 << 2));
+        assert_eq!(m[2], 7);
+        assert_eq!(&m[3..6], &[0x21 << 23 | 1, SEQNO_INDEX * 4, 7]);
+        assert_eq!(&mem[len - 2..len], &[0x02 << 23, 0]);
+        assert_eq!(mem[len], 0xDEAD_BEEF, "nothing past the request");
+        // An odd number of commands is padded to a quadword before the end.
+        let mut ring = Ring::new(1);
+        mem.fill(0xDEAD_BEEF);
+        let tail = ring.request(&mut mem, 0, &[cmd::NOOP; 3], 8).unwrap();
+        assert_eq!(tail as usize, (3 + REQUEST_EXTRA) * 4);
+        assert_eq!(
+            &mem[7..9],
+            &[cmd::NOOP, 0x26 << 23 | 1 | 1 << 21 | 1 << 18 | 1 << 14]
+        );
     }
 
     #[test]
     fn the_ring_waits_for_room_and_wraps_with_no_ops() {
         let mut mem = [0u32; 1024];
         let mut ring = Ring::new(1);
-        let per = (REQUEST_DWORDS * 4) as u32;
+        let body = [cmd::FLUSH_DW, 0, 0, cmd::NOOP];
+        let per = ((body.len() + REQUEST_EXTRA - 1) * 4) as u32;
         // With the engine still at 0, the ring takes what fits less the gap.
         let mut n = 0;
-        while ring.request(&mut mem, 0, 0x1000, n).is_some() {
+        while ring.request(&mut mem, 0, &body, n).is_some() {
             n += 1;
         }
         assert_eq!(n, (4096 - 64) / per);
         // Once the engine has consumed it all, the next wraps to 0.
         let head = ring.tail();
         mem.fill(0xAAAA_AAAA);
-        let tail = ring.request(&mut mem, head, 0x2000, 99).unwrap();
+        let tail = ring.request(&mut mem, head, &body, 99).unwrap();
         assert_eq!(tail, per);
-        assert_eq!(mem[5], 0x2000);
+        assert_eq!(&mem[4..8], &body);
         assert!(mem[(head / 4) as usize..].iter().all(|&w| w == cmd::NOOP));
+        // A request as big as the ring never fits.
+        let mut ring = Ring::new(1);
+        assert_eq!(ring.request(&mut mem, 0, &[cmd::NOOP; 1024], 1), None);
         assert!(ring::passed(5, 5) && ring::passed(6, 5) && !ring::passed(4, 5));
         assert!(ring::passed(2, u32::MAX), "numbers wrap");
     }
@@ -637,7 +654,7 @@ mod batches {
         let fill = cmd::fill(&DST, &ALL, 0x0033_6699).unwrap();
         let copy = cmd::copy(&DST, 0, 0, &SRC, &ALL).unwrap();
         let flush = [cmd::FLUSH_DW, 0, 0];
-        let mut b = batch(&[
+        let b = batch(&[
             &fill,
             &[cmd::NOOP],
             &copy,
@@ -645,44 +662,44 @@ mod batches {
             &[cmd::BATCH_END, 0xFFFF_FFFF],
         ]);
         let len = b.len();
-        assert_eq!(check(&mut b, START, &MAPS), Ok(len - 1), "stops at the end");
-        // A loop to its own start is allowed: only the reset ends it.
-        let mut looping = [cmd::BATCH_START | cmd::BATCH_PPGTT, 0];
-        assert_eq!(check(&mut looping, START, &MAPS), Ok(2));
-        assert_eq!(looping[1], START, "the copy's own address written in");
+        assert_eq!(
+            check(&b, &MAPS),
+            Ok(len - 2),
+            "the commands before the end, which is not written"
+        );
     }
 
     #[test]
     fn what_reached_the_registers_on_the_laptop_is_refused() {
         // ADR 0083's measurement, each part on its own.
-        let mut lri = [(0x22 << 23) | 1, 0x2_217C, 0x00AB_0000, cmd::BATCH_END];
-        assert_eq!(check(&mut lri, START, &MAPS), Err(Fault::Command(0)));
-        let mut store_index = [
+        let lri = [(0x22 << 23) | 1, 0x2_217C, 0x00AB_0000, cmd::BATCH_END];
+        assert_eq!(check(&lri, &MAPS), Err(Fault::Command(0)));
+        let store_index = [
             cmd::FLUSH_DW | cmd::FLUSH_DW_STORE_INDEX | cmd::FLUSH_DW_STORE_DWORD,
             0x240 | cmd::FLUSH_DW_GLOBAL_GTT,
             0xBAD0_0002,
             cmd::BATCH_END,
         ];
-        assert_eq!(
-            check(&mut store_index, START, &MAPS),
-            Err(Fault::Command(0))
-        );
-        let mut sdi = [(0x20 << 23) | (1 << 22) | 2, 0, 0x240, 1, cmd::BATCH_END];
-        assert_eq!(check(&mut sdi, START, &MAPS), Err(Fault::Command(0)));
+        assert_eq!(check(&store_index, &MAPS), Err(Fault::Command(0)));
+        let sdi = [(0x20 << 23) | (1 << 22) | 2, 0, 0x240, 1, cmd::BATCH_END];
+        assert_eq!(check(&sdi, &MAPS), Err(Fault::Command(0)));
         // A flush that names an address or data, even without the store bits.
         assert_eq!(
-            check(&mut [cmd::FLUSH_DW, 4, 0, cmd::BATCH_END], START, &MAPS),
+            check(&[cmd::FLUSH_DW, 4, 0, cmd::BATCH_END], &MAPS),
             Err(Fault::Command(0))
         );
-        // A jump anywhere but its own start, a secure one, MI_UPDATE_GTT.
-        let mut away = [cmd::BATCH_START | cmd::BATCH_PPGTT, 0x10_0000];
-        assert_eq!(check(&mut away, START, &MAPS), Err(Fault::Command(0)));
+        // Any jump (the ring runs commands, not batches; ADR 0086), a
+        // secure one, MI_UPDATE_GTT.
+        for to in [0, 0x8000, 0x10_0000] {
+            let jump = [cmd::BATCH_START | cmd::BATCH_PPGTT, to, cmd::BATCH_END];
+            assert_eq!(check(&jump, &MAPS), Err(Fault::Command(0)));
+        }
         assert_eq!(
-            check(&mut [cmd::BATCH_START, START], START, &MAPS),
+            check(&[cmd::BATCH_START, START], &MAPS),
             Err(Fault::Command(0))
         );
         assert_eq!(
-            check(&mut [(0x23 << 23) | 1, 0, 0], START, &MAPS),
+            check(&[(0x23 << 23) | 1, 0, 0], &MAPS),
             Err(Fault::Command(0))
         );
     }
@@ -691,7 +708,7 @@ mod batches {
     fn blits_must_stay_inside_the_mappings_to_the_byte() {
         let fill = |s: &Surface, r: &Rect| {
             let f = cmd::fill(s, r, 1).unwrap();
-            check(&mut batch(&[&f, &[cmd::BATCH_END]]), START, &MAPS)
+            check(&batch(&[&f, &[cmd::BATCH_END]]), &MAPS)
         };
         // The last byte of a mapping is fine; one more is not.
         let edge = Surface {
@@ -751,7 +768,7 @@ mod batches {
         )
         .unwrap();
         assert_eq!(
-            check(&mut batch(&[&copy, &[cmd::BATCH_END]]), START, &MAPS),
+            check(&batch(&[&copy, &[cmd::BATCH_END]]), &MAPS),
             Err(Fault::Outside(0))
         );
     }
@@ -762,7 +779,7 @@ mod batches {
         let with = |k: usize, v: u32| {
             let mut b = batch(&[&f, &[cmd::BATCH_END]]);
             b[k] = v;
-            check(&mut b, START, &MAPS)
+            check(&b, &MAPS)
         };
         assert_eq!(with(0, f[0] | 1 << 11), Err(Fault::Command(0)), "tiled");
         assert_eq!(with(1, f[1] | 1 << 30), Err(Fault::Command(0)), "clipping");
@@ -782,7 +799,7 @@ mod batches {
         let mut b = batch(&[&copy, &[cmd::BATCH_END]]);
         b[6] |= 1 << 16;
         assert_eq!(
-            check(&mut b, START, &MAPS),
+            check(&b, &MAPS),
             Err(Fault::Command(0)),
             "source pitch high bits"
         );
@@ -796,30 +813,23 @@ mod batches {
         assert_eq!(with(4, f[4] + 2), Err(Fault::Command(0)), "unaligned");
         let mut b = batch(&[&copy, &[cmd::BATCH_END]]);
         b[1] = (b[1] & !(0xFF << 16)) | 0xF0 << 16;
-        assert_eq!(
-            check(&mut b, START, &MAPS),
-            Err(Fault::Command(0)),
-            "copy rop"
-        );
+        assert_eq!(check(&b, &MAPS), Err(Fault::Command(0)), "copy rop");
         let rows = Rect {
             x1: 0,
             y1: 0,
             x2: 1024,
             y2: 8,
         };
-        let mut b = batch(&[
+        let b = batch(&[
             &cmd::copy(&DST, 0, 4, &DST, &rows).unwrap(),
             &[cmd::BATCH_END],
         ]);
-        assert!(
-            check(&mut b, START, &MAPS).is_ok(),
-            "one surface, pitch of 64s"
-        );
+        assert!(check(&b, &MAPS).is_ok(), "one surface, pitch of 64s");
         let mut raw = cmd::copy(&DST, 0, 0, &DST, &rows).unwrap();
         raw[7] = DST.address + 4096; // another base over the same bytes
-        let mut b = batch(&[&raw, &[cmd::BATCH_END]]);
+        let b = batch(&[&raw, &[cmd::BATCH_END]]);
         assert_eq!(
-            check(&mut b, START, &MAPS),
+            check(&b, &MAPS),
             Err(Fault::Command(0)),
             "overlap, two bases"
         );
@@ -828,13 +838,10 @@ mod batches {
     #[test]
     fn a_batch_must_end_within_itself() {
         let f = cmd::fill(&DST, &ALL, 1).unwrap();
-        assert_eq!(check(&mut { f }[..5], START, &MAPS), Err(Fault::Unended(0)));
-        assert_eq!(check(&mut { f }, START, &MAPS), Err(Fault::Unended(6)));
-        assert_eq!(check(&mut [], START, &MAPS), Err(Fault::Unended(0)));
-        assert_eq!(
-            check(&mut [cmd::FLUSH_DW, 0], START, &MAPS),
-            Err(Fault::Unended(0))
-        );
+        assert_eq!(check(&f[..5], &MAPS), Err(Fault::Unended(0)));
+        assert_eq!(check(&f, &MAPS), Err(Fault::Unended(6)));
+        assert_eq!(check(&[], &MAPS), Err(Fault::Unended(0)));
+        assert_eq!(check(&[cmd::FLUSH_DW, 0], &MAPS), Err(Fault::Unended(0)));
     }
 }
 

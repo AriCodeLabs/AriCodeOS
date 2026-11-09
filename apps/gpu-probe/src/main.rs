@@ -3,16 +3,17 @@
 //! `gpu_probe`: stage A of ADR 0080 (ADR 0083). Fills and copies a surface
 //! with the GPU's blitter and with the CPU, timed side by side and checked
 //! pixel by pixel; checks that the commands a non-secure batch could use to
-//! reach the blitter's registers are refused; hangs the engine on purpose
-//! and checks it is reset and works again. Then stage B (ADR 0086): EU
-//! kernels assembled here run on the render engine, igt's fill first, then
-//! one that writes each thread group's number, both checked byte by byte.
+//! reach the blitter's registers, or jump to a batch, are refused. Then
+//! stage B (ADR 0086): EU kernels assembled here run on the render engine,
+//! igt's fill first, then one that writes each thread group's number, both
+//! checked byte by byte; then one that never ends, which must be caught and
+//! reset, after which both engines must work.
 //!
 //! Exit codes: 0 all as expected; 2 no GPU engine here, and its calls
 //! refused cleanly; 10 setup failed; 11 a fill was wrong; 12 a copy was
 //! wrong; 13 a batch that must be refused was not, or something it aimed at
-//! changed; 14 a hang was not caught; 15 the engine did not work after its
-//! reset; 16 a call on an absent GPU was not refused as documented; 17 the
+//! changed; 14 an EU thread that never ends was not reset; 15 the engines
+//! did not work after that reset; 16 a call on an absent GPU was not refused as documented; 17 the
 //! GPU's clock could not be asked for, was given above what was asked, or
 //! did not speed the work up; 18 a dispatch could not be set up or did not
 //! finish; 19 a dispatch wrote the wrong bytes; 20 a dispatch the hardware
@@ -422,7 +423,7 @@ fn main(_arg: u64) -> u64 {
         0xBAD0_0003,
     )
     .expect("a well-formed fill");
-    let dangerous: [(&[u8], &[u32]); 4] = [
+    let dangerous: [(&[u8], &[u32]); 5] = [
         (
             b"register load into the blitter's page",
             &[(0x22 << 23) | 1, 0x2_217C, 0x00AB_0000],
@@ -440,6 +441,12 @@ fn main(_arg: u64) -> u64 {
             &[(0x20 << 23) | (1 << 22) | 2, 0, canary, 0xBAD0_0001],
         ),
         (b"fill past the client's memory", &past),
+        // The ring runs checked commands, never a batch in memory EU threads
+        // could rewrite (ADR 0086).
+        (
+            b"jump to its own start",
+            &[cmd::BATCH_START | cmd::BATCH_PPGTT, 0],
+        ),
     ];
     for (what, words) in dangerous {
         match g.run(words, WAIT_MS) {
@@ -473,41 +480,6 @@ fn main(_arg: u64) -> u64 {
         return 13;
     }
 
-    // 4. A hang: a batch that jumps to its own start.
-    let t0 = g.now();
-    let hang = [cmd::BATCH_START | cmd::BATCH_PPGTT, 0];
-    match g.run(&hang, 15_000) {
-        Err(Error::Hung) => {}
-        other => {
-            say(&[
-                b"a batch that never ends was not reset: ",
-                match other {
-                    Ok(_) => b"it finished".as_slice(),
-                    Err(e) => error_name(e),
-                },
-            ]);
-            return 14;
-        }
-    }
-    let r = g.report();
-    say(&[
-        b"hang caught and reset after ",
-        n((g.now() - t0) / 1000).s(),
-        b" ms; resets ",
-        n(after.resets).s(),
-        b" -> ",
-        n(r.resets).s(),
-    ]);
-    g.dst.fill(0);
-    match g.run(&fill, WAIT_MS) {
-        Ok(_) if g.dst.iter().all(|&p| p == colour) => {
-            say(&[b"after the reset the engine fills correctly"])
-        }
-        _ => {
-            say(&[b"the engine did not work after its reset"]);
-            return 15;
-        }
-    }
     if let Err(code) = dispatches(&mut g, hardware) {
         return code;
     }
@@ -745,6 +717,67 @@ fn dispatches(g: &mut Gpu, hardware: Handle) -> Result<(), u64> {
         return Err(20);
     }
     say(&[b"4 bad descriptors refused as invalid"]);
+
+    // 8. A hang (ADR 0086, B5): an EU thread that loops for ever. The
+    // heartbeat resets the render engine; then both engines work.
+    let mut asm = Asm::new(&mut code);
+    let top = asm.label();
+    asm.jmpi(None, top).emit(Inst::send(
+        E16,
+        Reg::null().uw(),
+        aricode_gen7_eu::g(112).d().scalar(),
+        Message::thread_spawner_eot().desc_as_d(),
+    ));
+    let Ok(looping) = asm.finish().map(|p| p.len()) else {
+        say(&[b"the looping kernel did not assemble"]);
+        return Err(18);
+    };
+    write_state(state, &code[..looping], 0).ok_or(18u64)?;
+    let mut one = out_dispatch();
+    one.groups = [1, 1, 1];
+    let resets = g.report().resets;
+    let t0 = g.now();
+    match run(g, &one) {
+        Err(Error::Hung) => {}
+        other => {
+            say(&[
+                b"an EU thread that never ends was not reset: ",
+                match other {
+                    Ok(_) => b"it finished".as_slice(),
+                    Err(e) => error_name(e),
+                },
+            ]);
+            return Err(14);
+        }
+    }
+    say(&[
+        b"EU hang caught and the render engine reset after ",
+        n((g.now() - t0) / 1000).s(),
+        b" ms; resets ",
+        n(resets).s(),
+        b" -> ",
+        n(g.report().resets).s(),
+    ]);
+    let Some(len) = fill_kernel(&mut code) else {
+        return Err(18);
+    };
+    write_state(state, &code[..len], 0x3C).ok_or(18u64)?;
+    out.fill(0);
+    let fine = run(g, &out_dispatch()).is_ok() && out.iter().all(|&w| w == 0x3C3C_3C3C);
+    let colour = 0x00C0_FFEE;
+    let blit = cmd::fill(&surface(DST_AT), &WHOLE, colour).map_err(|_| 18u64)?;
+    g.dst.fill(0);
+    let blitter = g.run(&blit, WAIT_MS).is_ok() && g.dst.iter().all(|&p| p == colour);
+    if !fine || !blitter {
+        say(&[
+            b"after the render reset: EU fill ",
+            if fine { b"right" } else { b"WRONG" },
+            b", blitter fill ",
+            if blitter { b"right" } else { b"WRONG" },
+        ]);
+        return Err(15);
+    }
+    say(&[b"after the render reset the EUs and the blitter fill correctly"]);
 
     // The EU threads reached nothing of the kernel's.
     let r = g.report();

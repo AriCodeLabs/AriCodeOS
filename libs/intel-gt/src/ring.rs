@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 // SPDX-License-Identifier: Apache-2.0
-//! The blitter's ring, which only the kernel writes (ADR 0083). Each request
-//! starts one client batch, non-secure in the PPGTT, then stores its number
-//! in the status page. The bring-up, the stop and the reset follow Linux's
+//! The engines' rings, which only the kernel writes (ADR 0083, 0086). Each
+//! blitter request holds one client batch's checked commands, then stores
+//! its number in the status page. The bring-up, the stop and the reset follow Linux's
 //! `xcs_resume`, `intel_engine_stop_cs` and `gen6_hw_domain_reset`, with the
 //! limits of PRM Vol 1 Part 4, 2.1.
 
@@ -28,10 +28,11 @@ const STORE_REPEATS: usize = 32;
 /// Bytes left between the tail and the head so a full ring never looks
 /// empty (Linux `__intel_ring_space`, a cache line).
 const GAP: u32 = 64;
-/// Dwords of one request: a TLB invalidation (4), so the batch sees the
-/// PPGTT as it is now; the start (2); flush and store (3); the repeated
-/// stores; a flush (3); the interrupt and a no-op.
-pub const REQUEST_DWORDS: usize = 4 + 2 + 3 + 3 * STORE_REPEATS + 3 + 2;
+/// Dwords of one request besides its commands: a TLB invalidation (4), so
+/// the commands see the PPGTT as it is now; flush and store (3); the
+/// repeated stores; a flush (3); the interrupt and a no-op; and one no-op
+/// more when the commands are an odd number, to end on a quadword.
+pub const REQUEST_EXTRA: usize = 4 + 3 + 3 * STORE_REPEATS + 3 + 2 + 1;
 
 /// Whether a request numbered `seqno` has finished, given the number last
 /// stored. Numbers wrap.
@@ -69,24 +70,29 @@ impl Ring {
             & (self.bytes - 1)
     }
 
-    /// Writes the commands that run the batch at `batch` (a PPGTT address)
-    /// and then store `seqno`; returns the new tail for `TAIL`, or `None` if
-    /// the ring has no room for it yet. A request that would cross the ring's
-    /// end starts again at 0, the rest filled with no-ops.
-    pub fn request(&mut self, mem: &mut [u32], head: u32, batch: u32, seqno: u32) -> Option<u32> {
-        let mut words = [cmd::NOOP; REQUEST_DWORDS];
+    /// Writes a request of `body` (checked blitter commands, no
+    /// `MI_BATCH_BUFFER_END`) that then stores `seqno`; returns the new tail
+    /// for `TAIL`, or `None` if the ring has no room for it yet. A request
+    /// that would cross the ring's end starts again at 0, the rest filled
+    /// with no-ops.
+    pub fn request(&mut self, mem: &mut [u32], head: u32, body: &[u32], seqno: u32) -> Option<u32> {
+        let mut before = [cmd::NOOP; 4];
+        before[0] = cmd::FLUSH_DW
+            | cmd::FLUSH_DW_STORE_DWORD
+            | cmd::FLUSH_DW_STORE_INDEX
+            | cmd::FLUSH_DW_INVALIDATE_TLB;
+        before[1] = SCRATCH_ADDR | cmd::FLUSH_DW_GLOBAL_GTT;
+        before[2] = 0;
+        let mut after = [cmd::NOOP; REQUEST_EXTRA - 4];
         let mut n = 0;
         let mut put = |w: u32| {
-            words[n] = w;
+            after[n] = w;
             n += 1;
         };
-        let flush = cmd::FLUSH_DW | cmd::FLUSH_DW_STORE_DWORD | cmd::FLUSH_DW_STORE_INDEX;
-        put(flush | cmd::FLUSH_DW_INVALIDATE_TLB);
-        put(SCRATCH_ADDR | cmd::FLUSH_DW_GLOBAL_GTT);
-        put(0);
-        put(cmd::NOOP);
-        put(cmd::BATCH_START | cmd::BATCH_PPGTT);
-        put(batch);
+        // An odd body leaves the rest one dword off a quadword.
+        if body.len() % 2 == 1 {
+            put(cmd::NOOP);
+        }
         put(cmd::FLUSH_DW
             | cmd::FLUSH_DW_INVALIDATE_TLB
             | cmd::FLUSH_DW_STORE_DWORD
@@ -103,8 +109,7 @@ impl Ring {
         put(0);
         put(cmd::USER_INTERRUPT);
         put(cmd::NOOP);
-        debug_assert_eq!(n, REQUEST_DWORDS);
-        self.emit(mem, head, &words)
+        self.emit_parts(mem, head, &[&before, body, &after[..n]])
     }
 
     /// Writes `words`, a whole number of quadwords (TAIL moves in them),
@@ -112,10 +117,16 @@ impl Ring {
     /// yet. Words that would cross the ring's end start again at 0, the rest
     /// filled with no-ops.
     pub fn emit(&mut self, mem: &mut [u32], head: u32, words: &[u32]) -> Option<u32> {
-        if !words.len().is_multiple_of(2) {
+        self.emit_parts(mem, head, &[words])
+    }
+
+    /// [`Ring::emit`] of `parts` one after another, as one piece.
+    fn emit_parts(&mut self, mem: &mut [u32], head: u32, parts: &[&[u32]]) -> Option<u32> {
+        let len: usize = parts.iter().map(|p| p.len()).sum();
+        if !len.is_multiple_of(2) {
             return None;
         }
-        let need = (words.len() * 4) as u32;
+        let need = (len * 4) as u32;
         let to_end = self.bytes - self.tail;
         let wrap = if need > to_end { to_end } else { 0 };
         if need >= self.bytes
@@ -129,8 +140,11 @@ impl Ring {
             mem[at..(self.bytes / 4) as usize].fill(cmd::NOOP);
             at = 0;
         }
-        mem[at..at + words.len()].copy_from_slice(words);
-        self.tail = ((at + words.len()) * 4) as u32 % self.bytes;
+        for p in parts {
+            mem[at..at + p.len()].copy_from_slice(p);
+            at += p.len();
+        }
+        self.tail = (at * 4) as u32 % self.bytes;
         Some(self.tail)
     }
 

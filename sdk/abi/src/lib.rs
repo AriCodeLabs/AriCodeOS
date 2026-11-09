@@ -14,7 +14,7 @@
 //!
 //! During `0.x` the ABI may change (section 74). Current version: 13
 //! (ADR 0086: `gpu_dispatch` and [`gpu::Dispatch`]; `gpu_wait` takes its
-//! numbers too). Version 12 (ADR 0083: `gpu_frequency`). Version 11 (ADR 0084: the `MEM` object, `mem_create`, and `mmio_map` and `gpu_map`
+//! numbers too; `gpu_submit` no longer takes `MI_BATCH_BUFFER_START`). Version 12 (ADR 0083: `gpu_frequency`). Version 11 (ADR 0084: the `MEM` object, `mem_create`, and `mmio_map` and `gpu_map`
 //! taking it). Version 10 (ADR 0083: the `GPU` object at `INIT_GPU`, which moves `INIT_PS2` one
 //! on; `gpu_map`, `gpu_unmap`, `gpu_submit`, `gpu_wait`; `Error::Busy` and
 //! `Error::Hung`; `sysinfo::GPU`). Version 9 (ADR 0082: threads in a
@@ -527,18 +527,18 @@ pub mod nr {
     pub const GPU_UNMAP: u64 = 44;
     /// `gpu_submit(gpu, ptr, len) -> number`: runs the batch of `len` bytes
     /// at `ptr` in the caller's memory (8 to 4096, a multiple of 8) after those
-    /// submitted before. The kernel copies it into a page of its own, checks
-    /// the copy and runs the copy, non-secure in the client's address space
-    /// (ADR 0083): `MI_NOOP`, `MI_BATCH_BUFFER_END`, `MI_FLUSH_DW` without a
-    /// store, linear 32-bit `XY_COLOR_BLT` (raster operation 0xF0) and
-    /// `XY_SRC_COPY_BLT` (0xCC) at 4-byte aligned addresses, entirely inside
-    /// the client's mappings (source and destination may overlap only as the
-    /// same surface with a pitch of whole 64 bytes), and
-    /// `MI_BATCH_BUFFER_START` with the PPGTT bit (bit 8) to address 0,
-    /// meaning the batch's own start. Anything else: `Denied`, nothing runs,
-    /// and a `Fault` event records where the check stopped. The number names
-    /// the batch for `gpu_wait`. `Busy` while the ring or the copies are full,
-    /// or if another process is the client; `Hung` once a reset has failed.
+    /// submitted before. The kernel copies it, checks the copy and writes its
+    /// commands into the blitter's ring, where they address the client's
+    /// GPU address space (ADR 0083, 0086): `MI_NOOP`, `MI_BATCH_BUFFER_END`
+    /// (the end of the batch), `MI_FLUSH_DW` without a store, linear 32-bit
+    /// `XY_COLOR_BLT` (raster operation 0xF0) and `XY_SRC_COPY_BLT` (0xCC)
+    /// at 4-byte aligned addresses, entirely inside the client's mappings
+    /// (source and destination may overlap only as the same surface with a
+    /// pitch of whole 64 bytes). Anything else, `MI_BATCH_BUFFER_START`
+    /// included since ABI 13: `Denied`, nothing runs, and a `Fault` event
+    /// records where the check stopped. The number names the batch for
+    /// `gpu_wait`. `Busy` while the ring is full, or if another process is
+    /// the client; `Hung` once a reset has failed.
     pub const GPU_SUBMIT: u64 = 45;
     /// `gpu_wait(gpu, number, timeout_ms)`: until the batch has finished.
     /// `Timeout` at the deadline; `Hung` if no batch finished for

@@ -1,10 +1,13 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 // SPDX-License-Identifier: Apache-2.0
-//! The GPU's engine on Intel Ivy Bridge (ADR 0083): the kernel owns the
-//! global GTT, the one client's PPGTT, the blitter's ring and every register;
-//! a program with the `GPU` object maps its DMA buffers and submits batches,
-//! which the kernel copies, checks and runs non-secure in the program's own
-//! address space. The decisions live in `aricode-intel-gt`; this is the glue.
+//! The GPU's engine on Intel Ivy Bridge (ADR 0083, 0086): the kernel owns
+//! the global GTT, the one client's PPGTT, both rings and every register; a
+//! program with the `GPU` object maps its memory, submits blitter batches,
+//! whose commands the kernel copies, checks and writes into the blitter's
+//! ring, and dispatches EU kernels, whose commands the kernel writes into
+//! the render ring from a descriptor. Nothing the kernel checked or wrote
+//! is in the client's PPGTT, where EU threads could rewrite it. The
+//! decisions live in `aricode-intel-gt`; this is the glue.
 //!
 //! The engine is never used under a spin lock: resets and waits on it take
 //! up to tens of milliseconds, so a call takes the engine out of `GPU`, works
@@ -36,12 +39,6 @@ use log::{info, warn};
 
 /// Pages of the ring (Linux's 16 KiB).
 const RING_PAGES: u32 = 4;
-/// The kernel's copies of client batches: this many pages, each holding one
-/// batch of up to a page, mapped in the client's PPGTT from `COPY_AT`, below
-/// `gpu::FIRST`, where no mapping of the client's can reach them.
-const COPIES: usize = 4;
-const COPY_AT: u32 = 0x8000;
-const _: () = assert!(COPY_AT as u64 + COPIES as u64 * 4096 <= aricode_abi::gpu::FIRST);
 /// Mappings a client may hold (audit M4): bounds the kernel's memory and the
 /// check's work per batch.
 const MAX_MAPS: usize = 256;
@@ -105,7 +102,6 @@ struct Pages {
     scratch: ObjectRef,
     status: ObjectRef,
     ring: ObjectRef,
-    copies: ObjectRef,
     /// The PPGTT's 512 tables, contiguous: every directory entry is written
     /// once, at boot, and never changes (audit M3).
     tables: ObjectRef,
@@ -115,12 +111,11 @@ struct Pages {
 }
 
 impl Pages {
-    fn all(self) -> [ObjectRef; 7] {
+    fn all(self) -> [ObjectRef; 6] {
         [
             self.scratch,
             self.status,
             self.ring,
-            self.copies,
             self.tables,
             self.render_status,
             self.render_ring,
@@ -195,7 +190,6 @@ struct Engine {
     pages: Pages,
     scratch_pte: u32,
     /// The number of the request that last used each copy page.
-    copy_seq: [u32; COPIES],
     maps: Vec<Mapping>,
     blit: Track,
     render: Track,
@@ -427,7 +421,6 @@ fn bring_up(
         scratch: alloc(1)?,
         status: alloc(1)?,
         ring: alloc(RING_PAGES)?,
-        copies: alloc(COPIES as u32)?,
         tables: alloc(layout.directory_entries)?,
         render_status: alloc(1)?,
         render_ring: alloc(RING_PAGES)?,
@@ -448,11 +441,6 @@ fn bring_up(
         let llc = |p: u64| gtt::encode(p, Cache::Llc).ok_or(Refusal::GttSize);
         let tables = dwords(phys(&pages.tables), layout.directory_entries);
         tables.fill(scratch_pte);
-        for i in 0..COPIES {
-            let (dir, entry) = ppgtt::split(COPY_AT + i as u32 * FRAME_SIZE as u32);
-            tables[(dir * ppgtt::TABLE_ENTRIES + entry) as usize] =
-                llc(phys(&pages.copies) + i as u64 * FRAME_SIZE)?;
-        }
         flush_lines(tables.as_ptr(), tables.len() * 4);
         // Every entry the firmware did not use points at the scratch page;
         // then the status page and the ring, cached in the LLC as Linux maps
@@ -526,7 +514,6 @@ fn bring_up(
         hang_us,
         pages,
         scratch_pte,
-        copy_seq: [0; COPIES],
         maps: Vec::new(),
         blit: Track::new(),
         render: Track::new(),
@@ -1025,14 +1012,15 @@ fn ensure_ppgtt(e: &mut Engine, regs: &mut Bar0, which: Which) -> bool {
 }
 
 /// `gpu_submit`: the batch at `ptr`, `len` bytes of the caller's memory, is
-/// copied into one of the kernel's pages, checked there, and that copy runs
-/// (ADR 0083: a non-secure batch reaches the blitter's registers).
+/// copied, checked, and its commands written into the blitter's ring (ADR
+/// 0083: a non-secure batch reaches the blitter's registers; ADR 0086: EU
+/// threads could rewrite a checked copy left in the PPGTT).
 pub fn submit(ptr: u64, len: u64) -> Result<u64, Error> {
     if !(8..=FRAME_SIZE).contains(&len) || !len.is_multiple_of(8) {
         return Err(Error::Invalid);
     }
     let bytes = process::copy_from_user(ptr, len)?;
-    let mut words: Vec<u32> = bytes
+    let words: Vec<u32> = bytes
         .as_chunks::<4>()
         .0
         .iter()
@@ -1044,12 +1032,7 @@ pub fn submit(ptr: u64, len: u64) -> Result<u64, Error> {
     }
     claim()?;
     let e = &mut *e;
-    let slot = e.blit.next as usize % COPIES;
     let done = finished(e, Which::Blitter);
-    if e.copy_seq[slot] != 0 && !ring::passed(done, e.copy_seq[slot]) {
-        return Err(Error::Busy);
-    }
-    let at = COPY_AT + slot as u32 * FRAME_SIZE as u32;
     let maps: Vec<Range> = e
         .maps
         .iter()
@@ -1058,7 +1041,7 @@ pub fn submit(ptr: u64, len: u64) -> Result<u64, Error> {
             end: m.address as u64 + m.pages as u64 * FRAME_SIZE,
         })
         .collect();
-    let used = match check::check(&mut words, at, &maps) {
+    let used = match check::check(&words, &maps) {
         Ok(n) => n,
         Err(fault) => {
             process::record_event(
@@ -1077,16 +1060,17 @@ pub fn submit(ptr: u64, len: u64) -> Result<u64, Error> {
     let head = awake.read(bcs::HEAD);
     let idle_before = head & bcs::HEAD_ADDR == e.ring.tail();
     let seqno = e.blit.next;
-    let copy = &mut dwords(phys(&e.pages.copies), COPIES as u32)[slot * 1024..(slot + 1) * 1024];
-    copy[..used].copy_from_slice(&words[..used]);
     let tail = e
         .ring
-        .request(dwords(phys(&e.pages.ring), RING_PAGES), head, at, seqno)
+        .request(
+            dwords(phys(&e.pages.ring), RING_PAGES),
+            head,
+            &words[..used],
+            seqno,
+        )
         .ok_or(Error::Busy)?;
     e.blit.take_number();
-    e.copy_seq[slot] = seqno;
-    // The copy's and the ring's writes reach memory before the engine is
-    // told of them.
+    // The ring's writes reach memory before the engine is told of them.
     // SAFETY: a fence touches no memory.
     unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
     ring::submit(&mut awake, &regs::BLITTER, tail);
