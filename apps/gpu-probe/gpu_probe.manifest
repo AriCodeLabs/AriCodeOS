@@ -1,5 +1,6 @@
-# Stage A of ADR 0080 (ADR 0083): the GPU, and the system's clock to time it and its
-# report to read back what batches reached. Two 3 MiB surfaces and a batch.
+# Stages A and B of ADR 0080 (ADR 0083, 0086): the GPU, and the system's clock to time it and
+# its report to read back what batches reached. Two 3 MiB surfaces and a batch; for
+# `run gpu_probe 3` five 4 MiB matrices more (A, B, C, the CPU's C and room), 26 MiB in all.
 name = gpu_probe
 caps = system, gpu
-memory = 8M
+memory = 32M

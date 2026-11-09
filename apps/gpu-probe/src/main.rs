@@ -3,20 +3,31 @@
 //! `gpu_probe`: stage A of ADR 0080 (ADR 0083). Fills and copies a surface
 //! with the GPU's blitter and with the CPU, timed side by side and checked
 //! pixel by pixel; checks that the commands a non-secure batch could use to
-//! reach the blitter's registers are refused; hangs the engine on purpose
-//! and checks it is reset and works again.
+//! reach the blitter's registers, or jump to a batch, are refused. Then
+//! stage B (ADR 0086): EU kernels assembled here run on the render engine,
+//! igt's fill first, then one that writes each thread group's number, both
+//! checked byte by byte; then one that never ends, which must be caught and
+//! reset, after which both engines must work.
 //!
 //! Exit codes: 0 all as expected; 2 no GPU engine here, and its calls
 //! refused cleanly; 10 setup failed; 11 a fill was wrong; 12 a copy was
 //! wrong; 13 a batch that must be refused was not, or something it aimed at
-//! changed; 14 a hang was not caught; 15 the engine did not work after its
-//! reset; 16 a call on an absent GPU was not refused as documented; 17 the
+//! changed; 14 an EU thread that never ends was not reset; 15 the engines
+//! did not work after that reset; 16 a call on an absent GPU was not refused as documented; 17 the
 //! GPU's clock could not be asked for, was given above what was asked, or
-//! did not speed the work up.
+//! did not speed the work up; 18 a dispatch could not be set up or did not
+//! finish; 19 a dispatch wrote the wrong bytes; 20 a dispatch the hardware
+//! would not take was not refused; 21 (`run gpu_probe 2`, the second client
+//! of the residue test) a register showed what the last client left; 22
+//! (`run gpu_probe 3`, the matrix multiply) the GPU's product differed
+//! from the CPU's.
 #![no_std]
 #![no_main]
 
+use aricode_gen7_eu::{g, Asm, ExecSize::*, Imm, Inst, Message, Reg};
 use aricode_intel_gt::cmd::{self, Rect, Surface};
+use aricode_intel_gt::compute::{self, Descriptor};
+use aricode_rt::sys::abi::gpu::{Dispatch, DISPATCH_NUMBER};
 use aricode_rt::sys::abi::sysinfo::{self, GpuReport};
 use aricode_rt::sys::{self, kind, permissions, time, Error, Handle};
 use aricode_rt::{fmt_hex, fmt_u64};
@@ -28,6 +39,9 @@ const BYTES: u64 = PITCH as u64 * HEIGHT as u64;
 /// Where each surface sits in the GPU's address space.
 const SRC_AT: u64 = 0x10_0000;
 const DST_AT: u64 = 0x50_0000;
+/// Stage B: the dispatch's state and EU code, and the surface it writes.
+const STATE_AT: u64 = 0xA0_0000;
+const OUT_AT: u64 = 0xB0_0000;
 const RUNS: usize = 8;
 const WAIT_MS: u64 = 5_000;
 
@@ -82,6 +96,8 @@ fn error_name(e: Error) -> &'static [u8] {
         Error::Busy => b"busy",
         Error::Invalid => b"invalid",
         Error::NotFound => b"no GPU",
+        Error::Limit => b"over a limit (the manifest's memory?)",
+        Error::TooBig => b"too big",
         _ => b"another error",
     }
 }
@@ -185,7 +201,7 @@ fn map(
     Ok(unsafe { core::slice::from_raw_parts_mut(virt as *mut u32, (bytes / 4) as usize) })
 }
 
-fn main(_arg: u64) -> u64 {
+fn main(arg: u64) -> u64 {
     let (mut gpu, mut system, mut hardware) = (None, None, None);
     permissions::granted(|h, _| {
         if permissions::is(h, kind::GPU) {
@@ -217,6 +233,7 @@ fn main(_arg: u64) -> u64 {
         let refused = sys::gpu_submit(gpu, &end) == Err(Error::NotFound)
             && sys::gpu_wait(gpu, 1, 0) == Err(Error::NotFound)
             && sys::gpu_frequency(gpu, 650) == Err(Error::NotFound)
+            && sys::gpu_dispatch(gpu, &Dispatch::default()) == Err(Error::NotFound)
             && sys::gpu_unmap(gpu, SRC_AT) == Err(Error::NotFound);
         let mapped = sys::dma_alloc(hardware, 4096).map(|d| sys::gpu_map(gpu, d, SRC_AT));
         if !refused || mapped != Ok(Err(Error::NotFound)) {
@@ -243,6 +260,22 @@ fn main(_arg: u64) -> u64 {
             return 10;
         }
     };
+    // `run gpu_probe 2`: the second client of the residue test (ADR 0086,
+    // B6), after a whole run left a pattern in the EU registers.
+    if arg == 2 {
+        return match residue_after_change(&mut g, hardware) {
+            Ok(()) => 0,
+            Err(code) => code,
+        };
+    }
+    // `run gpu_probe 3`: a matrix multiply on the EUs against the CPU, at
+    // each clock, with the heat (ADR 0086, B7).
+    if arg == 3 {
+        return match sgemm(&mut g, hardware) {
+            Ok(()) => 0,
+            Err(code) => code,
+        };
+    }
     let r = g.report();
     say(&[
         b"engine ready at ",
@@ -411,7 +444,7 @@ fn main(_arg: u64) -> u64 {
         0xBAD0_0003,
     )
     .expect("a well-formed fill");
-    let dangerous: [(&[u8], &[u32]); 4] = [
+    let dangerous: [(&[u8], &[u32]); 5] = [
         (
             b"register load into the blitter's page",
             &[(0x22 << 23) | 1, 0x2_217C, 0x00AB_0000],
@@ -429,6 +462,12 @@ fn main(_arg: u64) -> u64 {
             &[(0x20 << 23) | (1 << 22) | 2, 0, canary, 0xBAD0_0001],
         ),
         (b"fill past the client's memory", &past),
+        // The ring runs checked commands, never a batch in memory EU threads
+        // could rewrite (ADR 0086).
+        (
+            b"jump to its own start",
+            &[cmd::BATCH_START | cmd::BATCH_PPGTT, 0],
+        ),
     ];
     for (what, words) in dangerous {
         match g.run(words, WAIT_MS) {
@@ -462,43 +501,839 @@ fn main(_arg: u64) -> u64 {
         return 13;
     }
 
-    // 4. A hang: a batch that jumps to its own start.
-    let t0 = g.now();
-    let hang = [cmd::BATCH_START | cmd::BATCH_PPGTT, 0];
-    match g.run(&hang, 15_000) {
-        Err(Error::Hung) => {}
-        other => {
-            say(&[
-                b"a batch that never ends was not reset: ",
-                match other {
-                    Ok(_) => b"it finished".as_slice(),
-                    Err(e) => error_name(e),
-                },
-            ]);
-            return 14;
-        }
-    }
-    let r = g.report();
-    say(&[
-        b"hang caught and reset after ",
-        n((g.now() - t0) / 1000).s(),
-        b" ms; resets ",
-        n(after.resets).s(),
-        b" -> ",
-        n(r.resets).s(),
-    ]);
-    g.dst.fill(0);
-    match g.run(&fill, WAIT_MS) {
-        Ok(_) if g.dst.iter().all(|&p| p == colour) => {
-            say(&[b"after the reset the engine fills correctly"])
-        }
-        _ => {
-            say(&[b"the engine did not work after its reset"]);
-            return 15;
-        }
+    if let Err(code) = dispatches(&mut g, hardware) {
+        return code;
     }
     say(&[b"done"]);
     0
 }
 
+/// Where each piece of a dispatch's state sits in its page (offsets from
+/// the bases, which are all the page's address).
+const CODE: usize = 0x000;
+const CURBE: usize = 0x200;
+const BINDING_TABLE: usize = 0x240;
+const SURFACE_STATE: usize = 0x280;
+const DESCRIPTOR: usize = 0x2C0;
+/// The surface: 16 by 16 thread groups, each writing 16 bytes of a row.
+const OUT_WIDTH: u32 = 256;
+const OUT_HEIGHT: u32 = 16;
+const GROUPS: u32 = OUT_WIDTH / 16;
+
+/// Assembles a kernel that writes one 16-byte row block per thread group,
+/// at x = group X * 16 and y = group Y, of the byte `value` leaves in g1.0
+/// (igt's `gpgpu_fill.gxa`, from its second instruction).
+fn row_block_kernel(code: &mut [[u32; 4]], value: impl FnOnce(&mut Asm)) -> Option<usize> {
+    let write = Message::media_block_write(0, 2).ok()?.desc_as_d();
+    let eot = Message::thread_spawner_eot().desc_as_d();
+    let mut asm = Asm::new(code);
+    value(&mut asm);
+    asm.mul(E1, g(2).ud(), g(0).ud().sub(1).scalar(), Imm::ud(0x10))
+        .mov(E1, g(2).ud().sub(1), g(0).ud().sub(6).scalar())
+        .mov(E8, g(4).ud(), g(0).ud())
+        .mov(E2, g(4).ud(), g(2).ud().region(2, 2, 1))
+        .mov(E1, g(4).ud().sub(2), Imm::ud(0xf))
+        .mov(E16, g(5).ud(), g(1).ud().scalar())
+        .emit(Inst::send(E16, Reg::acc0().uw(), g(4).d().scalar(), write))
+        .mov(E8, g(112).ud(), g(0).ud())
+        .emit(Inst::send(E16, Reg::null().uw(), g(112).d().scalar(), eot));
+    asm.finish().ok().map(|p| p.len())
+}
+
+/// igt's fill: the byte from the CURBE data (g1), replicated.
+fn fill_kernel(code: &mut [[u32; 4]]) -> Option<usize> {
+    row_block_kernel(code, |asm| {
+        asm.mov(E4, g(1).ub(), g(1).ub().scalar());
+    })
+}
+
+/// Each group writes its number, X + 16 * Y, replicated.
+fn group_kernel(code: &mut [[u32; 4]]) -> Option<usize> {
+    row_block_kernel(code, |asm| {
+        asm.shl(E1, g(1).ud(), g(0).ud().sub(6).scalar(), Imm::ud(4))
+            .add(E1, g(1).ud(), g(1).ud().scalar(), g(0).ud().sub(1).scalar())
+            .mov(E4, g(1).ub(), g(1).ub().scalar());
+    })
+}
+
+/// The dispatch every kernel here runs with: one SIMD16 thread a group,
+/// GROUPS by OUT_HEIGHT groups, one CURBE register.
+fn out_dispatch() -> Dispatch {
+    Dispatch {
+        general_base: 0,
+        surface_base: STATE_AT as u32,
+        dynamic_base: STATE_AT as u32,
+        instruction_base: STATE_AT as u32,
+        scratch: 0,
+        max_threads: 1,
+        urb_entries: 0,
+        urb_entry_regs: 0,
+        curbe_regs: 1,
+        curbe_offset: CURBE as u32,
+        curbe_len: 32,
+        descriptor_offset: DESCRIPTOR as u32,
+        descriptors: 1,
+        descriptor: 0,
+        simd: 16,
+        group: [1, 1, 1],
+        start: [0, 0, 0],
+        groups: [GROUPS, OUT_HEIGHT, 1],
+        right_mask: 0xFFFF,
+        bottom_mask: 0xFFFF_FFFF,
+    }
+}
+
+/// Writes the state of a dispatch of `code` into `state`, its CURBE data
+/// `curbe`.
+fn write_state(state: &mut [u32], code: &[[u32; 4]], curbe: u32) -> Option<()> {
+    state.fill(0);
+    for (i, inst) in code.iter().enumerate() {
+        state[CODE / 4 + 4 * i..CODE / 4 + 4 * i + 4].copy_from_slice(inst);
+    }
+    state[CURBE / 4] = curbe;
+    state[BINDING_TABLE / 4] = SURFACE_STATE as u32;
+    let surface = compute::surface_2d(
+        compute::FORMAT_R8_UNORM,
+        OUT_AT as u32,
+        OUT_WIDTH,
+        OUT_HEIGHT,
+        OUT_WIDTH,
+    )?;
+    state[SURFACE_STATE / 4..SURFACE_STATE / 4 + 8].copy_from_slice(&surface);
+    let descriptor = Descriptor {
+        kernel: CODE as u32,
+        binding_table: BINDING_TABLE as u32,
+        binding_entries: 1,
+        curbe_regs: 1,
+        slm_blocks: 0,
+        barrier: false,
+    }
+    .encode()?;
+    state[DESCRIPTOR / 4..DESCRIPTOR / 4 + 8].copy_from_slice(&descriptor);
+    Some(())
+}
+
+/// Stage B (ADR 0086): EU kernels on the render engine.
+fn dispatches(g: &mut Gpu, hardware: Handle) -> Result<(), u64> {
+    let before = g.report();
+    if before.render != 1 {
+        say(&[
+            b"no render ring here (state ",
+            n(before.render as u64).s(),
+            b")",
+        ]);
+        let refused = sys::gpu_dispatch(g.gpu, &out_dispatch()) == Err(Error::NotFound);
+        if !refused {
+            say(&[b"a dispatch without a render ring was not refused with NotFound"]);
+            return Err(20);
+        }
+        return Ok(());
+    }
+    let state = map(Some(hardware), g.gpu, STATE_AT, 4096).map_err(|e| {
+        say(&[b"compute setup failed: ", error_name(e)]);
+        18u64
+    })?;
+    let out = map(None, g.gpu, OUT_AT, 4096).map_err(|e| {
+        say(&[b"compute setup failed: ", error_name(e)]);
+        18u64
+    })?;
+    let mut code = [[0u32; 4]; 32];
+    let run = |g: &mut Gpu, d: &Dispatch| -> Result<u64, Error> {
+        let t0 = g.now();
+        let number = sys::gpu_dispatch(g.gpu, d)?;
+        sys::gpu_wait(g.gpu, number, WAIT_MS)?;
+        Ok(g.now() - t0)
+    };
+
+    // 5. igt's fill, every byte the CURBE's.
+    let Some(len) = fill_kernel(&mut code) else {
+        say(&[b"the fill kernel did not assemble"]);
+        return Err(18);
+    };
+    if write_state(state, &code[..len], 0xA5).is_none() {
+        say(&[b"the dispatch's state did not encode"]);
+        return Err(18);
+    }
+    out.fill(0);
+    let took = run(g, &out_dispatch()).map_err(|e| {
+        say(&[b"the fill dispatch failed: ", error_name(e)]);
+        18u64
+    })?;
+    if let Some(i) = out.iter().position(|&w| w != 0xA5A5_A5A5) {
+        say(&[
+            b"FILL WRONG at byte ",
+            n(4 * i as u64).s(),
+            b": ",
+            hex(out[i] as u64).s(),
+        ]);
+        return Err(19);
+    }
+    say(&[
+        b"EU fill: ",
+        n((GROUPS * OUT_HEIGHT) as u64).s(),
+        b" thread groups, every byte right, in ",
+        n(took).s(),
+        b" us",
+    ]);
+
+    // 6. Each group's number, so a group run twice, not at all, or in the
+    // wrong place shows.
+    let Some(len) = group_kernel(&mut code) else {
+        say(&[b"the group kernel did not assemble"]);
+        return Err(18);
+    };
+    write_state(state, &code[..len], 0).ok_or(18u64)?;
+    out.fill(0);
+    let took = run(g, &out_dispatch()).map_err(|e| {
+        say(&[b"the group dispatch failed: ", error_name(e)]);
+        18u64
+    })?;
+    let bytes = out.iter().flat_map(|w| w.to_le_bytes());
+    for (i, b) in bytes.enumerate() {
+        let (x, y) = (i as u32 % OUT_WIDTH, i as u32 / OUT_WIDTH);
+        let want = (x / 16 + GROUPS * y) as u8;
+        if b != want {
+            say(&[
+                b"GROUP WRONG at x ",
+                n(x as u64).s(),
+                b" y ",
+                n(y as u64).s(),
+                b": ",
+                n(b as u64).s(),
+                b", want ",
+                n(want as u64).s(),
+            ]);
+            return Err(19);
+        }
+    }
+    say(&[
+        b"EU groups: each of ",
+        n((GROUPS * OUT_HEIGHT) as u64).s(),
+        b" wrote its own number, in ",
+        n(took).s(),
+        b" us",
+    ]);
+
+    // 7. Descriptors the hardware would not take are refused, and a number
+    // never given is not waited for.
+    let mut bad = [out_dispatch(); 4];
+    bad[0].descriptor_offset += 8;
+    bad[1].simd = 4;
+    bad[2].max_threads = 0;
+    bad[3].groups[0] = 0;
+    for d in &bad {
+        if sys::gpu_dispatch(g.gpu, d) != Err(Error::Invalid) {
+            say(&[b"a dispatch the hardware would not take was not refused"]);
+            return Err(20);
+        }
+    }
+    // Numbers compare with wrap-around, as the engine's do: one far ahead
+    // of the last given is never given; one far behind reads as done.
+    let ahead = DISPATCH_NUMBER | 0x7000_0000;
+    let other_engine = DISPATCH_NUMBER << 1 | 1;
+    if sys::gpu_wait(g.gpu, ahead, 0) != Err(Error::Invalid)
+        || sys::gpu_wait(g.gpu, other_engine, 0) != Err(Error::Invalid)
+    {
+        say(&[b"a dispatch number never given was waited for"]);
+        return Err(20);
+    }
+    say(&[b"4 bad descriptors refused as invalid"]);
+
+    // 8. A hang (ADR 0086, B5): an EU thread that loops for ever. The
+    // heartbeat resets the render engine; then both engines work.
+    let mut asm = Asm::new(&mut code);
+    let top = asm.label();
+    asm.jmpi(None, top).emit(Inst::send(
+        E16,
+        Reg::null().uw(),
+        aricode_gen7_eu::g(112).d().scalar(),
+        Message::thread_spawner_eot().desc_as_d(),
+    ));
+    let Ok(looping) = asm.finish().map(|p| p.len()) else {
+        say(&[b"the looping kernel did not assemble"]);
+        return Err(18);
+    };
+    write_state(state, &code[..looping], 0).ok_or(18u64)?;
+    let mut one = out_dispatch();
+    one.groups = [1, 1, 1];
+    let resets = g.report().resets;
+    let t0 = g.now();
+    match run(g, &one) {
+        Err(Error::Hung) => {}
+        other => {
+            say(&[
+                b"an EU thread that never ends was not reset: ",
+                match other {
+                    Ok(_) => b"it finished".as_slice(),
+                    Err(e) => error_name(e),
+                },
+            ]);
+            return Err(14);
+        }
+    }
+    say(&[
+        b"EU hang caught and the render engine reset after ",
+        n((g.now() - t0) / 1000).s(),
+        b" ms; resets ",
+        n(resets).s(),
+        b" -> ",
+        n(g.report().resets).s(),
+    ]);
+    let Some(len) = fill_kernel(&mut code) else {
+        return Err(18);
+    };
+    write_state(state, &code[..len], 0x3C).ok_or(18u64)?;
+    out.fill(0);
+    let fine = run(g, &out_dispatch()).is_ok() && out.iter().all(|&w| w == 0x3C3C_3C3C);
+    let colour = 0x00C0_FFEE;
+    let blit = cmd::fill(&surface(DST_AT), &WHOLE, colour).map_err(|_| 18u64)?;
+    g.dst.fill(0);
+    let blitter = g.run(&blit, WAIT_MS).is_ok() && g.dst.iter().all(|&p| p == colour);
+    if !fine || !blitter {
+        say(&[
+            b"after the render reset: EU fill ",
+            if fine { b"right" } else { b"WRONG" },
+            b", blitter fill ",
+            if blitter { b"right" } else { b"WRONG" },
+        ]);
+        return Err(15);
+    }
+    say(&[b"after the render reset the EUs and the blitter fill correctly"]);
+
+    // The EU threads reached nothing of the kernel's.
+    let r = g.report();
+    if r.canary != before.canary || r.watchdog != before.watchdog {
+        say(&[b"REACHED: the status page or the blitter's registers changed"]);
+        return Err(13);
+    }
+
+    // 9. Residue (ADR 0086, B6), within this client: a pattern left in
+    // every register, then read back by threads that write nothing first.
+    // What they see is what any program would; the kernel clears it only
+    // when the client changes (`run gpu_probe 2` checks that).
+    let mut res = Residue::new(g, hardware)?;
+    res.write(g)?;
+    let (ran, seen) = res.read(g)?;
+    say(&[
+        b"residue within a client: the pattern seen on ",
+        n(seen as u64).s(),
+        b" of ",
+        n(ran as u64).s(),
+        b" thread slots read",
+    ]);
+    // The same after the GPU sat idle longer than a change of client
+    // takes, so a clean second client owes nothing to the GT sleeping.
+    res.write(g)?;
+    sys::thread_sleep(IDLE_MS);
+    let (ran, seen) = res.read(g)?;
+    say(&[
+        b"residue after ",
+        n(IDLE_MS).s(),
+        b" ms idle: the pattern seen on ",
+        n(seen as u64).s(),
+        b" of ",
+        n(ran as u64).s(),
+        b" slots",
+    ]);
+    res.write(g)?;
+    say(&[b"pattern left for the next client: run gpu_probe 2"]);
+    Ok(())
+}
+
+/// The idle time of the residue control, longer than `run gpu_probe 2`
+/// takes to start over SSH.
+const IDLE_MS: u64 = 5_000;
+/// What one thread writes into every register in the residue test.
+const PATTERN: u32 = 0xA5C3_5A3C;
+/// The residue test's memory: its state page, and a surface of 256 bytes
+/// by 64 rows: a row of 8 slots of 32 bytes a thread for each of 32 EUs
+/// (what a reader saw), then 32 rows of 8 dwords (which slots ran).
+const RESIDUE_AT: u64 = 0xC0_0000;
+const RESIDUE_OUT_AT: u64 = 0xC1_0000;
+const RESIDUE_BYTES: u64 = 256 * 64;
+
+struct Residue {
+    state: &'static mut [u32],
+    out: &'static mut [u32],
+    threads: u16,
+}
+
+impl Residue {
+    fn new(g: &mut Gpu, hardware: Handle) -> Result<Self, u64> {
+        let threads = g.report().threads;
+        let fail = |e: Error| {
+            say(&[b"residue setup failed: ", error_name(e)]);
+            18u64
+        };
+        Ok(Residue {
+            state: map(Some(hardware), g.gpu, RESIDUE_AT, 4096).map_err(fail)?,
+            out: map(None, g.gpu, RESIDUE_OUT_AT, RESIDUE_BYTES).map_err(fail)?,
+            threads,
+        })
+    }
+
+    /// Runs `code` on every thread slot, the groups the kernel's clear uses.
+    fn run(&mut self, g: &mut Gpu, code: &[[u32; 4]]) -> Result<(), u64> {
+        let (per_group, groups) = aricode_intel_gt::clear::groups(self.threads).ok_or(18u64)?;
+        self.state.fill(0);
+        for (i, inst) in code.iter().enumerate() {
+            self.state[4 * i..4 * i + 4].copy_from_slice(inst);
+        }
+        let surface = compute::surface_2d(
+            compute::FORMAT_R8_UNORM,
+            RESIDUE_OUT_AT as u32,
+            256,
+            64,
+            256,
+        )
+        .ok_or(18u64)?;
+        self.state[0xC40 / 4..0xC40 / 4 + 8].copy_from_slice(&surface);
+        self.state[0xC00 / 4] = 0xC40;
+        let descriptor = Descriptor {
+            kernel: 0,
+            binding_table: 0xC00,
+            binding_entries: 1,
+            curbe_regs: 0,
+            slm_blocks: 0,
+            barrier: false,
+        }
+        .encode()
+        .ok_or(18u64)?;
+        self.state[0xD00 / 4..0xD00 / 4 + 8].copy_from_slice(&descriptor);
+        let d = Dispatch {
+            surface_base: RESIDUE_AT as u32,
+            dynamic_base: RESIDUE_AT as u32,
+            instruction_base: RESIDUE_AT as u32,
+            max_threads: self.threads,
+            descriptor_offset: 0xD00,
+            descriptors: 1,
+            simd: 16,
+            group: [per_group as u8, 1, 1],
+            groups: [groups as u32, 1, 1],
+            right_mask: 0xFFFF,
+            bottom_mask: 0xFFFF_FFFF,
+            ..Dispatch::default()
+        };
+        let number = sys::gpu_dispatch(g.gpu, &d).map_err(|e| {
+            say(&[b"a residue dispatch was refused: ", error_name(e)]);
+            18u64
+        })?;
+        sys::gpu_wait(g.gpu, number, WAIT_MS).map_err(|e| {
+            say(&[b"a residue dispatch failed: ", error_name(e)]);
+            18u64
+        })
+    }
+
+    /// Every register but g0 (the payload) and g127 (the header kept for
+    /// the end) to the pattern.
+    fn write(&mut self, g: &mut Gpu) -> Result<(), u64> {
+        let mut code = [[0u32; 4]; 80];
+        let mut asm = Asm::new(&mut code);
+        asm.mov(E8, aricode_gen7_eu::g(127).ud(), aricode_gen7_eu::g(0).ud())
+            .mov(E8, aricode_gen7_eu::g(1).ud(), Imm::ud(PATTERN));
+        for r in (2..126).step_by(2) {
+            asm.mov(E16, aricode_gen7_eu::g(r).ud(), Imm::ud(PATTERN));
+        }
+        asm.mov(E8, aricode_gen7_eu::g(126).ud(), Imm::ud(PATTERN))
+            .send(
+                E8,
+                Reg::null().ud(),
+                aricode_gen7_eu::g(127).ud(),
+                Message::thread_spawner_eot(),
+            );
+        let len = asm.finish().map_err(|_| 18u64)?.len();
+        self.run(g, &code[..len])
+    }
+
+    /// Threads that OR every register they did not write (g1 to g126) and
+    /// write it at their slot, with a mark that they ran. The slots that
+    /// ran, and those that saw the pattern.
+    fn read(&mut self, g: &mut Gpu) -> Result<(u32, u32), u64> {
+        use aricode_gen7_eu::g as r;
+        let write = Message::media_block_write(0, 1).map_err(|_| 18u64)?;
+        let mut code = [[0u32; 4]; 160];
+        let mut asm = Asm::new(&mut code);
+        asm.mov(E8, r(127).ud(), r(0).ud());
+        for k in 2..127 {
+            asm.or(E8, r(1).ud(), r(1).ud(), r(k).ud());
+        }
+        asm.and(E1, r(126).ud(), Reg::sr0().ud().scalar(), Imm::ud(7))
+            .shl(E1, r(126).ud(), r(126).ud().scalar(), Imm::ud(2))
+            .shr(E1, r(126).ud().sub(1), Reg::sr0().ud().scalar(), Imm::ud(8))
+            .and(
+                E1,
+                r(126).ud().sub(1),
+                r(126).ud().sub(1).scalar(),
+                Imm::ud(0x1F),
+            )
+            // What it saw: 32 bytes at x = thread * 32, y = row.
+            .mov(E8, r(2).ud(), r(127).ud())
+            .shl(E1, r(2).ud(), r(126).ud().scalar(), Imm::ud(3))
+            .mov(E1, r(2).ud().sub(1), r(126).ud().sub(1).scalar())
+            .mov(E1, r(2).ud().sub(2), Imm::ud(31))
+            .mov(E8, r(3).ud(), r(1).ud())
+            .send(E8, Reg::null().ud(), r(2).ud(), write)
+            // That it ran: 1 at x = thread * 4, y = 32 + row.
+            .mov(E8, r(4).ud(), r(127).ud())
+            .mov(E1, r(4).ud(), r(126).ud().scalar())
+            .add(
+                E1,
+                r(4).ud().sub(1),
+                r(126).ud().sub(1).scalar(),
+                Imm::ud(32),
+            )
+            .mov(E1, r(4).ud().sub(2), Imm::ud(3))
+            .mov(E8, r(5).ud(), Imm::ud(1))
+            .send(E8, Reg::null().ud(), r(4).ud(), write)
+            .send(
+                E8,
+                Reg::null().ud(),
+                r(127).ud(),
+                Message::thread_spawner_eot(),
+            );
+        let len = asm.finish().map_err(|_| 18u64)?.len();
+        self.out.fill(0);
+        self.run(g, &code[..len])?;
+        let (mut ran, mut seen) = (0, 0);
+        for row in 0..32usize {
+            for t in 0..8usize {
+                if self.out[(32 + row) * 64 + t] != 1 {
+                    continue;
+                }
+                ran += 1;
+                let at = row * 64 + t * 8;
+                if self.out[at..at + 8].iter().all(|&w| w == PATTERN) {
+                    seen += 1;
+                }
+                if self.out[at..at + 8].iter().any(|&w| w != 0 && w != PATTERN) {
+                    say(&[
+                        b"a slot saw neither zero nor the pattern: ",
+                        hex(self.out[at] as u64).s(),
+                    ]);
+                }
+            }
+        }
+        Ok((ran, seen))
+    }
+}
+
+/// The second client of the residue test: the kernel cleared what the last
+/// one left, so no register shows the pattern.
+fn residue_after_change(g: &mut Gpu, hardware: Handle) -> Result<(), u64> {
+    let r = g.report();
+    if r.render != 1 {
+        say(&[b"no render ring here"]);
+        return Err(18);
+    }
+    let mut res = Residue::new(g, hardware)?;
+    let (ran, seen) = res.read(g)?;
+    let r = g.report();
+    say(&[
+        b"the kernel's last clear reached ",
+        n(r.cleared_threads as u64).s(),
+        b" of ",
+        n(r.threads as u64).s(),
+        b" threads in ",
+        n(r.clear_us as u64).s(),
+        b" us; the pattern seen on ",
+        n(seen as u64).s(),
+        b" of ",
+        n(ran as u64).s(),
+        b" slots read",
+    ]);
+    if seen != 0 || ran == 0 {
+        say(&[b"RESIDUE: a new client saw the last one's registers"]);
+        return Err(21);
+    }
+    Ok(())
+}
+
 aricode_rt::entry!(main);
+
+/// The matrix multiply of stage B7: `C = A * B`, square float matrices of
+/// `SGEMM_N`, laid out in rows.
+const SGEMM_N: u32 = 1024;
+const SGEMM_STATE_AT: u64 = 0x100_0000;
+const SGEMM_A_AT: u64 = 0x200_0000;
+const SGEMM_B_AT: u64 = 0x300_0000;
+const SGEMM_C_AT: u64 = 0x400_0000;
+/// Runs a clock and how many products at it.
+const SGEMM_RUNS: usize = 10;
+const SGEMM_CODE: u32 = 0x0000;
+const SGEMM_TABLE: u32 = 0x1000;
+const SGEMM_SURFACES: u32 = 0x1040;
+const SGEMM_DESCRIPTOR: u32 = 0x1100;
+
+/// Assembles the EU program: each thread computes an 8 by 16 tile of C at
+/// row 8 * group Y and column 16 * group X. For each step of 8 along k it
+/// reads A's 8 by 8 block and B's 8 by 16 (two media block reads of 32
+/// bytes by 8 rows), then makes 128 `mad(8)`: each of C's rows (two
+/// registers) gains A's element times B's row. Measured against two
+/// variants on the laptop (ADR 0086, B7) and faster than both: fetching the
+/// next step while multiplying, and the walker's X picking the tile's rows.
+fn sgemm_program(code: &mut [[u32; 4]], n: u32) -> Option<usize> {
+    use aricode_gen7_eu::{g as r, CondMod, Flag, Pred};
+    let read = Message::media_block_read(0, 8).ok()?;
+    let read_b = Message::media_block_read(1, 8).ok()?;
+    let write = Message::media_block_write(2, 8).ok()?;
+    // 32 bytes by 8 rows.
+    let block = 0x0007_001F;
+    let mut asm = Asm::new(code);
+    asm.shl(E1, r(6).ud(), r(0).ud().sub(1).scalar(), Imm::ud(6))
+        .shl(E1, r(6).ud().sub(1), r(0).ud().sub(6).scalar(), Imm::ud(3))
+        // Headers: g2 for A (x = k * 4, y = tile row), g3 and g4 for B's
+        // halves (x = tile column bytes, + 32; y = k).
+        .mov(E8, r(2).ud(), r(0).ud())
+        .mov(E1, r(2).ud(), Imm::ud(0))
+        .mov(E1, r(2).ud().sub(1), r(6).ud().sub(1).scalar())
+        .mov(E1, r(2).ud().sub(2), Imm::ud(block))
+        .mov(E8, r(3).ud(), r(0).ud())
+        .mov(E1, r(3).ud(), r(6).ud().scalar())
+        .mov(E1, r(3).ud().sub(1), Imm::ud(0))
+        .mov(E1, r(3).ud().sub(2), Imm::ud(block))
+        .mov(E8, r(4).ud(), r(3).ud())
+        .add(E1, r(4).ud(), r(6).ud().scalar(), Imm::ud(32))
+        .mov(E1, r(5).ud(), Imm::ud(0));
+    for c in (16..32).step_by(2) {
+        asm.mov(E16, r(c).ud(), Imm::ud(0));
+    }
+    let top = asm.label();
+    asm.send(E8, r(32).ud(), r(2).ud(), read)
+        .send(E8, r(40).ud(), r(3).ud(), read_b)
+        .send(E8, r(48).ud(), r(4).ud(), read_b);
+    for kk in 0..8u8 {
+        for row in 0..8u8 {
+            let a = r(32 + row).f().sub(kk).scalar();
+            for (c, b) in [(16 + row, 40 + kk), (24 + row, 48 + kk)] {
+                asm.emit(Inst::mad(E8, r(c).f(), r(c).f().vec4(), a, r(b).f().vec4()));
+            }
+        }
+    }
+    asm.add(E1, r(2).ud(), r(2).ud().scalar(), Imm::ud(32))
+        .add(E1, r(3).ud().sub(1), r(3).ud().sub(1).scalar(), Imm::ud(8))
+        .add(E1, r(4).ud().sub(1), r(4).ud().sub(1).scalar(), Imm::ud(8))
+        .add(E1, r(5).ud(), r(5).ud().scalar(), Imm::ud(8))
+        .emit(Inst::cmp(
+            E1,
+            CondMod::L,
+            Flag::F0_0,
+            Reg::null().ud(),
+            r(5).ud().scalar(),
+            Imm::ud(n),
+        ))
+        .jmpi(Some(Pred::new(Flag::F0_0)), top);
+    // C's tile: the left 8 columns from g16, the right 8 copied after a
+    // header of their own.
+    asm.mov(E8, r(15).ud(), r(0).ud())
+        .mov(E1, r(15).ud(), r(6).ud().scalar())
+        .mov(E1, r(15).ud().sub(1), r(6).ud().sub(1).scalar())
+        .mov(E1, r(15).ud().sub(2), Imm::ud(block))
+        .send(E8, Reg::null().ud(), r(15).ud(), write)
+        .mov(E8, r(56).ud(), r(15).ud())
+        .add(E1, r(56).ud(), r(6).ud().scalar(), Imm::ud(32));
+    for row in 0..8u8 {
+        asm.mov(E8, r(57 + row).ud(), r(24 + row).ud());
+    }
+    asm.send(E8, Reg::null().ud(), r(56).ud(), write)
+        .mov(E8, r(127).ud(), r(0).ud())
+        .send(
+            E8,
+            Reg::null().ud(),
+            r(127).ud(),
+            Message::thread_spawner_eot(),
+        );
+    asm.finish().ok().map(|p| p.len())
+}
+
+/// The value at `(i, j)` of matrix `m`: eighths from -1 to 1, so every
+/// product and sum is exact in single precision and the GPU's and the
+/// CPU's results must match to the bit, whatever their order.
+fn sgemm_value(m: u32, i: u32, j: u32) -> f32 {
+    ((i * 7 + j * 3 + m * 5) % 17) as f32 / 8.0 - 1.0
+}
+
+fn temperature(g: &Gpu) -> u64 {
+    let mut t = [0u8; 8];
+    match sys::system_info(g.system, sysinfo::TEMPERATURE, &mut t) {
+        Ok(8) => u32::from_le_bytes([t[0], t[1], t[2], t[3]]) as u64,
+        _ => 0,
+    }
+}
+
+/// Stage B7 (ADR 0086): the product on the EUs, checked against the CPU's
+/// to the bit, then timed at each clock with the heat after.
+fn sgemm(g: &mut Gpu, hardware: Handle) -> Result<(), u64> {
+    let size = SGEMM_N;
+    let bytes = size as u64 * size as u64 * 4;
+    let fail = |e: Error| {
+        say(&[b"sgemm setup failed: ", error_name(e)]);
+        18u64
+    };
+    let state = map(Some(hardware), g.gpu, SGEMM_STATE_AT, 8192).map_err(fail)?;
+    let a = map(None, g.gpu, SGEMM_A_AT, bytes).map_err(fail)?;
+    let b = map(None, g.gpu, SGEMM_B_AT, bytes).map_err(fail)?;
+    let c = map(None, g.gpu, SGEMM_C_AT, bytes).map_err(fail)?;
+    let threads = g.report().threads;
+    for i in 0..size {
+        for j in 0..size {
+            a[(i * size + j) as usize] = sgemm_value(0, i, j).to_bits();
+            b[(i * size + j) as usize] = sgemm_value(1, i, j).to_bits();
+        }
+    }
+    // The state: code, binding table (A, B, C), surfaces, descriptor.
+    state.fill(0);
+    let mut code = [[0u32; 4]; 256];
+    let Some(len) = sgemm_program(&mut code, size) else {
+        say(&[b"the sgemm kernel did not assemble"]);
+        return Err(18);
+    };
+    for (i, inst) in code[..len].iter().enumerate() {
+        let at = (SGEMM_CODE / 4) as usize + 4 * i;
+        state[at..at + 4].copy_from_slice(inst);
+    }
+    for (k, at) in [SGEMM_A_AT, SGEMM_B_AT, SGEMM_C_AT].iter().enumerate() {
+        let surface = compute::surface_2d(
+            compute::FORMAT_R8_UNORM,
+            *at as u32,
+            size * 4,
+            size,
+            size * 4,
+        )
+        .ok_or(18u64)?;
+        let s = SGEMM_SURFACES + 32 * k as u32;
+        state[(s / 4) as usize..(s / 4) as usize + 8].copy_from_slice(&surface);
+        state[(SGEMM_TABLE / 4) as usize + k] = s;
+    }
+    let descriptor = Descriptor {
+        kernel: SGEMM_CODE,
+        binding_table: SGEMM_TABLE,
+        binding_entries: 3,
+        curbe_regs: 0,
+        slm_blocks: 0,
+        barrier: false,
+    }
+    .encode()
+    .ok_or(18u64)?;
+    let at = (SGEMM_DESCRIPTOR / 4) as usize;
+    state[at..at + 8].copy_from_slice(&descriptor);
+    let d = Dispatch {
+        surface_base: SGEMM_STATE_AT as u32,
+        dynamic_base: SGEMM_STATE_AT as u32,
+        instruction_base: SGEMM_STATE_AT as u32,
+        max_threads: threads,
+        descriptor_offset: SGEMM_DESCRIPTOR,
+        descriptors: 1,
+        simd: 16,
+        group: [1, 1, 1],
+        groups: [size / 16, size / 8, 1],
+        right_mask: 0xFFFF,
+        bottom_mask: 0xFFFF_FFFF,
+        ..Dispatch::default()
+    };
+    let run = |g: &mut Gpu| -> Result<u64, u64> {
+        let t0 = g.now();
+        let number = sys::gpu_dispatch(g.gpu, &d).map_err(|e| {
+            say(&[b"the sgemm dispatch was refused: ", error_name(e)]);
+            18u64
+        })?;
+        sys::gpu_wait(g.gpu, number, WAIT_MS).map_err(|e| {
+            say(&[b"the sgemm dispatch failed: ", error_name(e)]);
+            18u64
+        })?;
+        Ok(g.now() - t0)
+    };
+    let flops = 2 * size as u64 * size as u64 * size as u64;
+    // MFLOP/s from microseconds.
+    let rate = |us: u64| flops / us.max(1);
+
+    // The CPU's product, one core, the loop in i-k-j order (rows of B and
+    // C streamed, as a compiler vectorizes it), into a buffer of its own.
+    let cpu = map(None, g.gpu, 0x500_0000, bytes).map_err(fail)?;
+    cpu.fill(0);
+    let t0 = g.now();
+    for i in 0..size as usize {
+        let row = &mut cpu[i * size as usize..(i + 1) * size as usize];
+        for k in 0..size as usize {
+            let aik = f32::from_bits(a[i * size as usize + k]);
+            let brow = &b[k * size as usize..(k + 1) * size as usize];
+            for (cv, bv) in row.iter_mut().zip(brow) {
+                *cv = (f32::from_bits(*cv) + aik * f32::from_bits(*bv)).to_bits();
+            }
+        }
+    }
+    let cpu_us = g.now() - t0;
+    say(&[
+        b"sgemm ",
+        n(size as u64).s(),
+        b"x",
+        n(size as u64).s(),
+        b": cpu ",
+        n(cpu_us / 1000).s(),
+        b" ms (",
+        n(rate(cpu_us)).s(),
+        b" MFLOP/s), ",
+        n(temperature(g)).s(),
+        b" C",
+    ]);
+
+    // The GPU's, checked to the bit.
+    c.fill(0xFFFF_FFFF);
+    let first = run(g)?;
+    if let Some(i) = (0..c.len()).find(|&i| c[i] != cpu[i]) {
+        say(&[
+            b"SGEMM WRONG at row ",
+            n((i / size as usize) as u64).s(),
+            b" column ",
+            n((i % size as usize) as u64).s(),
+            b": gpu ",
+            hex(c[i] as u64).s(),
+            b", cpu ",
+            hex(cpu[i] as u64).s(),
+        ]);
+        return Err(22);
+    }
+    say(&[
+        b"gpu product equal to the cpu's to the bit (",
+        n((size / 16 * size / 8) as u64).s(),
+        b" threads of 8x16), first run ",
+        n(first / 1000).s(),
+        b" ms",
+    ]);
+
+    // Each clock: the runs, then the heat.
+    for mhz in [350u64, 650, 1050] {
+        let set = sys::gpu_frequency(g.gpu, mhz).map_err(|e| {
+            say(&[b"the clock was not set: ", error_name(e)]);
+            17u64
+        })?;
+        let mut times = [0u64; SGEMM_RUNS];
+        for t in times.iter_mut() {
+            *t = run(g)?;
+        }
+        let (best, median) = spread(&mut times);
+        say(&[
+            b"gpu at ",
+            n(set).s(),
+            b" MHz: best ",
+            n(best / 1000).s(),
+            b".",
+            n(best % 1000 / 100).s(),
+            b" ms (",
+            n(rate(best)).s(),
+            b" MFLOP/s), median ",
+            n(median / 1000).s(),
+            b" ms, ",
+            n(SGEMM_RUNS as u64).s(),
+            b" runs; ",
+            n(temperature(g)).s(),
+            b" C; ",
+            n(rate(best) / rate(cpu_us).max(1)).s(),
+            b".",
+            n(rate(best) * 100 / rate(cpu_us).max(1) % 100 / 10).s(),
+            n(rate(best) * 100 / rate(cpu_us).max(1) % 10).s(),
+            b"x the cpu's speed",
+        ]);
+    }
+    let _ = sys::gpu_frequency(g.gpu, 350);
+    Ok(())
+}

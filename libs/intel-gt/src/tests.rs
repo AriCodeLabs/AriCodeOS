@@ -228,7 +228,15 @@ fn the_layout_keeps_clear_of_the_firmware_and_aligns_the_directory() {
         "past the firmware's run"
     );
     assert_eq!(l.ring, l.status + 1);
-    assert_eq!(l.end, l.ring + 4);
+    assert_eq!(
+        l.render_status,
+        l.ring + 4,
+        "the render engine's pages after"
+    );
+    assert_eq!(l.render_ring, l.render_status + 1);
+    assert_eq!(l.end, l.render_ring + 4);
+    assert_eq!(l.placement(&regs::RENDER), (l.render_status, l.render_ring));
+    assert_eq!(l.placement(&regs::BLITTER), (l.status, l.ring));
     assert_eq!(l.directory, fake::ENTRIES - 512);
     assert_eq!(l.directory % 16, 0);
     assert_eq!(l.pp_dir_base(), (l.directory * 4) << 10);
@@ -286,7 +294,7 @@ mod blitter {
     use crate::gtt::Layout;
     use crate::power::Forcewake;
     use crate::regs::{self, bcs, masked_on};
-    use crate::ring::{self, Ring, REQUEST_DWORDS, SEQNO_INDEX};
+    use crate::ring::{self, Ring, REQUEST_EXTRA, SEQNO_INDEX};
     use crate::{Refusal, Timeouts};
 
     const SCREEN: Surface = Surface {
@@ -416,45 +424,62 @@ mod blitter {
     }
 
     #[test]
-    fn a_request_runs_the_batch_non_secure_then_stores_its_number() {
+    fn a_request_writes_the_commands_then_stores_its_number() {
         let mut mem = [0xDEAD_BEEFu32; 1024];
         let mut ring = Ring::new(1);
-        let tail = ring.request(&mut mem, 0, 0x40_0000, 7).unwrap();
-        assert_eq!(tail as usize, REQUEST_DWORDS * 4);
+        let body = [cmd::NOOP, cmd::FLUSH_DW, 0, 0];
+        let tail = ring.request(&mut mem, 0, &body, 7).unwrap();
+        // The odd-length no-op is not needed.
+        let len = body.len() + REQUEST_EXTRA - 1;
+        assert_eq!(tail as usize, len * 4);
         assert_eq!(tail % 8, 0, "TAIL moves in quadwords");
-        // First the TLB, so a page unmapped since the last batch is gone.
+        // First the TLB, so a page unmapped since the last request is gone.
         assert_eq!(mem[0], 0x26 << 23 | 1 | 1 << 21 | 1 << 18 | 1 << 14);
         assert_eq!(mem[1], (0x80 * 4) | (1 << 2));
         assert_eq!(&mem[2..4], &[0, 0]);
-        let m = &mem[4..];
-        assert_eq!(m[0], 0x31 << 23 | 1 << 8);
-        assert_eq!(m[1], 0x40_0000);
-        assert_eq!(m[2], 0x26 << 23 | 1 | 1 << 21 | 1 << 18 | 1 << 14);
-        assert_eq!(m[3], (SEQNO_INDEX * 4) | (1 << 2));
-        assert_eq!(m[4], 7);
-        assert_eq!(&m[5..8], &[0x21 << 23 | 1, SEQNO_INDEX * 4, 7]);
-        assert_eq!(&mem[REQUEST_DWORDS - 2..REQUEST_DWORDS], &[0x02 << 23, 0]);
-        assert_eq!(mem[REQUEST_DWORDS], 0xDEAD_BEEF, "nothing past the request");
+        // The commands themselves, never a jump to memory a client reaches.
+        assert_eq!(&mem[4..8], &body);
+        assert!(!mem[..len].contains(&(cmd::BATCH_START | cmd::BATCH_PPGTT)));
+        let m = &mem[8..];
+        assert_eq!(m[0], 0x26 << 23 | 1 | 1 << 21 | 1 << 18 | 1 << 14);
+        assert_eq!(m[1], (SEQNO_INDEX * 4) | (1 << 2));
+        assert_eq!(m[2], 7);
+        assert_eq!(&m[3..6], &[0x21 << 23 | 1, SEQNO_INDEX * 4, 7]);
+        assert_eq!(&mem[len - 2..len], &[0x02 << 23, 0]);
+        assert_eq!(mem[len], 0xDEAD_BEEF, "nothing past the request");
+        // An odd number of commands is padded to a quadword before the end.
+        let mut ring = Ring::new(1);
+        mem.fill(0xDEAD_BEEF);
+        let tail = ring.request(&mut mem, 0, &[cmd::NOOP; 3], 8).unwrap();
+        assert_eq!(tail as usize, (3 + REQUEST_EXTRA) * 4);
+        assert_eq!(
+            &mem[7..9],
+            &[cmd::NOOP, 0x26 << 23 | 1 | 1 << 21 | 1 << 18 | 1 << 14]
+        );
     }
 
     #[test]
     fn the_ring_waits_for_room_and_wraps_with_no_ops() {
         let mut mem = [0u32; 1024];
         let mut ring = Ring::new(1);
-        let per = (REQUEST_DWORDS * 4) as u32;
+        let body = [cmd::FLUSH_DW, 0, 0, cmd::NOOP];
+        let per = ((body.len() + REQUEST_EXTRA - 1) * 4) as u32;
         // With the engine still at 0, the ring takes what fits less the gap.
         let mut n = 0;
-        while ring.request(&mut mem, 0, 0x1000, n).is_some() {
+        while ring.request(&mut mem, 0, &body, n).is_some() {
             n += 1;
         }
         assert_eq!(n, (4096 - 64) / per);
         // Once the engine has consumed it all, the next wraps to 0.
         let head = ring.tail();
         mem.fill(0xAAAA_AAAA);
-        let tail = ring.request(&mut mem, head, 0x2000, 99).unwrap();
+        let tail = ring.request(&mut mem, head, &body, 99).unwrap();
         assert_eq!(tail, per);
-        assert_eq!(mem[5], 0x2000);
+        assert_eq!(&mem[4..8], &body);
         assert!(mem[(head / 4) as usize..].iter().all(|&w| w == cmd::NOOP));
+        // A request as big as the ring never fits.
+        let mut ring = Ring::new(1);
+        assert_eq!(ring.request(&mut mem, 0, &[cmd::NOOP; 1024], 1), None);
         assert!(ring::passed(5, 5) && ring::passed(6, 5) && !ring::passed(4, 5));
         assert!(ring::passed(2, u32::MAX), "numbers wrap");
     }
@@ -475,7 +500,15 @@ mod blitter {
         {
             let mut awake = fw.hold(&mut bank, &clock).unwrap();
             ring::prepare(&mut awake);
-            ring::start(&mut awake, &clock, &Timeouts::default(), &layout, &mut ring).unwrap();
+            ring::start(
+                &mut awake,
+                &clock,
+                &Timeouts::default(),
+                &regs::BLITTER,
+                &layout,
+                &mut ring,
+            )
+            .unwrap();
         }
         assert_eq!(bank.get(bcs::HWS_PGA), layout.status * 4096);
         assert_eq!(bank.get(bcs::START), layout.ring * 4096);
@@ -502,7 +535,14 @@ mod blitter {
         bank.stuck_head = true;
         let mut ring = Ring::new(4);
         let mut awake = fw.hold(&mut bank, &clock).unwrap();
-        let r = ring::start(&mut awake, &clock, &Timeouts::default(), &layout, &mut ring);
+        let r = ring::start(
+            &mut awake,
+            &clock,
+            &Timeouts::default(),
+            &regs::BLITTER,
+            &layout,
+            &mut ring,
+        );
         assert_eq!(r, Err(Refusal::RingRunning));
         drop(awake);
         assert_eq!(bank.get(bcs::CTL) & 1, 0, "never turned on");
@@ -514,7 +554,7 @@ mod blitter {
         let clock = Ticks::new();
         {
             let mut awake = fw.hold(&mut bank, &clock).unwrap();
-            ring::reset(&mut awake, &clock, &Timeouts::default()).unwrap();
+            ring::reset(&mut awake, &clock, &Timeouts::default(), &regs::BLITTER).unwrap();
         }
         assert_eq!(bank.writes_to(regs::GDRST), [regs::GDRST_BLITTER; 2]);
         assert_eq!(bank.get(bcs::CTL), 0);
@@ -522,7 +562,7 @@ mod blitter {
         bank.completes = false;
         let mut awake = fw.hold(&mut bank, &clock).unwrap();
         assert_eq!(
-            ring::reset(&mut awake, &clock, &Timeouts::default()),
+            ring::reset(&mut awake, &clock, &Timeouts::default(), &regs::BLITTER),
             Err(Refusal::Timeout)
         );
     }
@@ -614,7 +654,7 @@ mod batches {
         let fill = cmd::fill(&DST, &ALL, 0x0033_6699).unwrap();
         let copy = cmd::copy(&DST, 0, 0, &SRC, &ALL).unwrap();
         let flush = [cmd::FLUSH_DW, 0, 0];
-        let mut b = batch(&[
+        let b = batch(&[
             &fill,
             &[cmd::NOOP],
             &copy,
@@ -622,44 +662,44 @@ mod batches {
             &[cmd::BATCH_END, 0xFFFF_FFFF],
         ]);
         let len = b.len();
-        assert_eq!(check(&mut b, START, &MAPS), Ok(len - 1), "stops at the end");
-        // A loop to its own start is allowed: only the reset ends it.
-        let mut looping = [cmd::BATCH_START | cmd::BATCH_PPGTT, 0];
-        assert_eq!(check(&mut looping, START, &MAPS), Ok(2));
-        assert_eq!(looping[1], START, "the copy's own address written in");
+        assert_eq!(
+            check(&b, &MAPS),
+            Ok(len - 2),
+            "the commands before the end, which is not written"
+        );
     }
 
     #[test]
     fn what_reached_the_registers_on_the_laptop_is_refused() {
         // ADR 0083's measurement, each part on its own.
-        let mut lri = [(0x22 << 23) | 1, 0x2_217C, 0x00AB_0000, cmd::BATCH_END];
-        assert_eq!(check(&mut lri, START, &MAPS), Err(Fault::Command(0)));
-        let mut store_index = [
+        let lri = [(0x22 << 23) | 1, 0x2_217C, 0x00AB_0000, cmd::BATCH_END];
+        assert_eq!(check(&lri, &MAPS), Err(Fault::Command(0)));
+        let store_index = [
             cmd::FLUSH_DW | cmd::FLUSH_DW_STORE_INDEX | cmd::FLUSH_DW_STORE_DWORD,
             0x240 | cmd::FLUSH_DW_GLOBAL_GTT,
             0xBAD0_0002,
             cmd::BATCH_END,
         ];
-        assert_eq!(
-            check(&mut store_index, START, &MAPS),
-            Err(Fault::Command(0))
-        );
-        let mut sdi = [(0x20 << 23) | (1 << 22) | 2, 0, 0x240, 1, cmd::BATCH_END];
-        assert_eq!(check(&mut sdi, START, &MAPS), Err(Fault::Command(0)));
+        assert_eq!(check(&store_index, &MAPS), Err(Fault::Command(0)));
+        let sdi = [(0x20 << 23) | (1 << 22) | 2, 0, 0x240, 1, cmd::BATCH_END];
+        assert_eq!(check(&sdi, &MAPS), Err(Fault::Command(0)));
         // A flush that names an address or data, even without the store bits.
         assert_eq!(
-            check(&mut [cmd::FLUSH_DW, 4, 0, cmd::BATCH_END], START, &MAPS),
+            check(&[cmd::FLUSH_DW, 4, 0, cmd::BATCH_END], &MAPS),
             Err(Fault::Command(0))
         );
-        // A jump anywhere but its own start, a secure one, MI_UPDATE_GTT.
-        let mut away = [cmd::BATCH_START | cmd::BATCH_PPGTT, 0x10_0000];
-        assert_eq!(check(&mut away, START, &MAPS), Err(Fault::Command(0)));
+        // Any jump (the ring runs commands, not batches; ADR 0086), a
+        // secure one, MI_UPDATE_GTT.
+        for to in [0, 0x8000, 0x10_0000] {
+            let jump = [cmd::BATCH_START | cmd::BATCH_PPGTT, to, cmd::BATCH_END];
+            assert_eq!(check(&jump, &MAPS), Err(Fault::Command(0)));
+        }
         assert_eq!(
-            check(&mut [cmd::BATCH_START, START], START, &MAPS),
+            check(&[cmd::BATCH_START, START], &MAPS),
             Err(Fault::Command(0))
         );
         assert_eq!(
-            check(&mut [(0x23 << 23) | 1, 0, 0], START, &MAPS),
+            check(&[(0x23 << 23) | 1, 0, 0], &MAPS),
             Err(Fault::Command(0))
         );
     }
@@ -668,7 +708,7 @@ mod batches {
     fn blits_must_stay_inside_the_mappings_to_the_byte() {
         let fill = |s: &Surface, r: &Rect| {
             let f = cmd::fill(s, r, 1).unwrap();
-            check(&mut batch(&[&f, &[cmd::BATCH_END]]), START, &MAPS)
+            check(&batch(&[&f, &[cmd::BATCH_END]]), &MAPS)
         };
         // The last byte of a mapping is fine; one more is not.
         let edge = Surface {
@@ -728,7 +768,7 @@ mod batches {
         )
         .unwrap();
         assert_eq!(
-            check(&mut batch(&[&copy, &[cmd::BATCH_END]]), START, &MAPS),
+            check(&batch(&[&copy, &[cmd::BATCH_END]]), &MAPS),
             Err(Fault::Outside(0))
         );
     }
@@ -739,7 +779,7 @@ mod batches {
         let with = |k: usize, v: u32| {
             let mut b = batch(&[&f, &[cmd::BATCH_END]]);
             b[k] = v;
-            check(&mut b, START, &MAPS)
+            check(&b, &MAPS)
         };
         assert_eq!(with(0, f[0] | 1 << 11), Err(Fault::Command(0)), "tiled");
         assert_eq!(with(1, f[1] | 1 << 30), Err(Fault::Command(0)), "clipping");
@@ -759,7 +799,7 @@ mod batches {
         let mut b = batch(&[&copy, &[cmd::BATCH_END]]);
         b[6] |= 1 << 16;
         assert_eq!(
-            check(&mut b, START, &MAPS),
+            check(&b, &MAPS),
             Err(Fault::Command(0)),
             "source pitch high bits"
         );
@@ -773,30 +813,23 @@ mod batches {
         assert_eq!(with(4, f[4] + 2), Err(Fault::Command(0)), "unaligned");
         let mut b = batch(&[&copy, &[cmd::BATCH_END]]);
         b[1] = (b[1] & !(0xFF << 16)) | 0xF0 << 16;
-        assert_eq!(
-            check(&mut b, START, &MAPS),
-            Err(Fault::Command(0)),
-            "copy rop"
-        );
+        assert_eq!(check(&b, &MAPS), Err(Fault::Command(0)), "copy rop");
         let rows = Rect {
             x1: 0,
             y1: 0,
             x2: 1024,
             y2: 8,
         };
-        let mut b = batch(&[
+        let b = batch(&[
             &cmd::copy(&DST, 0, 4, &DST, &rows).unwrap(),
             &[cmd::BATCH_END],
         ]);
-        assert!(
-            check(&mut b, START, &MAPS).is_ok(),
-            "one surface, pitch of 64s"
-        );
+        assert!(check(&b, &MAPS).is_ok(), "one surface, pitch of 64s");
         let mut raw = cmd::copy(&DST, 0, 0, &DST, &rows).unwrap();
         raw[7] = DST.address + 4096; // another base over the same bytes
-        let mut b = batch(&[&raw, &[cmd::BATCH_END]]);
+        let b = batch(&[&raw, &[cmd::BATCH_END]]);
         assert_eq!(
-            check(&mut b, START, &MAPS),
+            check(&b, &MAPS),
             Err(Fault::Command(0)),
             "overlap, two bases"
         );
@@ -805,16 +838,10 @@ mod batches {
     #[test]
     fn a_batch_must_end_within_itself() {
         let f = cmd::fill(&DST, &ALL, 1).unwrap();
-        assert_eq!(
-            check(&mut f.clone()[..5], START, &MAPS),
-            Err(Fault::Unended(0))
-        );
-        assert_eq!(check(&mut f.clone(), START, &MAPS), Err(Fault::Unended(6)));
-        assert_eq!(check(&mut [], START, &MAPS), Err(Fault::Unended(0)));
-        assert_eq!(
-            check(&mut [cmd::FLUSH_DW, 0], START, &MAPS),
-            Err(Fault::Unended(0))
-        );
+        assert_eq!(check(&f[..5], &MAPS), Err(Fault::Unended(0)));
+        assert_eq!(check(&f, &MAPS), Err(Fault::Unended(6)));
+        assert_eq!(check(&[], &MAPS), Err(Fault::Unended(0)));
+        assert_eq!(check(&[cmd::FLUSH_DW, 0], &MAPS), Err(Fault::Unended(0)));
     }
 }
 
@@ -847,4 +874,504 @@ fn rps_interrupts_are_quieted_whatever_the_firmware_left() {
     );
     assert_eq!(bank.get(regs::PMIER), 0);
     assert_eq!(bank.get(regs::PMIMR), 0xFFFF_FFFF);
+}
+
+mod render_engine {
+    use super::*;
+    use crate::render::{self, Change, Setting};
+
+    /// What the laptop's firmware left (dev build 55's probe).
+    fn probed_render(bank: &mut Bank) {
+        for (r, v) in [
+            (0x7010, 0),
+            (0xB01C, 0x8C47_FF80),
+            (0xB030, 0x6000_0000),
+            (0xB034, 0x0800_0000),
+            (0x2090, 0),
+            (0x20A0, 0x28A0_1010),
+            (0x7008, 0),
+            (0x209C, 0x200),
+            (0xE4F4, 0),
+            (0xF4F4, 0),
+            (0x9404, 0),
+            (0x9030, 0x400),
+            (0x900C, 0x0040_0000),
+            (0x20C0, 0x8000),
+            (0x7000, 0x6804),
+            (0x7004, 0x0180),
+        ] {
+            bank.regs.insert(r, v);
+        }
+    }
+
+    #[test]
+    fn linuxs_settings_take_from_the_firmwares_state() {
+        let mut bank = Bank::probed();
+        probed_render(&mut bank);
+        let clock = Ticks::new();
+        let fw = Forcewake::init(&mut bank, &clock, Timeouts::default()).unwrap();
+        {
+            let mut awake = fw.hold(&mut bank, &clock).unwrap();
+            render::apply(&mut awake, &render::GT);
+            render::apply(&mut awake, &render::RENDER);
+            render::apply(&mut awake, &render::CLOCK_GATING);
+            render::apply(&mut awake, &render::CONTEXT);
+        }
+        let want = [
+            (0xB01C, 0x3C47_FF8C),
+            (0xB030, 0x2000_0000),
+            (0xB034, 0),
+            (0x7010, 0),
+            (0x2090, 1 << 10),
+            (0x20A0, 0x28A0_1010 & !0x0007_7070),
+            (0x7008, 1 << 9),
+            (0x209C, 0x200 | 1 << 14),
+            (0xE4F4, 1),
+            (0xF4F4, 1),
+            (0x9404, 1 << 13),
+            (0x9030, 0x400 | 1 << 11),
+            (0x900C, 1 << 21),
+            (0x20C0, 0x8000 | 1 << 7),
+            (0x7000, 0x6804),
+            (0x7004, 0x0180 | 1 << 6),
+        ];
+        for (r, v) in want {
+            assert_eq!(bank.get(r), v, "{r:#x}");
+        }
+        assert_eq!(bank.get(0x229C) & 0x2800, 0x2800);
+        // No display register among them.
+        for st in render::GT
+            .iter()
+            .chain(&render::RENDER)
+            .chain(&render::CLOCK_GATING)
+        {
+            assert!(st.register < 0x4_0000, "{:#x}", st.register);
+        }
+    }
+
+    #[test]
+    fn the_context_settings_load_from_the_ring() {
+        let mut out = [0u32; 7];
+        assert_eq!(render::load_masked(&render::CONTEXT, &mut out), Some(7));
+        assert_eq!(out[0], 0x22 << 23 | 5, "Linux MI_LOAD_REGISTER_IMM(3)");
+        assert_eq!(
+            &out[1..],
+            &[
+                0x20C0,
+                1 << 23 | 1 << 7,
+                0x7000,
+                1 << 16,
+                0x7004,
+                1 << 22 | 1 << 6
+            ]
+        );
+        let read_first = [Setting {
+            register: 0x9030,
+            change: Change::Set(1),
+        }];
+        assert_eq!(render::load_masked(&read_first, &mut out), None);
+        assert_eq!(render::load_masked(&render::CONTEXT, &mut out[..6]), None);
+    }
+
+    #[test]
+    fn pipe_controls_encode_as_linux_emits_them() {
+        // GFX_OP_PIPE_CONTROL(4).
+        assert_eq!(render::PIPE_CONTROL, 0x7A00_0002);
+        assert_eq!(render::stall(), [0x7A00_0002, 1 << 20 | 1 << 1, 0, 0]);
+        let b = render::breadcrumb(0x1000_0100, 9);
+        assert_eq!(
+            b[1],
+            1 << 12 | 1 << 0 | 1 << 5 | 1 << 7 | 1 << 14 | 1 << 24 | 1 << 20
+        );
+        assert_eq!(&b[2..], &[0x1000_0100, 9, 0x02 << 23, 0]);
+        let f = render::flush_invalidate(0x2000);
+        assert_eq!(
+            f[1] & (1 << 23 | 1 << 21 | 1 << 8),
+            0,
+            "no register write, index store or notify"
+        );
+        assert_eq!(
+            f[1] & (1 << 18 | 1 << 2 | 1 << 20),
+            1 << 18 | 1 << 2 | 1 << 20
+        );
+    }
+}
+
+#[test]
+fn the_render_ring_starts_and_resets_on_its_own_registers() {
+    use crate::gtt::Layout;
+    use crate::ring::{self, Ring};
+    let mut bank = Bank::probed();
+    let clock = Ticks::new();
+    let fw = Forcewake::init(&mut bank, &clock, Timeouts::default()).unwrap();
+    let layout = Layout::new(fake::FIRMWARE_RUN, fake::ENTRIES, 4, (256 << 20) / 4096).unwrap();
+    let mut ring = Ring::new(4);
+    {
+        let mut awake = fw.hold(&mut bank, &clock).unwrap();
+        ring::start(
+            &mut awake,
+            &clock,
+            &Timeouts::default(),
+            &regs::RENDER,
+            &layout,
+            &mut ring,
+        )
+        .unwrap();
+        ring::reset(&mut awake, &clock, &Timeouts::default(), &regs::RENDER).unwrap();
+    }
+    assert_eq!(
+        bank.get(0x4080),
+        layout.render_status * 4096,
+        "status page at 0x4080"
+    );
+    assert_eq!(bank.get(0x2038), layout.render_ring * 4096);
+    assert_eq!(bank.get(0x2228), layout.pp_dir_base());
+    assert_eq!(
+        bank.get(0x229C) & (1 << 9 | 0x2800),
+        1 << 9 | 0x2800,
+        "PPGTT on, TLB bits kept"
+    );
+    assert_eq!(
+        bank.writes_to(regs::GDRST),
+        [1 << 1, 1 << 1],
+        "the render domain, twice"
+    );
+    // Nothing of the blitter's touched.
+    assert!(bank.writes_to(regs::bcs::CTL).is_empty());
+}
+
+#[test]
+fn a_render_request_flushes_loads_its_settings_and_stores_its_number() {
+    use crate::render;
+    let mut out = [0u32; 64];
+    let n = render::request(0x1000_0200, 0x1000_0100, 5, &[], &mut out).unwrap();
+    assert_eq!(n, render::REQUEST_EXTRA);
+    assert_eq!(n % 2, 0, "whole quadwords");
+    assert_eq!(&out[..4], &render::stall());
+    assert_eq!(&out[4..8], &render::flush_invalidate(0x1000_0200));
+    assert_eq!(out[8], 0x22 << 23 | 5, "the context settings");
+    assert_eq!(&out[15..21], &render::breadcrumb(0x1000_0100, 5));
+    // An odd body is padded; too small an output is refused.
+    let n = render::request(0, 0, 1, &[0, 0, 0], &mut out).unwrap();
+    assert_eq!(n % 2, 0);
+    assert_eq!(render::request(0, 0, 1, &[], &mut out[..10]), None);
+}
+
+#[test]
+fn the_ring_emits_whole_quadwords_and_wraps() {
+    use crate::ring::Ring;
+    let mut mem = [0xAAAA_AAAAu32; 1024];
+    let mut ring = Ring::new(1);
+    assert_eq!(ring.emit(&mut mem, 0, &[1, 2, 3]), None, "odd");
+    assert_eq!(ring.emit(&mut mem, 0, &[1, 2]), Some(8));
+    assert_eq!(&mem[..3], &[1, 2, 0xAAAA_AAAA]);
+    assert_eq!(
+        ring.emit(&mut mem, 0, &[0; 1024]),
+        None,
+        "never the whole ring"
+    );
+}
+
+/// igt's `gen7_gpgpu_fillfunc` for a 64 x 4 fill at the origin, with its
+/// state 4 KiB-aligned at 0x10000: one thread a group, SIMD16, one CURBE
+/// register.
+fn igt_fill() -> aricode_abi::gpu::Dispatch {
+    aricode_abi::gpu::Dispatch {
+        general_base: 0,
+        surface_base: 0x1_0000,
+        dynamic_base: 0x1_0000,
+        instruction_base: 0x1_0000,
+        scratch: 0,
+        max_threads: 1,
+        urb_entries: 0,
+        urb_entry_regs: 0,
+        curbe_regs: 1,
+        curbe_offset: 0x40,
+        curbe_len: 32,
+        descriptor_offset: 0x200,
+        descriptors: 1,
+        descriptor: 0,
+        simd: 16,
+        group: [1, 1, 1],
+        start: [0, 0, 0],
+        groups: [4, 4, 1],
+        right_mask: 0xFFFF,
+        bottom_mask: 0xFFFF_FFFF,
+    }
+}
+
+#[test]
+fn a_dispatch_is_igts_gpgpu_fill_between_linuxs_flushes() {
+    extern crate std;
+    use crate::compute;
+    use crate::render::*;
+    let (w, n) = compute::emit(&igt_fill(), 128).unwrap();
+    let w = &w[..n];
+    let invalidate = [
+        PIPE_CONTROL,
+        PC_STALL_AT_SCOREBOARD | PC_CS_STALL,
+        0,
+        0,
+        PIPE_CONTROL,
+        PC_STATE_INVALIDATE,
+        0,
+        0,
+    ];
+    let flush = [
+        PIPE_CONTROL,
+        PC_RENDER_TARGET_FLUSH | PC_DEPTH_FLUSH | PC_DC_FLUSH | PC_CS_STALL,
+        0,
+        0,
+    ];
+    let mut want: std::vec::Vec<u32> = std::vec::Vec::new();
+    want.extend(invalidate);
+    want.extend([0x6904_0002, 0]);
+    want.extend(invalidate);
+    want.extend(flush);
+    // igt's `gen7_emit_state_base_address`, with the bases relocated.
+    want.extend([0x6101_0008, 1, 0x1_0001, 0x1_0001, 0, 0x1_0001, 0, 1, 0, 1]);
+    want.extend(invalidate);
+    // `gen7_emit_vfe_state(THREADS 1, URB entries 0, URB size 0, CURBE 1,
+    // GPGPU mode)`.
+    want.extend([0x7000_0006, 0, 1 << 2, 0, 1, 0, 0, 0]);
+    want.extend([0x7001_0002, 0, 32, 0x40]);
+    want.extend([0x7002_0002, 0, 32, 0x200]);
+    // `gen7_emit_gpgpu_walk(0, 0, 64, 4)`.
+    want.extend([
+        0x7105_0009,
+        0,
+        1 << 30,
+        0,
+        4,
+        0,
+        4,
+        0,
+        1,
+        0xFFFF,
+        0xFFFF_FFFF,
+    ]);
+    want.extend([0x7004_0000, 0]);
+    assert_eq!(w, &want[..]);
+    assert!(n <= compute::MAX_DWORDS);
+    // Nothing that reaches registers: the gateway's MMIO bits, the walker's
+    // indirect and predicate bits stay clear.
+    let vfe = w
+        .iter()
+        .position(|&x| x == compute::MEDIA_VFE_STATE)
+        .unwrap();
+    assert_eq!(w[vfe + 2] & 3 << 3, 0);
+    let walker = w.iter().position(|&x| x == compute::GPGPU_WALKER).unwrap();
+    assert_eq!(w[walker] & (1 << 10 | 1 << 8), 0);
+    // It fits a render request.
+    let mut out = [0u32; 256];
+    let r = request(0x80, 0x100, 7, w, &mut out).unwrap();
+    // `REQUEST_EXTRA` counts the no-op that may pad to a quadword.
+    assert_eq!(r, (n + REQUEST_EXTRA - 1).next_multiple_of(2));
+}
+
+#[test]
+fn a_dispatch_carries_its_geometry_and_sizes() {
+    use crate::compute;
+    let mut d = igt_fill();
+    d.max_threads = 128;
+    d.urb_entries = 2;
+    d.urb_entry_regs = 3;
+    d.curbe_len = 0;
+    d.scratch = 0x1400 | 2;
+    d.descriptors = 4;
+    d.descriptor = 3;
+    d.simd = 8;
+    d.group = [4, 2, 2];
+    d.start = [1, 2, 3];
+    d.groups = [10, 20, 30];
+    let (w, n) = compute::emit(&d, 128).unwrap();
+    let w = &w[..n];
+    // No CURBE load without data.
+    assert!(!w.contains(&compute::MEDIA_CURBE_LOAD));
+    let vfe = w
+        .iter()
+        .position(|&x| x == compute::MEDIA_VFE_STATE)
+        .unwrap();
+    assert_eq!(
+        &w[vfe + 1..vfe + 5],
+        &[0x1402, 127 << 16 | 2 << 8 | 1 << 2, 0, 2 << 16 | 1]
+    );
+    let idl = w
+        .iter()
+        .position(|&x| x == compute::MEDIA_INTERFACE_DESCRIPTOR_LOAD)
+        .unwrap();
+    assert_eq!(w[idl + 2], 4 * 32);
+    let walker = w.iter().position(|&x| x == compute::GPGPU_WALKER).unwrap();
+    assert_eq!(
+        &w[walker + 1..walker + 9],
+        &[3, 1 << 16 | 1 << 8 | 3, 1, 10, 2, 20, 3, 30]
+    );
+    // GT1 has 36 threads.
+    assert_eq!(compute::threads(0x0156), Some(36));
+    assert_eq!(compute::threads(0x0166), Some(128));
+    assert_eq!(compute::emit(&d, 36), Err(compute::Bad::Threads));
+}
+
+#[test]
+fn a_dispatch_the_hardware_would_not_take_is_refused() {
+    use crate::compute::{validate, Bad};
+    let ok = igt_fill();
+    assert_eq!(validate(&ok, 128), Ok(()));
+    let cases: [(fn(&mut aricode_abi::gpu::Dispatch), Bad); 18] = [
+        (|d| d.surface_base = 0x1_0800, Bad::Base),
+        (|d| d.general_base = 1, Bad::Base),
+        (|d| d.scratch = 0x10, Bad::Scratch),
+        (|d| d.scratch = 12, Bad::Scratch),
+        (|d| d.max_threads = 0, Bad::Threads),
+        (|d| d.max_threads = 129, Bad::Threads),
+        (|d| d.urb_entries = 65, Bad::Urb),
+        (|d| d.urb_entries = 1, Bad::Urb),
+        (
+            |d| {
+                d.urb_entries = 64;
+                d.urb_entry_regs = 32;
+            },
+            Bad::Urb,
+        ),
+        (|d| d.curbe_len = 64, Bad::Curbe),
+        (|d| d.curbe_offset = 0x50, Bad::Curbe),
+        (|d| d.descriptors = 0, Bad::Descriptor),
+        (|d| d.descriptor = 1, Bad::Descriptor),
+        (|d| d.descriptor_offset = 0x210, Bad::Descriptor),
+        (|d| d.simd = 4, Bad::Simd),
+        (|d| d.group = [8, 8, 2], Bad::Group),
+        (
+            |d| {
+                d.simd = 32;
+                d.group = [8, 8, 1];
+            },
+            Bad::Group,
+        ),
+        (|d| d.start = [4, 0, 0], Bad::Groups),
+    ];
+    for (i, (change, bad)) in cases.iter().enumerate() {
+        let mut d = ok;
+        change(&mut d);
+        assert_eq!(validate(&d, 128), Err(*bad), "case {i}");
+    }
+    let mut d = ok;
+    d.groups[2] = 0;
+    assert_eq!(validate(&d, 128), Err(Bad::Groups));
+    let mut d = ok;
+    d.right_mask = 0;
+    assert_eq!(validate(&d, 128), Err(Bad::Groups));
+    let mut d = ok;
+    d.group = [0, 1, 1];
+    assert_eq!(validate(&d, 128), Err(Bad::Group));
+}
+
+#[test]
+fn descriptors_and_surfaces_are_igts() {
+    use crate::compute::{surface_2d, Descriptor, FORMAT_R8_UNORM};
+    // igt's `gen7_fill_interface_descriptor`: the kernel at 0x100, the
+    // binding table at 0xC0, one CURBE register.
+    let d = Descriptor {
+        kernel: 0x100,
+        binding_table: 0xC0,
+        binding_entries: 0,
+        curbe_regs: 1,
+        slm_blocks: 0,
+        barrier: false,
+    };
+    assert_eq!(
+        d.encode(),
+        Some([0x100, 1 << 18, 0, 0xC0, 1 << 16, 0, 0, 0])
+    );
+    let slm = Descriptor {
+        slm_blocks: 16,
+        barrier: true,
+        ..d
+    };
+    assert_eq!(slm.encode().unwrap()[5], 1 << 21 | 16 << 16);
+    for bad in [
+        Descriptor { kernel: 0x120, ..d },
+        Descriptor {
+            binding_table: 0xC8,
+            ..d
+        },
+        Descriptor {
+            binding_table: 0x1_0000,
+            ..d
+        },
+        Descriptor {
+            binding_entries: 32,
+            ..d
+        },
+        Descriptor { slm_blocks: 3, ..d },
+    ] {
+        assert_eq!(bad.encode(), None, "{bad:?}");
+    }
+    // igt's `gen7_fill_surface_state` for a linear 64 x 4 R8 buffer
+    // (without the Haswell channel selects igt also sets).
+    assert_eq!(
+        surface_2d(FORMAT_R8_UNORM, 0x2_0000, 64, 4, 64),
+        Some([
+            1 << 29 | 0x140 << 18 | 1 << 8,
+            0x2_0000,
+            3 << 16 | 63,
+            63,
+            0,
+            0,
+            0,
+            0
+        ])
+    );
+    assert_eq!(surface_2d(FORMAT_R8_UNORM, 0, 0, 4, 64), None);
+    assert_eq!(surface_2d(FORMAT_R8_UNORM, 0, 64, 4, 1 << 18 | 1), None);
+}
+
+#[test]
+fn the_residue_clear_fills_every_slot_of_a_gt2() {
+    extern crate std;
+    use crate::clear;
+    use crate::compute;
+    let mut code = [[0u32; 4]; 192];
+    let n = clear::program(&mut code, 7).unwrap();
+    // g127 to keep the header, the slot, 63 zeroings, the sweep, the mark,
+    // the last zeroings and the end.
+    assert!(n < 192, "{n} instructions");
+    let last = code[n - 1];
+    assert_eq!(last[0] & 0x7F, 0x31, "a send ends it");
+    assert_ne!(last[3] & 1 << 31, 0, "with the end of thread");
+    let mut state = [0u32; 1024];
+    let base = 0x1_0000;
+    let d = clear::prepare(&mut state, base, 7, 128).unwrap();
+    // A half-slice's 64 threads a group, one group a half-slice.
+    assert_eq!(d.group, [64, 1, 1]);
+    assert_eq!(d.groups, [2, 1, 1]);
+    assert_eq!(d.max_threads, 128);
+    assert_eq!(compute::validate(&d, 128), Ok(()));
+    // The program, then the two surfaces, the sweep's and the marks'.
+    assert_eq!(&state[..4], &code[0]);
+    assert_eq!(state[0xC00 / 4..0xC00 / 4 + 2], [0xC40, 0xC80]);
+    assert_eq!(state[0xC40 / 4 + 1], base + 2 * 4096);
+    assert_eq!(state[0xC80 / 4 + 1], base + 4096);
+    // The number is in the code, not the CURBE, which hands each thread of
+    // a group a section of its own.
+    assert_eq!((d.curbe_len, d.curbe_regs), (0, 0));
+    let mut other = [[0u32; 4]; 192];
+    clear::program(&mut other, 8).unwrap();
+    let differ: std::vec::Vec<usize> = (0..n).filter(|&i| code[i] != other[i]).collect();
+    assert_eq!(differ.len(), 1, "only the mark's immediate differs");
+    assert_eq!(code[differ[0]][3], 7);
+    // GT1: one group of 36.
+    let d = clear::prepare(&mut state, base, 1, 36).unwrap();
+    assert_eq!((d.group, d.groups), ([36, 1, 1], [1, 1, 1]));
+    assert_eq!(clear::prepare(&mut state, base, 1, 130), None);
+    assert_eq!(clear::groups(0), None);
+    assert_eq!(clear::groups(127), None);
+    // Counting: only this clear's number counts.
+    let mut marks = [0u32; 1024];
+    marks[0] = 7;
+    marks[9] = 7;
+    marks[10] = 6;
+    marks[300] = 7; // past the 256 slots
+    assert_eq!(clear::covered(&marks, 7), 2);
+    assert!(clear::slm_on(1) && !clear::slm_on(0x0008_0040));
+    assert_eq!(clear::PAGES, 34);
 }

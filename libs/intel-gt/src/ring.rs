@@ -1,15 +1,15 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 // SPDX-License-Identifier: Apache-2.0
-//! The blitter's ring, which only the kernel writes (ADR 0083). Each request
-//! starts one client batch, non-secure in the PPGTT, then stores its number
-//! in the status page. The bring-up, the stop and the reset follow Linux's
+//! The engines' rings, which only the kernel writes (ADR 0083, 0086). Each
+//! blitter request holds one client batch's checked commands, then stores
+//! its number in the status page. The bring-up, the stop and the reset follow Linux's
 //! `xcs_resume`, `intel_engine_stop_cs` and `gen6_hw_domain_reset`, with the
 //! limits of PRM Vol 1 Part 4, 2.1.
 
 use crate::cmd;
 use crate::gtt::{Layout, PAGE};
 use crate::power::Awake;
-use crate::regs::{self, bcs, masked_off, masked_on};
+use crate::regs::{self, bcs, masked_off, masked_on, Engine};
 use crate::{Clock, Refusal, Regs, Timeouts};
 
 /// The dword of the status page that receives each request's number
@@ -28,10 +28,11 @@ const STORE_REPEATS: usize = 32;
 /// Bytes left between the tail and the head so a full ring never looks
 /// empty (Linux `__intel_ring_space`, a cache line).
 const GAP: u32 = 64;
-/// Dwords of one request: a TLB invalidation (4), so the batch sees the
-/// PPGTT as it is now; the start (2); flush and store (3); the repeated
-/// stores; a flush (3); the interrupt and a no-op.
-pub const REQUEST_DWORDS: usize = 4 + 2 + 3 + 3 * STORE_REPEATS + 3 + 2;
+/// Dwords of one request besides its commands: a TLB invalidation (4), so
+/// the commands see the PPGTT as it is now; flush and store (3); the
+/// repeated stores; a flush (3); the interrupt and a no-op; and one no-op
+/// more when the commands are an odd number, to end on a quadword.
+pub const REQUEST_EXTRA: usize = 4 + 3 + 3 * STORE_REPEATS + 3 + 2 + 1;
 
 /// Whether a request numbered `seqno` has finished, given the number last
 /// stored. Numbers wrap.
@@ -69,24 +70,29 @@ impl Ring {
             & (self.bytes - 1)
     }
 
-    /// Writes the commands that run the batch at `batch` (a PPGTT address)
-    /// and then store `seqno`; returns the new tail for `TAIL`, or `None` if
-    /// the ring has no room for it yet. A request that would cross the ring's
-    /// end starts again at 0, the rest filled with no-ops.
-    pub fn request(&mut self, mem: &mut [u32], head: u32, batch: u32, seqno: u32) -> Option<u32> {
-        let mut words = [cmd::NOOP; REQUEST_DWORDS];
+    /// Writes a request of `body` (checked blitter commands, no
+    /// `MI_BATCH_BUFFER_END`) that then stores `seqno`; returns the new tail
+    /// for `TAIL`, or `None` if the ring has no room for it yet. A request
+    /// that would cross the ring's end starts again at 0, the rest filled
+    /// with no-ops.
+    pub fn request(&mut self, mem: &mut [u32], head: u32, body: &[u32], seqno: u32) -> Option<u32> {
+        let mut before = [cmd::NOOP; 4];
+        before[0] = cmd::FLUSH_DW
+            | cmd::FLUSH_DW_STORE_DWORD
+            | cmd::FLUSH_DW_STORE_INDEX
+            | cmd::FLUSH_DW_INVALIDATE_TLB;
+        before[1] = SCRATCH_ADDR | cmd::FLUSH_DW_GLOBAL_GTT;
+        before[2] = 0;
+        let mut after = [cmd::NOOP; REQUEST_EXTRA - 4];
         let mut n = 0;
         let mut put = |w: u32| {
-            words[n] = w;
+            after[n] = w;
             n += 1;
         };
-        let flush = cmd::FLUSH_DW | cmd::FLUSH_DW_STORE_DWORD | cmd::FLUSH_DW_STORE_INDEX;
-        put(flush | cmd::FLUSH_DW_INVALIDATE_TLB);
-        put(SCRATCH_ADDR | cmd::FLUSH_DW_GLOBAL_GTT);
-        put(0);
-        put(cmd::NOOP);
-        put(cmd::BATCH_START | cmd::BATCH_PPGTT);
-        put(batch);
+        // An odd body leaves the rest one dword off a quadword.
+        if body.len() % 2 == 1 {
+            put(cmd::NOOP);
+        }
         put(cmd::FLUSH_DW
             | cmd::FLUSH_DW_INVALIDATE_TLB
             | cmd::FLUSH_DW_STORE_DWORD
@@ -103,11 +109,30 @@ impl Ring {
         put(0);
         put(cmd::USER_INTERRUPT);
         put(cmd::NOOP);
-        debug_assert_eq!(n, REQUEST_DWORDS);
-        let need = (REQUEST_DWORDS * 4) as u32;
+        self.emit_parts(mem, head, &[&before, body, &after[..n]])
+    }
+
+    /// Writes `words`, a whole number of quadwords (TAIL moves in them),
+    /// and returns the new tail, or `None` if the ring has no room for them
+    /// yet. Words that would cross the ring's end start again at 0, the rest
+    /// filled with no-ops.
+    pub fn emit(&mut self, mem: &mut [u32], head: u32, words: &[u32]) -> Option<u32> {
+        self.emit_parts(mem, head, &[words])
+    }
+
+    /// [`Ring::emit`] of `parts` one after another, as one piece.
+    fn emit_parts(&mut self, mem: &mut [u32], head: u32, parts: &[&[u32]]) -> Option<u32> {
+        let len: usize = parts.iter().map(|p| p.len()).sum();
+        if !len.is_multiple_of(2) {
+            return None;
+        }
+        let need = (len * 4) as u32;
         let to_end = self.bytes - self.tail;
         let wrap = if need > to_end { to_end } else { 0 };
-        if self.space(head) < need + wrap || mem.len() * 4 < self.bytes as usize {
+        if need >= self.bytes
+            || self.space(head) < need + wrap
+            || mem.len() * 4 < self.bytes as usize
+        {
             return None;
         }
         let mut at = (self.tail / 4) as usize;
@@ -115,8 +140,11 @@ impl Ring {
             mem[at..(self.bytes / 4) as usize].fill(cmd::NOOP);
             at = 0;
         }
-        mem[at..at + REQUEST_DWORDS].copy_from_slice(&words);
-        self.tail = ((at + REQUEST_DWORDS) * 4) as u32 % self.bytes;
+        for p in parts {
+            mem[at..at + p.len()].copy_from_slice(p);
+            at += p.len();
+        }
+        self.tail = (at * 4) as u32 % self.bytes;
         Some(self.tail)
     }
 
@@ -146,103 +174,106 @@ pub fn prepare<R: Regs + ?Sized>(awake: &mut Awake<'_, R>) {
 
 /// Empties and turns off the ring (Linux `stop_ring`); true if the head
 /// went back to 0.
-fn stop_ring<R: Regs + ?Sized>(awake: &mut Awake<'_, R>) -> bool {
-    let tail = awake.read(bcs::TAIL);
-    awake.write(bcs::HEAD, tail);
-    awake.read(bcs::HEAD);
-    awake.write(bcs::CTL, 0);
-    awake.read(bcs::CTL);
-    awake.write(bcs::HEAD, 0);
-    awake.write(bcs::TAIL, 0);
-    awake.read(bcs::HEAD) & bcs::HEAD_ADDR == 0
+fn stop_ring<R: Regs + ?Sized>(awake: &mut Awake<'_, R>, e: &Engine) -> bool {
+    let tail = awake.read(e.tail());
+    awake.write(e.head(), tail);
+    awake.read(e.head());
+    awake.write(e.ctl(), 0);
+    awake.read(e.ctl());
+    awake.write(e.head(), 0);
+    awake.write(e.tail(), 0);
+    awake.read(e.head()) & bcs::HEAD_ADDR == 0
 }
 
-/// Starts the blitter on an empty ring with the PPGTT on (Linux
-/// `xcs_resume`). The status page and the ring must be mapped at `layout`'s
+/// Starts `e` on an empty ring with the PPGTT on (Linux `xcs_resume`, for
+/// every engine). Its status page and ring must be mapped at `layout`'s
 /// entries, and the page directory written, before this.
 pub fn start<R: Regs + ?Sized>(
     awake: &mut Awake<'_, R>,
     clock: &dyn Clock,
     t: &Timeouts,
+    e: &Engine,
     layout: &Layout,
     ring: &mut Ring,
 ) -> Result<(), Refusal> {
-    if !stop_ring(awake) {
+    if !stop_ring(awake, e) {
         return Err(Refusal::RingRunning);
     }
     ring.rewind();
-    awake.write(bcs::HWS_PGA, layout.status * PAGE as u32);
-    awake.read(bcs::HWS_PGA);
-    awake.write(bcs::HWSTAM, !0);
+    let (status, at) = layout.placement(e);
+    awake.write(e.hws_pga, status * PAGE as u32);
+    awake.read(e.hws_pga);
+    awake.write(e.hwstam(), !0);
     // A synchronizing flush with a TLB invalidation; the ring must be idle.
-    if awake.read(bcs::MI_MODE) & bcs::MODE_IDLE == 0 {
+    if awake.read(e.mi_mode()) & bcs::MODE_IDLE == 0 {
         return Err(Refusal::NotIdle);
     }
     awake.write(
-        bcs::INSTPM,
+        e.instpm(),
         masked_on(bcs::INSTPM_TLB_INVALIDATE | bcs::INSTPM_SYNC_FLUSH),
     );
     awake
-        .wait(clock, bcs::INSTPM, t.reset, |v| {
+        .wait(clock, e.instpm(), t.reset, |v| {
             v & bcs::INSTPM_SYNC_FLUSH == 0
         })
         .map_err(|_| Refusal::Timeout)?;
-    awake.read(bcs::HEAD);
-    awake.write(bcs::START, layout.ring * PAGE as u32);
-    awake.write(bcs::PP_DIR_DCLV, bcs::DCLV_2G);
-    awake.write(bcs::PP_DIR_BASE, layout.pp_dir_base());
-    awake.write(bcs::MODE, masked_on(bcs::PPGTT_ENABLE));
+    awake.read(e.head());
+    awake.write(e.start(), at * PAGE as u32);
+    awake.write(e.pp_dir_dclv(), bcs::DCLV_2G);
+    awake.write(e.pp_dir_base(), layout.pp_dir_base());
+    awake.write(e.mode(), masked_on(bcs::PPGTT_ENABLE));
     // The head may not take at the first write (Linux: "experimented ...
     // 50ms works best").
     let start = clock.now_us();
     loop {
-        awake.write(bcs::HEAD, 0);
-        if awake.read(bcs::HEAD) == 0 {
+        awake.write(e.head(), 0);
+        if awake.read(e.head()) == 0 {
             break;
         }
         if clock.now_us().saturating_sub(start) > t.readback {
             return Err(Refusal::Timeout);
         }
     }
-    awake.write(bcs::TAIL, 0);
-    if awake.read(bcs::HEAD) != awake.read(bcs::TAIL) {
+    awake.write(e.tail(), 0);
+    if awake.read(e.head()) != awake.read(e.tail()) {
         return Err(Refusal::Timeout);
     }
-    awake.write(bcs::CTL, (layout.ring_pages - 1) << 12 | bcs::CTL_VALID);
+    awake.write(e.ctl(), (layout.ring_pages - 1) << 12 | bcs::CTL_VALID);
     awake
-        .wait(clock, bcs::CTL, 5_000, |v| v & bcs::CTL_VALID != 0)
+        .wait(clock, e.ctl(), 5_000, |v| v & bcs::CTL_VALID != 0)
         .map_err(|_| Refusal::Timeout)?;
-    awake.write(bcs::MI_MODE, masked_off(bcs::MODE_STOP));
-    awake.read(bcs::MI_MODE);
+    awake.write(e.mi_mode(), masked_off(bcs::MODE_STOP));
+    awake.read(e.mi_mode());
     Ok(())
 }
 
-/// Hands the engine everything up to `tail`. The kernel makes its writes
-/// to the ring's memory visible first.
-pub fn submit<R: Regs + ?Sized>(awake: &mut Awake<'_, R>, tail: u32) {
-    awake.write(bcs::TAIL, tail & bcs::TAIL_ADDR);
-    awake.read(bcs::TAIL);
+/// Hands `e` everything up to `tail`. The kernel makes its writes to the
+/// ring's memory visible first.
+pub fn submit<R: Regs + ?Sized>(awake: &mut Awake<'_, R>, e: &Engine, tail: u32) {
+    awake.write(e.tail(), tail & bcs::TAIL_ADDR);
+    awake.read(e.tail());
 }
 
-/// Stops the blitter and resets its domain alone (Linux `__intel_engine_
-/// reset_bh`: stop, then `GDRST` twice). The ring must be started again
-/// after, which also invalidates the TLB: a soft reset does not (PRM Vol 1
-/// Part 4, 2.1.7.4).
+/// Stops `e` and resets its domain alone (Linux `__intel_engine_reset_bh`:
+/// stop, then `GDRST` twice). The ring must be started again after, which
+/// also invalidates the TLB: a soft reset does not (PRM Vol 1 Part 4,
+/// 2.1.7.4). A render reset also clears the render engine's settings and
+/// the blitter's TLB mode bits, which live in its mode register (ADR 0086):
+/// they must be applied again.
 pub fn reset<R: Regs + ?Sized>(
     awake: &mut Awake<'_, R>,
     clock: &dyn Clock,
     t: &Timeouts,
+    e: &Engine,
 ) -> Result<(), Refusal> {
-    awake.write(bcs::MI_MODE, masked_on(bcs::MODE_STOP));
+    awake.write(e.mi_mode(), masked_on(bcs::MODE_STOP));
     // Linux goes on if the engine does not stop: the reset is the remedy.
-    let _ = awake.wait(clock, bcs::MI_MODE, t.idle, |v| v & bcs::MODE_IDLE != 0);
-    stop_ring(awake);
+    let _ = awake.wait(clock, e.mi_mode(), t.idle, |v| v & bcs::MODE_IDLE != 0);
+    stop_ring(awake, e);
     for _ in 0..2 {
-        awake.write(regs::GDRST, regs::GDRST_BLITTER);
+        awake.write(regs::GDRST, e.reset);
         awake
-            .wait(clock, regs::GDRST, t.reset, |v| {
-                v & regs::GDRST_BLITTER == 0
-            })
+            .wait(clock, regs::GDRST, t.reset, |v| v & e.reset == 0)
             .map_err(|_| Refusal::Timeout)?;
     }
     Ok(())

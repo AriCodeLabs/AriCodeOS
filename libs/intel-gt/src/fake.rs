@@ -38,6 +38,12 @@ pub const PROBED: &[(u32, u32)] = &[
     (bcs::EIR, 0),
     (bcs::FAULT, 0),
     (bcs::HWS_PGA, 0),
+    // The render engine (dev build 55's probe).
+    (0x203C, 0),
+    (0x2034, 0),
+    (0x2030, 0),
+    (0x209C, 0x200),
+    (0x4094, 0),
 ];
 /// `ECOBUS` while the GT is awake.
 pub const ECOBUS_AWAKE: u32 = 0x8410_0020;
@@ -48,12 +54,22 @@ pub const FIRMWARE_RUN: u32 = 16_383;
 pub const STALE: u32 = 0x217D_80C1;
 pub const ENTRIES: u32 = 512 * 1024;
 
-const MASKED: [u32; 5] = [
+const MASKED: [u32; 14] = [
     regs::FORCEWAKE_MT,
     bcs::MI_MODE,
     bcs::MODE,
     bcs::INSTPM,
     regs::RCS_GFX_MODE,
+    // The render engine's masked registers (`render`).
+    0x7010,
+    0x2090,
+    0x7008,
+    0x209C,
+    0xE4F4,
+    0xF4F4,
+    0x20C0,
+    0x7000,
+    0x7004,
 ];
 
 pub struct Bank {
@@ -147,7 +163,7 @@ impl Regs for Bank {
         }
         // A synchronizing flush and a reset end at once, if they end.
         let new = match offset {
-            bcs::INSTPM if self.completes => new & !bcs::INSTPM_SYNC_FLUSH,
+            bcs::INSTPM | 0x20C0 if self.completes => new & !bcs::INSTPM_SYNC_FLUSH,
             regs::GDRST if self.completes => 0,
             _ => new,
         };

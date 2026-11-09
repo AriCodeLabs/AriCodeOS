@@ -1,10 +1,13 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 // SPDX-License-Identifier: Apache-2.0
-//! The GPU's engine on Intel Ivy Bridge (ADR 0083): the kernel owns the
-//! global GTT, the one client's PPGTT, the blitter's ring and every register;
-//! a program with the `GPU` object maps its DMA buffers and submits batches,
-//! which the kernel copies, checks and runs non-secure in the program's own
-//! address space. The decisions live in `aricode-intel-gt`; this is the glue.
+//! The GPU's engine on Intel Ivy Bridge (ADR 0083, 0086): the kernel owns
+//! the global GTT, the one client's PPGTT, both rings and every register; a
+//! program with the `GPU` object maps its memory, submits blitter batches,
+//! whose commands the kernel copies, checks and writes into the blitter's
+//! ring, and dispatches EU kernels, whose commands the kernel writes into
+//! the render ring from a descriptor. Nothing the kernel checked or wrote
+//! is in the client's PPGTT, where EU threads could rewrite it. The
+//! decisions live in `aricode-intel-gt`; this is the glue.
 //!
 //! The engine is never used under a spin lock: resets and waits on it take
 //! up to tens of milliseconds, so a call takes the engine out of `GPU`, works
@@ -22,6 +25,7 @@ use crate::sync::IrqLock;
 use crate::user::process;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use aricode_abi::gpu::{Dispatch, DISPATCH_NUMBER};
 use aricode_abi::sysinfo::{GpuReport, GPU_ABSENT, GPU_OFF, GPU_READY, GPU_REFUSED};
 use aricode_abi::Error;
 use aricode_intel_gt::check::{self, Range};
@@ -29,21 +33,27 @@ use aricode_intel_gt::gtt::{self, Cache, Layout};
 use aricode_intel_gt::power::{self, Forcewake, Limits};
 use aricode_intel_gt::regs::{bcs, masked_off, masked_on};
 use aricode_intel_gt::ring::{self, Ring};
-use aricode_intel_gt::{self as gt, ppgtt, Refusal, Timeouts};
+use aricode_intel_gt::{self as gt, clear, compute, ppgtt, regs, render, Refusal, Timeouts};
 use aricode_pmm::FRAME_SIZE;
 use log::{info, warn};
 
 /// Pages of the ring (Linux's 16 KiB).
 const RING_PAGES: u32 = 4;
-/// The kernel's copies of client batches: this many pages, each holding one
-/// batch of up to a page, mapped in the client's PPGTT from `COPY_AT`, below
-/// `gpu::FIRST`, where no mapping of the client's can reach them.
-const COPIES: usize = 4;
-const COPY_AT: u32 = 0x8000;
-const _: () = assert!(COPY_AT as u64 + COPIES as u64 * 4096 <= aricode_abi::gpu::FIRST);
+/// Where the residue clear's pages are mapped while it runs, between two
+/// clients, when the PPGTT holds nothing else (ADR 0086, B6).
+const CLEAR_AT: u32 = aricode_abi::gpu::FIRST as u32;
+/// How long one clear may take, and how many times it is tried while it
+/// misses a thread slot, before the render engine is left off.
+const CLEAR_LIMIT_US: u64 = 200_000;
+const CLEAR_TRIES: usize = 3;
+/// Resets whose lost numbers `gpu_wait` remembers.
+const LOST_KEPT: usize = 8;
 /// Mappings a client may hold (audit M4): bounds the kernel's memory and the
 /// check's work per batch.
 const MAX_MAPS: usize = 256;
+/// The render status page's dword its flushes may store to (Linux's
+/// `I915_GEM_HWS_SCRATCH`).
+const RENDER_SCRATCH: u32 = 0x80;
 /// A dword of the status page nothing writes; see `GpuReport::canary`.
 const CANARY_INDEX: usize = 0x90;
 /// The blitter's watchdog threshold (PRM Vol 1 Part 4, 2.1.9.2): unused,
@@ -101,21 +111,108 @@ struct Pages {
     scratch: ObjectRef,
     status: ObjectRef,
     ring: ObjectRef,
-    copies: ObjectRef,
     /// The PPGTT's 512 tables, contiguous: every directory entry is written
     /// once, at boot, and never changes (audit M3).
     tables: ObjectRef,
+    /// The render engine's status page and ring (ADR 0086).
+    render_status: ObjectRef,
+    render_ring: ObjectRef,
+    /// The residue clear's state, marks and sweep surface (`clear::PAGES`).
+    clear: ObjectRef,
 }
 
 impl Pages {
-    fn all(self) -> [ObjectRef; 5] {
+    fn all(self) -> [ObjectRef; 7] {
         [
             self.scratch,
             self.status,
             self.ring,
-            self.copies,
             self.tables,
+            self.render_status,
+            self.render_ring,
+            self.clear,
         ]
+    }
+}
+
+/// What one engine was given and has done.
+struct Track {
+    /// The next request's number, and the last one submitted.
+    next: u32,
+    submitted: u32,
+    /// Numbers lost to the last resets: those after `.0` up to `.1`, the
+    /// newest at `lost_at` (audit of stage B, L1: one range forgot the
+    /// earlier ones).
+    lost: [(u32, u32); LOST_KEPT],
+    lost_at: usize,
+    /// The number of the last request finished, and when it changed or the
+    /// engine got work while idle. The status pages are the kernel's alone:
+    /// no command a client can have run writes them.
+    progress: (u32, u64),
+}
+
+impl Track {
+    fn new() -> Self {
+        Track {
+            next: 1,
+            submitted: 0,
+            lost: [(0, 0); LOST_KEPT],
+            lost_at: 0,
+            progress: (0, crate::time::uptime_us()),
+        }
+    }
+
+    /// Whether `seqno` was lost to one of the resets remembered.
+    fn was_lost(&self, seqno: u32) -> bool {
+        self.lost
+            .iter()
+            .any(|&(after, upto)| !ring::passed(after, seqno) && ring::passed(upto, seqno))
+    }
+
+    /// Whether the engine has made no progress for `hang_us` with work
+    /// pending (`done` the last number it finished): Linux's heartbeat,
+    /// not its old head sampling, which a batch looping on itself keeps
+    /// moving.
+    fn stalled(&mut self, done: u32, hang_us: u64) -> bool {
+        let now = crate::time::uptime_us();
+        if done != self.progress.0 {
+            self.progress = (done, now);
+            return false;
+        }
+        !ring::passed(done, self.submitted) && now.saturating_sub(self.progress.1) > hang_us
+    }
+
+    /// Takes the next number for a request.
+    fn take_number(&mut self) -> u32 {
+        let seqno = self.next;
+        self.next = match seqno.wrapping_add(1) {
+            0 => 1,
+            n => n,
+        };
+        seqno
+    }
+}
+
+/// One of the two engines the kernel runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Which {
+    Blitter,
+    Render,
+}
+
+impl Which {
+    fn regs(self) -> regs::Engine {
+        match self {
+            Which::Blitter => regs::BLITTER,
+            Which::Render => regs::RENDER,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Which::Blitter => "blitter",
+            Which::Render => "render engine",
+        }
     }
 }
 
@@ -128,20 +225,21 @@ struct Engine {
     hang_us: u64,
     pages: Pages,
     scratch_pte: u32,
-    /// The number of the request that last used each copy page.
-    copy_seq: [u32; COPIES],
     maps: Vec<Mapping>,
-    /// The next batch's number, and the last one submitted.
-    next: u32,
-    submitted: u32,
+    blit: Track,
+    render: Track,
+    /// Requests on either engine, and resets of either, since boot.
     requests: u64,
     resets: u64,
-    /// Numbers lost to the last reset: those after `.0` up to `.1`.
-    lost: (u32, u32),
-    /// The number of the last batch finished, and when it changed or the
-    /// engine got work while idle. The status page is the kernel's alone:
-    /// no checked batch can write it.
-    progress: (u32, u64),
+    /// The GPU's hardware threads, for dispatches and the residue clear
+    /// (ADR 0086).
+    threads: u16,
+    /// The client ran EU threads: its residue is cleared when it goes.
+    eu_used: bool,
+    /// Clears done, and the last one's reach and time.
+    clears: u32,
+    cleared_threads: u16,
+    clear_us: u32,
     /// A reset failed: the engine takes no more work, and what it could
     /// reach is never freed.
     dead: bool,
@@ -151,6 +249,13 @@ struct Engine {
     asked: u8,
     cap: u8,
     step: u8,
+    /// The render engine's ring, and whether it started and passed its
+    /// boot check (ADR 0086).
+    render_ring: Ring,
+    render_ok: bool,
+    /// What the boot check of the render ring reported (`GpuReport`).
+    render_state: u8,
+    render_us: u16,
 }
 
 enum Status {
@@ -204,9 +309,20 @@ fn status_dword(e: &Engine, index: usize) -> u32 {
     unsafe { core::ptr::read_volatile(&page[index]) }
 }
 
-/// The number of the last batch finished.
-fn stored(e: &Engine) -> u32 {
-    status_dword(e, ring::SEQNO_INDEX as usize)
+/// The status page of `which`.
+fn status_page(e: &Engine, which: Which) -> &'static mut [u32] {
+    match which {
+        Which::Blitter => dwords(phys(&e.pages.status), 1),
+        Which::Render => dwords(phys(&e.pages.render_status), 1),
+    }
+}
+
+/// The number of the last request `which` finished.
+fn finished(e: &Engine, which: Which) -> u32 {
+    let page = status_page(e, which);
+    // SAFETY: inside the status page; a volatile read of memory a device
+    // writes.
+    unsafe { core::ptr::read_volatile(&page[ring::SEQNO_INDEX as usize]) }
 }
 
 /// Writes the CPU's cached lines of `[addr, addr + len)` back to memory: page
@@ -259,6 +375,27 @@ pub fn init(
         match bring_up(&d, mhz, max_mhz, hang_ms * 1000) {
             Ok(e) => {
                 let mut e = e;
+                if let Some(mut regs) = framebuffer::mapped_bar0() {
+                    match render_bring_up(&mut e, &mut regs) {
+                        Ok((first, again)) => {
+                            e.render_ok = true;
+                            e.render_state = 1;
+                            e.render_us = first.min(u16::MAX as u64) as u16;
+                            info!(
+                                "gpu: render ring ready: an empty request in {first} us; \
+                                 reset and started again, another in {again} us"
+                            );
+                        }
+                        Err(why) => {
+                            e.render_state = 2;
+                            if let Ok(mut awake) = e.fw.hold(&mut regs, &Clock) {
+                                awake.write(regs::RENDER.ctl(), 0);
+                                awake.write(regs::RENDER.mi_mode(), masked_on(bcs::MODE_STOP));
+                            }
+                            warn!("gpu: render ring left off: {why}; the blitter goes on");
+                        }
+                    }
+                }
                 // Without the thread or a sensor there is no brake: no
                 // clock above the boot's unless gpu.max_mhz says so (M3).
                 let thread = crate::task::scheduler::spawn("gpu", reaper, 0);
@@ -326,8 +463,10 @@ fn bring_up(
         scratch: alloc(1)?,
         status: alloc(1)?,
         ring: alloc(RING_PAGES)?,
-        copies: alloc(COPIES as u32)?,
         tables: alloc(layout.directory_entries)?,
+        render_status: alloc(1)?,
+        render_ring: alloc(RING_PAGES)?,
+        clear: alloc(clear::PAGES)?,
     };
     let scratch_pte = gtt::encode(phys(&pages.scratch), Cache::Uncached).ok_or(Refusal::GttSize)?;
     // From the first write to the tables on, a failure stops the engine and
@@ -345,17 +484,24 @@ fn bring_up(
         let llc = |p: u64| gtt::encode(p, Cache::Llc).ok_or(Refusal::GttSize);
         let tables = dwords(phys(&pages.tables), layout.directory_entries);
         tables.fill(scratch_pte);
-        for i in 0..COPIES {
-            let (dir, entry) = ppgtt::split(COPY_AT + i as u32 * FRAME_SIZE as u32);
-            tables[(dir * ppgtt::TABLE_ENTRIES + entry) as usize] =
-                llc(phys(&pages.copies) + i as u64 * FRAME_SIZE)?;
-        }
         flush_lines(tables.as_ptr(), tables.len() * 4);
         // Every entry the firmware did not use points at the scratch page;
         // then the status page and the ring, cached in the LLC as Linux maps
         // them; then the directory, each entry naming its table.
         gtt::clear(&mut regs, kept, layout.directory, scratch_pte);
         gtt::set(&mut regs, layout.status, llc(phys(&pages.status))?);
+        gtt::set(
+            &mut regs,
+            layout.render_status,
+            llc(phys(&pages.render_status))?,
+        );
+        for i in 0..RING_PAGES {
+            gtt::set(
+                &mut regs,
+                layout.render_ring + i,
+                llc(phys(&pages.render_ring) + i as u64 * FRAME_SIZE)?,
+            );
+        }
         for i in 0..RING_PAGES {
             gtt::set(
                 &mut regs,
@@ -370,8 +516,20 @@ fn bring_up(
         }
         ppgtt::flush_directory(&mut regs);
         let mut awake = fw.hold(&mut regs, &clock)?;
+        // Linux's Ivy Bridge settings, which the firmware does not apply
+        // (ADR 0086), before any engine starts.
+        render::apply(&mut awake, &render::GT);
+        render::apply(&mut awake, &render::CLOCK_GATING);
+        render::apply(&mut awake, &render::RENDER);
         ring::prepare(&mut awake);
-        ring::start(&mut awake, &clock, &timeouts, &layout, &mut ring)?;
+        ring::start(
+            &mut awake,
+            &clock,
+            &timeouts,
+            &regs::BLITTER,
+            &layout,
+            &mut ring,
+        )?;
         power::quiet_rps_interrupts(&mut awake);
         power::set_frequency(&mut awake, &found.limits, step);
         Ok(())
@@ -379,9 +537,11 @@ fn bring_up(
     if let Err(why) = programmed {
         warn!("gpu: taking the engine failed halfway ({why:?}): stopped, its pages kept for good");
         if let Ok(mut awake) = fw.hold(&mut regs, &clock) {
-            awake.write(bcs::CTL, 0);
-            awake.write(bcs::MODE, masked_off(bcs::PPGTT_ENABLE));
-            awake.write(bcs::MI_MODE, masked_on(bcs::MODE_STOP));
+            for engine in [regs::BLITTER, regs::RENDER] {
+                awake.write(engine.ctl(), 0);
+                awake.write(engine.mode(), masked_off(bcs::PPGTT_ENABLE));
+                awake.write(engine.mi_mode(), masked_on(bcs::MODE_STOP));
+            }
         }
         for p in pages.all() {
             crate::hw::quarantine(p);
@@ -397,20 +557,127 @@ fn bring_up(
         hang_us,
         pages,
         scratch_pte,
-        copy_seq: [0; COPIES],
         maps: Vec::new(),
-        next: 1,
-        submitted: 0,
+        blit: Track::new(),
+        render: Track::new(),
         requests: 0,
         resets: 0,
-        lost: (0, 0),
-        progress: (0, crate::time::uptime_us()),
+        threads: compute::threads(d.device).ok_or(Refusal::NotThisFamily)?,
+        eu_used: false,
+        clears: 0,
+        cleared_threads: 0,
+        clear_us: 0,
         dead: false,
         boot_step: step,
         asked: step,
         cap,
         step,
+        render_ring: Ring::new(RING_PAGES),
+        render_ok: false,
+        render_state: 0,
+        render_us: 0,
     }))
+}
+
+/// Writes `body` into the render ring as one request and submits it; its
+/// number, or `None` if the ring has no room or the GT does not wake.
+fn render_request(e: &mut Engine, regs: &mut Bar0, body: &[u32]) -> Option<u32> {
+    let page = e.layout.render_status * FRAME_SIZE as u32;
+    let seqno = e.render.next;
+    let mut words = [0u32; compute::MAX_DWORDS + render::REQUEST_EXTRA];
+    let n = render::request(
+        page + RENDER_SCRATCH * 4,
+        page + ring::SEQNO_INDEX * 4,
+        seqno,
+        body,
+        &mut words,
+    )?;
+    let done = finished(e, Which::Render);
+    let mut awake = e.fw.hold(regs, &Clock).ok()?;
+    let head = awake.read(regs::RENDER.head());
+    let idle_before = head & bcs::HEAD_ADDR == e.render_ring.tail();
+    let tail = e.render_ring.emit(
+        dwords(phys(&e.pages.render_ring), RING_PAGES),
+        head,
+        &words[..n],
+    )?;
+    // SAFETY: a fence touches no memory.
+    unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
+    ring::submit(&mut awake, &regs::RENDER, tail);
+    e.render.take_number();
+    if idle_before {
+        e.render.progress = (done, crate::time::uptime_us());
+    }
+    e.render.submitted = seqno;
+    Some(seqno)
+}
+
+/// Waits up to `limit_us` for render request `seqno`; the time it took.
+fn render_wait(e: &Engine, seqno: u32, limit_us: u64) -> Option<u64> {
+    let page = dwords(phys(&e.pages.render_status), 1);
+    let start = crate::time::uptime_us();
+    loop {
+        // SAFETY: inside the status page; the GPU writes it.
+        let stored = unsafe { core::ptr::read_volatile(&page[ring::SEQNO_INDEX as usize]) };
+        let now = crate::time::uptime_us();
+        if ring::passed(stored, seqno) {
+            return Some(now - start);
+        }
+        if now - start > limit_us {
+            return None;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+/// Starts the render engine's ring and checks it at boot (ADR 0086, B2): an
+/// empty request, a reset of the render domain with its settings applied
+/// again, and another. On any failure the ring is stopped and the blitter
+/// goes on alone.
+fn render_bring_up(e: &mut Engine, regs: &mut Bar0) -> Result<(u64, u64), &'static str> {
+    const LIMIT_US: u64 = 50_000;
+    let (fw, timeouts, layout) = (e.fw, e.timeouts, e.layout);
+    {
+        let mut awake = fw.hold(regs, &Clock).map_err(|_| "forcewake")?;
+        ring::start(
+            &mut awake,
+            &Clock,
+            &timeouts,
+            &regs::RENDER,
+            &layout,
+            &mut e.render_ring,
+        )
+        .map_err(|_| "the ring did not start")?;
+    }
+    {
+        let awake = fw.hold(regs, &Clock).map_err(|_| "forcewake")?;
+        // Nothing clears the shared local memory between clients: it must
+        // stay off, as the firmware leaves it (ADR 0086, B6).
+        if clear::slm_on(awake.read(clear::L3CNTLREG2)) {
+            return Err("the shared local memory is on");
+        }
+    }
+    let first = render_request(e, regs, &[]).ok_or("no room in the ring")?;
+    let took = render_wait(e, first, LIMIT_US).ok_or("an empty request did not finish")?;
+    {
+        let mut awake = fw.hold(regs, &Clock).map_err(|_| "forcewake")?;
+        ring::reset(&mut awake, &Clock, &timeouts, &regs::RENDER)
+            .map_err(|_| "the render domain did not reset")?;
+        render::apply(&mut awake, &render::RENDER);
+        ring::start(
+            &mut awake,
+            &Clock,
+            &timeouts,
+            &regs::RENDER,
+            &layout,
+            &mut e.render_ring,
+        )
+        .map_err(|_| "the ring did not start again")?;
+    }
+    let second = render_request(e, regs, &[]).ok_or("no room after the reset")?;
+    let again = render_wait(e, second, LIMIT_US)
+        .ok_or("an empty request did not finish after the reset")?;
+    Ok((took, again))
 }
 
 /// The engine, out of `GPU` for one call.
@@ -474,8 +741,18 @@ extern "C" fn reaper(_arg: usize) {
     use core::sync::atomic::Ordering;
     loop {
         crate::task::scheduler::sleep_ms(REAP_MS);
-        if GPU.lock().client_gone {
+        let (gone, client) = {
+            let g = GPU.lock();
+            (g.client_gone, g.client.is_some())
+        };
+        if gone {
             drop(take());
+        } else if client {
+            // The heartbeat for a client that does not wait (audit of
+            // stage B): an endless EU loop is reset all the same.
+            if let (Ok((mut e, _)), Some(mut regs)) = (take(), framebuffer::mapped_bar0()) {
+                watch(&mut e, &mut regs);
+            }
         }
         // The heat brake: the CPU's package carries the GPU too.
         let Some((degrees, _)) = crate::arch::x86_64::thermal::read() else {
@@ -496,6 +773,28 @@ extern "C" fn reaper(_arg: usize) {
                     );
                 }
             }
+        }
+    }
+}
+
+/// Resets an engine that has had work pending with no progress for
+/// `gpu.hang_ms`.
+fn watch(e: &mut Engine, regs: &mut Bar0) {
+    if e.dead {
+        return;
+    }
+    for which in [Which::Blitter, Which::Render] {
+        if which == Which::Render && !e.render_ok {
+            continue;
+        }
+        let (done, hang_us) = (finished(e, which), e.hang_us);
+        if track(e, which).stalled(done, hang_us) {
+            warn!(
+                "gpu: the {} made no progress for {} ms",
+                which.name(),
+                hang_us / 1000
+            );
+            reset(e, regs, which);
         }
     }
 }
@@ -560,38 +859,74 @@ fn is_client() -> bool {
     pid.is_some() && g.client == pid && !g.client_gone
 }
 
-/// The engine has done everything it was given: it has consumed the ring to
-/// its tail, and the last batch's number has been stored after the flush that
-/// follows it (audit L2).
-fn idle(e: &Engine, regs: &mut Bar0) -> bool {
-    let consumed = match e.fw.hold(regs, &Clock) {
-        Ok(awake) => awake.read(bcs::HEAD) & bcs::HEAD_ADDR == e.ring.tail(),
-        Err(_) => false,
-    };
-    consumed && ring::passed(stored(e), e.submitted)
+fn track(e: &mut Engine, which: Which) -> &mut Track {
+    match which {
+        Which::Blitter => &mut e.blit,
+        Which::Render => &mut e.render,
+    }
 }
 
-/// Resets the blitter and starts its ring again; every batch submitted is
-/// lost. A reset that fails leaves the engine dead.
-fn reset(e: &mut Engine, regs: &mut Bar0) {
-    let before = stored(e);
-    let ok = e.fw.hold(regs, &Clock).is_ok_and(|mut awake| {
-        ring::reset(&mut awake, &Clock, &e.timeouts).is_ok()
-            && ring::start(&mut awake, &Clock, &e.timeouts, &e.layout, &mut e.ring).is_ok()
+/// `which` has done everything it was given: it has consumed its ring to the
+/// tail, and the last request's number has been stored after the flush that
+/// follows it (audit L2). A render engine that never started has nothing.
+fn engine_idle(e: &Engine, regs: &mut Bar0, which: Which) -> bool {
+    let (tail, submitted) = match which {
+        Which::Blitter => (e.ring.tail(), e.blit.submitted),
+        Which::Render if !e.render_ok => return true,
+        Which::Render => (e.render_ring.tail(), e.render.submitted),
+    };
+    let consumed = match e.fw.hold(regs, &Clock) {
+        Ok(awake) => awake.read(which.regs().head()) & bcs::HEAD_ADDR == tail,
+        Err(_) => false,
+    };
+    consumed && ring::passed(finished(e, which), submitted)
+}
+
+/// Both engines are idle.
+fn idle(e: &Engine, regs: &mut Bar0) -> bool {
+    engine_idle(e, regs, Which::Blitter) && engine_idle(e, regs, Which::Render)
+}
+
+/// Resets `which` and starts its ring again; every request submitted to it
+/// is lost. The render engine's settings go back first, since its reset
+/// clears them (ADR 0086, decision 4). A reset that fails leaves the whole
+/// engine dead: what either could reach is kept for good.
+fn reset(e: &mut Engine, regs: &mut Bar0, which: Which) {
+    let before = finished(e, which);
+    let engine = which.regs();
+    let (fw, timeouts, layout) = (e.fw, e.timeouts, e.layout);
+    let ring = match which {
+        Which::Blitter => &mut e.ring,
+        Which::Render => &mut e.render_ring,
+    };
+    let ok = fw.hold(regs, &Clock).is_ok_and(|mut awake| {
+        if ring::reset(&mut awake, &Clock, &timeouts, &engine).is_err() {
+            return false;
+        }
+        if which == Which::Render {
+            render::apply(&mut awake, &render::RENDER);
+        }
+        ring::start(&mut awake, &Clock, &timeouts, &engine, &layout, ring).is_ok()
     });
-    dwords(phys(&e.pages.status), 1)[ring::SEQNO_INDEX as usize] = e.submitted;
-    e.lost = (before, e.submitted);
+    let submitted = track(e, which).submitted;
+    status_page(e, which)[ring::SEQNO_INDEX as usize] = submitted;
+    let t = track(e, which);
+    t.lost_at = (t.lost_at + 1) % LOST_KEPT;
+    t.lost[t.lost_at] = (before, submitted);
+    t.progress = (submitted, crate::time::uptime_us());
     e.resets += 1;
-    e.progress = (e.submitted, crate::time::uptime_us());
     if ok {
         warn!(
-            "gpu: blitter reset; batches {} to {} lost",
+            "gpu: {} reset; requests {} to {submitted} lost",
+            which.name(),
             before.wrapping_add(1),
-            e.submitted
         );
     } else {
         e.dead = true;
-        warn!("gpu: blitter reset failed; the engine takes no more work");
+        warn!(
+            "gpu: {} reset failed; the engine takes no more work",
+            which.name()
+        );
     }
 }
 
@@ -602,12 +937,23 @@ fn release_client(e: &mut Engine) -> Vec<Mapping> {
     let Some(mut regs) = framebuffer::mapped_bar0() else {
         return Vec::new();
     };
-    if !e.dead && !idle(e, &mut regs) {
-        reset(e, &mut regs);
+    for which in [Which::Blitter, Which::Render] {
+        if !e.dead && !engine_idle(e, &mut regs, which) {
+            reset(e, &mut regs, which);
+        }
     }
     let maps = core::mem::take(&mut e.maps);
     for m in &maps {
         set_pages(e, m.address, m.pages, None);
+    }
+    // Before the next client, and before the buffers go back to be used
+    // again: what EU threads left in registers and caches.
+    if core::mem::take(&mut e.eu_used) && e.render_ok && !e.dead {
+        if let Err(why) = clear_residue(e, &mut regs) {
+            e.render_ok = false;
+            e.render_state = 2;
+            warn!("gpu: residue clear failed ({why}): the render engine takes no more work");
+        }
     }
     // The next client starts at the boot's clock.
     e.asked = e.boot_step;
@@ -620,6 +966,97 @@ fn release_client(e: &mut Engine) -> Vec<Mapping> {
         return Vec::new();
     }
     maps
+}
+
+/// Clears what the last client's EU threads left (ADR 0086, B6): the
+/// scratch page zeroed; then a dispatch of `clear::program` on every thread
+/// slot, counted by its marks, tried again while it misses a slot (nothing
+/// forces a group's threads to be resident at once; audit of stage B, M1).
+/// The PPGTT holds nothing of a client's. An error leaves the render engine
+/// off.
+fn clear_residue(e: &mut Engine, regs: &mut Bar0) -> Result<(), &'static str> {
+    // First, whatever happens next (audit L3): EU writes outside the
+    // client's mappings landed here.
+    let scratch = dwords(phys(&e.pages.scratch), 1);
+    scratch.fill(0);
+    flush_lines(scratch.as_ptr(), scratch.len() * 4);
+    {
+        let awake = e.fw.hold(regs, &Clock).map_err(|_| "forcewake")?;
+        if clear::slm_on(awake.read(clear::L3CNTLREG2)) {
+            return Err("the shared local memory is on");
+        }
+    }
+    // The clear's addresses must be PPGTT ones (audit M2).
+    if !ensure_ppgtt(e, regs, Which::Render) {
+        return Err("the render engine's PPGTT was not as set");
+    }
+    let base = phys(&e.pages.clear);
+    let frame = |i: u32| Some(base + i as u64 * FRAME_SIZE);
+    if !set_pages(e, CLEAR_AT, clear::PAGES, Some(&frame)) {
+        return Err("its pages could not be mapped");
+    }
+    let t0 = crate::time::uptime_us();
+    let mut result = Err("no attempt");
+    for _ in 0..CLEAR_TRIES {
+        result = clear_once(e, regs);
+        if !matches!(result, Ok(false)) {
+            break;
+        }
+    }
+    set_pages(e, CLEAR_AT, clear::PAGES, None);
+    e.clear_us = (crate::time::uptime_us() - t0).min(u32::MAX as u64) as u32;
+    match result {
+        Ok(true) => {
+            info!(
+                "gpu: residue cleared on {} threads in {} us",
+                e.cleared_threads, e.clear_us
+            );
+            Ok(())
+        }
+        Ok(false) => {
+            warn!(
+                "gpu: residue clear reached {} of {} threads in {CLEAR_TRIES} tries",
+                e.cleared_threads, e.threads
+            );
+            Err("a thread slot was not reached")
+        }
+        Err(why) => Err(why),
+    }
+}
+
+/// One run of the clear, its pages mapped at `CLEAR_AT`; whether it reached
+/// every thread slot.
+fn clear_once(e: &mut Engine, regs: &mut Bar0) -> Result<bool, &'static str> {
+    let base = phys(&e.pages.clear);
+    let page = |p: u32| base + p as u64 * FRAME_SIZE;
+    e.clears = e.clears.wrapping_add(1).max(1);
+    let number = e.clears;
+    let d = clear::prepare(
+        dwords(page(clear::STATE_PAGE), 1),
+        CLEAR_AT,
+        number,
+        e.threads,
+    )
+    .ok_or("no clear for this GPU")?;
+    let marks = dwords(page(clear::MARKS_PAGE), 1);
+    marks.fill(0);
+    let (body, n) = compute::emit(&d, e.threads).map_err(|_| "the clear's dispatch")?;
+    let ran = render_request(e, regs, &body[..n])
+        .ok_or("no room in the ring")
+        .and_then(|seqno| render_wait(e, seqno, CLEAR_LIMIT_US).ok_or("it did not finish"));
+    if ran.is_err() {
+        reset(e, regs, Which::Render);
+    }
+    ran?;
+    let mut seen = [0u32; (clear::MARKS_WIDTH / 4 * clear::MARKS_HEIGHT) as usize];
+    for (s, m) in seen.iter_mut().zip(marks.iter()) {
+        // SAFETY: inside the marks page; a volatile read of memory the GPU
+        // wrote.
+        *s = unsafe { core::ptr::read_volatile(m) };
+    }
+    let reached = clear::covered(&seen, number);
+    e.cleared_threads = reached as u16;
+    Ok(reached >= e.threads as u32)
 }
 
 /// Points the PPGTT's pages from `address` at `frame(i)`, or at the
@@ -696,6 +1133,13 @@ pub fn map(dma: ObjectRef, address: u64) -> Result<(), Error> {
         _ => None,
     };
     if !set_pages(&mut e, address, pages, Some(&frame)) {
+        // Pages written before the failure may sit in the GPU's TLB while
+        // an engine runs: the object is then kept for good (audit L2).
+        let mut regs = framebuffer::mapped_bar0().ok_or(Error::NotFound)?;
+        if !idle(&e, &mut regs) {
+            let bytes = crate::hw::quarantine(dma);
+            warn!("gpu: a mapping failed halfway while the GPU ran: {bytes} bytes kept for good");
+        }
         return Err(Error::Limit);
     }
     // Every table exists from boot; the next request invalidates the GPU's
@@ -734,25 +1178,44 @@ pub fn unmap(address: u64) -> Result<(), Error> {
     Ok(())
 }
 
-/// Whether the blitter still runs in the PPGTT the kernel set (audit L2): a
+/// Whether `which` still runs in the PPGTT the kernel set (audit L2): a
 /// power state's restore or anything else unmeasured must not leave it
-/// running batches through the global GTT.
-fn ppgtt_in_place(e: &Engine, regs: &mut Bar0) -> bool {
+/// running commands through the global GTT.
+fn ppgtt_in_place(e: &Engine, regs: &mut Bar0, which: Which) -> bool {
+    let engine = which.regs();
     e.fw.hold(regs, &Clock).is_ok_and(|awake| {
-        awake.read(bcs::MODE) & bcs::PPGTT_ENABLE != 0
-            && awake.read(bcs::PP_DIR_BASE) == e.layout.pp_dir_base()
+        awake.read(engine.mode()) & bcs::PPGTT_ENABLE != 0
+            && awake.read(engine.pp_dir_base()) == e.layout.pp_dir_base()
     })
 }
 
+/// Resets `which` if its PPGTT is not as set; `false` if it still is not.
+fn ensure_ppgtt(e: &mut Engine, regs: &mut Bar0, which: Which) -> bool {
+    if ppgtt_in_place(e, regs, which) {
+        return true;
+    }
+    warn!(
+        "gpu: the {}'s PPGTT was not as set; resetting it",
+        which.name()
+    );
+    reset(e, regs, which);
+    if e.dead || !ppgtt_in_place(e, regs, which) {
+        e.dead = true;
+        return false;
+    }
+    true
+}
+
 /// `gpu_submit`: the batch at `ptr`, `len` bytes of the caller's memory, is
-/// copied into one of the kernel's pages, checked there, and that copy runs
-/// (ADR 0083: a non-secure batch reaches the blitter's registers).
+/// copied, checked, and its commands written into the blitter's ring (ADR
+/// 0083: a non-secure batch reaches the blitter's registers; ADR 0086: EU
+/// threads could rewrite a checked copy left in the PPGTT).
 pub fn submit(ptr: u64, len: u64) -> Result<u64, Error> {
     if !(8..=FRAME_SIZE).contains(&len) || !len.is_multiple_of(8) {
         return Err(Error::Invalid);
     }
     let bytes = process::copy_from_user(ptr, len)?;
-    let mut words: Vec<u32> = bytes
+    let words: Vec<u32> = bytes
         .as_chunks::<4>()
         .0
         .iter()
@@ -764,12 +1227,7 @@ pub fn submit(ptr: u64, len: u64) -> Result<u64, Error> {
     }
     claim()?;
     let e = &mut *e;
-    let slot = e.next as usize % COPIES;
-    let finished = stored(e);
-    if e.copy_seq[slot] != 0 && !ring::passed(finished, e.copy_seq[slot]) {
-        return Err(Error::Busy);
-    }
-    let at = COPY_AT + slot as u32 * FRAME_SIZE as u32;
+    let done = finished(e, Which::Blitter);
     let maps: Vec<Range> = e
         .maps
         .iter()
@@ -778,7 +1236,7 @@ pub fn submit(ptr: u64, len: u64) -> Result<u64, Error> {
             end: m.address as u64 + m.pages as u64 * FRAME_SIZE,
         })
         .collect();
-    let used = match check::check(&mut words, at, &maps) {
+    let used = match check::check(&words, &maps) {
         Ok(n) => n,
         Err(fault) => {
             process::record_event(
@@ -790,45 +1248,73 @@ pub fn submit(ptr: u64, len: u64) -> Result<u64, Error> {
         }
     };
     let mut regs = framebuffer::mapped_bar0().ok_or(Error::NotFound)?;
-    if !ppgtt_in_place(e, &mut regs) {
-        warn!("gpu: the blitter's PPGTT was not as set; resetting it");
-        reset(e, &mut regs);
-        if e.dead || !ppgtt_in_place(e, &mut regs) {
-            e.dead = true;
-            return Err(Error::Hung);
-        }
+    if !ensure_ppgtt(e, &mut regs, Which::Blitter) {
+        return Err(Error::Hung);
     }
     let mut awake = e.fw.hold(&mut regs, &Clock).map_err(|_| Error::Busy)?;
     let head = awake.read(bcs::HEAD);
     let idle_before = head & bcs::HEAD_ADDR == e.ring.tail();
-    let seqno = e.next;
-    let copy = &mut dwords(phys(&e.pages.copies), COPIES as u32)[slot * 1024..(slot + 1) * 1024];
-    copy[..used].copy_from_slice(&words[..used]);
+    let seqno = e.blit.next;
     let tail = e
         .ring
-        .request(dwords(phys(&e.pages.ring), RING_PAGES), head, at, seqno)
+        .request(
+            dwords(phys(&e.pages.ring), RING_PAGES),
+            head,
+            &words[..used],
+            seqno,
+        )
         .ok_or(Error::Busy)?;
-    e.next = match seqno.wrapping_add(1) {
-        0 => 1,
-        n => n,
-    };
-    e.copy_seq[slot] = seqno;
-    // The copy's and the ring's writes reach memory before the engine is
-    // told of them.
+    e.blit.take_number();
+    // The ring's writes reach memory before the engine is told of them.
     // SAFETY: a fence touches no memory.
     unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
-    ring::submit(&mut awake, tail);
+    ring::submit(&mut awake, &regs::BLITTER, tail);
     if idle_before {
-        e.progress = (finished, crate::time::uptime_us());
+        e.blit.progress = (done, crate::time::uptime_us());
     }
-    e.submitted = seqno;
+    e.blit.submitted = seqno;
     e.requests += 1;
     Ok(seqno as u64)
 }
 
+/// `gpu_dispatch`: the kernel writes the commands of the client's
+/// descriptor into the render ring (ADR 0086); the state and the EU code it
+/// names stay in the client's mappings. The number carries
+/// `DISPATCH_NUMBER`.
+pub fn dispatch(ptr: u64, len: u64) -> Result<u64, Error> {
+    if len != Dispatch::LEN as u64 {
+        return Err(Error::Invalid);
+    }
+    let bytes = process::copy_from_user(ptr, len)?;
+    let d = Dispatch::decode(&bytes).ok_or(Error::Invalid)?;
+    let (mut e, _) = take()?;
+    if e.dead {
+        return Err(Error::Hung);
+    }
+    if !e.render_ok {
+        return Err(Error::NotFound);
+    }
+    let (body, n) = compute::emit(&d, e.threads).map_err(|_| Error::Invalid)?;
+    claim()?;
+    let mut regs = framebuffer::mapped_bar0().ok_or(Error::NotFound)?;
+    let e = &mut *e;
+    e.eu_used = true;
+    if !ensure_ppgtt(e, &mut regs, Which::Render) {
+        return Err(Error::Hung);
+    }
+    let seqno = render_request(e, &mut regs, &body[..n]).ok_or(Error::Busy)?;
+    e.requests += 1;
+    Ok(DISPATCH_NUMBER | seqno as u64)
+}
+
 /// `gpu_wait`.
-pub fn wait(seqno: u64, timeout_ms: u64) -> Result<u64, Error> {
-    let seqno = u32::try_from(seqno).map_err(|_| Error::Invalid)?;
+pub fn wait(number: u64, timeout_ms: u64) -> Result<u64, Error> {
+    let which = match number >> 32 {
+        0 => Which::Blitter,
+        1 => Which::Render,
+        _ => return Err(Error::Invalid),
+    };
+    let seqno = number as u32;
     let start = crate::time::uptime_us();
     let deadline = start.saturating_add(timeout_ms.saturating_mul(1000));
     loop {
@@ -840,29 +1326,31 @@ pub fn wait(seqno: u64, timeout_ms: u64) -> Result<u64, Error> {
             if !is_client() {
                 return Err(Error::Busy);
             }
-            if seqno == 0 || !ring::passed(e.submitted, seqno) {
+            if which == Which::Render && !e.render_ok {
                 return Err(Error::Invalid);
             }
-            if !ring::passed(e.lost.0, seqno) && ring::passed(e.lost.1, seqno) {
+            let done = finished(&e, which);
+            let hang_us = e.hang_us;
+            let t = track(&mut e, which);
+            if seqno == 0 || !ring::passed(t.submitted, seqno) {
+                return Err(Error::Invalid);
+            }
+            if t.was_lost(seqno) {
                 return Err(Error::Hung);
             }
-            let finished = stored(&e);
-            if ring::passed(finished, seqno) {
+            if ring::passed(done, seqno) {
                 return Ok(0);
             }
+            // A request that ends in well under `gpu.hang_ms` is all the
+            // engines take; an EU kernel that runs longer is cut the same
+            // way.
+            let hung = t.stalled(done, hang_us);
             if e.dead {
                 return Err(Error::Hung);
             }
-            // A batch of the checked commands ends in well under a second:
-            // none finishing for `hang_us` with work pending is a hang
-            // (Linux's heartbeat, not its old head sampling, which a batch
-            // looping on itself keeps moving).
-            let now = crate::time::uptime_us();
-            if finished != e.progress.0 {
-                e.progress = (finished, now);
-            } else if now.saturating_sub(e.progress.1) > e.hang_us {
+            if hung {
                 let mut regs = framebuffer::mapped_bar0().ok_or(Error::NotFound)?;
-                reset(&mut e, &mut regs);
+                reset(&mut e, &mut regs, which);
                 return Err(Error::Hung);
             }
         }
@@ -922,6 +1410,11 @@ pub fn report() -> GpuReport {
     };
     let mhz = |step: u8| (step as u32 * power::STEP_MHZ) as u16;
     r.mhz_lowest = mhz(e.limits.lowest);
+    r.render = e.render_state;
+    r.render_us = e.render_us;
+    r.threads = e.threads;
+    r.cleared_threads = e.cleared_threads;
+    r.clear_us = e.clear_us;
     r.mhz_highest = mhz(e.limits.highest);
     r.requests = e.requests;
     r.resets = e.resets;

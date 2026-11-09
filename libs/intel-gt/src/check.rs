@@ -1,17 +1,19 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 // SPDX-License-Identifier: Apache-2.0
-//! The check every client batch passes before it runs (ADR 0083). On Ivy
-//! Bridge a non-secure batch still reaches the blitter's register page,
-//! which holds the PPGTT's own registers: the laptop showed it. So the
-//! kernel copies each batch into a page of its own, checks the copy against
-//! this short list, and runs the copy. What is not on the list does not run.
+//! The check every client batch passes before it runs (ADR 0083, 0086). On
+//! Ivy Bridge a non-secure batch still reaches the blitter's register page,
+//! which holds the PPGTT's own registers: the laptop showed it. And once EU
+//! threads run, they can write any page of the client's PPGTT, so no batch
+//! the kernel checked may wait there to be run (ADR 0086, point 4). So the
+//! kernel copies each batch, checks the copy against this short list, and
+//! writes the commands themselves into the blitter's ring, which only the
+//! kernel can reach. What is not on the list does not run.
 //!
-//! The list: `MI_NOOP`; `MI_BATCH_BUFFER_END`; `MI_FLUSH_DW` with no store;
-//! linear 32-bit `XY_COLOR_BLT` and `XY_SRC_COPY_BLT` whose every byte lies
-//! in one of the client's mappings; and `MI_BATCH_BUFFER_START` to the copy's
-//! own start, which can only loop until the engine is reset. The client does
-//! not know where its copy runs: it writes address 0 for "my own start", and
-//! the check writes the copy's address in its place.
+//! The list: `MI_NOOP`; `MI_BATCH_BUFFER_END`, which ends the list and is
+//! not written; `MI_FLUSH_DW` with no store; linear 32-bit `XY_COLOR_BLT`
+//! and `XY_SRC_COPY_BLT` whose every byte lies in one of the client's
+//! mappings. Blits from the ring still address the PPGTT: with it on, every
+//! command but the `MI_*` ones does (PRM Vol 1 Part 2, 2.2).
 
 use crate::cmd;
 
@@ -82,11 +84,10 @@ fn inside(r: &Range, maps: &[Range]) -> bool {
     maps.iter().any(|m| m.start <= r.start && r.end <= m.end)
 }
 
-/// Checks `batch`, the kernel's copy, which will run from `start` in the
-/// client's GPU address space; `maps`: the client's mappings, none of which
-/// may cover the copy. Returns the dwords up to and including the command
-/// that ends it.
-pub fn check(batch: &mut [u32], start: u32, maps: &[Range]) -> Result<usize, Fault> {
+/// Checks `batch`, the kernel's copy; `maps`: the client's mappings. Returns
+/// the dwords of commands before the `MI_BATCH_BUFFER_END` that ends it,
+/// which the kernel writes into the ring.
+pub fn check(batch: &[u32], maps: &[Range]) -> Result<usize, Fault> {
     let mut i = 0;
     while i < batch.len() {
         let w = batch[i];
@@ -99,14 +100,7 @@ pub fn check(batch: &mut [u32], start: u32, maps: &[Range]) -> Result<usize, Fau
         };
         match w {
             cmd::NOOP => i += 1,
-            cmd::BATCH_END => return Ok(i + 1),
-            w if w == cmd::BATCH_START | cmd::BATCH_PPGTT => {
-                if need(2)?[1] != 0 {
-                    return Err(Fault::Command(i));
-                }
-                batch[i + 1] = start;
-                return Ok(i + 2);
-            }
+            cmd::BATCH_END => return Ok(i),
             cmd::FLUSH_DW => {
                 let c = need(3)?;
                 if c[1] != 0 || c[2] != 0 {

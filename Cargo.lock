@@ -63,6 +63,7 @@ name = "ari-app-gpu-probe"
 version = "0.18.0"
 dependencies = [
  "aricode-build",
+ "aricode-gen7-eu",
  "aricode-intel-gt",
  "aricode-rt",
 ]
@@ -464,6 +465,7 @@ name = "aricode-intel-gt"
 version = "0.18.0"
 dependencies = [
  "aricode-abi",
+ "aricode-gen7-eu",
 ]
 
 [[package]]
