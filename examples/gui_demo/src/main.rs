@@ -6,7 +6,8 @@
 //! reads its events: the compositor closes its window for it at the second
 //! click on its close box, ADR 0077), or 3 (Demo D, the window protocol's
 //! events, `events` below), or 4 and 5 (Demo E, frames on two buffers or on one,
-//! `frames` below, incident 0063). The broker grants what
+//! `frames` below, incident 0063), or 6 (Demo F, a window that may be resized and
+//! never takes a size, `stubborn` below, ADR 0085). The broker grants what
 //! its manifest asks for: its compositor session (WRITE, ADR 0052) and
 //! `HARDWARE` for the window's buffer. Demo B also checks that Demo A's
 //! window is out of its reach and leaves without closing its own: the
@@ -272,6 +273,49 @@ fn frames(session: Handle, hw: Handle, double: bool) -> u64 {
     0
 }
 
+/// Requests for a size a stroke of the pointer may bring a window that never
+/// answers: the compositor asks again only once each 250 ms (ADR 0085), so a drag
+/// of under a second asks a handful of times, and one ask per move is a storm.
+const FEW_ASKS: u32 = 10;
+
+/// Mode 6, Demo F (ADR 0085): a window that may be resized and never answers. It
+/// reads its events, so it is not hung, but takes no size it is asked for, and
+/// counts the requests. `q` ends it and says how many came.
+fn stubborn(session: Handle, hw: Handle) -> u64 {
+    let Ok(mut win) = Window::create_wanting(session, hw, 400, 300, "Demo F", wants::RESIZE) else {
+        return 1;
+    };
+    win.canvas().fill(rgb(0xa0, 0x60, 0x20));
+    if win.present().is_err() {
+        return 2;
+    }
+    sys::print(b"gui_demo F: window presented\n");
+    let mut asked = 0u32;
+    for _ in 0..600 {
+        match win.poll(100) {
+            Ok(Some(Event::Configure { .. })) => {
+                asked += 1;
+                if asked == 1 {
+                    sys::print(b"gui_demo F: asked for a size, not answering\n");
+                }
+            }
+            Ok(Some(Event::Key(b'q') | Event::Close)) => {
+                sys::print(b"gui_demo F: asked ");
+                num_i32(asked as i32);
+                if asked > FEW_ASKS {
+                    sys::print(b" times: a storm\n");
+                    return 7;
+                }
+                sys::print(b" times: a few\n");
+                return 0;
+            }
+            Ok(_) => {}
+            Err(_) => return 3,
+        }
+    }
+    0
+}
+
 fn main(index: u64) -> u64 {
     let (mut session, mut hw) = (None, None);
     permissions::granted(|h, _| {
@@ -290,6 +334,9 @@ fn main(index: u64) -> u64 {
     }
     if index == 4 || index == 5 {
         return frames(session, hw, index == 4);
+    }
+    if index == 6 {
+        return stubborn(session, hw);
     }
     let (name, title, color) = if index == 0 {
         (b"gui_demo A" as &[u8], "Demo A", rgb(0xc0, 0x40, 0x40))

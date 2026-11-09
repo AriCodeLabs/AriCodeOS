@@ -16,8 +16,8 @@ use alloc::format;
 use alloc::vec::Vec;
 use aricode_cmdline::{keys, CmdLine};
 use aricode_gfx::{
-    resized, snap_at, snap_content, Canvas, Damage, Desktop, Hit, Labels, MenuHit, MenuOpen, Menus,
-    PasteGrant, PixelMasks, Rect, Scene, Window, STATUS_MAX,
+    snap_at, snap_content, Canvas, Cursor, Damage, Desktop, Hit, Labels, MenuHit, MenuOpen, Menus,
+    PasteGrant, PixelMasks, Placing, Rect, Scene, Window, STATUS_MAX,
 };
 use aricode_input::{
     EscapeChord, KeyRepeat, Keyboard, Layout, BTN_LEFT, EV_KEY, EV_REL, REL_WHEEL, REL_X, REL_Y,
@@ -109,6 +109,17 @@ fn say(msg: &[u8]) {
 fn num(v: u64) {
     let mut b = [0u8; 20];
     sys::print(fmt_u64(v, &mut b));
+}
+
+/// "window N is now WxH": what the scenarios wait for after a resize.
+fn say_size(id: u32, width: u32, height: u32) {
+    sys::print(b"compositor: window ");
+    num(id as u64);
+    sys::print(b" is now ");
+    num(width as u64);
+    sys::print(b"x");
+    num(height as u64);
+    sys::print(b"\n");
 }
 
 fn now(system: Handle) -> u64 {
@@ -231,9 +242,13 @@ struct Content {
     /// What it presented since the last frame, in content coordinates: it goes on
     /// screen where the window is when the frame is made.
     dirty: Option<Rect>,
-    /// The place asked of its program, position and size: the window goes there
-    /// when that size arrives, and any other size leaves it where it is.
-    place_at: Option<Rect>,
+    /// The places asked of its program and the one waiting to be (ADR 0085): the
+    /// window goes to one when its size arrives, and any other size leaves it
+    /// where it is.
+    placing: Placing,
+    /// Sizes its program chose itself, said at most once a second: a program that
+    /// resizes in a loop must not fill the log, nor hide another's (ADR 0085).
+    said_size: aricode_faults::Meter<1>,
     /// When a request to close was handed to the client, queued or as the
     /// answer to its poll (ms since boot), while it has not polled since:
     /// it has not come back from it (ADR 0077, audit L4).
@@ -609,6 +624,7 @@ impl Compositor {
             if let Some(w) = self.desktop.get(closed.id) {
                 self.damage.add(&w.frame());
             }
+            self.forget_drag(closed.id);
             self.desktop.remove(closed.id);
             closed_windows += 1;
         }
@@ -618,6 +634,14 @@ impl Compositor {
         num(closed_windows);
         sys::print(b" window(s) closed\n");
         self.refocus();
+    }
+
+    /// Window `id` is gone: a drag of it is over.
+    fn forget_drag(&mut self, id: u32) {
+        if self.pointer.drag.is_some_and(|d| d.id == id) {
+            self.pointer.drag = None;
+            self.pointer.moved = true;
+        }
     }
 
     /// `deliver` if the window asked for this kind of event.
@@ -647,13 +671,13 @@ impl Compositor {
 
     /// Tells windows where the pointer went, once per round: moving it makes
     /// two device events, one per axis, and one motion says it all.
-    fn flush_pointer(&mut self) {
+    fn flush_pointer(&mut self, now_ms: u64) {
         if !core::mem::take(&mut self.pointer.moved) {
             return;
         }
         let (px, py) = self.desktop.pointer;
         if self.pointer.drag.is_some() {
-            return self.continue_drag(px, py);
+            return self.continue_drag(px, py, now_ms);
         }
         if self.menu_open.is_some() {
             return self.menu_hover(px, py);
@@ -674,60 +698,101 @@ impl Compositor {
         }
     }
 
-    /// Asks a window's program for a place on the screen. It moves at once if the
-    /// size stays; otherwise when its program answers, so it is never shown cut.
-    fn place(&mut self, id: u32, to: Rect) {
+    /// Asks a window's program for a place on the screen (ADR 0085). It moves at
+    /// once if the size stays; otherwise when its program answers with that size,
+    /// so it is never shown cut.
+    fn place(&mut self, id: u32, to: Rect, now_ms: u64) {
         let Some(w) = self.desktop.get(id).copied() else {
             return;
         };
-        // No size a program can be asked for is outside these.
-        let to = Rect::new(to.x, to.y, to.w.clamp(1, MAX_SIDE), to.h.clamp(1, MAX_SIDE));
-        let same = (w.content.w, w.content.h) == (to.w, to.h);
-        let asked = self.content(id).and_then(|c| c.place_at);
-        if same && asked.is_none() {
-            self.desktop.move_window(id, to.x, to.y);
+        // No size a program can be asked for is larger than the screen under the
+        // bar, less the title bar, or than `MAX_SIDE`.
+        let room = self.desktop.drag_bounds();
+        let max_w = room.w.min(MAX_SIDE);
+        let max_h = room.h.saturating_sub(aricode_gfx::TITLE_H).min(MAX_SIDE);
+        let to = Rect::new(
+            to.x,
+            to.y,
+            to.w.clamp(1, max_w.max(1)),
+            to.h.clamp(1, max_h.max(1)),
+        );
+        let Some(c) = self.content(id) else {
             return;
-        }
-        if !w.resizable || asked.is_some_and(|a| a == to) {
-            return;
-        }
-        if same {
-            // Back to its size while another is asked: that one's answer must not
-            // stay. The program is asked again, for this one.
-            self.desktop.move_window(id, to.x, to.y);
-        }
-        if let Some(c) = self.content(id) {
-            c.place_at = (!same).then_some(to);
-        }
-        let ev = Event::Configure {
-            width: to.w,
-            height: to.h,
         };
-        self.deliver_wanted(id, wants::RESIZE, ev);
+        let step = c.placing.want(w.content, to, w.resizable, now_ms);
+        if let Some((x, y)) = step.move_to {
+            self.desktop.move_window(id, x, y);
+        }
+        if let Some((width, height)) = step.ask {
+            self.configure(id, width, height);
+        }
     }
 
-    fn continue_drag(&mut self, px: i32, py: i32) {
+    /// Asks window `id`'s program for this size. A `Configure` queued right behind
+    /// another replaces it; `Placing` keeps more from being sent meanwhile.
+    fn configure(&mut self, id: u32, width: u32, height: u32) {
+        self.deliver_wanted(id, wants::RESIZE, Event::Configure { width, height });
+    }
+
+    /// Sizes not answered for `PATIENCE_MS`, when a later one waits: asked now.
+    fn ask_again(&mut self, now_ms: u64) {
+        for i in 0..self.contents.len() {
+            let due = self.contents[i]
+                .as_mut()
+                .and_then(|c| Some((c.id, c.placing.due(now_ms)?)));
+            if let Some((id, (width, height))) = due {
+                self.configure(id, width, height);
+            }
+        }
+    }
+
+    fn continue_drag(&mut self, px: i32, py: i32, now_ms: u64) {
         let Some(d) = self.pointer.drag else {
             return;
         };
         let (dx, dy) = (px - d.from.0, py - d.from.1);
         match d.edges {
             None => {
+                let Some(was) = self.desktop.get(d.id).map(|w| w.content) else {
+                    return;
+                };
                 self.desktop
                     .move_window(d.id, d.start.x + dx, d.start.y + dy);
+                let Some(now) = self.desktop.get(d.id).map(|w| w.content) else {
+                    return;
+                };
+                if let Some(c) = self.content(d.id) {
+                    c.placing.moved(now.x - was.x, now.y - was.y);
+                }
             }
-            Some(edges) => self.place(d.id, resized(d.start, edges, dx, dy)),
+            Some(edges) => {
+                let bounds = self.desktop.drag_bounds();
+                let to = self
+                    .desktop
+                    .grips
+                    .resized(d.start, edges, (dx, dy), &bounds);
+                self.place(d.id, to, now_ms);
+            }
         }
     }
 
-    /// The button is up: a title bar left at the screen's edge snaps there.
-    fn end_drag(&mut self, px: i32, py: i32) {
+    /// The button is up: a title bar left at the screen's edge snaps there. An edge
+    /// whose program has answered says the window's new size.
+    fn end_drag(&mut self, px: i32, py: i32, now_ms: u64) {
         let Some(d) = self.pointer.drag.take() else {
             return;
         };
         self.pointer.moved = true;
+        if d.edges.is_some() {
+            let settled = self.content(d.id).is_some_and(|c| c.placing.is_idle());
+            let size = self.desktop.get(d.id).map(|w| (w.content.w, w.content.h));
+            if let Some((w, h)) = size.filter(|&s| settled && s != (d.start.w, d.start.h)) {
+                say_size(d.id, w, h);
+            }
+            return;
+        }
         let travelled = (px - d.from.0).abs().max((py - d.from.1).abs());
-        if d.edges.is_some() || travelled < MIN_DRAG {
+        if travelled < MIN_DRAG {
             return;
         }
         let screen = self.desktop.screen;
@@ -738,12 +803,12 @@ impl Compositor {
             if self.desktop.get(d.id).is_some_and(|w| w.restore.is_none()) {
                 self.desktop.set_restore(d.id, Some(d.start));
             }
-            self.place(d.id, snap_content(snap, &work));
+            self.place(d.id, snap_content(snap, &work), now_ms);
         }
     }
 
     /// The zoom button: fills the screen, or goes back.
-    fn zoom(&mut self, id: u32) {
+    fn zoom(&mut self, id: u32, now_ms: u64) {
         let Some(w) = self.desktop.get(id).copied() else {
             return;
         };
@@ -751,15 +816,29 @@ impl Compositor {
         match w.restore.filter(|_| w.resizable) {
             Some(back) => {
                 self.desktop.set_restore(id, None);
-                self.place(id, back);
+                self.place(id, back, now_ms);
             }
             None if w.resizable => {
                 self.desktop.set_restore(id, Some(w.content));
                 let full = snap_content(aricode_gfx::Snap::Full, &work);
-                self.place(id, full);
+                self.place(id, full, now_ms);
             }
             None => {}
         }
+    }
+
+    /// The pointer's picture: what a press would do where it is (ADR 0085).
+    fn update_cursor(&mut self) {
+        let (px, py) = self.desktop.pointer;
+        let edges = match self.pointer.drag {
+            Some(d) => d.edges.unwrap_or(0),
+            None if self.menu_open.is_some() || self.pointer.grab.is_some() => 0,
+            None => match self.desktop.hit(px, py) {
+                Hit::Edge { edges, .. } => edges,
+                _ => 0,
+            },
+        };
+        self.desktop.cursor = Cursor::for_edges(edges);
     }
 
     /// Alt+Tab: the next window in the order they had when Alt went down, brought
@@ -1046,14 +1125,14 @@ impl Compositor {
     /// A button. While one pressed on a window is held, every button goes to
     /// that window: a program that saw a press sees its release.
     fn on_button(&mut self, code: u16, pressed: bool, at: u64) {
-        self.flush_pointer();
+        self.flush_pointer(at);
         let number = (code - BTN_LEFT) as u8 + 1;
         let bit = 1u8 << (code - BTN_LEFT);
         let (px, py) = self.desktop.pointer;
         if !pressed {
             self.pointer.buttons &= !bit;
             if code == BTN_LEFT {
-                self.end_drag(px, py);
+                self.end_drag(px, py, at);
                 self.menu_release(px, py);
             }
             if let Some(id) = self
@@ -1111,7 +1190,7 @@ impl Compositor {
                 }
                 Hit::Zoom { id } if left => {
                     self.set_focus(id);
-                    self.zoom(id);
+                    self.zoom(id, at);
                     None
                 }
                 Hit::TitleBar { id } if left => {
@@ -1306,10 +1385,16 @@ impl Compositor {
             .iter()
             .flatten()
             .filter_map(|c| c.pending.map(|(_, d)| d));
+        let asks = self
+            .contents
+            .iter()
+            .flatten()
+            .filter_map(|c| c.placing.deadline());
         let sweep = self.last_sweep_ms + SWEEP_MS;
         frame
             .into_iter()
             .chain(polls)
+            .chain(asks)
             .chain(self.keys.repeat.next_due())
             .chain(self.late.next_due())
             .fold(sweep, u64::min)
@@ -1414,6 +1499,7 @@ impl Compositor {
         if let Some(second) = closed.second {
             self.unmap_unused(second);
         }
+        self.forget_drag(closed.id);
         self.desktop.remove(closed.id);
         self.refocus();
     }
@@ -1443,7 +1529,7 @@ impl Compositor {
                 REL_X => (ev.value as i32, 0),
                 REL_Y => (0, ev.value as i32),
                 REL_WHEEL => {
-                    self.flush_pointer();
+                    self.flush_pointer(at);
                     if self.menu_open.is_some() {
                         return;
                     }
@@ -1611,7 +1697,8 @@ impl Compositor {
                     pending: None,
                     wants: req.events,
                     dirty: None,
-                    place_at: None,
+                    placing: Placing::default(),
+                    said_size: aricode_faults::Meter::new(),
                     close_waiting: None,
                     said_clipboard: 0,
                     menus: None,
@@ -1701,7 +1788,7 @@ impl Compositor {
                 }
                 answer(reply_to, Reply::ok(shown));
             }
-            Op::Resize => self.resize(req, owner, reply_to, buf),
+            Op::Resize => self.resize(req, owner, reply_to, buf, now_ms),
             Op::SecondBuffer => self.second_buffer(req, owner, reply_to, buf),
             Op::MenuAdd => {
                 // What the owner has in front of them does not change under the pointer.
@@ -1940,7 +2027,14 @@ impl Compositor {
 
     /// `Op::Resize`: the same checks as `Create`, and only then the old buffer
     /// goes, so a refused request leaves the window as it was.
-    fn resize(&mut self, req: Request, owner: usize, reply_to: Handle, buf: Option<Handle>) {
+    fn resize(
+        &mut self,
+        req: Request,
+        owner: usize,
+        reply_to: Handle,
+        buf: Option<Handle>,
+        now_ms: u64,
+    ) {
         if self.owned(req.window, owner).is_none() {
             return answer(reply_to, Reply::status(Status::BadWindow));
         }
@@ -1984,21 +2078,24 @@ impl Compositor {
         c.width = req.width;
         c.height = req.height;
         c.dirty = None;
-        sys::print(b"compositor: window ");
-        num(req.window as u64);
-        sys::print(b" is now ");
-        num(req.width as u64);
-        sys::print(b"x");
-        num(req.height as u64);
-        sys::print(b"\n");
-        // The size asked for: it goes to its place. Any other, say an earlier
-        // answer, stays where it is until that one comes.
-        let place = c.place_at.filter(|p| (p.w, p.h) == (req.width, req.height));
-        if place.is_some() {
-            c.place_at = None;
+        // A size asked for goes to its place. Any other, say one the program chose,
+        // stays where it is.
+        let placed = c.placing.answered(req.width, req.height, now_ms);
+        let say = placed.asked || c.said_size.report(0, now_ms) > 0;
+        if let Some((x, y)) = placed.move_to {
+            self.desktop.move_window(req.window, x, y);
         }
-        if let Some(p) = place {
-            self.desktop.move_window(req.window, p.x, p.y);
+        if let Some((width, height)) = placed.ask {
+            self.configure(req.window, width, height);
+        }
+        // The log says where a drag ended, not each step of it, and a program
+        // resizing itself in a loop is said once a second.
+        let dragging = self
+            .pointer
+            .drag
+            .is_some_and(|d| d.id == req.window && d.edges.is_some());
+        if say && !(placed.asked && dragging) {
+            say_size(req.window, req.width, req.height);
         }
         self.unmap_unused(old);
         if let Some(second) = old_second {
@@ -2160,7 +2257,12 @@ impl Compositor {
         num(self.desktop.pointer.0 as u64);
         sys::print(b",");
         num(self.desktop.pointer.1 as u64);
-        sys::print(b"), flushed ");
+        sys::print(b")");
+        if self.desktop.cursor != Cursor::Arrow {
+            sys::print(b" ");
+            sys::print(self.desktop.cursor.name().as_bytes());
+        }
+        sys::print(b", flushed ");
         num(self.damage.pixels());
         sys::print(b" px in ");
         num(self.damage.rects().len() as u64);
@@ -2307,7 +2409,9 @@ fn main(inputs: u64) -> u64 {
         comp.account_late(handled.iter().map(|(at, _)| *at), now(SYSTEM));
         inputs.clear();
         comp.after_lost_input();
-        comp.flush_pointer();
+        comp.flush_pointer(t);
+        comp.ask_again(t);
+        comp.update_cursor();
         comp.repeat_keys(t);
         comp.expire(t);
         comp.tick_clock(t);

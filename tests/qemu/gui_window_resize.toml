@@ -1,0 +1,75 @@
+# Resizing windows by their edges (ADR 0085). Demo D (window 1, frame at (40,40))
+# answers each size it is asked for; Demo F (window 2, frame at (80,80), in front)
+# may be resized but never answers. Both 400x300 in a 1280x800 screen, the bar 24 px
+# high; the pointer starts at the centre, (640,400).
+# - A corner is grabbed along its side: D's bottom band at (50,372), 10 px from its
+#   left side, is its bottom-left corner. The cursor says so before the press, and
+#   the drag moves both sides.
+# - A window that never answers stays as it is, is asked only a few times during a
+#   stroke of 40 moves, and blocks nothing: D is resized after it.
+# - A dragged top stops under the bar: D's title bar cannot go beneath it.
+name = "gui.window_resize"
+description = "edges and corners resize a window, a program that never answers blocks nothing"
+level = "full"
+areas = ["gui"]
+cmdline = "qemu_exit gui shell gui_trace"
+install = ["examples/gui_demo"]
+stdin = ["spawn gui_demo 3", "sleep 600", "run gui_demo 6", "sleep 500", "shutdown"]
+timeout_secs = 90
+
+# D's bottom band beside its left corner, then a drag of (-40,20): the left side goes
+# to 0 and the bottom down 20, so 440x320.
+[host_input]
+marker = "compositor: window 2 'Demo F' 400x300"
+wait_ms = 400
+mouse_rel = [-590, -28]
+drag = [-40, 20]
+
+# The pointer rests on D's new bottom-left corner, (10,392). Then F's right band at
+# (484,250), dragged 40 px right, one pixel each 10 ms.
+[[host_input_then]]
+marker = "compositor: window 1 is now 440x320"
+wait_ms = 300
+screendump = "corner"
+mouse_rel = [474, -142]
+drag_steps = [40, 1, 0, 10]
+
+# Once the stroke is over, D's top band at (200,36), dragged up 100: the pointer stops
+# at the screen's top, 36 px up, and the frame at the bar, 16 px up.
+[[host_input_then]]
+marker = "gui_demo F: asked for a size, not answering"
+wait_ms = 1000
+mouse_rel = [-324, -214]
+drag = [0, -100]
+
+[[host_input_then]]
+marker = "compositor: window 1 is now 440x336"
+keys = ["q"]
+
+# D is gone and F has the focus: it says how many sizes it was asked for.
+[[host_input_then]]
+marker = "gui_demo D: done"
+keys = ["q"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "cursor (50,372) ne-sw",
+    "cursor (200,36) up-down",
+    "times: a few",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = [
+    "KERNEL PANIC",
+    "killed by fault",
+    "the resize failed",
+    "times: a storm",
+    "compositor: window 2 is now",
+]
+serial_order = [
+    "compositor: window 1 is now 440x320",
+    "gui_demo F: asked for a size, not answering",
+    "compositor: window 1 is now 440x336",
+    "gui_demo D: done",
+    "times: a few",
+]
