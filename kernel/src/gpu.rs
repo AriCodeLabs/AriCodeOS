@@ -56,8 +56,17 @@ const HANG_MS: u64 = 2_000;
 const HANG_MS_RANGE: core::ops::RangeInclusive<u64> = 100..=60_000;
 /// Waits spin this long before they sleep, so short batches are timed well.
 const SPIN_US: u64 = 2_000;
-/// How often the `gpu` thread looks for a client that ended.
+/// How often the `gpu` thread looks for a client that ended and at the
+/// temperature.
 const REAP_MS: u64 = 100;
+/// At this CPU package temperature the GPU drops to its lowest clock
+/// (`gpu.hot_c`): the laptop reached 90 C in 25 s at 1050 MHz under Linux
+/// (ADR 0080, 4b). It may rise again `COOL_MARGIN` degrees below.
+const HOT_C: u32 = 85;
+const COOL_MARGIN: u32 = 5;
+static HOT_AT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(HOT_C);
+/// The GPU is held at its lowest clock for heat.
+static HOT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 impl gt::Regs for Bar0 {
     fn read(&self, offset: u32) -> u32 {
@@ -133,6 +142,12 @@ struct Engine {
     /// A reset failed: the engine takes no more work, and what it could
     /// reach is never freed.
     dead: bool,
+    /// The clock asked for at boot (`gpu.mhz`), the client's, the most any
+    /// may have (`gpu.max_mhz`), and the one set now, in 50 MHz steps.
+    boot_step: u8,
+    asked: u8,
+    cap: u8,
+    step: u8,
 }
 
 enum Status {
@@ -212,7 +227,16 @@ fn flush_lines(addr: *const u32, len: usize) {
 /// state the probe saw; otherwise leaves it as the firmware set it and says
 /// why (ADR 0083). After `framebuffer::use_panel_size`: where the screen ends
 /// decides which GTT entries stay the firmware's.
-pub fn init(off: bool, mhz: Option<u32>, hang_ms: Option<u64>) {
+pub fn init(
+    off: bool,
+    mhz: Option<u32>,
+    hang_ms: Option<u64>,
+    max_mhz: Option<u32>,
+    hot_c: Option<u32>,
+) {
+    if let Some(c) = hot_c {
+        HOT_AT.store(c.clamp(50, 100), core::sync::atomic::Ordering::Relaxed);
+    }
     let Some(d) = crate::pci::intel_display() else {
         return;
     };
@@ -226,7 +250,7 @@ pub fn init(off: bool, mhz: Option<u32>, hang_ms: Option<u64>) {
         Status::Off
     } else {
         let t0 = crate::time::uptime_us();
-        match bring_up(&d, mhz, hang_ms * 1000) {
+        match bring_up(&d, mhz, max_mhz, hang_ms * 1000) {
             Ok(e) => {
                 info!(
                     "gpu: blitter ready in {} us; GTT entries 0..{} kept for the screen, \
@@ -256,6 +280,7 @@ pub fn init(off: bool, mhz: Option<u32>, hang_ms: Option<u64>) {
 fn bring_up(
     d: &crate::pci::IntelDisplay,
     mhz: Option<u32>,
+    max_mhz: Option<u32>,
     hang_us: u64,
 ) -> Result<Box<Engine>, Refusal> {
     // Reading, and the firmware's forcewake bits dropped: nothing else yet.
@@ -290,9 +315,14 @@ fn bring_up(
     // From the first write to the tables on, a failure stops the engine and
     // keeps its pages for good (audit M2).
     let mut ring = Ring::new(RING_PAGES);
-    let step = mhz.map_or(found.limits.lowest, |m| {
-        (m / power::STEP_MHZ).min(255) as u8
-    });
+    let to_step = |m: u32| (m / power::STEP_MHZ).min(255) as u8;
+    let cap = found
+        .limits
+        .clamp(max_mhz.map_or(found.limits.highest, to_step));
+    let step = found
+        .limits
+        .clamp(mhz.map_or(found.limits.lowest, to_step))
+        .min(cap);
     let programmed = (|| -> Result<(), Refusal> {
         let llc = |p: u64| gtt::encode(p, Cache::Llc).ok_or(Refusal::GttSize);
         let tables = dwords(phys(&pages.tables), layout.directory_entries);
@@ -357,6 +387,10 @@ fn bring_up(
         lost: (0, 0),
         progress: (0, crate::time::uptime_us()),
         dead: false,
+        boot_step: step,
+        asked: step,
+        cap,
+        step,
     }))
 }
 
@@ -418,12 +452,67 @@ fn take() -> Result<(Taken, Option<u32>), Error> {
 /// Lets go of a client that ended within `REAP_MS`, so its buffers and a
 /// batch it left looping do not wait for another program's call (audit L3).
 extern "C" fn reaper(_arg: usize) {
+    use core::sync::atomic::Ordering;
     loop {
         crate::task::scheduler::sleep_ms(REAP_MS);
         if GPU.lock().client_gone {
             drop(take());
         }
+        // The heat brake: the CPU's package carries the GPU too.
+        let Some((degrees, _)) = crate::arch::x86_64::thermal::read() else {
+            continue;
+        };
+        let hot_at = HOT_AT.load(Ordering::Relaxed);
+        let was = HOT.load(Ordering::Relaxed);
+        let now = if was {
+            degrees + COOL_MARGIN >= hot_at
+        } else {
+            degrees >= hot_at
+        };
+        if now != was {
+            HOT.store(now, Ordering::Relaxed);
+            if let (Ok((mut e, _)), Some(mut regs)) = (take(), framebuffer::mapped_bar0()) {
+                apply_frequency(&mut e, &mut regs);
+                warn!(
+                    "gpu: {degrees} C: clock {} MHz",
+                    e.step as u32 * power::STEP_MHZ
+                );
+            }
+        }
     }
+}
+
+/// Sets the clock the client asked for, within the cap, or the lowest
+/// while the machine is hot.
+fn apply_frequency(e: &mut Engine, regs: &mut Bar0) {
+    let want = if HOT.load(core::sync::atomic::Ordering::Relaxed) {
+        e.limits.lowest
+    } else {
+        e.asked.min(e.cap)
+    };
+    if want == e.step {
+        return;
+    }
+    if let Ok(mut awake) = e.fw.hold(regs, &Clock) {
+        e.step = power::set_frequency(&mut awake, &e.limits, want);
+    }
+}
+
+/// `gpu_frequency`: the client asks for `mhz`; the clock granted, in MHz,
+/// within the GPU's limits and `gpu.max_mhz`, and the lowest while the
+/// machine is hot.
+pub fn frequency(mhz: u64) -> Result<u64, Error> {
+    let (mut e, _) = take()?;
+    if e.dead {
+        return Err(Error::Hung);
+    }
+    claim()?;
+    let mut regs = framebuffer::mapped_bar0().ok_or(Error::NotFound)?;
+    e.asked = e
+        .limits
+        .clamp((mhz / power::STEP_MHZ as u64).min(255) as u8);
+    apply_frequency(&mut e, &mut regs);
+    Ok(e.step as u64 * power::STEP_MHZ as u64)
 }
 
 /// Makes the calling process the client if there is none; `Busy` if
@@ -496,6 +585,9 @@ fn release_client(e: &mut Engine) -> Vec<Mapping> {
     for m in &maps {
         set_pages(e, m.address, m.pages, None);
     }
+    // The next client starts at the boot's clock.
+    e.asked = e.boot_step;
+    apply_frequency(e, &mut regs);
     if e.dead {
         for m in maps {
             let bytes = crate::hw::quarantine(m.dma);

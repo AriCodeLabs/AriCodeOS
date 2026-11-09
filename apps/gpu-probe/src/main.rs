@@ -10,7 +10,8 @@
 //! refused cleanly; 10 setup failed; 11 a fill was wrong; 12 a copy was
 //! wrong; 13 a batch that must be refused was not, or something it aimed at
 //! changed; 14 a hang was not caught; 15 the engine did not work after its
-//! reset; 16 a call on an absent GPU was not refused as documented.
+//! reset; 16 a call on an absent GPU was not refused as documented; 17 the
+//! GPU's clock could not be asked for.
 #![no_std]
 #![no_main]
 
@@ -214,6 +215,7 @@ fn main(_arg: u64) -> u64 {
         let end = [cmd::BATCH_END, cmd::NOOP];
         let refused = sys::gpu_submit(gpu, &end) == Err(Error::NotFound)
             && sys::gpu_wait(gpu, 1, 0) == Err(Error::NotFound)
+            && sys::gpu_frequency(gpu, 650) == Err(Error::NotFound)
             && sys::gpu_unmap(gpu, SRC_AT) == Err(Error::NotFound);
         let mapped = sys::dma_alloc(hardware, 4096).map(|d| sys::gpu_map(gpu, d, SRC_AT));
         if !refused || mapped != Ok(Err(Error::NotFound)) {
@@ -304,6 +306,52 @@ fn main(_arg: u64) -> u64 {
         cpu_t[i] = g.now() - t0;
     }
     line(b"copy 3 MiB", spread(&mut gpu_t), spread(&mut cpu_t));
+
+    // 2b. The same fill and copy at each clock asked for, with the CPU
+    // package's temperature after: what each costs in heat (ADR 0083).
+    for mhz in [350u64, 650, 1050] {
+        let set = match sys::gpu_frequency(g.gpu, mhz) {
+            Ok(m) => m,
+            Err(e) => {
+                say(&[b"frequency: ", error_name(e)]);
+                return 17;
+            }
+        };
+        sys::thread_sleep(50);
+        let (mut fill_t, mut copy_t) = ([0u64; RUNS], [0u64; RUNS]);
+        for i in 0..RUNS {
+            fill_t[i] = g.run(&fill, WAIT_MS).unwrap_or(0);
+            copy_t[i] = g.run(&copy, WAIT_MS).unwrap_or(0);
+        }
+        let running = g.report().mhz as u64;
+        let mut t = [0u8; 8];
+        let degrees = match sys::system_info(g.system, sysinfo::TEMPERATURE, &mut t) {
+            Ok(8) => u32::from_le_bytes([t[0], t[1], t[2], t[3]]) as u64,
+            _ => 0,
+        };
+        let (fill_best, _) = spread(&mut fill_t);
+        let (copy_best, _) = spread(&mut copy_t);
+        say(&[
+            b"asked ",
+            n(mhz).s(),
+            b" MHz, set ",
+            n(set).s(),
+            b", running ",
+            n(running).s(),
+            b": fill ",
+            n(fill_best).s(),
+            b" us (",
+            n(rate(fill_best)).s(),
+            b" MB/s), copy ",
+            n(copy_best).s(),
+            b" us (",
+            n(rate(copy_best)).s(),
+            b" MB/s), ",
+            n(degrees).s(),
+            b" C",
+        ]);
+    }
+    let _ = sys::gpu_frequency(g.gpu, 350);
 
     // 3. What reached the blitter's registers and the status page on the
     // laptop (ADR 0083), each in a batch of its own, and a blit past the
