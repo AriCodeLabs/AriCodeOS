@@ -403,6 +403,10 @@ name = "aricode-fb-console"
 version = "0.18.0"
 
 [[package]]
+name = "aricode-gen7-eu"
+version = "0.18.0"
+
+[[package]]
 name = "aricode-gfx"
 version = "0.18.0"
 dependencies = [
