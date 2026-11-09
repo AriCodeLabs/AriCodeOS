@@ -848,3 +848,124 @@ fn rps_interrupts_are_quieted_whatever_the_firmware_left() {
     assert_eq!(bank.get(regs::PMIER), 0);
     assert_eq!(bank.get(regs::PMIMR), 0xFFFF_FFFF);
 }
+
+mod render_engine {
+    use super::*;
+    use crate::render::{self, Change, Setting};
+
+    /// What the laptop's firmware left (dev build 55's probe).
+    fn probed_render(bank: &mut Bank) {
+        for (r, v) in [
+            (0x7010, 0),
+            (0xB01C, 0x8C47_FF80),
+            (0xB030, 0x6000_0000),
+            (0xB034, 0x0800_0000),
+            (0x2090, 0),
+            (0x20A0, 0x28A0_1010),
+            (0x7008, 0),
+            (0x209C, 0x200),
+            (0xE4F4, 0),
+            (0xF4F4, 0),
+            (0x9404, 0),
+            (0x9030, 0x400),
+            (0x900C, 0x0040_0000),
+            (0x20C0, 0x8000),
+            (0x7000, 0x6804),
+            (0x7004, 0x0180),
+        ] {
+            bank.regs.insert(r, v);
+        }
+    }
+
+    #[test]
+    fn linuxs_settings_take_from_the_firmwares_state() {
+        let mut bank = Bank::probed();
+        probed_render(&mut bank);
+        let clock = Ticks::new();
+        let fw = Forcewake::init(&mut bank, &clock, Timeouts::default()).unwrap();
+        {
+            let mut awake = fw.hold(&mut bank, &clock).unwrap();
+            render::apply(&mut awake, &render::GT);
+            render::apply(&mut awake, &render::RENDER);
+            render::apply(&mut awake, &render::CLOCK_GATING);
+            render::apply(&mut awake, &render::CONTEXT);
+        }
+        let want = [
+            (0xB01C, 0x3C47_FF8C),
+            (0xB030, 0x2000_0000),
+            (0xB034, 0),
+            (0x7010, 0),
+            (0x2090, 1 << 10),
+            (0x20A0, 0x28A0_1010 & !0x0007_7070),
+            (0x7008, 1 << 9),
+            (0x209C, 0x200 | 1 << 14),
+            (0xE4F4, 1),
+            (0xF4F4, 1),
+            (0x9404, 1 << 13),
+            (0x9030, 0x400 | 1 << 11),
+            (0x900C, 1 << 21),
+            (0x20C0, 0x8000 | 1 << 7),
+            (0x7000, 0x6804),
+            (0x7004, 0x0180 | 1 << 6),
+        ];
+        for (r, v) in want {
+            assert_eq!(bank.get(r), v, "{r:#x}");
+        }
+        assert_eq!(bank.get(0x229C) & 0x2800, 0x2800);
+        // No display register among them.
+        for st in render::GT
+            .iter()
+            .chain(&render::RENDER)
+            .chain(&render::CLOCK_GATING)
+        {
+            assert!(st.register < 0x4_0000, "{:#x}", st.register);
+        }
+    }
+
+    #[test]
+    fn the_context_settings_load_from_the_ring() {
+        let mut out = [0u32; 7];
+        assert_eq!(render::load_masked(&render::CONTEXT, &mut out), Some(7));
+        assert_eq!(out[0], 0x22 << 23 | 5, "Linux MI_LOAD_REGISTER_IMM(3)");
+        assert_eq!(
+            &out[1..],
+            &[
+                0x20C0,
+                1 << 23 | 1 << 7,
+                0x7000,
+                1 << 16,
+                0x7004,
+                1 << 22 | 1 << 6
+            ]
+        );
+        let read_first = [Setting {
+            register: 0x9030,
+            change: Change::Set(1),
+        }];
+        assert_eq!(render::load_masked(&read_first, &mut out), None);
+        assert_eq!(render::load_masked(&render::CONTEXT, &mut out[..6]), None);
+    }
+
+    #[test]
+    fn pipe_controls_encode_as_linux_emits_them() {
+        // GFX_OP_PIPE_CONTROL(4).
+        assert_eq!(render::PIPE_CONTROL, 0x7A00_0002);
+        assert_eq!(render::stall(), [0x7A00_0002, 1 << 20 | 1 << 1, 0, 0]);
+        let b = render::breadcrumb(0x1000_0100, 9);
+        assert_eq!(
+            b[1],
+            1 << 12 | 1 << 0 | 1 << 5 | 1 << 7 | 1 << 14 | 1 << 24 | 1 << 20
+        );
+        assert_eq!(&b[2..], &[0x1000_0100, 9, 0x02 << 23, 0]);
+        let f = render::flush_invalidate(0x2000);
+        assert_eq!(
+            f[1] & (1 << 23 | 1 << 21 | 1 << 8),
+            0,
+            "no register write, index store or notify"
+        );
+        assert_eq!(
+            f[1] & (1 << 18 | 1 << 2 | 1 << 20),
+            1 << 18 | 1 << 2 | 1 << 20
+        );
+    }
+}

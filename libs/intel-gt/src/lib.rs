@@ -21,6 +21,7 @@ pub mod gtt;
 pub mod power;
 pub mod ppgtt;
 pub mod regs;
+pub mod render;
 pub mod ring;
 
 /// Access to BAR 0 of the graphics device: registers, then from

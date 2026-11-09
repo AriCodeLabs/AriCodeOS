@@ -48,12 +48,22 @@ pub const FIRMWARE_RUN: u32 = 16_383;
 pub const STALE: u32 = 0x217D_80C1;
 pub const ENTRIES: u32 = 512 * 1024;
 
-const MASKED: [u32; 5] = [
+const MASKED: [u32; 14] = [
     regs::FORCEWAKE_MT,
     bcs::MI_MODE,
     bcs::MODE,
     bcs::INSTPM,
     regs::RCS_GFX_MODE,
+    // The render engine's masked registers (`render`).
+    0x7010,
+    0x2090,
+    0x7008,
+    0x209C,
+    0xE4F4,
+    0xF4F4,
+    0x20C0,
+    0x7000,
+    0x7004,
 ];
 
 pub struct Bank {
