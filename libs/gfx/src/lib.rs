@@ -10,7 +10,9 @@
 #![no_std]
 
 pub mod icons;
+pub mod resize;
 use icons::Icon;
+pub use resize::{Cursor, Grips, Placing};
 
 use aricode_fb_console::char_glyph;
 use aricode_fb_console::font::GLYPH_WIDTH;
@@ -426,31 +428,48 @@ impl<'a> Canvas<'a> {
         }
     }
 
-    /// Draws the cursor (12x19 arrow: `#` = black, `.` = white) at `(x, y)`.
-    pub fn cursor(&mut self, x: i32, y: i32) {
-        for (row, line) in CURSOR.iter().enumerate() {
-            for (col, cell) in line.bytes().enumerate() {
-                let color = match cell {
-                    b'#' => rgb(0, 0, 0),
-                    b'.' => rgb(255, 255, 255),
-                    _ => continue,
-                };
-                let (px, py) = (x + col as i32, y + row as i32);
-                if self.clip.contains(px, py) {
-                    self.pixels[py as usize * self.stride as usize + px as usize] = color;
+    /// Draws `shape` with its point at `(x, y)`, only inside [`Cursor::rect`]: the
+    /// arrow is 12x19 (`#` black, `.` white) with its point at the top left; a resize
+    /// cursor is white outlined in black, centred on the point.
+    pub fn cursor(&mut self, shape: Cursor, x: i32, y: i32) {
+        let mut put = |px: i32, py: i32, color: Color| {
+            if self.clip.contains(px, py) {
+                self.pixels[py as usize * self.stride as usize + px as usize] = color;
+            }
+        };
+        if shape == Cursor::Arrow {
+            for (row, line) in CURSOR.iter().enumerate() {
+                for (col, cell) in line.bytes().enumerate() {
+                    let color = match cell {
+                        b'#' => rgb(0, 0, 0),
+                        b'.' => rgb(255, 255, 255),
+                        _ => continue,
+                    };
+                    put(x + col as i32, y + row as i32, color);
+                }
+            }
+            return;
+        }
+        let area = shape.rect(x, y);
+        for py in area.y..area.bottom() {
+            for px in area.x..area.right() {
+                let (dx, dy) = (px - x, py - y);
+                if shape.fills(dx, dy) {
+                    put(px, py, rgb(255, 255, 255));
+                } else if [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                    .iter()
+                    .any(|&(ox, oy)| shape.fills(dx + ox, dy + oy))
+                {
+                    put(px, py, rgb(0, 0, 0));
                 }
             }
         }
     }
 }
 
+/// The arrow's size: what [`Cursor::rect`] gives for it.
 pub const CURSOR_W: u32 = 12;
 pub const CURSOR_H: u32 = 19;
-
-/// The pixels [`Canvas::cursor`] may paint for a cursor at `(x, y)`.
-pub const fn cursor_rect(x: i32, y: i32) -> Rect {
-    Rect::new(x, y, CURSOR_W, CURSOR_H)
-}
 const CURSOR: [&str; CURSOR_H as usize] = [
     "#           ",
     "##          ",
@@ -485,10 +504,6 @@ pub const CIRCLE_STEP: i32 = 20;
 const CIRCLE_MARGIN: i32 = 8;
 /// How far a window's shadow reaches.
 pub const SHADOW: i32 = 24;
-/// The band outside the frame that resizes a window that can be.
-pub const RESIZE_BAND: i32 = 6;
-/// The smallest content a window is dragged to.
-pub const MIN_CONTENT: (u32, u32) = (160, 80);
 /// A program's menus at most, and the items of each.
 pub const MAX_MENUS: usize = 6;
 pub const MAX_MENU_ITEMS: usize = 10;
@@ -941,30 +956,6 @@ pub fn snap_content(snap: Snap, work: &Rect) -> Rect {
     )
 }
 
-/// The content a drag of (dx, dy) on the `edges` of `start` asks for, kept above
-/// `MIN_CONTENT`: the side opposite the one dragged stays where it is.
-pub fn resized(start: Rect, edges: u8, dx: i32, dy: i32) -> Rect {
-    let (min_w, min_h) = (MIN_CONTENT.0 as i32, MIN_CONTENT.1 as i32);
-    let (mut x, mut y, mut w, mut h) = (start.x, start.y, start.w as i32, start.h as i32);
-    if edges & edge::RIGHT != 0 {
-        w = (w + dx).max(min_w);
-    }
-    if edges & edge::BOTTOM != 0 {
-        h = (h + dy).max(min_h);
-    }
-    if edges & edge::LEFT != 0 {
-        let new = (w - dx).max(min_w);
-        x += w - new;
-        w = new;
-    }
-    if edges & edge::TOP != 0 {
-        let new = (h - dy).max(min_h);
-        y += h - new;
-        h = new;
-    }
-    Rect::new(x, y, w as u32, h as u32)
-}
-
 /// What the title of a window whose program does not answer ends with.
 pub const HUNG_MARK: &str = " (not responding)";
 
@@ -1082,34 +1073,6 @@ impl Labels for CellLabels {
     }
 }
 
-/// Which edges of `frame` the point (x, y) is on, in the band outside it.
-fn band_edges(frame: &Rect, x: i32, y: i32) -> u8 {
-    let band = RESIZE_BAND;
-    let wide = Rect::new(
-        frame.x - band,
-        frame.y - band,
-        frame.w + 2 * band as u32,
-        frame.h + 2 * band as u32,
-    );
-    if !wide.contains(x, y) {
-        return 0;
-    }
-    let mut edges = 0;
-    if x < frame.x {
-        edges |= edge::LEFT;
-    }
-    if x >= frame.right() {
-        edges |= edge::RIGHT;
-    }
-    if y < frame.y {
-        edges |= edge::TOP;
-    }
-    if y >= frame.bottom() {
-        edges |= edge::BOTTOM;
-    }
-    edges
-}
-
 /// What lies under a point of the screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hit {
@@ -1142,7 +1105,8 @@ pub enum Hit {
     TitleBar {
         id: u32,
     },
-    /// The band around a resizable window, on these [`edge`]s.
+    /// Where a resizable window's [`edge`]s are grabbed: the band around it, or a
+    /// rounded corner's notch ([`Grips::edges_at`]).
     Edge {
         id: u32,
         edges: u8,
@@ -1178,6 +1142,10 @@ pub struct Desktop {
     count: usize,
     pub focus: Option<u32>,
     pub pointer: (i32, i32),
+    /// The pointer's picture: the compositor says what the pointer would do.
+    pub cursor: Cursor,
+    /// Where resizable windows are grabbed, and their smallest size.
+    pub grips: Grips,
     next_id: u32,
     status: [u8; STATUS_MAX],
     status_len: u8,
@@ -1195,6 +1163,8 @@ impl Desktop {
             count: 0,
             focus: None,
             pointer: (width as i32 / 2, height as i32 / 2),
+            cursor: Cursor::Arrow,
+            grips: Grips::DEFAULT,
             next_id: 1,
             status: [0; STATUS_MAX],
             status_len: 0,
@@ -1309,13 +1279,13 @@ impl Desktop {
                 continue;
             }
             let f = w.frame();
-            if !f.contains(x, y) {
-                if w.resizable {
-                    let edges = band_edges(&f, x, y);
-                    if edges != 0 {
-                        return Hit::Edge { id: w.id, edges };
-                    }
+            if w.resizable {
+                let edges = self.grips.edges_at(&f, x, y);
+                if edges != 0 {
+                    return Hit::Edge { id: w.id, edges };
                 }
+            }
+            if !f.contains(x, y) {
                 continue;
             }
             let inside = |b: Option<Rect>| b.is_some_and(|b| b.contains(x, y));
@@ -1367,6 +1337,12 @@ impl Desktop {
         if let Some(w) = self.windows.iter_mut().flatten().find(|w| w.id == id) {
             w.resizable = true;
         }
+    }
+
+    /// Where a frame may be dragged to by its edges: the screen under the bar.
+    pub fn drag_bounds(&self) -> Rect {
+        let bar = self.theme.bar_h.min(self.screen.h);
+        Rect::new(0, bar as i32, self.screen.w, self.screen.h - bar)
     }
 
     /// The bar at the top of the screen.
@@ -1641,6 +1617,7 @@ impl Desktop {
             count: self.count,
             focus: self.focus,
             pointer: self.pointer,
+            cursor: self.cursor,
             bar: self.bar(),
             dock: self.dock().0,
             dock_hint: self.dock_hint(),
@@ -1664,7 +1641,7 @@ impl Desktop {
     /// rectangle of a [`Damage`] over the previous frame gives the same
     /// pixels as composing the whole screen. Each window draws only inside
     /// its frame (title text included) and the cursor only inside
-    /// [`cursor_rect`], which is what [`Scene::damage`] relies on.
+    /// [`Cursor::rect`], which is what [`Scene::damage`] relies on.
     pub fn compose_region(
         &self,
         out: &mut Canvas,
@@ -1758,7 +1735,7 @@ impl Desktop {
         if let Some((menus, open)) = menus {
             self.compose_menus(&mut out, labels, menus, open);
         }
-        out.cursor(self.pointer.0, self.pointer.1);
+        out.cursor(self.cursor, self.pointer.0, self.pointer.1);
     }
 
     /// The bar and the dock, over the windows.
@@ -1895,6 +1872,7 @@ pub struct Scene {
     count: usize,
     focus: Option<u32>,
     pointer: (i32, i32),
+    cursor: Cursor,
     bar: Rect,
     dock: Rect,
     dock_hint: Option<(u32, Rect)>,
@@ -1913,16 +1891,16 @@ impl Scene {
     }
 
     /// Adds to `damage` every screen area whose composed pixels may differ
-    /// between `self` and `newer`: both cursor positions if the pointer
-    /// moved; the old and new frame of a window that appeared, went away,
+    /// between `self` and `newer`: both cursors if the pointer moved or
+    /// changed its picture; the old and new frame of a window that appeared, went away,
     /// moved, was retitled or gained or lost the focus; and, for two windows
     /// whose stacking order swapped, the area where they overlap. Content
     /// changes are not part of a scene: the compositor adds the content
     /// rectangle of a window its client presented.
     pub fn damage(&self, newer: &Scene, damage: &mut Damage) {
-        if self.pointer != newer.pointer {
-            damage.add(&cursor_rect(self.pointer.0, self.pointer.1));
-            damage.add(&cursor_rect(newer.pointer.0, newer.pointer.1));
+        if (self.pointer, self.cursor) != (newer.pointer, newer.cursor) {
+            damage.add(&self.cursor.rect(self.pointer.0, self.pointer.1));
+            damage.add(&newer.cursor.rect(newer.pointer.0, newer.pointer.1));
         }
         // The bar names the focused window and the dock shows each one: a window that
         // came, went, changed its title or hid changes them.
@@ -2512,7 +2490,24 @@ mod tests {
         assert_eq!(d.hit(right.0, right.1), Hit::Edge { id, edges });
         let edges = edge::LEFT | edge::TOP;
         assert_eq!(d.hit(f.x - 2, f.y - 2), Hit::Edge { id, edges });
-        assert_eq!(d.hit(f.right() + RESIZE_BAND + 1, f.y + 50), Hit::Desktop);
+        assert_eq!(d.hit(f.right() + d.grips.band, f.y + 50), Hit::Desktop);
+        // The notch of a rounded corner grabs it; the same pixel of a window that
+        // cannot be resized is still its own.
+        let corner = (f.right() - 1, f.bottom() - 1);
+        let edges = edge::RIGHT | edge::BOTTOM;
+        assert_eq!(d.hit(corner.0, corner.1), Hit::Edge { id, edges });
+        let fixed = d.create(300, 200, "fixed").unwrap();
+        let f = d.get(fixed).unwrap().frame();
+        let (x, y) = (f.right() - 1, f.bottom() - 1);
+        assert!(matches!(d.hit(x, y), Hit::Window { id, .. } if id == fixed));
+    }
+
+    #[test]
+    fn the_drag_bounds_are_the_screen_under_the_bar() {
+        let d = Desktop::new(800, 600);
+        let bar = Theme::LIGHT.bar_h;
+        assert_eq!(d.drag_bounds(), Rect::new(0, bar as i32, 800, 600 - bar));
+        assert_eq!(Desktop::new(800, 10).drag_bounds().h, 0, "a screen all bar");
     }
 
     #[test]
@@ -2530,19 +2525,6 @@ mod tests {
         assert_eq!(d.focus, None);
         assert_eq!(d.front(), Some(a));
         assert!(!matches!(d.hit(probe.0, probe.1), Hit::Window { id, .. } if id == b));
-    }
-
-    #[test]
-    fn dragging_an_edge_keeps_the_far_side_and_the_minimum() {
-        let start = Rect::new(100, 100, 400, 300);
-        let r = resized(start, edge::RIGHT | edge::BOTTOM, 50, -20);
-        assert_eq!(r, Rect::new(100, 100, 450, 280));
-        let r = resized(start, edge::LEFT, 30, 0);
-        assert_eq!(r, Rect::new(130, 100, 370, 300), "the right side stays");
-        let r = resized(start, edge::TOP, 0, 1000);
-        assert_eq!((r.h, r.bottom()), (MIN_CONTENT.1, start.bottom()));
-        let r = resized(start, edge::RIGHT, -1000, 0);
-        assert_eq!(r.w, MIN_CONTENT.0);
     }
 
     #[test]
@@ -2739,7 +2721,7 @@ mod tests {
         // Partially outside text does not panic.
         let mut c = canvas(&mut buf, 40, 20);
         c.text(36, 10, "xyz", 1, Some(2));
-        c.cursor(35, 15);
+        c.cursor(Cursor::Arrow, 35, 15);
         assert_eq!(c.get(35, 15), Some(rgb(0, 0, 0)));
     }
 
@@ -2884,7 +2866,7 @@ mod tests {
             v.fill(2);
             v.fill_rect(&Rect::new(0, 0, 40, 30), 3);
             v.text(8, 4, "Clip", 4, Some(5));
-            v.cursor(20, 12);
+            v.cursor(Cursor::Arrow, 20, 12);
             let mut sbuf = vec![6; 30 * 30];
             let src = Canvas::new(&mut sbuf, 30, 30, 30).unwrap();
             v.blit(&src, 15, 0);
@@ -3119,7 +3101,16 @@ mod tests {
                     self.present(id);
                 }
                 8 => self.desktop.focus = None,
-                _ => {}
+                _ => {
+                    let shapes = [
+                        Cursor::Arrow,
+                        Cursor::LeftRight,
+                        Cursor::UpDown,
+                        Cursor::Falling,
+                        Cursor::Rising,
+                    ];
+                    self.desktop.cursor = shapes[rng.below(shapes.len() as u32) as usize];
+                }
             }
         }
     }
@@ -3252,7 +3243,7 @@ mod tests {
         for y in 0..100 {
             for x in 0..200 {
                 let panels = d.bar().contains(x, y) || d.dock().0.contains(x, y);
-                if !panels && !outer.contains(x, y) && !cursor_rect(190, 90).contains(x, y) {
+                if !panels && !outer.contains(x, y) && !Cursor::Arrow.rect(190, 90).contains(x, y) {
                     assert_eq!(out.get(x, y), Some(Theme::LIGHT.desktop), "({x},{y})");
                 }
             }

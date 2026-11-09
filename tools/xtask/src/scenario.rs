@@ -239,6 +239,10 @@ pub struct HostInput {
     pub click: Option<String>,
     /// A drag after that: the left button down, a move by (dx, dy), and up.
     pub drag: Option<(i32, i32)>,
+    /// A drag as a hand makes it, after `drag`: the left button down, `[count,
+    /// dx, dy, every_ms]` as in `mouse_steps`, and up (ADR 0085: a resize that
+    /// asks a program for many sizes while the button is held).
+    pub drag_steps: Option<(u32, i32, i32, u64)>,
     /// A key held for this many ms, after `keys` are typed.
     pub hold_key: Option<(String, u64)>,
     /// A picture of the screen, kept as `NAME.ppm` in the scenario's directory:

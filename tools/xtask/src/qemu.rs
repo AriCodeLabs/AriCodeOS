@@ -282,6 +282,8 @@ pub struct InputProbe<'a> {
     pub click: Option<&'a str>,
     /// The left button down, a move by (dx, dy), and up.
     pub drag: Option<(i32, i32)>,
+    /// The left button down, `count` moves of (dx, dy) one every `every_ms`, and up.
+    pub drag_steps: Option<(u32, i32, i32, u64)>,
     /// A key held for this many ms.
     pub hold_key: Option<(&'a str, u64)>,
     /// A picture of the screen, `NAME.ppm` in the scenario's directory.
@@ -363,6 +365,7 @@ struct Pointing {
     steps: Option<(u32, i32, i32, u64)>,
     click: Option<String>,
     drag: Option<(i32, i32)>,
+    drag_steps: Option<(u32, i32, i32, u64)>,
     hold_key: Option<(String, u64)>,
     /// Where to keep a picture of the screen, before anything is sent.
     screendump: Option<PathBuf>,
@@ -436,7 +439,10 @@ fn run_input_probe(
                 )?;
             }
         }
-        if let Some((dx, dy)) = pointing.drag {
+        // A drag is one move 100 ms after the press, and the release 100 ms later;
+        // a stroke is many, each as a mouse sends them.
+        let one = pointing.drag.map(|(dx, dy)| (1, dx, dy, 100));
+        for (count, dx, dy, every_ms) in one.into_iter().chain(pointing.drag_steps) {
             let button = |down: bool| {
                 format!(r#"{{"type":"btn","data":{{"down":{down},"button":"left"}}}}"#)
             };
@@ -445,8 +451,10 @@ fn run_input_probe(
             };
             step(&mut qmp, &[button(true)])?;
             std::thread::sleep(Duration::from_millis(100));
-            step(&mut qmp, &[rel("x", dx), rel("y", dy)])?;
-            std::thread::sleep(Duration::from_millis(100));
+            for _ in 0..count {
+                step(&mut qmp, &[rel("x", dx), rel("y", dy)])?;
+                std::thread::sleep(Duration::from_millis(every_ms));
+            }
             step(&mut qmp, &[button(false)])?;
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -1650,6 +1658,7 @@ pub fn run_headless(
                     steps: p.mouse_steps,
                     click: p.click.map(String::from),
                     drag: p.drag,
+                    drag_steps: p.drag_steps,
                     hold_key: p.hold_key.map(|(k, ms)| (k.to_string(), ms)),
                     screendump: p
                         .screendump
