@@ -734,8 +734,13 @@ fn dispatches(g: &mut Gpu, hardware: Handle) -> Result<(), u64> {
             return Err(20);
         }
     }
-    let never = DISPATCH_NUMBER | 0xFFFF_FF00;
-    if sys::gpu_wait(g.gpu, never, 0) != Err(Error::Invalid) {
+    // Numbers compare with wrap-around, as the engine's do: one far ahead
+    // of the last given is never given; one far behind reads as done.
+    let ahead = DISPATCH_NUMBER | 0x7000_0000;
+    let other_engine = DISPATCH_NUMBER << 1 | 1;
+    if sys::gpu_wait(g.gpu, ahead, 0) != Err(Error::Invalid)
+        || sys::gpu_wait(g.gpu, other_engine, 0) != Err(Error::Invalid)
+    {
         say(&[b"a dispatch number never given was waited for"]);
         return Err(20);
     }
