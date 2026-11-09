@@ -195,8 +195,10 @@ pub mod gpu {
         pub dynamic_base: u32,
         pub instruction_base: u32,
         /// `MEDIA_VFE_STATE`: the scratch space, a 1 KiB-aligned offset from
-        /// the general base with each thread's size in bits 3:0 (0 is 1 KiB,
-        /// up to 11, 12 KiB); 0 when no kernel spills.
+        /// the general base with each thread's size code in bits 3:0, at
+        /// most 11 (the 2012 PRM reads it as 1 to 12 KiB, Mesa writes it as
+        /// powers of two from 1 KiB; nothing here spills yet, so neither is
+        /// measured); 0 when no kernel spills.
         pub scratch: u32,
         /// Threads that may run at once, from 1 to the GPU's.
         pub max_threads: u16,

@@ -13,7 +13,8 @@
 //! kernel counts the slots the clear reached. Each thread then writes two
 //! blocks of zeros through the render cache, the 512 bytes Linux writes a
 //! thread to push the last client's lines out, and zeroes every register
-//! but g127, which holds its own header for the end. The program is
+//! but g127, which holds its own header for the end, and the accumulators,
+//! flags and address register. The program is
 //! assembled here by `aricode-gen7-eu`, for each clear, with the clear's
 //! number as an immediate: CURBE data would not do, since a group's
 //! threads each get their own section of it (PRM Vol 2 Part 2, 1.3.3; on
@@ -125,6 +126,13 @@ pub fn program(code: &mut [[u32; 4]], number: u32) -> Option<usize> {
         .mov(E16, g(10).ud(), Imm::ud(0))
         .mov(E16, g(12).ud(), Imm::ud(0))
         .mov(E8, g(126).ud(), Imm::ud(0))
+        // The architecture registers a program writes too, which Linux's
+        // clear leaves (audit of stage B): the accumulators (a SIMD16 move
+        // covers acc0 and acc1), the flags and the address register.
+        .mov(E16, Reg::acc0().d(), Imm::d(0))
+        .mov(E1, Reg::f0().ud(), Imm::ud(0))
+        .mov(E1, Reg::f1().ud(), Imm::ud(0))
+        .mov(E8, Reg::a0().uw(), Imm::uw(0))
         .send(
             E8,
             Reg::null().ud(),

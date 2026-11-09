@@ -1060,15 +1060,16 @@ const SGEMM_C_AT: u64 = 0x400_0000;
 /// Runs a clock and how many products at it.
 const SGEMM_RUNS: usize = 10;
 const SGEMM_CODE: u32 = 0x0000;
-const SGEMM_TABLE: u32 = 0x1000;
-const SGEMM_SURFACES: u32 = 0x1040;
-const SGEMM_DESCRIPTOR: u32 = 0x1100;
+const SGEMM_TABLE: u32 = 0x2000;
+const SGEMM_SURFACES: u32 = 0x2040;
+const SGEMM_DESCRIPTOR: u32 = 0x2100;
 
 /// Assembles the EU program: each thread computes an 8 by 16 tile of C at
 /// row 8 * group Y and column 16 * group X. For each step of 8 along k it
 /// reads A's 8 by 8 block and B's 8 by 16 (two media block reads of 32
 /// bytes by 8 rows), then makes 128 `mad(8)`: each of C's rows (two
-/// registers) gains A's element times B's row.
+/// registers) gains A's element times B's row. `n` must be a multiple of
+/// 16: the loop takes two steps a turn.
 fn sgemm_program(code: &mut [[u32; 4]], n: u32) -> Option<usize> {
     use aricode_gen7_eu::{g as r, CondMod, Flag, Pred};
     let read = Message::media_block_read(0, 8).ok()?;
@@ -1095,22 +1096,36 @@ fn sgemm_program(code: &mut [[u32; 4]], n: u32) -> Option<usize> {
     for c in (16..32).step_by(2) {
         asm.mov(E16, r(c).ud(), Imm::ud(0));
     }
-    let top = asm.label();
-    asm.send(E8, r(32).ud(), r(2).ud(), read)
-        .send(E8, r(40).ud(), r(3).ud(), read_b)
-        .send(E8, r(48).ud(), r(4).ud(), read_b);
-    for kk in 0..8u8 {
-        for row in 0..8u8 {
-            let a = r(32 + row).f().sub(kk).scalar();
-            for (c, b) in [(16 + row, 40 + kk), (24 + row, 48 + kk)] {
-                asm.emit(Inst::mad(E8, r(c).f(), r(c).f().vec4(), a, r(b).f().vec4()));
+    // Two sets of A and B registers: while one is multiplied, the next
+    // step's blocks are on their way into the other. The last step reads
+    // past the matrices; the surfaces clamp it and nothing uses it.
+    let fetch = |asm: &mut Asm, set: u8| {
+        let base = 32 + 32 * set;
+        asm.send(E8, r(base).ud(), r(2).ud(), read)
+            .send(E8, r(base + 8).ud(), r(3).ud(), read_b)
+            .send(E8, r(base + 16).ud(), r(4).ud(), read_b)
+            .add(E1, r(2).ud(), r(2).ud().scalar(), Imm::ud(32))
+            .add(E1, r(3).ud().sub(1), r(3).ud().sub(1).scalar(), Imm::ud(8))
+            .add(E1, r(4).ud().sub(1), r(4).ud().sub(1).scalar(), Imm::ud(8));
+    };
+    let multiply = |asm: &mut Asm, set: u8| {
+        let base = 32 + 32 * set;
+        for kk in 0..8u8 {
+            for row in 0..8u8 {
+                let a = r(base + row).f().sub(kk).scalar();
+                for (c, b) in [(16 + row, base + 8 + kk), (24 + row, base + 16 + kk)] {
+                    asm.emit(Inst::mad(E8, r(c).f(), r(c).f().vec4(), a, r(b).f().vec4()));
+                }
             }
         }
-    }
-    asm.add(E1, r(2).ud(), r(2).ud().scalar(), Imm::ud(32))
-        .add(E1, r(3).ud().sub(1), r(3).ud().sub(1).scalar(), Imm::ud(8))
-        .add(E1, r(4).ud().sub(1), r(4).ud().sub(1).scalar(), Imm::ud(8))
-        .add(E1, r(5).ud(), r(5).ud().scalar(), Imm::ud(8))
+    };
+    fetch(&mut asm, 0);
+    let top = asm.label();
+    fetch(&mut asm, 1);
+    multiply(&mut asm, 0);
+    fetch(&mut asm, 0);
+    multiply(&mut asm, 1);
+    asm.add(E1, r(5).ud(), r(5).ud().scalar(), Imm::ud(16))
         .emit(Inst::cmp(
             E1,
             CondMod::L,
@@ -1167,7 +1182,7 @@ fn sgemm(g: &mut Gpu, hardware: Handle) -> Result<(), u64> {
         say(&[b"sgemm setup failed: ", error_name(e)]);
         18u64
     };
-    let state = map(Some(hardware), g.gpu, SGEMM_STATE_AT, 8192).map_err(fail)?;
+    let state = map(Some(hardware), g.gpu, SGEMM_STATE_AT, 12288).map_err(fail)?;
     let a = map(None, g.gpu, SGEMM_A_AT, bytes).map_err(fail)?;
     let b = map(None, g.gpu, SGEMM_B_AT, bytes).map_err(fail)?;
     let c = map(None, g.gpu, SGEMM_C_AT, bytes).map_err(fail)?;
@@ -1180,7 +1195,7 @@ fn sgemm(g: &mut Gpu, hardware: Handle) -> Result<(), u64> {
     }
     // The state: code, binding table (A, B, C), surfaces, descriptor.
     state.fill(0);
-    let mut code = [[0u32; 4]; 256];
+    let mut code = [[0u32; 4]; 512];
     let Some(len) = sgemm_program(&mut code, size) else {
         say(&[b"the sgemm kernel did not assemble"]);
         return Err(18);
@@ -1325,8 +1340,11 @@ fn sgemm(g: &mut Gpu, hardware: Handle) -> Result<(), u64> {
             b" runs; ",
             n(temperature(g)).s(),
             b" C; ",
-            n(rate(best) * 100 / rate(cpu_us).max(1) / 100).s(),
-            b"x the cpu",
+            n(rate(best) / rate(cpu_us).max(1)).s(),
+            b".",
+            n(rate(best) * 100 / rate(cpu_us).max(1) % 100 / 10).s(),
+            n(rate(best) * 100 / rate(cpu_us).max(1) % 10).s(),
+            b"x the cpu's speed",
         ]);
     }
     let _ = sys::gpu_frequency(g.gpu, 350);
