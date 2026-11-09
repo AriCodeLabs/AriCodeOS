@@ -29,7 +29,7 @@ use aricode_intel_gt::gtt::{self, Cache, Layout};
 use aricode_intel_gt::power::{self, Forcewake, Limits};
 use aricode_intel_gt::regs::{bcs, masked_off, masked_on};
 use aricode_intel_gt::ring::{self, Ring};
-use aricode_intel_gt::{self as gt, ppgtt, regs, Refusal, Timeouts};
+use aricode_intel_gt::{self as gt, ppgtt, regs, render, Refusal, Timeouts};
 use aricode_pmm::FRAME_SIZE;
 use log::{info, warn};
 
@@ -44,6 +44,9 @@ const _: () = assert!(COPY_AT as u64 + COPIES as u64 * 4096 <= aricode_abi::gpu:
 /// Mappings a client may hold (audit M4): bounds the kernel's memory and the
 /// check's work per batch.
 const MAX_MAPS: usize = 256;
+/// The render status page's dword its flushes may store to (Linux's
+/// `I915_GEM_HWS_SCRATCH`).
+const RENDER_SCRATCH: u32 = 0x80;
 /// A dword of the status page nothing writes; see `GpuReport::canary`.
 const CANARY_INDEX: usize = 0x90;
 /// The blitter's watchdog threshold (PRM Vol 1 Part 4, 2.1.9.2): unused,
@@ -105,16 +108,21 @@ struct Pages {
     /// The PPGTT's 512 tables, contiguous: every directory entry is written
     /// once, at boot, and never changes (audit M3).
     tables: ObjectRef,
+    /// The render engine's status page and ring (ADR 0086).
+    render_status: ObjectRef,
+    render_ring: ObjectRef,
 }
 
 impl Pages {
-    fn all(self) -> [ObjectRef; 5] {
+    fn all(self) -> [ObjectRef; 7] {
         [
             self.scratch,
             self.status,
             self.ring,
             self.copies,
             self.tables,
+            self.render_status,
+            self.render_ring,
         ]
     }
 }
@@ -151,6 +159,11 @@ struct Engine {
     asked: u8,
     cap: u8,
     step: u8,
+    /// The render engine's ring, its next request's number, and whether it
+    /// started and passed its boot check (ADR 0086).
+    render_ring: Ring,
+    render_next: u32,
+    render_ok: bool,
 }
 
 enum Status {
@@ -259,6 +272,24 @@ pub fn init(
         match bring_up(&d, mhz, max_mhz, hang_ms * 1000) {
             Ok(e) => {
                 let mut e = e;
+                if let Some(mut regs) = framebuffer::mapped_bar0() {
+                    match render_bring_up(&mut e, &mut regs) {
+                        Ok((first, again)) => {
+                            e.render_ok = true;
+                            info!(
+                                "gpu: render ring ready: an empty request in {first} us; \
+                                 reset and started again, another in {again} us"
+                            );
+                        }
+                        Err(why) => {
+                            if let Ok(mut awake) = e.fw.hold(&mut regs, &Clock) {
+                                awake.write(regs::RENDER.ctl(), 0);
+                                awake.write(regs::RENDER.mi_mode(), masked_on(bcs::MODE_STOP));
+                            }
+                            warn!("gpu: render ring left off: {why}; the blitter goes on");
+                        }
+                    }
+                }
                 // Without the thread or a sensor there is no brake: no
                 // clock above the boot's unless gpu.max_mhz says so (M3).
                 let thread = crate::task::scheduler::spawn("gpu", reaper, 0);
@@ -328,6 +359,8 @@ fn bring_up(
         ring: alloc(RING_PAGES)?,
         copies: alloc(COPIES as u32)?,
         tables: alloc(layout.directory_entries)?,
+        render_status: alloc(1)?,
+        render_ring: alloc(RING_PAGES)?,
     };
     let scratch_pte = gtt::encode(phys(&pages.scratch), Cache::Uncached).ok_or(Refusal::GttSize)?;
     // From the first write to the tables on, a failure stops the engine and
@@ -356,6 +389,18 @@ fn bring_up(
         // them; then the directory, each entry naming its table.
         gtt::clear(&mut regs, kept, layout.directory, scratch_pte);
         gtt::set(&mut regs, layout.status, llc(phys(&pages.status))?);
+        gtt::set(
+            &mut regs,
+            layout.render_status,
+            llc(phys(&pages.render_status))?,
+        );
+        for i in 0..RING_PAGES {
+            gtt::set(
+                &mut regs,
+                layout.render_ring + i,
+                llc(phys(&pages.render_ring) + i as u64 * FRAME_SIZE)?,
+            );
+        }
         for i in 0..RING_PAGES {
             gtt::set(
                 &mut regs,
@@ -370,6 +415,11 @@ fn bring_up(
         }
         ppgtt::flush_directory(&mut regs);
         let mut awake = fw.hold(&mut regs, &clock)?;
+        // Linux's Ivy Bridge settings, which the firmware does not apply
+        // (ADR 0086), before any engine starts.
+        render::apply(&mut awake, &render::GT);
+        render::apply(&mut awake, &render::CLOCK_GATING);
+        render::apply(&mut awake, &render::RENDER);
         ring::prepare(&mut awake);
         ring::start(
             &mut awake,
@@ -386,9 +436,11 @@ fn bring_up(
     if let Err(why) = programmed {
         warn!("gpu: taking the engine failed halfway ({why:?}): stopped, its pages kept for good");
         if let Ok(mut awake) = fw.hold(&mut regs, &clock) {
-            awake.write(bcs::CTL, 0);
-            awake.write(bcs::MODE, masked_off(bcs::PPGTT_ENABLE));
-            awake.write(bcs::MI_MODE, masked_on(bcs::MODE_STOP));
+            for engine in [regs::BLITTER, regs::RENDER] {
+                awake.write(engine.ctl(), 0);
+                awake.write(engine.mode(), masked_off(bcs::PPGTT_ENABLE));
+                awake.write(engine.mi_mode(), masked_on(bcs::MODE_STOP));
+            }
         }
         for p in pages.all() {
             crate::hw::quarantine(p);
@@ -417,7 +469,100 @@ fn bring_up(
         asked: step,
         cap,
         step,
+        render_ring: Ring::new(RING_PAGES),
+        render_next: 1,
+        render_ok: false,
     }))
+}
+
+/// Writes `body` into the render ring as one request and submits it; its
+/// number, or `None` if the ring has no room or the GT does not wake.
+fn render_request(e: &mut Engine, regs: &mut Bar0, body: &[u32]) -> Option<u32> {
+    let page = e.layout.render_status * FRAME_SIZE as u32;
+    let seqno = e.render_next;
+    let mut words = [0u32; 256];
+    let n = render::request(
+        page + RENDER_SCRATCH * 4,
+        page + ring::SEQNO_INDEX * 4,
+        seqno,
+        body,
+        &mut words,
+    )?;
+    let mut awake = e.fw.hold(regs, &Clock).ok()?;
+    let head = awake.read(regs::RENDER.head());
+    let tail = e.render_ring.emit(
+        dwords(phys(&e.pages.render_ring), RING_PAGES),
+        head,
+        &words[..n],
+    )?;
+    // SAFETY: a fence touches no memory.
+    unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
+    ring::submit(&mut awake, &regs::RENDER, tail);
+    e.render_next = match seqno.wrapping_add(1) {
+        0 => 1,
+        n => n,
+    };
+    Some(seqno)
+}
+
+/// Waits up to `limit_us` for render request `seqno`; the time it took.
+fn render_wait(e: &Engine, seqno: u32, limit_us: u64) -> Option<u64> {
+    let page = dwords(phys(&e.pages.render_status), 1);
+    let start = crate::time::uptime_us();
+    loop {
+        // SAFETY: inside the status page; the GPU writes it.
+        let stored = unsafe { core::ptr::read_volatile(&page[ring::SEQNO_INDEX as usize]) };
+        let now = crate::time::uptime_us();
+        if ring::passed(stored, seqno) {
+            return Some(now - start);
+        }
+        if now - start > limit_us {
+            return None;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+/// Starts the render engine's ring and checks it at boot (ADR 0086, B2): an
+/// empty request, a reset of the render domain with its settings applied
+/// again, and another. On any failure the ring is stopped and the blitter
+/// goes on alone.
+fn render_bring_up(e: &mut Engine, regs: &mut Bar0) -> Result<(u64, u64), &'static str> {
+    const LIMIT_US: u64 = 50_000;
+    let (fw, timeouts, layout) = (e.fw, e.timeouts, e.layout);
+    {
+        let mut awake = fw.hold(regs, &Clock).map_err(|_| "forcewake")?;
+        ring::start(
+            &mut awake,
+            &Clock,
+            &timeouts,
+            &regs::RENDER,
+            &layout,
+            &mut e.render_ring,
+        )
+        .map_err(|_| "the ring did not start")?;
+    }
+    let first = render_request(e, regs, &[]).ok_or("no room in the ring")?;
+    let took = render_wait(e, first, LIMIT_US).ok_or("an empty request did not finish")?;
+    {
+        let mut awake = fw.hold(regs, &Clock).map_err(|_| "forcewake")?;
+        ring::reset(&mut awake, &Clock, &timeouts, &regs::RENDER)
+            .map_err(|_| "the render domain did not reset")?;
+        render::apply(&mut awake, &render::RENDER);
+        ring::start(
+            &mut awake,
+            &Clock,
+            &timeouts,
+            &regs::RENDER,
+            &layout,
+            &mut e.render_ring,
+        )
+        .map_err(|_| "the ring did not start again")?;
+    }
+    let second = render_request(e, regs, &[]).ok_or("no room after the reset")?;
+    let again = render_wait(e, second, LIMIT_US)
+        .ok_or("an empty request did not finish after the reset")?;
+    Ok((took, again))
 }
 
 /// The engine, out of `GPU` for one call.
