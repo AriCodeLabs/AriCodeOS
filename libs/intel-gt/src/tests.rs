@@ -806,10 +806,10 @@ mod batches {
     fn a_batch_must_end_within_itself() {
         let f = cmd::fill(&DST, &ALL, 1).unwrap();
         assert_eq!(
-            check(&mut f.clone()[..5], START, &MAPS),
+            check(&mut { f }[..5], START, &MAPS),
             Err(Fault::Unended(0))
         );
-        assert_eq!(check(&mut f.clone(), START, &MAPS), Err(Fault::Unended(6)));
+        assert_eq!(check(&mut { f }, START, &MAPS), Err(Fault::Unended(6)));
         assert_eq!(check(&mut [], START, &MAPS), Err(Fault::Unended(0)));
         assert_eq!(
             check(&mut [cmd::FLUSH_DW, 0], START, &MAPS),
