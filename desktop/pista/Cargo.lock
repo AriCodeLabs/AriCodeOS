@@ -68,6 +68,10 @@ name = "aricode-fb-console"
 version = "0.18.0"
 
 [[package]]
+name = "aricode-gen7-eu"
+version = "0.18.0"
+
+[[package]]
 name = "aricode-gfx"
 version = "0.18.0"
 dependencies = [
@@ -87,6 +91,14 @@ name = "aricode-http"
 version = "0.18.0"
 
 [[package]]
+name = "aricode-intel-gt"
+version = "0.18.0"
+dependencies = [
+ "aricode-abi",
+ "aricode-gen7-eu",
+]
+
+[[package]]
 name = "aricode-net"
 version = "0.18.0"
 dependencies = [
@@ -100,6 +112,11 @@ version = "0.18.0"
 [[package]]
 name = "aricode-pista"
 version = "0.18.0"
+dependencies = [
+ "aricode-abi",
+ "aricode-gen7-eu",
+ "aricode-intel-gt",
+]
 
 [[package]]
 name = "aricode-proto"

@@ -42,17 +42,30 @@ impl Target<'_> {
 
     /// Perspective texture coordinates are world X/Z multiplied by reciprocal
     /// depth. Only terrain pays for texture sampling; solid objects use fills.
-    pub fn surface(&mut self, mut v: [[i64; 5]; 3], color: u32, material: u8) {
+    pub fn surface(&mut self, v: [[i64; 5]; 3], color: u32, material: u8) {
+        self.shaded(
+            v.map(|p| [p[0], p[1], p[2], p[3], p[4], 0]),
+            color,
+            material,
+        );
+    }
+
+    /// RGB times reciprocal depth, interpolated with the same perspective as terrain.
+    pub fn lit(&mut self, v: [[i64; 6]; 3]) {
+        self.shaded(v, 0, 3);
+    }
+
+    fn shaded(&mut self, mut v: [[i64; 6]; 3], color: u32, material: u8) {
         v.sort_unstable_by_key(|p| p[1]);
         let [top, mid, low] = v;
         let first = ((top[1] + 32767) >> 16).max(0);
         let last = ((low[1] + 32767) >> 16).min(self.height as i64);
-        let along = |a: [i64; 5], b: [i64; 5], y: i64| {
+        let along = |a: [i64; 6], b: [i64; 6], y: i64| {
             let dy = b[1] - a[1];
             let t = y - a[1];
-            let mut out = [a[0], a[2], a[3], a[4]];
+            let mut out = [a[0], a[2], a[3], a[4], a[5]];
             if dy != 0 {
-                for (j, index) in [0, 2, 3, 4].into_iter().enumerate() {
+                for (j, index) in [0, 2, 3, 4, 5].into_iter().enumerate() {
                     out[j] += ((b[index] - a[index]) as i128 * t as i128 / dy as i128) as i64;
                 }
             }
@@ -72,9 +85,15 @@ impl Target<'_> {
             if x0 >= x1 || r[0] == l[0] {
                 continue;
             }
-            let mut values = [0i64; 3];
-            let mut slopes = [0i64; 3];
-            let attrs = if material == 0 { 1 } else { 3 };
+            let mut values = [0i64; 4];
+            let mut slopes = [0i64; 4];
+            let attrs = if material == 3 {
+                4
+            } else if material == 0 || material == 4 {
+                1
+            } else {
+                3
+            };
             for j in 0..attrs {
                 slopes[j] =
                     ((((r[j + 1] - l[j + 1]) as i128) << 32) / (r[0] - l[0]) as i128) as i64;
@@ -85,11 +104,20 @@ impl Target<'_> {
             let end = row as usize * self.width + x1 as usize;
             for index in start..end {
                 let depth = (values[0] >> 16).max(1) as u32;
-                if depth >= self.depth[index] {
+                if material == 4 {
+                    // Contact decals modulate the terrain without hiding later geometry.
+                    if self.depth[index] > 0
+                        && depth >= self.depth[index].saturating_sub(self.depth[index] / 30)
+                    {
+                        let old = self.pixels[index];
+                        self.pixels[index] = ((((old & 0xff00ff) * color) >> 8) & 0xff00ff)
+                            | ((((old & 0x00ff00) * color) >> 8) & 0x00ff00);
+                    }
+                } else if depth >= self.depth[index] {
                     self.depth[index] = depth;
                     let mut paint = color;
                     // Fade fine texture into the distance to avoid shimmer.
-                    if material != 0 && depth > 150_000 {
+                    if (material == 1 || material == 2) && depth > 150_000 {
                         let u = ((values[1] >> 12) / depth as i64) as i32;
                         let v = ((values[2] >> 12) / depth as i64) as i32;
                         let hash = (u.wrapping_mul(374761393) ^ v.wrapping_mul(668265263)) as u32;
@@ -106,6 +134,12 @@ impl Target<'_> {
                         let green = (((color >> 8) & 255) * factor / 256).min(255);
                         let blue = ((color & 255) * factor / 256).min(255);
                         paint = (red << 16) | (green << 8) | blue;
+                    }
+                    if material == 3 {
+                        let r = ((values[1] >> 16) / depth as i64).clamp(0, 255) as u32;
+                        let g = ((values[2] >> 16) / depth as i64).clamp(0, 255) as u32;
+                        let b = ((values[3] >> 16) / depth as i64).clamp(0, 255) as u32;
+                        paint = r << 16 | g << 8 | b;
                     }
                     self.pixels[index] = paint;
                 }

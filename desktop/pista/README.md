@@ -12,7 +12,7 @@ circuit has climbs and drops, linked bends and three boost zones. Spanish:
 | Space + steer | Drift; releasing Space fires the charged boost |
 | P | Pause / resume |
 | Enter | Resume a pause, or start another race after the finish |
-| R | Back to the current stretch, losing speed and boost |
+| R | Return to the last safe road position, losing speed and boost |
 | Q | Switch between high quality and fast mode |
 | Esc | Quit |
 
@@ -25,7 +25,11 @@ it through the whole countdown does not.
 A lap counts when the three checkpoints are crossed in order and then the line
 in the racing direction. The position tells the approach to the start from the
 end of a lap. At the finish the time and the result freeze. Lap times are kept
-for the race. Losing the focus pauses the game.
+for the race. Losing the focus pauses the game. Barriers contain the kart;
+after one second continuously off the road it returns to its last safe point.
+Release a held steering key before steering again after recovery. Off-road
+movement cannot advance checkpoints. The scene remains visible in every direction,
+including when facing backwards, and queued key releases are drained each frame.
 
 ## Graphics
 
@@ -38,28 +42,42 @@ for the race. Losing the focus pauses the game.
   detail fading with distance.
 - A warm sky, sun halo, clouds and three layers of mountains; trees, rocks,
   stands, chalets, waving flags, signs and barriers.
-- Karts with octagonal tyres, steering front wheels, a faceted helmet, a spoiler,
-  boost flames and drift sparks.
+- Sculpted kart bodywork and helmets with smooth, perspective-correct lighting,
+  clear-coat highlights, sky reflections, 16-sided tyres and metallic hubs.
+- Blended contact shadows, soft procedural clouds, shaded snowy ridges, varied
+  vegetation, boost flames and drift sparks.
+- Bloom and colour finishing, applied before the interface.
 - A chase camera that widens its field of view with speed.
 
-Rendering runs on the CPU in integer arithmetic, with no outside graphics
-dependency. The app asks for 16 MiB: the window, the colour and depth buffers
-and the runtime. Its speed inside AriCodeOS also includes the framebuffer copy
-and the compositor; the host example's figures are not the system's whole frame
-rate.
+Geometry rasterization runs on the CPU in integer arithmetic. On the Intel
+Gen7 (Ivy Bridge) compute backend supported by AriCodeOS, Pista submits an EU
+kernel for bloom and colour finishing. This is a hybrid renderer, **not a full
+GPU 3D pipeline**, and does not add support for other GPU families.
+
+The GPU path is enabled only after a hardware readback test matches the CPU
+reference at every pixel, including image edges. An unavailable/busy device,
+`gpu=off`, a failed check or dispatch error uses the CPU effect instead. Buffers
+from a failed dispatch are not reused. The pause screen identifies the active
+backend; the serial log also records detection and any fallback. QEMU verifies
+the absent/disabled paths; successful compilation and host tests do not prove
+execution on physical Gen7 hardware.
+
+The app asks for 16 MiB, including its optional GPU input/output/state mappings.
+Its speed inside AriCodeOS includes rendering, finishing, framebuffer copies
+and the compositor; host example measurements exclude the compositor.
 
 ## Build and check
 
 From the repository root:
 
 ```sh
-cargo test -p aricode-pista
-cargo clippy -p aricode-pista --all-targets -- -D warnings
-cargo xtask app-pack desktop/pista
+cargo test -p aricode-pista --all-features
+cargo clippy -p aricode-pista --all-features --all-targets -- -D warnings
+cargo xtask app-pack desktop/pista --version 2
 cargo xtask test --only gui.pista,gui.pista_controls
 ```
 
-The package lands in `build/pkgs/pista-1.aripkg`. Scenario `gui.pista` installs
+The package lands in `build/pkgs/pista-2.aripkg`. Scenario `gui.pista` installs
 the app and presents 60 frames through the compositor; `gui.pista_controls`
 drives the interactive path (quality changes, pause, recovery, driving and
 quitting) with the compositor's keyboard. On a system with the package,

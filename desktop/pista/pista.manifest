@@ -1,5 +1,5 @@
 # Pista, a kart racing game: its window, and the system's clock to keep time.
 # Window, native-resolution colour/depth buffers and runtime headroom.
 name = pista
-caps = system, window
+caps = system, window, gpu
 memory = 16M

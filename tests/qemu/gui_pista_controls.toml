@@ -4,7 +4,7 @@ name = "gui.pista_controls"
 description = "Pista handles quality changes and driving controls through the compositor"
 level = "full"
 areas = ["gui", "apps", "input"]
-cmdline = "qemu_exit gui shell gui_trace"
+cmdline = "qemu_exit gui shell gui_trace gpu=off"
 install = ["desktop/pista"]
 stdin = ["run pista", "sleep 500", "shutdown"]
 timeout_secs = 120
@@ -23,6 +23,7 @@ key_delay_ms = 400
 [expect]
 exit = 33
 serial_contains = [
+    "pista: CPU renderer + bloom (no verified GPU compute)",
     "compositor: window 1 'Pista' 960x540",
     "'pista' exited with code 0",
     "ARICODEOS_SHUTDOWN",

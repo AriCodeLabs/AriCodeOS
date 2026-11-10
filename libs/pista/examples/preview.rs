@@ -3,6 +3,7 @@
 //! Render real game frames on the host, without a compositor or a GPU.
 //! cargo run -p aricode-pista --release --example preview -- build/pista-preview
 use aricode_pista::{
+    effects,
     hud::{self, Overlay},
     raster::Target,
     render::{draw, View},
@@ -39,8 +40,10 @@ fn main() {
                     height,
                 },
             );
+            effects::finish(&pixels, &mut depth, width, height);
             frames += 1;
         }
+        pixels.copy_from_slice(&depth);
         hud::draw(
             &mut Target {
                 pixels: &mut pixels,
@@ -63,7 +66,7 @@ fn main() {
         output.write_all(&bytes).unwrap();
     }
     println!(
-        "{frames} native 960x540 frames, {:.2} ms/frame (host, without compositor)",
+        "{frames} native 960x540 frames, {:.2} ms/frame (host, CPU geometry + bloom, without compositor)",
         start.elapsed().as_secs_f64() * 1000.0 / frames as f64
     );
     println!("Frames: {dir}/grid.ppm, race.ppm, summit.ppm");
