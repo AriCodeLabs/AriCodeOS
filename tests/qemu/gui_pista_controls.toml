@@ -1,0 +1,30 @@
+# Exercises the interactive path (the benchmark never polls keyboard events):
+# both buffer resolutions, pause/resume, recovery, driving and a clean exit.
+name = "gui.pista_controls"
+description = "Pista handles quality changes and driving controls through the compositor"
+level = "full"
+areas = ["gui", "apps", "input"]
+cmdline = "qemu_exit gui shell gui_trace"
+install = ["desktop/pista"]
+stdin = ["run pista", "sleep 500", "shutdown"]
+timeout_secs = 120
+
+[host_input]
+marker = "compositor: window 1 'Pista' 960x540"
+wait_ms = 1000
+keys = ["q"]
+
+[[host_input_then]]
+marker = "compositor: frame"
+wait_ms = 4000
+keys = ["p", "ret", "up", "r", "q", "esc"]
+key_delay_ms = 400
+
+[expect]
+exit = 33
+serial_contains = [
+    "compositor: window 1 'Pista' 960x540",
+    "'pista' exited with code 0",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "pista: could not", "pista: started without", "killed by fault", "could not launch"]
