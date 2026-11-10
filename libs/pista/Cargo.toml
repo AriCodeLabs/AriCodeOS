@@ -8,4 +8,10 @@ description = "Pista, a kart racing game: its world and its 3D software renderer
 [lib]
 path = "src/lib.rs"
 
+[features]
+gpu = ["dep:aricode-abi", "dep:aricode-gen7-eu", "dep:aricode-intel-gt"]
+
 [dependencies]
+aricode-abi = { path = "../../sdk/abi", optional = true }
+aricode-gen7-eu = { path = "../gen7-eu", optional = true }
+aricode-intel-gt = { path = "../intel-gt", optional = true }

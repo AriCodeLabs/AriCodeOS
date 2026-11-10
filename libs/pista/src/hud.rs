@@ -15,6 +15,7 @@ const CYAN: u32 = 0x64E6ED;
 #[derive(Default)]
 pub struct Overlay {
     pub paused: bool,
+    pub gpu: bool,
     pub fps: u32,
     pub high_quality: bool,
 }
@@ -176,7 +177,10 @@ pub fn draw(target: &mut Target, world: &World, overlay: &Overlay) {
         } else {
             ui.text(168, 253, b"SPACE DRIFT   P PAUSE", 1, WHITE);
         }
-        if world.wrong_way() {
+        if !k.steer_armed {
+            ui.rect(158, 54, 164, 18, INK);
+            ui.text(168, 60, b"RELEASE STEERING TO CONTINUE", 1, CYAN);
+        } else if world.wrong_way() {
             ui.rect(179, 54, 122, 18, INK);
             ui.text(189, 60, b"WRONG WAY - R RESET", 1, GOLD);
         } else if k.recovery > 0 {
@@ -228,6 +232,17 @@ pub fn draw(target: &mut Target, world: &World, overlay: &Overlay) {
             ui.text(129, 128, b"R               RETURN TO TRACK", 1, MUTED);
             ui.text(129, 143, b"Q               GRAPHICS QUALITY", 1, MUTED);
             ui.text(129, 158, b"ESC             EXIT", 1, MUTED);
+            ui.text(
+                129,
+                171,
+                if overlay.gpu {
+                    b"GPU BLOOM / CPU GEOMETRY"
+                } else {
+                    b"CPU GEOMETRY + BLOOM"
+                },
+                1,
+                GOLD,
+            );
             ui.text(129, 184, b"SPACE + TURN, THEN RELEASE: TURBO", 1, CYAN);
         } else {
             let label = if world.position() == 1 {

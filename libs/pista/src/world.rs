@@ -30,7 +30,7 @@ const DRIFT_TURN_NUM: i64 = 3;
 const DRIFT_TURN_DEN: i64 = 2;
 /// Steps of speed a turbo strip gives.
 const BOOST_STEPS: u32 = 80;
-const TOO_FAR: F = f(45);
+const TOO_FAR: F = HALF_WIDTH + f(2);
 const KART_RADIUS: F = f(1);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -61,6 +61,10 @@ pub struct Kart {
     pub drift_charge: u32,
     pub drifting: bool,
     pub recovery: u32,
+    /// Recovery ignores a held steering key until it is released.
+    pub steer_armed: bool,
+    offroad_steps: u32,
+    safe_segment: usize,
     pub lap_start: u32,
     pub last_lap: u32,
     pub best_lap: u32,
@@ -126,6 +130,9 @@ impl World {
                 drift_charge: 0,
                 drifting: false,
                 recovery: 0,
+                steer_armed: true,
+                offroad_steps: 0,
+                safe_segment: i,
                 lap_start: 0,
                 last_lap: 0,
                 best_lap: 0,
@@ -238,10 +245,10 @@ impl World {
 
         // Speed.
         let dt = |v: F| v / RATE;
-        let top = if k.boost > 0 {
-            BOOST_SPEED
-        } else if off_road {
+        let top = if off_road {
             OFF_ROAD_SPEED
+        } else if k.boost > 0 {
+            BOOST_SPEED
         } else {
             TOP_SPEED
         };
@@ -260,13 +267,16 @@ impl World {
         k.boost = k.boost.saturating_sub(1);
 
         // Steering: the wheels take time to turn, and a stopped kart cannot.
-        let wanted = match (input.left, input.right) {
+        if !input.left && !input.right {
+            k.steer_armed = true;
+        }
+        let wanted = match (input.left && k.steer_armed, input.right && k.steer_armed) {
             (true, false) => -ONE,
             (false, true) => ONE,
             _ => 0,
         };
         k.steer += (wanted - k.steer).clamp(-ONE / 8, ONE / 8);
-        let drifting = input.drift && k.speed > f(10) && !off_road;
+        let drifting = input.drift && k.steer_armed && k.speed > f(10) && !off_road;
         if drifting && k.steer.abs() > ONE / 3 {
             k.drift_charge = (k.drift_charge + 1).min(120);
         } else if !input.drift && k.drifting && !off_road {
@@ -304,11 +314,21 @@ impl World {
 
         // Where that is on the circuit.
         let before = k.segment;
-        k.segment = self.track.nearest(before, k.x, k.z);
-        Self::cross_gates(&mut k, before, self.clock);
+        let candidate = self.track.nearest(before, k.x, k.z);
+        // Only road travel advances gates or the last safe recovery point.
+        let on_road = self.track.lateral(candidate, k.x, k.z).abs() <= HALF_WIDTH;
+        k.segment = candidate;
+        if on_road {
+            Self::cross_gates(&mut k, before, self.clock);
+            k.safe_segment = candidate;
+            k.offroad_steps = 0;
+        } else {
+            k.offroad_steps += 1;
+            k.boost = 0;
+        }
         let s = *self.track.at(k.segment);
         k.y += (s.y - k.y) / 4;
-        if is_turbo(k.segment) && !off_road {
+        if is_turbo(k.segment) && on_road {
             k.boost = BOOST_STEPS;
         }
 
@@ -318,6 +338,13 @@ impl World {
             let back = lateral - lateral.clamp(-TOO_FAR, TOO_FAR);
             k.x -= mul(back, s.right_x);
             k.z -= mul(back, s.right_z);
+            // Slide against the visible barrier, instead of crossing through it.
+            k.speed = k.speed.min(f(8));
+            k.boost = 0;
+        }
+        if k.offroad_steps >= 60 {
+            k.segment = k.safe_segment;
+            self.reset_kart(&mut k);
         }
         self.karts[i] = k;
     }
@@ -354,7 +381,13 @@ impl World {
         if self.phase != Phase::Racing {
             return;
         }
-        let k = &mut self.karts[0];
+        let mut k = self.karts[0];
+        k.segment = k.safe_segment;
+        self.reset_kart(&mut k);
+        self.karts[0] = k;
+    }
+
+    fn reset_kart(&self, k: &mut Kart) {
         let s = self.track.at(k.segment);
         let n = self.track.at(k.segment + 1);
         k.x = s.x;
@@ -368,6 +401,8 @@ impl World {
         k.drift_charge = 0;
         k.drifting = false;
         k.recovery = 60;
+        k.offroad_steps = 0;
+        k.steer_armed = false;
     }
 
     pub fn wrong_way(&self) -> bool {
@@ -451,6 +486,51 @@ mod tests {
     }
 
     #[test]
+    fn holding_a_turn_offroad_recovers_without_repeating_the_escape() {
+        for left in [false, true] {
+            let mut w = race(COUNTDOWN, |_| Input::default());
+            let mut rescued = false;
+            let k = &mut w.karts[0];
+            let s = w.track.at(k.segment);
+            let side = if left { -1 } else { 1 };
+            k.x = s.x + mul(side * (HALF_WIDTH + ONE), s.right_x);
+            k.z = s.z + mul(side * (HALF_WIDTH + ONE), s.right_z);
+            k.heading = k.heading.wrapping_add((side * 16384) as i16 as u16);
+            k.course = k.heading;
+            k.speed = f(20);
+            let input = Input {
+                throttle: true,
+                left,
+                right: !left,
+                ..Input::default()
+            };
+            for _ in 0..1800 {
+                w.advance(input);
+                let k = &w.karts[0];
+                assert!(w.track.lateral(k.segment, k.x, k.z).abs() <= TOO_FAR + ONE / 2);
+                assert_eq!(k.laps, 0, "circling on grass cannot score a lap");
+                if !k.steer_armed {
+                    rescued = true;
+                    assert_eq!(k.steer, 0);
+                    break;
+                }
+            }
+            assert!(rescued, "the stuck kart must return to a safe section");
+            w.advance(input);
+            assert_eq!(
+                w.karts[0].steer, 0,
+                "held steering is not replayed on recovery"
+            );
+            w.advance(Input::default());
+            w.advance(input);
+            assert_ne!(
+                w.karts[0].steer, 0,
+                "releasing and pressing rearms steering"
+            );
+        }
+    }
+
+    #[test]
     fn checkpoints_must_be_crossed_in_order_and_forward() {
         let mut k = World::new().karts[0];
         k.segment = 2;
@@ -484,6 +564,7 @@ mod tests {
         for (charge, reward) in [(39, 0), (40, 45), (90, 90)] {
             let mut w = race(COUNTDOWN, |_| Input::default());
             w.recover();
+            w.advance(Input::default());
             w.karts[0].speed = f(20);
             w.karts[0].drifting = true;
             w.karts[0].drift_charge = charge;
@@ -635,13 +716,15 @@ mod tests {
         k.x += 30 * w.track.at(k.segment).right_x;
         k.z += 30 * w.track.at(k.segment).right_z;
         k.speed = TOP_SPEED;
+        let mut slowest = TOP_SPEED;
         for _ in 0..60 {
             w.advance(flat_out);
+            slowest = slowest.min(w.karts[0].speed);
         }
         let k = &w.karts[0];
-        assert!(w.track.lateral(k.segment, k.x, k.z).abs() > HALF_WIDTH);
+        assert!(w.track.lateral(k.segment, k.x, k.z).abs() <= TOO_FAR + ONE / 16);
         assert!(
-            w.karts[0].speed <= OFF_ROAD_SPEED + f(1),
+            slowest <= OFF_ROAD_SPEED + f(1),
             "{}",
             w.karts[0].speed >> 16
         );
@@ -671,6 +754,7 @@ mod tests {
                 ..Input::default()
             });
             w.recover();
+            w.advance(Input::default());
             w.karts[0].speed = f(20);
             let from = w.karts[0].heading;
             for _ in 0..20 {

@@ -501,6 +501,11 @@ version = "0.18.0"
 [[package]]
 name = "aricode-pista"
 version = "0.18.0"
+dependencies = [
+ "aricode-abi",
+ "aricode-gen7-eu",
+ "aricode-intel-gt",
+]
 
 [[package]]
 name = "aricode-pkg"

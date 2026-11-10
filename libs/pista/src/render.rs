@@ -3,13 +3,13 @@
 //! The picture: a chase camera, perspective-correct terrain textures and a
 //! reciprocal depth buffer shared by the track, scenery and vehicles.
 
-use crate::fixed::{cos, f, mul, sin, F, ONE};
+use crate::fixed::{cos, f, isqrt, mul, sin, F, ONE};
 use crate::raster::Target;
 use crate::track::{Segment, HALF_WIDTH, SEGMENTS};
 use crate::world::{is_turbo, Kart, World, KARTS};
 
-/// How many segments ahead are drawn.
-const DRAW: usize = 160;
+/// Scenery remains visible in every direction, including when turned around.
+const FAR: F = f(260);
 const NEAR: F = ONE / 2;
 /// The striped grass beside the road: past this, plain ground. Wider bands fold
 /// over themselves inside tight corners.
@@ -18,11 +18,10 @@ const CURB: F = f(1);
 const CAMERA_BACK: F = f(10);
 const CAMERA_UP: F = f(3) + ONE / 2;
 
-const HAZE: u32 = 0xF3CBA5;
-const SKY_TOP: u32 = 0x377BA5;
-const SKY_LOW: u32 = 0xF3CBA5;
-const HILLS: u32 = 0x85959D;
-const GRASS: [u32; 2] = [0x558D65, 0x518761];
+const HAZE: u32 = 0xE7BD9B;
+const SKY_TOP: u32 = 0x345E8B;
+const SKY_LOW: u32 = 0xF7C9A6;
+const GRASS: [u32; 2] = [0x407B5C, 0x427C5B];
 const ROAD: [u32; 2] = [0x424B57, 0x444D59];
 const CURBS: [u32; 2] = [0xE96148, 0xF7EACD];
 const LINE: u32 = 0xE8E8E8;
@@ -38,6 +37,7 @@ pub struct View {
     heading: u16,
     ready: bool,
     speed: F,
+    recovery: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -164,6 +164,178 @@ impl Painter<'_, '_> {
         }
     }
 
+    /// Smooth normals, directional sunlight, a clear-coat highlight and sky
+    /// reflections. Lighting is evaluated per vertex and interpolated in perspective.
+    fn lit(
+        &mut self,
+        points: [[F; 3]; 3],
+        normals: [[F; 3]; 3],
+        color: u32,
+        fog: u32,
+        gloss: bool,
+    ) {
+        #[derive(Clone, Copy)]
+        struct V {
+            eye: Eye,
+            rgb: [F; 3],
+        }
+        let vertex = |i: usize| {
+            let at = points[i];
+            let normal = normals[i];
+            let light = [-28000, 50000, -32000];
+            let dot = |a: [F; 3], b: [F; 3]| mul(a[0], b[0]) + mul(a[1], b[1]) + mul(a[2], b[2]);
+            let norm = |v: [F; 3]| {
+                let len =
+                    isqrt(v.iter().map(|&x| x as i64 * x as i64).sum::<i64>() as u64).max(1) as i64;
+                v.map(|x| (x as i64 * ONE as i64 / len) as F)
+            };
+            let view = norm([
+                self.camera.x - at[0],
+                self.camera.y - at[1],
+                self.camera.z - at[2],
+            ]);
+            let half = norm([light[0] + view[0], light[1] + view[1], light[2] + view[2]]);
+            let diffuse = dot(normal, light).clamp(0, ONE);
+            let mut spec = dot(normal, half).clamp(0, ONE);
+            for _ in 0..4 {
+                spec = mul(spec, spec);
+            }
+            let rim = (ONE - dot(normal, view).clamp(0, ONE)).min(ONE);
+            let rim = if gloss { mul(mul(rim, rim), rim) } else { 0 };
+            let intensity = ONE / 3 + diffuse * 2 / 3;
+            let rgb = core::array::from_fn(|c| {
+                let shift = 16 - c * 8;
+                let base = ((color >> shift) & 255) as i32;
+                let sky = [35, 65, 85][c];
+                let highlight = if gloss { mul(spec, f(190)) >> 16 } else { 0 };
+                let value = (((base as i64 * intensity as i64) >> 16) as i32
+                    + highlight
+                    + (mul(rim, f(sky)) >> 16))
+                    .clamp(0, 255);
+                let haze = ((HAZE >> shift) & 255) as i32;
+                ((value * (256 - fog as i32) + haze * fog as i32) / 256) * ONE
+            });
+            V {
+                eye: self.camera.eye(at),
+                rgb,
+            }
+        };
+        let input = [vertex(0), vertex(1), vertex(2)];
+        let mut cut = [input[0]; 5];
+        let mut count = 0;
+        for i in 0..3 {
+            let a = input[i];
+            let b = input[(i + 1) % 3];
+            if a.eye.z >= NEAR {
+                cut[count] = a;
+                count += 1;
+            }
+            if (a.eye.z >= NEAR) != (b.eye.z >= NEAR) {
+                let t = ((NEAR - a.eye.z) as i64 * ONE as i64 / (b.eye.z - a.eye.z) as i64) as F;
+                let lerp = |x: F, y: F| x + mul(y - x, t);
+                cut[count] = V {
+                    eye: Eye {
+                        x: lerp(a.eye.x, b.eye.x),
+                        y: lerp(a.eye.y, b.eye.y),
+                        z: NEAR,
+                    },
+                    rgb: core::array::from_fn(|c| lerp(a.rgb[c], b.rgb[c])),
+                };
+                count += 1;
+            }
+        }
+        if count < 3 {
+            return;
+        }
+        let screen = |v: V| {
+            let (x, y) = self.camera.screen(v.eye);
+            let z = (1i64 << 40) / v.eye.z as i64;
+            [
+                x,
+                y,
+                z,
+                v.rgb[0] as i64 * z / ONE as i64,
+                v.rgb[1] as i64 * z / ONE as i64,
+                v.rgb[2] as i64 * z / ONE as i64,
+            ]
+        };
+        for i in 1..count - 1 {
+            self.target
+                .lit([screen(cut[0]), screen(cut[i]), screen(cut[i + 1])]);
+        }
+    }
+
+    fn shell(
+        &mut self,
+        at: [F; 3],
+        radius: [F; 3],
+        heading: u16,
+        color: u32,
+        fog: u32,
+        helmet: bool,
+    ) {
+        let close = self.camera.eye(at).z < f(35);
+        let (rings, sides) = if close { (10, 20) } else { (6, 12) };
+        let rotate = |v: [F; 3]| {
+            [
+                mul(v[0], cos(heading)) + mul(v[2], sin(heading)),
+                v[1],
+                -mul(v[0], sin(heading)) + mul(v[2], cos(heading)),
+            ]
+        };
+        for ring in 0..rings {
+            for side in 0..sides {
+                let a = (ring * 32768 / rings) as u16;
+                let b = ((ring + 1) * 32768 / rings) as u16;
+                let c = (side * 65536 / sides) as u16;
+                let d = ((side + 1) * 65536 / sides) as u16;
+                let vertex = |lat, lon| {
+                    let unit = [mul(sin(lat), cos(lon)), cos(lat), mul(sin(lat), sin(lon))];
+                    let normal = unit.map(|v| v);
+                    let normal = core::array::from_fn(|j| {
+                        ((normal[j] as i64 * ONE as i64) / radius[j].max(1) as i64) as F
+                    });
+                    let len = isqrt(normal.iter().map(|&x| x as i64 * x as i64).sum::<i64>() as u64)
+                        .max(1) as i64;
+                    let normal = rotate(normal.map(|x| (x as i64 * ONE as i64 / len) as F));
+                    let offset = rotate(core::array::from_fn(|j| mul(radius[j], unit[j])));
+                    (core::array::from_fn(|j| at[j] + offset[j]), normal)
+                };
+                let v = [vertex(a, c), vertex(a, d), vertex(b, d), vertex(b, c)];
+                let normal = core::array::from_fn::<F, 3, _>(|j| {
+                    (v[0].1[j] + v[1].1[j] + v[2].1[j] + v[3].1[j]) / 4
+                });
+                let toward = [
+                    self.camera.x - v[0].0[0],
+                    self.camera.y - v[0].0[1],
+                    self.camera.z - v[0].0[2],
+                ];
+                if normal
+                    .iter()
+                    .zip(toward)
+                    .map(|(&a, b)| a as i64 * b as i64)
+                    .sum::<i64>()
+                    <= 0
+                {
+                    continue;
+                }
+                let visor =
+                    helmet && (rings * 3 / 10..rings * 6 / 10).contains(&ring) && side < sides / 2;
+                let stripe = helmet && (side == sides / 4 || side == sides * 3 / 4);
+                let paint = if visor {
+                    0x163D58
+                } else if stripe {
+                    0xE85436
+                } else {
+                    color
+                };
+                for tri in [[0, 1, 2], [0, 2, 3]] {
+                    self.lit(tri.map(|i| v[i].0), tri.map(|i| v[i].1), paint, fog, true);
+                }
+            }
+        }
+    }
+
     /// A box in a frame placed at `at`, turned by `heading`: x right, y up,
     /// z forward, in metres, Q16.16. Its bottom is never seen.
     fn block(&mut self, at: [F; 3], heading: u16, size: [F; 6], color: u32, fog: u32) {
@@ -217,11 +389,16 @@ impl Painter<'_, '_> {
             for face in 0..6 {
                 let a = (face * 65536 / 6) as u16;
                 let b = ((face + 1) * 65536 / 6) as u16;
-                let point = |angle| {
+                let point = |angle: u16| {
+                    let r = radius
+                        + mul(
+                            radius / 6,
+                            sin(angle.wrapping_mul(5).wrapping_add((at[0] >> 8) as u16)),
+                        );
                     [
-                        at[0] + mul(radius, sin(angle)),
-                        at[1] + base,
-                        at[2] + mul(radius, cos(angle)),
+                        at[0] + mul(r, sin(angle)),
+                        at[1] + base + mul(ONE / 3, sin(angle.wrapping_mul(3))),
+                        at[2] + mul(r, cos(angle)),
                     ]
                 };
                 let c = mix(leaves, 0xD3DB94, (face * 13 + tier * 9) as u32);
@@ -272,17 +449,21 @@ impl Painter<'_, '_> {
                 k.z - mul(x, sin(h)) + mul(z, cos(h)),
             ]
         };
-        // Contact shadow, in world space; the depth buffer clips it at hills.
-        self.polygon(
-            &[
-                point(-12 * t, t / 3, -15 * t),
-                point(12 * t, t / 3, -15 * t),
-                point(12 * t, t / 3, 15 * t),
-                point(-12 * t, t / 3, 15 * t),
-            ],
-            mix(0x29343A, HAZE, fog),
-            false,
-        );
+        // Soft concentric contact shadows, blended onto the receiving terrain.
+        for (radius, darken) in [(16, 228), (13, 210), (10, 202)] {
+            for segment in 0..16 {
+                let a = (segment * 4096) as u16;
+                let b = a.wrapping_add(4096);
+                let rim = |angle| {
+                    point(
+                        mul(radius * t, sin(angle)),
+                        t,
+                        mul(radius * t * 3 / 2, cos(angle)),
+                    )
+                };
+                self.surface(&[point(0, t, 0), rim(a), rim(b)], darken, false, 4);
+            }
+        }
         if k.boost > 0 {
             let reach = f(2) + (sin((tick * 4900) as u16) + ONE) / 3;
             for x in [-4 * t, 4 * t] {
@@ -324,9 +505,9 @@ impl Painter<'_, '_> {
                         at[2] - mul(side, sin(heading)) + mul(z, cos(heading)),
                     ]
                 };
-                for n in 0..8 {
-                    let a = (n * 8192) as u16;
-                    let b = a.wrapping_add(8192);
+                for n in 0..16 {
+                    let a = (n * 4096) as u16;
+                    let b = a.wrapping_add(4096);
                     self.polygon(
                         &[
                             wheel_point(-2 * t, a),
@@ -346,79 +527,72 @@ impl Painter<'_, '_> {
                         ];
                         self.polygon(
                             &[center, wheel_point(side, a), wheel_point(side, b)],
-                            mix(0x536477, HAZE, fog),
+                            mix(0x18242D, HAZE, fog),
                             false,
                         );
                     }
                 }
+                for side in [-1, 1] {
+                    let hub = [
+                        at[0] + mul(side * 21 * t / 10, cos(heading)),
+                        at[1],
+                        at[2] - mul(side * 21 * t / 10, sin(heading)),
+                    ];
+                    self.shell(hub, [t / 4, 2 * t, 2 * t], heading, 0xB2C8D6, fog, false);
+                }
             }
         }
-        self.block(
-            at,
+        // Sculpted bodywork instead of boxes: clear-coated pods and nose.
+        self.shell(
+            point(0, 5 * t, 0),
+            [8 * t, 3 * t, 15 * t],
             h,
-            [-7 * t, 7 * t, 3 * t, 6 * t, -12 * t, 12 * t],
             color,
             fog,
+            false,
         );
-        // Side pods, sloped nose, racing stripe and warm highlights.
         for side in [-1, 1] {
-            self.block(
-                at,
+            self.shell(
+                point(side * 8 * t, 5 * t, 0),
+                [3 * t, 3 * t, 10 * t],
                 h,
-                [
-                    side * 8 * t - 2 * t,
-                    side * 8 * t + 2 * t,
-                    4 * t,
-                    7 * t,
-                    -6 * t,
-                    7 * t,
-                ],
                 color,
                 fog,
+                false,
             );
         }
-        self.polygon(
-            &[
-                point(-5 * t, 6 * t, 2 * t),
-                point(5 * t, 6 * t, 2 * t),
-                point(4 * t, 5 * t, 14 * t),
-                point(-4 * t, 5 * t, 14 * t),
-            ],
-            mix(color, 0xFFF0CE, 60),
-            false,
-        );
-        self.polygon(
-            &[
-                point(-t, 6 * t + t / 8, 2 * t),
-                point(t, 6 * t + t / 8, 2 * t),
-                point(t, 5 * t + t / 8, 14 * t),
-                point(-t, 5 * t + t / 8, 14 * t),
-            ],
-            0xFFF2D8,
-            false,
-        );
-        self.block(
-            at,
+        self.shell(
+            point(0, 6 * t, 8 * t),
+            [4 * t, 2 * t, 9 * t],
             h,
-            [-4 * t, 4 * t, 6 * t, 10 * t, -6 * t, t],
-            0x1A2B3A,
+            0xF6E7BC,
             fog,
+            false,
         );
-        self.block(at, h, [-3 * t, 3 * t, 8 * t, 12 * t, -4 * t, t], color, fog);
-        self.gem(
-            point(0, 15 * t, -2 * t),
+        self.shell(
+            point(0, 8 * t, -3 * t),
+            [4 * t, 4 * t, 5 * t],
+            h,
+            0x142632,
+            fog,
+            false,
+        );
+        self.shell(
+            point(0, 11 * t, -3 * t),
+            [3 * t, 4 * t, 3 * t],
+            h,
+            color,
+            fog,
+            false,
+        );
+        self.shell(
+            point(0, 16 * t, -3 * t),
             [4 * t, 4 * t, 4 * t],
-            0xFFF0D3,
-            fog,
-        );
-        self.block(
-            at,
             h,
-            [-3 * t, 3 * t, 14 * t, 16 * t, t, 2 * t],
-            0x17364D,
+            0xEDE9DE,
             fog,
+            true,
         );
-        self.block(at, h, [-t, t, 18 * t, 19 * t, -4 * t, t], color, fog);
         for x in [-5 * t, 5 * t] {
             self.block(
                 at,
@@ -506,40 +680,93 @@ fn backdrop(target: &mut Target, horizon: usize, heading: u16) {
             }
         }
     }
-    // Long luminous clouds; two harmonics break up their silhouette.
-    for layer in 0..3i64 {
-        for x in 0..w {
-            let a = heading
-                .wrapping_add((x * 22000 / w.max(1)) as u16)
-                .wrapping_add((layer * 17000) as u16);
-            let wave = sin(a.wrapping_mul(3));
-            if wave > ONE / 4 {
-                let y = h * (9 + layer * 8) / 100 + (mul(sin(a), f(3)) >> 16) as i64;
-                let thick = ((wave - ONE / 4) as i64 * h / (ONE as i64 * 50)).max(1);
-                for yy in y..y + thick {
-                    target.span(yy, x, x + 1, mix(0xFFF0D8, SKY_LOW, layer as u32 * 35));
+    // Soft cumulus clouds sampled in sky space; smoothly interpolate the
+    // noise so silhouettes stay stable when the camera turns.
+    let noise = |x: i64, y: i64, period: i64| {
+        let (ix, iy) = (x >> 16, y >> 16);
+        let smooth = |t: i64| (((t * t) >> 16) * (3 * 65536 - 2 * t)) >> 16;
+        let (tx, ty) = (smooth(x & 65535), smooth(y & 65535));
+        let hash = |xx: i64, yy: i64| {
+            let a = (xx.rem_euclid(period) as u32).wrapping_mul(374761393)
+                ^ (yy as u32).wrapping_mul(668265263);
+            ((a ^ (a >> 13)).wrapping_mul(1274126177) >> 16) as i64
+        };
+        let a = hash(ix, iy);
+        let b = hash(ix + 1, iy);
+        let c = hash(ix, iy + 1);
+        let d = hash(ix + 1, iy + 1);
+        let top = a + (((b - a) * tx) >> 16);
+        let bottom = c + (((d - c) * tx) >> 16);
+        top + (((bottom - top) * ty) >> 16)
+    };
+    let cell = (w / 480).max(1) as usize;
+    for y in (0..horizon).step_by(cell) {
+        for x in (0..target.width).step_by(cell) {
+            let angle = heading.wrapping_add(((x as i64 - w / 2) * 21000 / w.max(1)) as u16) as i64;
+            let yy = y as i64 * 4 * 65536 / (horizon as i64).max(1);
+            let n = (noise(angle * 12, yy, 12) * 4
+                + noise(angle * 24, yy * 2, 24) * 2
+                + noise(angle * 72, yy * 6, 72))
+                / 7;
+            let opacity = ((n - 35500) * 256 / 15000).clamp(0, 220) as u32;
+            if opacity == 0 {
+                continue;
+            }
+            let shade = ((n - 35000) / 160).clamp(0, 120) as u32;
+            let cloud = mix(0xB1B6C4, 0xFFF0DC, 100 + shade);
+            for dy in 0..cell {
+                if y + dy >= horizon {
+                    break;
+                }
+                for dx in 0..cell {
+                    if x + dx >= target.width {
+                        break;
+                    }
+                    let i = (y + dy) * target.width + x + dx;
+                    target.pixels[i] = mix(target.pixels[i], cloud, opacity);
                 }
             }
         }
     }
-    // Three continuous, parallax mountain ranges with snow and lit facets.
+    // Angular ridgelines at three distances. Snow follows altitude and slope;
+    // the lit/shaded gradients give the mountains volume rather than flat bands.
+    let ridge = |angle: u16, seed: u32| -> i64 {
+        let noise = |scale: u32| {
+            let p = angle as u32 * scale;
+            let cell = p >> 16;
+            let t = (p & 65535) as i64;
+            let hash = |i: u32| {
+                let v = i.wrapping_mul(374761393).wrapping_add(seed * 668265263);
+                ((v ^ (v >> 13)) & 65535) as i64
+            };
+            let a = hash(cell % scale);
+            let b = hash((cell + 1) % scale);
+            a + (b - a) * t / 65536
+        };
+        (noise(13) * 6 + noise(29) * 3 + noise(71)) / 10
+    };
     for layer in 0..3i64 {
         for x in 0..w {
-            let a = heading
-                .wrapping_add((x * 21000 / w.max(1)) as u16)
-                .wrapping_add((layer * 11000) as u16);
-            let ridge = (sin(a.wrapping_mul(5)).abs() as i64 * 3
-                + sin(a.wrapping_mul(11)).abs() as i64)
-                / 4;
-            let tall =
-                h * (9 - layer * 2) / 100 + ridge * h * (13 - layer * 2) / (ONE as i64 * 100);
-            let base = horizon as i64 + layer * h / 24;
+            let a = heading.wrapping_add(((x - w / 2) * 21000 / w.max(1)) as u16);
+            let peak = ridge(a, layer as u32 + 1);
+            let next = ridge(a.wrapping_add(100), layer as u32 + 1);
+            let tall = h * (10 - layer * 2) / 100 + peak * h * (30 - layer * 6) / (65536 * 100);
+            let base = horizon as i64 + layer * h / 20;
             let top = base - tall;
-            let shade = if sin(a.wrapping_mul(11)) > 0 { 25 } else { 75 };
-            let color = mix([HILLS, 0x66838A, 0x426E70][layer as usize], HAZE, shade);
+            let slope = ((next - peak) / 150).clamp(-45, 45);
+            let stone = [0x8D9DA8, 0x65848A, 0x366D66][layer as usize];
             for y in top.max(0)..base.min(h) {
-                let snow = layer == 0 && y < top + tall / 5 && tall > h / 6;
-                target.pixels[(y * w + x) as usize] = if snow { 0xF5DCC2 } else { color };
+                let down = y - top;
+                let haze = (down * 100 / tall.max(1)).clamp(0, 100) as u32;
+                let snow = layer == 0
+                    && down < tall / 3 + (sin(a.wrapping_mul(23)) as i64 * h / 65536 / 100)
+                    && tall > h / 5;
+                let color = if snow {
+                    mix(0xFFF0DF, 0x91A9BE, (50 + slope).max(0) as u32)
+                } else {
+                    mix(stone, 0x1D4259, (45 + slope).max(0) as u32)
+                };
+                target.pixels[(y * w + x) as usize] = mix(color, HAZE, haze);
             }
         }
     }
@@ -650,12 +877,30 @@ fn standing(p: &mut Painter, world: &World, i: usize, fog: u32) {
         for side in [-1, 1] {
             let off = side * (HALF_WIDTH + f(7) + f((code % 17) as i32));
             let at = point(off, 0);
-            p.tree(
-                at,
-                f(7) + f((code % 5) as i32),
-                LEAVES[(code >> 3) & 1],
-                fog,
-            );
+            if code.is_multiple_of(3) {
+                p.block(
+                    at,
+                    0,
+                    [-ONE / 4, ONE / 4, 0, f(5), -ONE / 4, ONE / 4],
+                    TRUNK,
+                    fog,
+                );
+                for (dx, dy, dz, r) in [(-2, 5, 0, 3), (2, 6, 1, 3), (0, 8, 0, 3)] {
+                    p.gem(
+                        [at[0] + f(dx), at[1] + f(dy), at[2] + f(dz)],
+                        [f(r), f(r), f(r)],
+                        if code & 4 == 0 { 0x668847 } else { 0xAD8F47 },
+                        fog,
+                    );
+                }
+            } else {
+                p.tree(
+                    at,
+                    f(7) + f((code % 5) as i32),
+                    LEAVES[(code >> 3) & 1],
+                    fog,
+                );
+            }
         }
     }
     // Grandstands on the starting straight. Spectators and seats are geometry,
@@ -892,10 +1137,11 @@ fn arch(p: &mut Painter, s: &Segment, fog: u32) {
 pub fn draw(world: &World, view: &mut View, target: &mut Target) {
     target.depth.fill(0);
     let you = &world.karts[0];
-    if !view.ready {
+    if !view.ready || you.recovery > view.recovery {
         view.heading = you.heading;
         view.ready = true;
     }
+    view.recovery = you.recovery;
     let lag = you.heading.wrapping_sub(view.heading) as i16 as i32;
     view.heading = view.heading.wrapping_add((lag / 5) as i16 as u16);
     view.speed += (you.speed - view.speed) / 8;
@@ -915,10 +1161,20 @@ pub fn draw(world: &World, view: &mut View, target: &mut Target) {
     };
     backdrop(target, horizon as usize, view.heading);
     let mut p = Painter { target, camera };
+    let camera = p.camera;
     let segments = || {
-        (0..DRAW).rev().map(|k| {
-            let fog = (k * k * 200 / (DRAW * DRAW)) as u32;
-            (you.segment + SEGMENTS + k - 8, fog)
+        (0..SEGMENTS).filter_map(|i| {
+            let s = world.track.at(i);
+            let e = camera.eye([s.x, s.y, s.z]);
+            // Include shoulders/trees near the edge of the frustum and behind the
+            // near plane, where they can still cross into view after clipping.
+            if e.z < -f(40) || e.z > FAR || e.x.abs() > e.z.max(0) + f(60) {
+                return None;
+            }
+            let distance = crate::fixed::length(s.x - camera.x, s.z - camera.z);
+            let fog = ((distance as i64 * distance as i64 * 210) / (FAR as i64 * FAR as i64))
+                .clamp(0, 210) as u32;
+            Some((i, fog))
         })
     };
     for (i, fog) in segments() {

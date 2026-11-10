@@ -14,6 +14,7 @@ timeout_secs = 120
 [expect]
 exit = 33
 serial_contains = [
+    "pista: CPU renderer + bloom (no verified GPU compute)",
     "compositor: window 1 'Pista' 960x540",
     "pista: 60 frames: world ",
     "ARICODEOS_SHUTDOWN",

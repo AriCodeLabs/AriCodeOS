@@ -11,6 +11,8 @@
 #![no_std]
 #![no_main]
 
+mod gpu;
+
 use aricode_pista::hud::{self, Overlay};
 use aricode_pista::raster::Target;
 use aricode_pista::render::{draw, View};
@@ -142,6 +144,7 @@ fn measure(
     picture: &mut [u32],
     depth: &mut [u32],
     frames: u64,
+    finishing: &mut Option<gpu::Finish>,
 ) -> u64 {
     let mut world = World::new();
     let mut view = View::default();
@@ -153,12 +156,14 @@ fn measure(
         world.advance(input);
         let b = now_us(system);
         render_picture(&world, &mut view, picture, depth, true);
+        let gpu_used = gpu::Finish::apply(finishing, picture, depth, WIDTH, HEIGHT);
         let c = now_us(system);
         present_picture(
-            picture,
+            depth,
             &mut window,
             &world,
             &Overlay {
+                gpu: gpu_used,
                 high_quality: true,
                 ..Overlay::default()
             },
@@ -178,9 +183,9 @@ fn measure(
     num(frames);
     sys::print(b" frames: world ");
     num(sim / frames);
-    sys::print(b" us, 3D ");
+    sys::print(b" us, 3D+FX ");
     num(paint / frames);
-    sys::print(b" us, doubling and text ");
+    sys::print(b" us, copy and HUD ");
     num(blit / frames);
     sys::print(b" us, present ");
     num(show / frames);
@@ -192,7 +197,7 @@ fn measure(
 }
 
 fn main(arg: u64) -> u64 {
-    let (mut session, mut hw, mut system) = (None, None, None);
+    let (mut session, mut hw, mut system, mut gpu_cap) = (None, None, None, None);
     permissions::granted(|h, _| {
         if permissions::is(h, kind::ENDPOINT) {
             session = Some(h);
@@ -200,6 +205,8 @@ fn main(arg: u64) -> u64 {
             hw = Some(h);
         } else if permissions::is(h, kind::SYSTEM) {
             system = Some(h);
+        } else if permissions::is(h, kind::GPU) {
+            gpu_cap = Some(h);
         }
     });
     let (Some(session), Some(hw), Some(system)) = (session, hw, system) else {
@@ -218,8 +225,12 @@ fn main(arg: u64) -> u64 {
         return 4;
     };
     let (picture, depth) = buffers.slices();
+    let mut finishing = gpu::Finish::new(gpu_cap, hw, system);
+    if finishing.is_none() {
+        sys::print(b"pista: CPU renderer + bloom (no verified GPU compute)\n");
+    }
     if arg > 0 {
-        return measure(window, system, picture, depth, arg);
+        return measure(window, system, picture, depth, arg, &mut finishing);
     }
     let mut world = World::new();
     let mut view = View::default();
@@ -232,9 +243,13 @@ fn main(arg: u64) -> u64 {
     let (mut frames, mut since, mut fps) = (0u32, next, 0u32);
     loop {
         // The time until the next frame goes in waiting for keys.
-        loop {
+        for _ in 0..128 {
             let left = next.saturating_sub(now_us(system));
-            let wait = (left / 1000).clamp(1, 16) as u32;
+            let wait = if left == 0 {
+                0
+            } else {
+                (left / 1000).clamp(1, 16) as u32
+            };
             match window.poll(wait) {
                 Ok(Some(Event::Close)) => {
                     let _ = window.close();
@@ -282,17 +297,15 @@ fn main(arg: u64) -> u64 {
                         _ => {}
                     }
                 }
+                Ok(None) if now_us(system) >= next => break,
                 Ok(_) => {}
                 Err(_) => return 3,
-            }
-            if now_us(system) >= next {
-                break;
             }
         }
         // The world keeps its own time: a slow frame does not slow the race.
         let t = now_us(system);
         let mut steps = 0;
-        while next <= t && steps < 4 {
+        while next <= t && steps < 8 {
             if !overlay.paused {
                 world.advance(input);
             }
@@ -309,8 +322,16 @@ fn main(arg: u64) -> u64 {
             &mut view
         };
         render_picture(&world, camera, picture, depth, overlay.high_quality);
+        let scale = if overlay.high_quality { 1 } else { 2 };
+        overlay.gpu = gpu::Finish::apply(
+            &mut finishing,
+            picture,
+            depth,
+            WIDTH / scale,
+            HEIGHT / scale,
+        );
         overlay.fps = fps;
-        present_picture(picture, &mut window, &world, &overlay);
+        present_picture(depth, &mut window, &world, &overlay);
         if window.present().is_err() {
             return 3;
         }
