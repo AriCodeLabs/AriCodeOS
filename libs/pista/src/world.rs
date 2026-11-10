@@ -55,7 +55,15 @@ pub struct Kart {
     pub steer: F,
     pub segment: usize,
     pub laps: u32,
-    pub halfway: bool,
+    /// Ordered gates prevent reverse crossings and shortcuts from scoring laps.
+    pub checkpoint: u8,
+    pub started: bool,
+    pub drift_charge: u32,
+    pub drifting: bool,
+    pub recovery: u32,
+    pub lap_start: u32,
+    pub last_lap: u32,
+    pub best_lap: u32,
     pub boost: u32,
     /// The step it finished at.
     pub finished: Option<u32>,
@@ -66,8 +74,8 @@ pub struct Kart {
 
 impl Kart {
     /// Laps and segments, for positions.
-    pub fn progress(&self) -> u64 {
-        self.laps as u64 * SEGMENTS as u64 + self.segment as u64
+    pub fn progress(&self) -> i64 {
+        (self.laps as i64 - i64::from(!self.started)) * SEGMENTS as i64 + self.segment as i64
     }
 }
 
@@ -85,6 +93,7 @@ pub struct World {
     pub step: u32,
     /// Steps since the green light.
     pub clock: u32,
+    launch_charge: u32,
 }
 
 /// Whether segment `i` has a turbo strip.
@@ -112,7 +121,14 @@ impl World {
                 steer: 0,
                 segment: i,
                 laps: 0,
-                halfway: false,
+                checkpoint: 0,
+                started: false,
+                drift_charge: 0,
+                drifting: false,
+                recovery: 0,
+                lap_start: 0,
+                last_lap: 0,
+                best_lap: 0,
                 boost: 0,
                 finished: None,
                 skill,
@@ -131,6 +147,7 @@ impl World {
             phase: Phase::Countdown,
             step: 0,
             clock: 0,
+            launch_charge: 0,
         }
     }
 
@@ -173,10 +190,23 @@ impl World {
 
     /// One step, with the player's kart (kart 0) on `player`.
     pub fn advance(&mut self, player: Input) {
+        if self.phase == Phase::Finished {
+            return;
+        }
         self.step += 1;
         if self.phase == Phase::Countdown {
+            self.launch_charge = if player.throttle {
+                self.launch_charge + 1
+            } else {
+                0
+            };
             if self.step >= COUNTDOWN {
                 self.phase = Phase::Racing;
+                // Timing the throttle in the final half-second earns a launch.
+                if (8..=30).contains(&self.launch_charge) {
+                    self.karts[0].boost = 50;
+                    self.karts[0].speed = f(12);
+                }
             }
             return;
         }
@@ -236,7 +266,25 @@ impl World {
             _ => 0,
         };
         k.steer += (wanted - k.steer).clamp(-ONE / 8, ONE / 8);
-        let drifting = input.drift && k.speed > f(10);
+        let drifting = input.drift && k.speed > f(10) && !off_road;
+        if drifting && k.steer.abs() > ONE / 3 {
+            k.drift_charge = (k.drift_charge + 1).min(120);
+        } else if !input.drift && k.drifting && !off_road {
+            let reward = match k.drift_charge {
+                90.. => 90,
+                40.. => 45,
+                _ => 0,
+            };
+            if reward > 0 {
+                k.boost = k.boost.max(reward);
+                k.speed = (k.speed + f(7)).min(BOOST_SPEED);
+            }
+            k.drift_charge = 0;
+        } else if !drifting {
+            k.drift_charge = 0;
+        }
+        k.drifting = drifting;
+        k.recovery = k.recovery.saturating_sub(1);
         let mut turn = (k.steer as i64 * TURN as i64) >> 16;
         turn = turn * (k.speed.min(f(14)) as i64) / f(14) as i64;
         if drifting {
@@ -257,13 +305,7 @@ impl World {
         // Where that is on the circuit.
         let before = k.segment;
         k.segment = self.track.nearest(before, k.x, k.z);
-        if k.segment.abs_diff(SEGMENTS / 2) < 40 {
-            k.halfway = true;
-        }
-        if before > SEGMENTS - 30 && k.segment < 30 && k.halfway {
-            k.laps += 1;
-            k.halfway = false;
-        }
+        Self::cross_gates(&mut k, before, self.clock);
         let s = *self.track.at(k.segment);
         k.y += (s.y - k.y) / 4;
         if is_turbo(k.segment) && !off_road {
@@ -278,6 +320,60 @@ impl World {
             k.z -= mul(back, s.right_z);
         }
         self.karts[i] = k;
+    }
+
+    fn cross_gates(k: &mut Kart, before: usize, clock: u32) {
+        let travel = (k.segment + SEGMENTS - before) % SEGMENTS;
+        if travel == 0 || travel > 24 {
+            return; // Reverse travel cannot open a gate.
+        }
+        let crossed = |gate: usize| {
+            let distance = (gate + SEGMENTS - before) % SEGMENTS;
+            distance > 0 && distance <= travel
+        };
+        if crossed(0) {
+            if k.started && k.checkpoint == 3 {
+                k.laps += 1;
+                k.last_lap = clock - k.lap_start;
+                if k.best_lap == 0 || k.last_lap < k.best_lap {
+                    k.best_lap = k.last_lap;
+                }
+            }
+            k.started = true;
+            k.checkpoint = 0;
+            k.lap_start = clock;
+        }
+        if k.started && k.checkpoint < 3 && crossed((k.checkpoint as usize + 1) * SEGMENTS / 4) {
+            k.checkpoint += 1;
+        }
+    }
+
+    /// Returns to the current section without advancing any checkpoint.
+    /// Losing speed and any charged turbo is the cost of recovery.
+    pub fn recover(&mut self) {
+        if self.phase != Phase::Racing {
+            return;
+        }
+        let k = &mut self.karts[0];
+        let s = self.track.at(k.segment);
+        let n = self.track.at(k.segment + 1);
+        k.x = s.x;
+        k.y = s.y;
+        k.z = s.z;
+        k.heading = heading_of(n.x - s.x, n.z - s.z);
+        k.course = k.heading;
+        k.speed = 0;
+        k.steer = 0;
+        k.boost = 0;
+        k.drift_charge = 0;
+        k.drifting = false;
+        k.recovery = 60;
+    }
+
+    pub fn wrong_way(&self) -> bool {
+        let k = &self.karts[0];
+        let s = self.track.at(k.segment);
+        k.speed > f(3) && mul(cos(k.heading), s.right_x) - mul(sin(k.heading), s.right_z) < -ONE / 3
     }
 
     /// Karts that touch push apart, and lose a little speed.
@@ -296,7 +392,8 @@ impl World {
                 if overlap <= 0 {
                     continue;
                 }
-                let d = d.max(1);
+                // Identical centres still need a direction in which to separate.
+                let (dx, dz, d) = if d == 0 { (ONE, 0, ONE) } else { (dx, dz, d) };
                 let push = |v: F| ((v as i64 * (overlap / 2) as i64) / d as i64) as F;
                 let (px, pz) = (push(dx), push(dz));
                 self.karts[a].x -= px;
@@ -329,7 +426,7 @@ impl Default for World {
 }
 
 /// The heading of a direction: a walk around the circle is enough for a start.
-fn heading_of(dx: F, dz: F) -> u16 {
+pub(crate) fn heading_of(dx: F, dz: F) -> u16 {
     let mut best = (i64::MIN, 0u16);
     for a in (0..=u16::MAX).step_by(64) {
         let d = mul(dx, sin(a)) as i64 + mul(dz, cos(a)) as i64;
@@ -351,6 +448,121 @@ mod tests {
             w.advance(input);
         }
         w
+    }
+
+    #[test]
+    fn checkpoints_must_be_crossed_in_order_and_forward() {
+        let mut k = World::new().karts[0];
+        k.segment = 2;
+        World::cross_gates(&mut k, SEGMENTS - 2, 10);
+        assert!(k.started);
+        assert_eq!(k.laps, 0);
+        // Skipping the first gate cannot arm the second or score a lap.
+        k.segment = SEGMENTS / 2 + 1;
+        World::cross_gates(&mut k, SEGMENTS / 2 - 1, 20);
+        assert_eq!(k.checkpoint, 0);
+        // A reverse crossing cannot arm the first gate either.
+        k.segment = SEGMENTS / 4 - 1;
+        World::cross_gates(&mut k, SEGMENTS / 4 + 1, 30);
+        assert_eq!(k.checkpoint, 0);
+        for gate in 1..=3 {
+            k.segment = gate * SEGMENTS / 4 + 1;
+            World::cross_gates(&mut k, gate * SEGMENTS / 4 - 1, 40 + gate as u32);
+            assert_eq!(k.checkpoint, gate as u8);
+        }
+        k.segment = 1;
+        World::cross_gates(&mut k, SEGMENTS - 1, 100);
+        assert_eq!(k.laps, 1);
+        assert_eq!(k.last_lap, 90);
+        assert_eq!(k.best_lap, 90);
+        World::cross_gates(&mut k, SEGMENTS - 1, 110);
+        assert_eq!(k.laps, 1, "crossing the line twice does not score twice");
+    }
+
+    #[test]
+    fn release_rewards_a_charged_drift_but_grass_cancels_it() {
+        for (charge, reward) in [(39, 0), (40, 45), (90, 90)] {
+            let mut w = race(COUNTDOWN, |_| Input::default());
+            w.recover();
+            w.karts[0].speed = f(20);
+            w.karts[0].drifting = true;
+            w.karts[0].drift_charge = charge;
+            w.advance(Input {
+                throttle: true,
+                ..Input::default()
+            });
+            assert_eq!(w.karts[0].boost, reward);
+            assert_eq!(w.karts[0].drift_charge, 0);
+        }
+        let mut w = race(COUNTDOWN, |_| Input::default());
+        let k = &mut w.karts[0];
+        let s = w.track.at(k.segment);
+        k.x = s.x + mul(f(20), s.right_x);
+        k.z = s.z + mul(f(20), s.right_z);
+        k.speed = f(20);
+        k.drifting = true;
+        k.drift_charge = 100;
+        w.advance(Input::default());
+        assert_eq!(w.karts[0].boost, 0);
+        assert_eq!(w.karts[0].drift_charge, 0);
+    }
+
+    #[test]
+    fn recovery_preserves_race_progress_and_costs_speed() {
+        let mut w = race(COUNTDOWN + 500, |w| w.autopilot(0));
+        let before = w.karts[0];
+        w.karts[0].boost = 50;
+        w.recover();
+        let k = &w.karts[0];
+        assert_eq!(
+            (k.laps, k.segment, k.checkpoint),
+            (before.laps, before.segment, before.checkpoint)
+        );
+        assert_eq!(w.track.lateral(k.segment, k.x, k.z), 0);
+        assert_eq!((k.speed, k.boost, k.drift_charge), (0, 0, 0));
+        assert!(!w.wrong_way());
+    }
+
+    #[test]
+    fn timed_launch_beats_holding_throttle_through_countdown() {
+        let held = race(COUNTDOWN, |_| Input {
+            throttle: true,
+            ..Input::default()
+        });
+        let timed = race(COUNTDOWN, |w| Input {
+            throttle: w.step >= COUNTDOWN - 20,
+            ..Input::default()
+        });
+        assert_eq!(held.karts[0].boost, 0);
+        assert!(timed.karts[0].boost > 0);
+        assert!(timed.karts[0].speed > held.karts[0].speed);
+    }
+
+    #[test]
+    fn finished_race_freezes_the_result_and_clock() {
+        let mut w = World::new();
+        while w.phase != Phase::Finished {
+            w.advance(w.autopilot(0));
+        }
+        let (karts, clock, place) = (w.karts, w.clock, w.position());
+        assert!(karts[0].best_lap > 0);
+        for _ in 0..120 {
+            w.advance(Input::default());
+        }
+        assert_eq!(w.karts, karts);
+        assert_eq!(w.clock, clock);
+        assert_eq!(w.position(), place);
+    }
+
+    #[test]
+    fn identical_kart_centres_separate() {
+        let mut w = World::new();
+        w.karts[1].x = w.karts[0].x;
+        w.karts[1].z = w.karts[0].z;
+        w.collide();
+        assert!(
+            length(w.karts[1].x - w.karts[0].x, w.karts[1].z - w.karts[0].z) >= 2 * KART_RADIUS
+        );
     }
 
     #[test]
@@ -458,6 +670,8 @@ mod tests {
                 throttle: true,
                 ..Input::default()
             });
+            w.recover();
+            w.karts[0].speed = f(20);
             let from = w.karts[0].heading;
             for _ in 0..20 {
                 w.advance(Input {
@@ -488,6 +702,7 @@ mod tests {
         let mut w = World::new();
         for k in &mut w.karts {
             k.laps = 1;
+            k.started = true;
             k.segment = 10;
         }
         w.karts[0].segment = 11;
