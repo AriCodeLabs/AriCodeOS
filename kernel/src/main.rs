@@ -25,6 +25,7 @@ mod hw;
 mod initrd;
 mod iommu;
 mod ipc;
+mod machine;
 mod memory;
 mod object;
 mod pci;
@@ -167,6 +168,7 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
     boot_args::set(cmdline.raw());
 
     acpi::init(info);
+    machine::init(info);
     arch::x86_64::pic::disable();
     arch::x86_64::apic::init();
     arch::x86_64::ioapic::init();

@@ -20,6 +20,8 @@ pub struct AcpiInfo {
     /// the DSDT (`None`: no ACPI power-off on this machine).
     pub fadt: Option<Fadt>,
     pub s5: Option<(u8, u8)>,
+    /// Device identifiers the DSDT and SSDTs declare, for `diag`.
+    pub ids: Vec<aricode_acpi::DeviceId>,
 }
 
 static ACPI: IrqLock<Option<AcpiInfo>> = IrqLock::new(None);
@@ -92,7 +94,12 @@ pub fn init(info: &BootInfo) {
                 Ok(f) => acpi.fadt = Some(f),
                 Err(e) => warn!("acpi: invalid FADT ({e:?})"),
             },
-            b"SSDT" if acpi.s5.is_none() => acpi.s5 = aricode_acpi::find_s5(table),
+            b"SSDT" => {
+                if acpi.s5.is_none() {
+                    acpi.s5 = aricode_acpi::find_s5(table);
+                }
+                acpi.ids.extend(aricode_acpi::device_ids(table));
+            }
             _ => {}
         }
     }
@@ -102,6 +109,9 @@ pub fn init(info: &BootInfo) {
             if let Some(s5) = aricode_acpi::find_s5(dsdt) {
                 acpi.s5 = Some(s5);
             }
+            let ssdt = core::mem::take(&mut acpi.ids);
+            acpi.ids = aricode_acpi::device_ids(dsdt);
+            acpi.ids.extend(ssdt);
         }
         match acpi.s5 {
             Some((a, b)) => info!(
@@ -155,6 +165,11 @@ pub fn init(info: &BootInfo) {
     *ACPI.lock() = Some(acpi);
 }
 
+/// Bytes at physical `addr`, for other firmware tables (SMBIOS).
+pub fn firmware_bytes(addr: u64, len: usize) -> Option<&'static [u8]> {
+    phys_slice(addr, len)
+}
+
 /// Access to the ACPI information (empty if it could not be read).
 pub fn with<R>(f: impl FnOnce(&AcpiInfo) -> R) -> R {
     static EMPTY: AcpiInfo = AcpiInfo {
@@ -168,6 +183,7 @@ pub fn with<R>(f: impl FnOnce(&AcpiInfo) -> R) -> R {
         dmar: None,
         fadt: None,
         s5: None,
+        ids: Vec::new(),
     };
     let guard = ACPI.lock();
     f(guard.as_ref().unwrap_or(&EMPTY))

@@ -1,0 +1,22 @@
+# Which machine a report came from (sysinfo::MACHINE): the make and model from
+# SMBIOS (in the legacy area or, on UEFI, the firmware's own memory), and the
+# device identifiers in the ACPI tables, found without an AML interpreter. On
+# QEMU's q35 the PCI Express root bridge is PNP0A08, compatible with PNP0A03.
+name = "diag.machine"
+description = "diag names the machine and the ACPI device identifiers"
+level = "smoke"
+areas = ["diag", "shell"]
+cmdline = "qemu_exit shell"
+timeout_secs = 120
+stdin = ["diag", "shutdown"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "machine QEMU Standard PC",
+    "SMBIOS 2.8 in firmware memory",
+    "PNP0A08 PNP0A03",
+    "=== end of diagnostics ===",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "acpi    no device identifiers found"]

@@ -754,6 +754,11 @@ pub mod sysinfo {
     /// 0084). They count as free in [`MEMORY`] but no allocation other than
     /// their objects' own pages can have them.
     pub const MEMORY_PROMISED: u64 = 18;
+    /// Text: which machine this is, as `diag` prints it (ABI 13): a
+    /// `machine` line with the make and model from SMBIOS (never the
+    /// serial), then `acpi` lines with each device's identifiers from the
+    /// DSDT and SSDTs. Read only; the buffer gets as much as fits.
+    pub const MACHINE: u64 = 19;
 
     /// The state of the GPU's engine ([`GPU`]).
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

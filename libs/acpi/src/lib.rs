@@ -510,10 +510,203 @@ pub fn find_s5(aml: &[u8]) -> Option<(u8, u8)> {
     None
 }
 
+/// Whether `_HID` or `_CID` declared an identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdKind {
+    Hardware,
+    Compatible,
+}
+
+/// A device identifier found in AML: the device's four-letter name, which
+/// kind of identifier, and the identifier ("PNP0C50", "ELAN0501").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeviceId {
+    pub device: [u8; 4],
+    pub kind: IdKind,
+    pub id: [u8; 16],
+    pub len: u8,
+}
+
+impl DeviceId {
+    pub fn id_str(&self) -> &str {
+        core::str::from_utf8(&self.id[..self.len as usize]).unwrap_or("?")
+    }
+
+    pub fn device_str(&self) -> &str {
+        core::str::from_utf8(&self.device).unwrap_or("????")
+    }
+}
+
+/// An EISA identifier (`EISAID("PNP0C50")`) from its compressed dword.
+fn eisa_id(v: u32) -> [u8; 7] {
+    let v = v.swap_bytes();
+    let letter = |shift: u32| b'@' + ((v >> shift) & 0x1F) as u8;
+    let hex = |shift: u32| b"0123456789ABCDEF"[((v >> shift) & 0xF) as usize];
+    [
+        letter(26),
+        letter(21),
+        letter(16),
+        hex(12),
+        hex(8),
+        hex(4),
+        hex(0),
+    ]
+}
+
+/// The identifier an AML term at `aml[j..]` names: a string
+/// (`StringPrefix`) of 3 to 16 printable bytes or an EISA dword
+/// (`DWordPrefix`).
+fn id_at(aml: &[u8], j: usize) -> Option<([u8; 16], u8)> {
+    let mut id = [0u8; 16];
+    match *aml.get(j)? {
+        0x0D => {
+            let rest = aml.get(j + 1..)?;
+            let len = rest.iter().position(|&b| b == 0)?;
+            if !(3..=16).contains(&len) || !rest[..len].iter().all(|b| b.is_ascii_graphic()) {
+                return None;
+            }
+            id[..len].copy_from_slice(&rest[..len]);
+            Some((id, len as u8))
+        }
+        0x0C => {
+            let b = aml.get(j + 1..j + 5)?;
+            let e = eisa_id(u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+            id[..7].copy_from_slice(&e);
+            Some((id, 7))
+        }
+        _ => None,
+    }
+}
+
+/// The device identifiers declared in an AML table (DSDT or SSDT), found
+/// by scanning without an AML interpreter, as `find_s5` does: each `_HID`
+/// or `_CID` named with `NameOp` and a string or EISA value, or a small
+/// method returning one; the device is the last `DeviceOp` before it. A
+/// read-only view of what the firmware describes (touchpads on I2C, their
+/// controllers), not a device tree: identifiers chosen at run time by a
+/// method that computes them are missed.
+pub fn device_ids(aml: &[u8]) -> Vec<DeviceId> {
+    let mut out = Vec::new();
+    let mut device = *b"????";
+    let mut i = 0;
+    while i + 4 <= aml.len() {
+        // DeviceOp: ExtOpPrefix 0x5B, 0x82, PkgLength, then the name (its
+        // last four bytes, after any prefixes, are the segment).
+        if aml[i] == 0x5B && aml[i + 1] == 0x82 {
+            let lead = aml[i + 2];
+            let at = i + 3 + (lead >> 6) as usize;
+            let mut k = at;
+            while k < aml.len() && (aml[k] == b'\\' || aml[k] == b'^') {
+                k += 1;
+            }
+            // A path of two (DualNamePrefix) or n (MultiNamePrefix)
+            // segments: the device is the last.
+            match aml.get(k) {
+                Some(0x2E) => k += 1 + 4,
+                Some(0x2F) => {
+                    k += 2 + 4 * (aml.get(k + 1).copied().unwrap_or(1).max(1) as usize - 1)
+                }
+                _ => {}
+            }
+            if let Some(name) = aml.get(k..k + 4) {
+                if name
+                    .iter()
+                    .all(|&b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+                {
+                    device.copy_from_slice(name);
+                }
+            }
+            i += 2;
+            continue;
+        }
+        let kind = match &aml[i..i + 4] {
+            b"_HID" => IdKind::Hardware,
+            b"_CID" => IdKind::Compatible,
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+        let found = if i >= 1 && aml[i - 1] == 0x08 {
+            // Name (_HID, value)
+            id_at(aml, i + 4)
+        } else {
+            // Method (_HID) { Return (value) }: MethodOp, a PkgLength of 1 to
+            // 4 bytes, the name, the flags, then ReturnOp 0xA4.
+            let method = (i.saturating_sub(5)..i).any(|k| aml[k] == 0x14);
+            if method && aml.get(i + 5) == Some(&0xA4) {
+                id_at(aml, i + 6)
+            } else {
+                None
+            }
+        };
+        if let Some((id, len)) = found {
+            let d = DeviceId {
+                device,
+                kind,
+                id,
+                len,
+            };
+            if !out.contains(&d) {
+                out.push(d);
+            }
+        }
+        i += 4;
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloc::vec;
+
+    #[test]
+    fn device_ids_of_an_i2c_touchpad() {
+        // Device (TPD0) { Name (_HID, "ELAN0501") Name (_CID, EISAID
+        // ("PNP0C50")) }, then Device (I2C0) { Method (_HID) { Return
+        // ("INT33C2") } }, as iasl writes them.
+        let mut aml = vec![0x5B, 0x82, 0x20];
+        aml.extend_from_slice(b"TPD0");
+        aml.push(0x08);
+        aml.extend_from_slice(b"_HID");
+        aml.push(0x0D);
+        aml.extend_from_slice(b"ELAN0501\0");
+        aml.push(0x08);
+        aml.extend_from_slice(b"_CID");
+        aml.push(0x0C);
+        aml.extend_from_slice(&[0x41, 0xD0, 0x0C, 0x50]);
+        aml.extend_from_slice(&[0x5B, 0x82, 0x1A]);
+        aml.push(0x2E);
+        aml.extend_from_slice(b"_SB_I2C0");
+        aml.extend_from_slice(&[0x14, 0x0E]);
+        aml.extend_from_slice(b"_HID");
+        aml.extend_from_slice(&[0x00, 0xA4, 0x0D]);
+        aml.extend_from_slice(b"INT33C2\0");
+        // A reference to _HID that declares nothing, and a string too short.
+        aml.extend_from_slice(b"_HID");
+        aml.extend_from_slice(&[0x08]);
+        aml.extend_from_slice(b"_CID");
+        aml.extend_from_slice(&[0x0D, b'A', b'B', 0]);
+        let ids = device_ids(&aml);
+        let got: Vec<(&str, IdKind, &str)> = ids
+            .iter()
+            .map(|d| (d.device_str(), d.kind, d.id_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("TPD0", IdKind::Hardware, "ELAN0501"),
+                ("TPD0", IdKind::Compatible, "PNP0C50"),
+                ("I2C0", IdKind::Hardware, "INT33C2"),
+            ]
+        );
+        // The PS/2 mouse's EISA identifier.
+        assert_eq!(
+            &eisa_id(u32::from_le_bytes([0x41, 0xD0, 0x0F, 0x13])),
+            b"PNP0F13"
+        );
+    }
 
     #[test]
     fn fadt_fields_for_s5() {
