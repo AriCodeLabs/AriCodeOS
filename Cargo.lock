@@ -545,6 +545,10 @@ name = "aricode-sched"
 version = "0.18.0"
 
 [[package]]
+name = "aricode-smbios"
+version = "0.18.0"
+
+[[package]]
 name = "aricode-ssh"
 version = "0.18.0"
 dependencies = [
@@ -703,6 +707,7 @@ dependencies = [
  "aricode-pci",
  "aricode-pmm",
  "aricode-sched",
+ "aricode-smbios",
  "aricode-sync",
  "aricode-vranges",
  "aricode-x86-cpu",

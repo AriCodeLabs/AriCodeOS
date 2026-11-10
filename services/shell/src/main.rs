@@ -508,6 +508,7 @@ fn diag(fs: &mut FsClient, net_client: &NetClient, mask: u64, rest: &[u8]) {
     }
     print(b"=== AriCodeOS diagnostics ===\n");
     system();
+    machine();
     uptime();
     mem();
     cpus();
@@ -833,6 +834,16 @@ fn screen() {
         print(b")");
     }
     print(b"\n");
+}
+
+/// Which machine this is (`sysinfo::MACHINE`): its make and model from
+/// SMBIOS and the device identifiers in its ACPI tables, so a report from
+/// an unknown machine names its devices (a touchpad on I2C).
+fn machine() {
+    let mut b = [0u8; 4096];
+    if let Ok(n) = sys::system_info(SYSTEM, abi::sysinfo::MACHINE, &mut b) {
+        print(&b[..n.min(b.len())]);
+    }
 }
 
 /// The GPU's engine (`sysinfo::GPU`, ADR 0083): `gpu     blitter ready, 350
