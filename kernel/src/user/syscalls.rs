@@ -347,6 +347,10 @@ fn system_info(h: Handle, kind: u64, ptr: u64, len: u64) -> Result<u64, Error> {
             None => return Err(Error::NotFound),
         },
         sysinfo::GPU => crate::gpu::report().encode().to_vec(),
+        sysinfo::ACPI_AML_LEN => (crate::acpi::aml_tables().len() as u64)
+            .to_le_bytes()
+            .to_vec(),
+        sysinfo::ACPI_AML => crate::acpi::aml_tables(),
         sysinfo::MACHINE => {
             let mut text = crate::machine::report().into_bytes();
             text.truncate(len as usize);

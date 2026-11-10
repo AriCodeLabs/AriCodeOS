@@ -268,7 +268,7 @@ fn trim(s: &[u8]) -> &[u8] {
 
 fn help() {
     print(
-        b"commands:\n  help      this help\n  ps        processes\n  mem       physical memory\n  ls        AriFS files\n  cat NAME  show a file\n  write NAME TEXT  save TEXT to the file (creates it or replaces it entirely)\n  devices   PCI functions\n  services  boot services (--detail: supervisor state)\n  uptime    time since boot\n  sleep MS  wait MS milliseconds (at most 60000)\n  cpus      online processors and idle time per CPU\n  temp      the CPU's temperature\n  diag [NAME]  full report (uptime, mem, cpus, entropy, ps, stacks, services, net, devices); with NAME saves it to AriFS\n  net       network configuration\n  ping IP   ICMP echo (4 attempts)\n  dns NAME  resolve a name\n  http URL  GET and show the body (http:// or https://)\n  run PROG  run an initrd program and wait\n\
+        b"commands:\n  help      this help\n  ps        processes\n  mem       physical memory\n  ls        AriFS files\n  cat NAME  show a file\n  write NAME TEXT  save TEXT to the file (creates it or replaces it entirely)\n  devices   PCI functions\n  services  boot services (--detail: supervisor state)\n  uptime    time since boot\n  sleep MS  wait MS milliseconds (at most 60000)\n  cpus      online processors and idle time per CPU\n  temp      the CPU's temperature\n  diag [NAME]  full report (uptime, mem, cpus, entropy, ps, stacks, services, net, devices); with NAME saves it to AriFS\n  acpidump NAME  save the firmware's DSDT and SSDTs to AriFS, for a device study\n  net       network configuration\n  ping IP   ICMP echo (4 attempts)\n  dns NAME  resolve a name\n  http URL  GET and show the body (http:// or https://)\n  run PROG  run an initrd program and wait\n\
   update [--channel stable|dev]  fetch and verify the signed index of every source of the channel (stable by default) and show what is new (installs nothing; ADR 0029, ADR 0045)\n  update add [--channel dev] URL|IP[:PORT]  register an update source (stable unless --channel dev)\n  update remove N|URL  unregister a source\n  update sources  list the sources\n  update profile add|remove NAME  follow a profile of the sources (upgrade installs its apps) or stop following it (its apps are deleted; ADR 0074)\n  update profiles  list the followed profiles\n  session [shell|desktop]  show or choose what the machine boots into: the text console, or the desktop of the desktop profile once installed (ADR 0074)\n  update apply [--allow-downgrade]  install the image in the UPDATE partition\n  update rollback  boot the system in the other slot next (no network; then `reboot`)\n  upgrade [--channel stable|dev] [--allow-downgrade]  install what the last `update` found (system into the inactive slot, then `reboot`; apps through the installer); only --channel moves the system to another channel\n  spawn PROG  launch it in the background (cannot be stopped)\n  repeat N CMD  repeat a command N times\n  reboot    reboot\n  shutdown  power off\n  exit      exit the shell\n",
     );
 }
@@ -553,6 +553,49 @@ fn diag(fs: &mut FsClient, net_client: &NetClient, mask: u64, rest: &[u8]) {
 }
 
 /// Creates the file `name`, or replaces it entirely, with `data`.
+/// `acpidump NAME`: the firmware's DSDT and SSDTs, as the kernel copies
+/// them (`sysinfo::ACPI_AML`), saved to AriFS for a device study on the
+/// build host. Nothing else of the firmware's: no serial, no licence key.
+fn acpidump(fs: &mut FsClient, rest: &[u8]) {
+    let name = trim(rest);
+    let Ok(name) = core::str::from_utf8(name) else {
+        print(b"acpidump: invalid name\n");
+        return;
+    };
+    if name.is_empty() {
+        print(b"usage: acpidump NAME\n");
+        return;
+    }
+    let mut len = [0u8; 8];
+    if sys::system_info(SYSTEM, abi::sysinfo::ACPI_AML_LEN, &mut len).is_err() {
+        print(b"acpidump: the kernel does not offer the tables\n");
+        return;
+    }
+    let len = u64::from_le_bytes(len) as usize;
+    if len == 0 {
+        print(b"acpidump: no DSDT or SSDT found\n");
+        return;
+    }
+    let mut data = alloc::vec![0u8; len];
+    let n = match sys::system_info(SYSTEM, abi::sysinfo::ACPI_AML, &mut data) {
+        Ok(n) => n,
+        Err(_) => {
+            print(b"acpidump: could not read the tables\n");
+            return;
+        }
+    };
+    match save_file(fs, name, &data[..n]) {
+        Ok(n) => {
+            print(b"acpidump: ");
+            num(n as u64);
+            print(b" bytes to ");
+            print(name.as_bytes());
+            print(b"\n");
+        }
+        Err(()) => print(b"acpidump: could not save the tables\n"),
+    }
+}
+
 fn save_file(fs: &mut FsClient, name: &str, data: &[u8]) -> Result<usize, ()> {
     update_index::client::save(fs, name, data).map_err(|_| ())
 }
@@ -609,8 +652,15 @@ fn events() {
                 print(e.name_str().as_bytes());
             }
             EventKind::DmaFault => {
-                print(b"DMA fault from device ");
-                hex(e.code, 4);
+                let (source, write, _, address) = abi::sysinfo::dma_fault_parts(e.code);
+                print(b"DMA fault from ");
+                hex((source >> 8) as u64, 2);
+                print(b":");
+                hex((source >> 3 & 0x1F) as u64, 2);
+                print(b".");
+                num((source & 7) as u64);
+                print(if write { b", write at " } else { b", read at " });
+                hex(address, 8);
                 print(b": ");
                 print(e.name_str().as_bytes());
             }
@@ -2155,6 +2205,7 @@ fn execute(
         b"cpus" => cpus(),
         b"temp" => temp(),
         b"diag" => diag(fs, net_client, mask, rest),
+        b"acpidump" => acpidump(fs, rest),
         // Without a network service the shell's net handle is a
         // placeholder that reaches nobody (init, `spawn_shell`).
         b"net" | b"ping" | b"dns" | b"http" if mask & SERVICE_NET == 0 => {

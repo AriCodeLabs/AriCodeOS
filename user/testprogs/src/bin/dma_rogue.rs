@@ -159,11 +159,34 @@ fn main(mask: u64) -> u64 {
         sys::print(b"dma_rogue: the unit did not record the fault\n");
         return 24;
     }
+    // The event says which device, that it wrote, why, and where
+    // (incident 0064): 00:02.0, a write, reason 5, the foreign page.
+    if !fault_event_recorded() {
+        sys::print(b"dma_rogue: no event names the write to the foreign page\n");
+        return 25;
+    }
     let mut b = [0u8; 20];
     sys::print(b"dma_rogue: legitimate read ok, DMA to foreign memory blocked (");
     sys::print(fmt_u64(after - before, &mut b));
     sys::print(b" fault(s) recorded)\n");
     0
+}
+
+/// Whether the kernel's events hold this device's write to `FOREIGN_PHYS`
+/// with the IOMMU's reason for a write without permission.
+fn fault_event_recorded() -> bool {
+    use abi::sysinfo::{dma_fault_parts, EventEntry, EventKind};
+    let mut buf = [0u8; EventEntry::LEN * 64];
+    let Ok(n) = sys::system_info(SERVICE, abi::sysinfo::EVENTS, &mut buf) else {
+        return false;
+    };
+    buf[..n]
+        .as_chunks::<{ EventEntry::LEN }>()
+        .0
+        .iter()
+        .filter_map(|c| EventEntry::decode(c))
+        .filter(|e| e.kind == EventKind::DmaFault)
+        .any(|e| dma_fault_parts(e.code) == (0x0010, true, 5, FOREIGN_PHYS))
 }
 
 /// The client buffer the kernel handed over (4 KiB, filled with `0xA5`
