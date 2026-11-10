@@ -22,6 +22,9 @@ pub struct AcpiInfo {
     pub s5: Option<(u8, u8)>,
     /// Device identifiers the DSDT and SSDTs declare, for `diag`.
     pub ids: Vec<aricode_acpi::DeviceId>,
+    /// Where the DSDT and SSDTs are, and their lengths: the AML a device
+    /// study reads (`sysinfo::ACPI_AML`).
+    pub aml: Vec<(u64, u32)>,
 }
 
 static ACPI: IrqLock<Option<AcpiInfo>> = IrqLock::new(None);
@@ -95,6 +98,7 @@ pub fn init(info: &BootInfo) {
                 Err(e) => warn!("acpi: invalid FADT ({e:?})"),
             },
             b"SSDT" => {
+                acpi.aml.push((addr, head.length));
                 if acpi.s5.is_none() {
                     acpi.s5 = aricode_acpi::find_s5(table);
                 }
@@ -105,7 +109,8 @@ pub fn init(info: &BootInfo) {
     }
     // \_S5_ normally lives in the DSDT, which only the FADT points to.
     if let Some(f) = acpi.fadt {
-        if let Some((dsdt, _)) = table_at(f.dsdt) {
+        if let Some((dsdt, head)) = table_at(f.dsdt) {
+            acpi.aml.insert(0, (f.dsdt, head.length));
             if let Some(s5) = aricode_acpi::find_s5(dsdt) {
                 acpi.s5 = Some(s5);
             }
@@ -165,6 +170,21 @@ pub fn init(info: &BootInfo) {
     *ACPI.lock() = Some(acpi);
 }
 
+/// The DSDT and SSDTs, one after another, each whole with its header: the
+/// firmware's description of the machine's devices, for a study on the
+/// build host. Only these: other tables may hold what is not ours to copy
+/// (MSDM and SLIC carry a Windows licence key).
+pub fn aml_tables() -> Vec<u8> {
+    let at = with(|a| a.aml.clone());
+    let mut out = Vec::new();
+    for (addr, len) in at {
+        if let Some(t) = phys_slice(addr, len as usize) {
+            out.extend_from_slice(t);
+        }
+    }
+    out
+}
+
 /// Bytes at physical `addr`, for other firmware tables (SMBIOS).
 pub fn firmware_bytes(addr: u64, len: usize) -> Option<&'static [u8]> {
     phys_slice(addr, len)
@@ -184,6 +204,7 @@ pub fn with<R>(f: impl FnOnce(&AcpiInfo) -> R) -> R {
         fadt: None,
         s5: None,
         ids: Vec::new(),
+        aml: Vec::new(),
     };
     let guard = ACPI.lock();
     f(guard.as_ref().unwrap_or(&EMPTY))

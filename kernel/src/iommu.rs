@@ -679,8 +679,13 @@ pub fn on_fault_irq() {
                         owner,
                         aricode_abi::sysinfo::EventKind::DmaFault,
                         owner,
-                        f.source_id as u64,
-                        aricode_iommu::fault_reason_name(f.reason),
+                        aricode_abi::sysinfo::dma_fault_code(
+                            f.source_id,
+                            !f.is_read,
+                            f.reason,
+                            f.address,
+                        ),
+                        aricode_iommu::fault_reason_short(f.reason),
                     );
                     warn!(
                         "iommu: DMA fault from {:02x}:{:02x}.{} ({} at {:#x}): {} (reason {:#x}, unit {i})",

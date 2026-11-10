@@ -260,6 +260,27 @@ pub fn fault_reason_name(reason: u8) -> &'static str {
     }
 }
 
+/// [`fault_reason_name`] short enough for an event's name (24 bytes):
+/// the full one is cut there (incident 0064).
+pub fn fault_reason_short(reason: u8) -> &'static str {
+    match reason {
+        0x1 => "no root entry",
+        0x2 => "no context entry",
+        0x3 => "bad context entry",
+        0x4 => "beyond address width",
+        0x5 => "no write permission",
+        0x6 => "no read permission",
+        0x7 => "page not mapped",
+        0x8 => "root table unreadable",
+        0x9 => "context table unreadable",
+        0xA => "root entry reserved bit",
+        0xB => "context reserved bit",
+        0xC => "paging reserved bit",
+        0xD => "paging unreadable",
+        _ => "unknown reason",
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IommuError {
     OutOfFrames,
@@ -480,6 +501,13 @@ impl<A: FrameAlloc, M: PhysMap> SecondLevel<A, M> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_short_reason_fits_an_event() {
+        for r in 0..=0xFFu8 {
+            assert!(super::fault_reason_short(r).len() <= 24, "reason {r:#x}");
+        }
+    }
+
     extern crate std;
     use super::*;
     use aricode_x86_paging::IdentityMap;

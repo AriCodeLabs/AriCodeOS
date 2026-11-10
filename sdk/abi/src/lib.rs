@@ -759,6 +759,13 @@ pub mod sysinfo {
     /// serial), then `acpi` lines with each device's identifiers from the
     /// DSDT and SSDTs. Read only; the buffer gets as much as fits.
     pub const MACHINE: u64 = 19;
+    /// One `u64`: the bytes [`ACPI_AML`] answers with (ABI 13).
+    pub const ACPI_AML_LEN: u64 = 20;
+    /// The firmware's DSDT and SSDTs, one after another, each whole with
+    /// its header, for a device study on another machine (ABI 13). No other
+    /// table: some hold what is not ours to copy (a Windows licence key in
+    /// MSDM or SLIC). `TooBig` if the buffer is short.
+    pub const ACPI_AML: u64 = 21;
 
     /// The state of the GPU's engine ([`GPU`]).
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1059,7 +1066,8 @@ pub mod sysinfo {
         ProcessExited = 2,
         /// `pid`, `name` = kernel reason (exception).
         ProcessKilled = 3,
-        /// `code` = `bus << 8 | dev << 3 | fn` of the device, `name` = reason.
+        /// `code` = [`dma_fault_code`]: the device, the access and the page;
+        /// `name` = the reason, short.
         DmaFault = 4,
         /// `pid`, `name`, `code` = bytes requested above the quota.
         DmaQuota = 5,
@@ -1083,6 +1091,24 @@ pub mod sysinfo {
     }
 
     pub const EVENT_NAME_LEN: usize = 24;
+
+    /// A DMA fault event's `code` (ABI 13; incident 0064): bits 15:0 the
+    /// device (`bus << 8 | dev << 3 | fn`), bit 16 a write, bits 24:17 the
+    /// IOMMU's reason, bits 63:32 the page (address >> 12). Older kernels
+    /// set only the device.
+    pub fn dma_fault_code(source: u16, write: bool, reason: u8, address: u64) -> u64 {
+        source as u64 | (write as u64) << 16 | (reason as u64) << 17 | (address >> 12) << 32
+    }
+
+    /// The parts of a [`dma_fault_code`]: device, write, reason, address.
+    pub fn dma_fault_parts(code: u64) -> (u16, bool, u8, u64) {
+        (
+            code as u16,
+            code & 1 << 16 != 0,
+            (code >> 17) as u8,
+            (code >> 32) << 12,
+        )
+    }
 
     /// Kernel event (48 bytes): timestamp in us, class, pid, code and
     /// name or reason.
@@ -2175,6 +2201,19 @@ mod tests {
         // Never negative: an error is `-4095..=-1` in the same register.
         assert!((irq(last, u32::MAX) as i64) > 0);
         assert!((message(last, IPC_MAX_DATA, IPC_MAX_HANDLES) as i64) > 0);
+    }
+
+    #[test]
+    fn dma_fault_code_round_trip() {
+        use super::sysinfo::{dma_fault_code, dma_fault_parts};
+        let c = dma_fault_code(0x00A0, false, 6, 0x7_8912_3000);
+        assert_eq!(dma_fault_parts(c), (0x00A0, false, 6, 0x7_8912_3000));
+        assert_eq!(
+            dma_fault_parts(dma_fault_code(0xFFFF, true, 0xFF, 0)),
+            (0xFFFF, true, 0xFF, 0)
+        );
+        // An older kernel's code: the device only.
+        assert_eq!(dma_fault_parts(0x00A0), (0x00A0, false, 0, 0));
     }
 
     #[test]
