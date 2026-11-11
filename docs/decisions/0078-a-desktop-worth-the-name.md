@@ -675,3 +675,19 @@ No panic and no bound broken. Its high finding, and what else was fixed:
 
 **Left as it was:** `Resize` still prints a line each time, with no limit, so a program can fill the
 log, as it could before this stage.
+
+## The owner's remote screen (2026-11-11)
+
+The owner asked to see the desktop of a machine without photos. `screenshot` in a shell
+gives the screen as last composed, as a QOI image in Base64 (`docs/hardware.md`). The shell
+asks init with the launch flag `SCREEN` and a DMA buffer; init asks the compositor with the
+window protocol's `Capture` on its main endpoint, which only init holds. Who may ask is who
+holds a shell's endpoint: the console's shell, an SSH session's (an `authorized_keys` login)
+and the Terminal's. The Terminal is a signed app, so it can read the screen through its shell,
+as it can already run anything there. The launcher's endpoint and every window session are
+refused and said. Init logs each copy and the kind of shell, the desktop shows a notice, and one
+copy every 2 s is the most, so a hung compositor (1.25 s a try) cannot keep init waiting.
+QOI was chosen over PNG: one pass, no deflate encoder, about 19 KB for an empty 1280x800
+desktop, and ffmpeg reads it. The [audit](../audits/2026-11-11-remote-screen.md) found no high
+finding.
+

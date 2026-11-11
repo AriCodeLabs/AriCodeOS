@@ -177,6 +177,29 @@ The 166 MiB cover the ARI0 partition of the USB image, last since ADR 0072
 (LBA 208896 to 339967). A stick written before it has ARI0 at LBA 133120
 to 139263, and 70 MiB are enough; `fs-cat` reads either version of AriFS.
 
+### The screen without photos
+
+Over SSH, `screenshot` gives the desktop's screen as last composed, as a QOI
+image in Base64 between two marker lines; the line after them gives its length
+and SHA-256. Only the owner's shells get it: the console's, an SSH session's or
+the Terminal's (so the signed Terminal app can read the screen through its
+shell, as it can run anything else there); the launcher's endpoint is refused.
+Init logs each copy and which kind of shell asked, the desktop shows "Screen
+copied for the owner's shell", so whoever sits at the machine knows, and one
+copy every 2 s is the most it gives.
+
+```bash
+ssh ari@LAPTOP screenshot > shot.txt
+tr -d '\r' < shot.txt | sed -n '/^-----BEGIN QOI-----$/,/^-----END QOI-----$/{//!p}' | base64 -d > screen.qoi
+tail -1 shot.txt; sha256sum screen.qoi   # the two must agree
+ffmpeg -loglevel error -i screen.qoi screen.png
+```
+
+Only the exact marker lines are dropped: a data line may contain the letters
+`QOI`. `tr` removes the carriage returns a session with a terminal (`ssh -t`)
+adds. If the session cannot take the output fast enough the shell stops,
+prints no end marker and says that the image is incomplete.
+
 ### Entropy: does the laptop have `rdrand`?
 
 Read it from `diag` (on the console, over SSH, or saved with `diag NAME`

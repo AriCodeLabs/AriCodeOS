@@ -24,6 +24,8 @@ aricode-x509 = { path = "../../libs/x509" }
 aricode-update-index = { path = "../../libs/update-index", features = ["client"] }
 aricode-crypto = { path = "../../libs/crypto" }
 aricode-cmdline = { path = "../../libs/cmdline" }
+aricode-qoi = { path = "../../libs/qoi" }
+aricode-ssh = { path = "../../libs/ssh" }
 
 [build-dependencies]
 aricode-build = { path = "../../sdk/build" }

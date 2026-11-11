@@ -455,6 +455,8 @@ struct Compositor {
     network_len: usize,
     /// When the notice on show goes.
     notice_until: Option<u64>,
+    /// A program asked for a copy of the screen, which is init's to ask: said once.
+    said_capture: bool,
     /// When the processor's heat is next looked at.
     heat_due_ms: u64,
     /// The processor's heat was said, and has not cooled since.
@@ -1601,12 +1603,16 @@ impl Compositor {
         if (owner == MAIN)
             != matches!(
                 req.op,
-                Op::Attach | Op::Detach | Op::Appearance | Op::Timezone | Op::Network
+                Op::Attach | Op::Detach | Op::Appearance | Op::Timezone | Op::Network | Op::Capture
             )
         {
+            if req.op == Op::Capture && !core::mem::replace(&mut self.said_capture, true) {
+                say(b"a program asked for a copy of the screen: refused (said once)");
+            }
             return answer(reply_to, Reply::status(Status::Invalid));
         }
         match req.op {
+            Op::Capture => self.capture(reply_to, buf, now_ms),
             Op::Attach => self.attach(&req, reply_to, now_ms),
             Op::Detach => self.detach(reply_to, req.window),
             Op::Appearance => {
@@ -1961,6 +1967,32 @@ impl Compositor {
             }
         }
         answer(reply_to, Reply::status(status));
+    }
+
+    /// `Op::Capture`, from init for the owner's shell: the back buffer, the screen as
+    /// last composed, into a DMA buffer, row after row without the stride's padding.
+    /// The desktop says so: whoever sits at it knows the screen was copied.
+    fn capture(&mut self, reply_to: Handle, buf: Option<Handle>, now_ms: u64) {
+        let (w, h) = (self.screen.info.width, self.screen.info.height);
+        let need = w as usize * h as usize * 4;
+        let Some(virt) = Self::clipboard_buffer(buf, need).filter(|_| need > 0) else {
+            say(b"a screen copy came without a buffer of its size: refused");
+            return answer(reply_to, Reply::status(Status::BadHandles));
+        };
+        // Never into a buffer a window shows: its program would read the screen.
+        if self.holders(virt) > 0 {
+            say(b"a screen copy came with a window's buffer: refused");
+            return answer(reply_to, Reply::status(Status::BadHandles));
+        }
+        // SAFETY: mapped and at least `need` bytes, checked above. Only written.
+        let out = unsafe { core::slice::from_raw_parts_mut(virt as *mut u32, need / 4) };
+        let stride = self.screen.info.stride as usize;
+        for (y, row) in out.chunks_exact_mut(w as usize).enumerate() {
+            row.copy_from_slice(&self.screen.back[y * stride..y * stride + w as usize]);
+        }
+        self.unmap_unused(virt);
+        self.show_notice("Screen copied for the owner's shell", now_ms);
+        answer(reply_to, Reply::ok(u64::from(w) | u64::from(h) << 32));
     }
 
     /// Maps a program's buffer of at least `need` bytes for a clipboard request. It may
@@ -2344,6 +2376,7 @@ fn main(inputs: u64) -> u64 {
         network: [0; aricode_proto::window::MAX_TITLE],
         network_len: 0,
         notice_until: None,
+        said_capture: false,
         heat_due_ms: 0,
         heat_said: false,
         contents: (0..MAX_WINDOWS).map(|_| None).collect(),

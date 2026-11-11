@@ -432,6 +432,33 @@ pub fn set_network(compositor: Handle, text: &str, wait_ms: u64) -> Result<(), W
     main_request_within(compositor, req, wait_ms)
 }
 
+/// Init only, over the compositor's main endpoint, for the owner's shell: the screen
+/// as last composed into `buffer` (a DMA buffer, given up whatever the outcome),
+/// `0x00RRGGBB` rows; its width and height. Waits `send_ms` at most for the
+/// compositor to take the request, and `reply_ms` for its answer.
+pub fn capture(
+    compositor: Handle,
+    buffer: Handle,
+    send_ms: u64,
+    reply_ms: u64,
+) -> Result<(u32, u32), WindowError> {
+    let mut msg = [0u8; Reply::LEN];
+    let len = rpc::call(
+        compositor,
+        &Request::new(Op::Capture).encode(),
+        &[buffer],
+        send_ms,
+        reply_ms,
+        &mut msg,
+    )
+    .map_err(WindowError::Ipc)?;
+    match Reply::decode(&msg[..len]) {
+        Some(r) if r.status == Status::Ok => Ok((r.value as u32, (r.value >> 32) as u32)),
+        Some(r) => Err(WindowError::Status(r.status)),
+        None => Err(WindowError::Ipc(Error::Invalid)),
+    }
+}
+
 fn main_request(compositor: Handle, req: Request) -> Result<(), WindowError> {
     main_request_within(compositor, req, rpc::GRACE_MS)
 }

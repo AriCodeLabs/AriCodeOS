@@ -1228,6 +1228,12 @@ pub mod window {
         /// for a buffer a window already holds. A resize drops it: the program
         /// gives a new one after.
         SecondBuffer = 14,
+        /// Main endpoint only (init, for the owner's shell): the screen as last
+        /// composed goes to the buffer, `0x00RRGGBB` rows without padding;
+        /// handles `[reply, buffer]`, a DMA buffer of at least width x height x 4
+        /// bytes. `Reply::value` is the width, and the height in its high 32
+        /// bits. The desktop says that it was taken.
+        Capture = 15,
     }
 
     /// Request (64 bytes).
@@ -1334,6 +1340,7 @@ pub mod window {
                 12 => Op::MenuAdd,
                 13 => Op::Network,
                 14 => Op::SecondBuffer,
+                15 => Op::Capture,
                 _ => return None,
             };
             let mut req = Self::new(op);
@@ -1626,6 +1633,13 @@ pub mod launch {
         /// offer (ADR 0074 phase C); the reply is an [`Entry`]. The name is
         /// empty.
         pub const LIST: u8 = 4;
+        /// The owner's shell asks for a copy of the screen (the window
+        /// protocol's `Capture`): a second handle follows the reply endpoint,
+        /// the DMA buffer it goes to, which the compositor checks holds the
+        /// screen. Only on the shells' endpoints, never the launcher's; the
+        /// reply's `value` is the width, and the height in its high 32 bits. The
+        /// name is empty and `arg` 0.
+        pub const SCREEN: u8 = 8;
 
         /// `None` if the name does not fit.
         pub fn new(name: &str, arg: u64) -> Option<Self> {
@@ -1650,6 +1664,20 @@ pub mod launch {
                 name_len: 0,
                 flags: Self::LIST,
             }
+        }
+
+        /// The request for a copy of the screen (`SCREEN`).
+        pub fn screen() -> Self {
+            Self {
+                arg: 0,
+                name: [0; MAX_NAME],
+                name_len: 0,
+                flags: Self::SCREEN,
+            }
+        }
+
+        pub fn is_screen(&self) -> bool {
+            self.flags & Self::SCREEN != 0
         }
 
         pub fn is_list(&self) -> bool {
@@ -2052,6 +2080,9 @@ mod tests {
         let req = Request::decode(&Request::list(3).encode()).unwrap();
         assert!(req.is_list() && !req.is_detached() && req.arg == 3);
         assert_eq!(req.name_str(), "");
+        let screen = Request::decode(&Request::screen().encode()).unwrap();
+        assert!(screen.is_screen() && !screen.is_list() && screen.arg == 0);
+        assert_eq!(screen.flags, Request::SCREEN);
         let e = Entry::decode(&Entry::named("editor").unwrap().encode()).unwrap();
         assert_eq!((e.status, e.name_str()), (Status::Ok, "editor"));
         let end = Entry::decode(&Entry::status(Status::NotFound).encode()).unwrap();
@@ -2098,7 +2129,7 @@ mod tests {
         let d = Request::decode(&r.encode()).unwrap();
         assert_eq!(d, r);
         assert_eq!(d.title_str(), "Demo A");
-        for op in [Op::Attach, Op::Detach] {
+        for op in [Op::Attach, Op::Detach, Op::Capture] {
             let mut s = Request::new(op);
             s.window = 0x0102_0003;
             assert_eq!(Request::decode(&s.encode()), Some(s));
