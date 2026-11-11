@@ -207,6 +207,22 @@ pub fn set_affinity(tid: Tid, cpu: Option<usize>) -> Result<(), aricode_sched::S
     with(|s| s.policy.set_affinity(tid, cpu))
 }
 
+/// Moves the calling thread to CPU `target` and keeps it there (the
+/// power-off, `arch::x86_64::power::move_to_poweroff_cpu`): pinned, then
+/// yielding until that CPU picks it up at its next switch, within its next
+/// tick (every CPU ticks; an idle one looks for ready threads on each).
+/// With interrupts on.
+pub fn move_current_to(target: usize) -> Result<(), &'static str> {
+    if target >= cpu::MAX_CPUS || !cpu::slot(target).is_online() {
+        return Err("is not online");
+    }
+    set_affinity(current_tid(), Some(target)).map_err(|_| "cannot be chosen")?;
+    while cpu::id() as usize != target {
+        yield_now();
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct SchedStats {
     pub switches: u64,

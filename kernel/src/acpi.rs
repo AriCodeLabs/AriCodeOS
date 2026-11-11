@@ -119,9 +119,13 @@ pub fn init(info: &BootInfo) {
             acpi.ids.extend(ssdt);
         }
         match acpi.s5 {
+            Some((a, b)) if f.hw_reduced() => info!(
+                "acpi: power-off through S5 (SLP_TYP {a}/{b}, hardware-reduced: sleep control {:#x}, status {:#x})",
+                f.sleep_control.address, f.sleep_status.address
+            ),
             Some((a, b)) => info!(
-                "acpi: power-off through S5 (SLP_TYP {a}/{b}, PM1a {:#x}, PM1b {:#x})",
-                f.pm1a_cnt, f.pm1b_cnt
+                "acpi: power-off through S5 (SLP_TYP {a}/{b}, PM1a cnt {}, PM1b cnt {}, PM1a evt {}, GPE0 {}, GPE1 {}; FADT rev {}.{}, {} bytes)",
+                f.pm1a_cnt, f.pm1b_cnt, f.pm1a_evt, f.gpe0, f.gpe1, f.revision, f.minor_revision, f.length
             ),
             None => warn!("acpi: no \\_S5_ package; shutdown will only halt the CPU"),
         }

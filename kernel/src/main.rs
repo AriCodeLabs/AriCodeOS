@@ -84,6 +84,12 @@ pub unsafe extern "C" fn kernel_entry(boot_info: *const BootInfo) -> ! {
     let cmdline = CmdLine::new(unsafe { info.cmdline() });
     QEMU_EXIT.store(cmdline.has(keys::QEMU_EXIT), Ordering::Relaxed);
     POWEROFF_IGNORED.store(cmdline.has(keys::POWEROFF_IGNORED), Ordering::Relaxed);
+    let number = |key: &str| cmdline.get(key).and_then(|v| v.parse().ok());
+    arch::x86_64::power::configure(
+        number(keys::POWEROFF_CPU).map(|c: u64| c as usize),
+        number(keys::POWEROFF_WAIT_MS),
+        number(keys::POWEROFF_FROM).map(|c: u64| c as usize),
+    );
 
     framebuffer::set_info(info.framebuffer, info.video());
     // With `gui` the screen belongs to the user compositor: the kernel only
@@ -579,22 +585,25 @@ fn run_user_program(name: &str) {
 /// (interrupts are off: no clock); well over a second on any machine.
 const HALT_WAIT_SPINS: u64 = 200_000_000;
 
-/// Orderly shutdown requested from user space (`system_power`): with
-/// `qemu_exit` it terminates QEMU successfully; otherwise it powers the
-/// machine off through ACPI S5 and, if the firmware does not cooperate,
-/// halts.
+/// Orderly shutdown requested from user space (`system_power`) or by the
+/// thermal watch: with `qemu_exit` it terminates QEMU successfully;
+/// otherwise it powers the machine off through ACPI S5 and, if the firmware
+/// does not cooperate, halts.
 ///
-/// Interrupts go off and the other CPUs are halted before the S5 write, as
-/// Linux's `native_machine_shutdown` stops them, so no process runs from
-/// here on (before, the halt left the scheduler running). Linux also moves
-/// to the boot CPU first (`migrate_to_reboot_cpu`), which this does not:
-/// incident 0065 lists it among the differences to study. If the power
-/// stays on, the console takes the screen back from whoever held it (the
-/// desktop) and shows the last line, which says whether the write was
-/// made at all.
+/// The order is the proven one (audit `2026-11-11-acpi-power-off-study`):
+/// first the calling thread moves to the boot CPU (`poweroff.cpu`), as
+/// Linux's `migrate_to_reboot_cpu` and FreeBSD's `kern_reboot` do; then
+/// interrupts go off and the other CPUs are halted, as Linux's
+/// `native_machine_shutdown` stops them, so no process runs from here on;
+/// then the S5 sequence (`power::acpi_poweroff`). If the power stays on,
+/// the console takes the screen back from whoever held it (the desktop)
+/// and shows the last line, which says what was written and with what.
 pub fn shutdown() -> ! {
     println!("ARICODEOS_SHUTDOWN");
     if !QEMU_EXIT.load(Ordering::Relaxed) {
+        use arch::x86_64::power::{self, PowerOff};
+        power::move_to_poweroff_cpu();
+        let prepared = power::prepare();
         // SAFETY: interrupts off for good on this CPU: nothing is scheduled
         // here again, and the halt below then never wakes.
         unsafe { core::arch::asm!("cli", options(nomem, nostack)) };
@@ -608,33 +617,39 @@ pub fn shutdown() -> ! {
                 "not every other CPU halted in time"
             }
         );
-        use arch::x86_64::power::PowerOff;
         let screen = framebuffer::current();
         let off = "halting (it is safe to switch off)";
-        if POWEROFF_IGNORED.load(Ordering::Relaxed) {
-            console::last_words(
+        let cpu = cpu::id();
+        match power::acpi_poweroff(&prepared, !POWEROFF_IGNORED.load(Ordering::Relaxed)) {
+            PowerOff::NoFadt => console::last_words(
                 screen,
-                format_args!("AriCodeOS: poweroff_ignored: the S5 write was skipped; {off}"),
-            );
-        } else {
-            match arch::x86_64::power::acpi_poweroff() {
-                PowerOff::NoS5 => console::last_words(
-                    screen,
-                    format_args!("AriCodeOS: no ACPI power-off here (no FADT or \\_S5_); {off}"),
+                format_args!("AriCodeOS: no ACPI power-off here (no valid FADT); {off}"),
+            ),
+            PowerOff::NoS5 => console::last_words(
+                screen,
+                format_args!(
+                    "AriCodeOS: no ACPI power-off here (no \\_S5_ in the DSDT or SSDTs); {off}"
                 ),
-                PowerOff::NoPm1a(at) => console::last_words(
+            ),
+            PowerOff::Refused(why) => console::last_words(
+                screen,
+                format_args!("AriCodeOS: no ACPI power-off here ({why}); {off}"),
+            ),
+            PowerOff::Skipped(done) => {
+                println!("AriCodeOS: power-off prepared on CPU {cpu}: {done}");
+                console::last_words(
                     screen,
-                    format_args!("AriCodeOS: no ACPI power-off here (PM1a control block {at:#x}); {off}"),
+                    format_args!("AriCodeOS: poweroff_ignored: the S5 write was skipped; {off}"),
+                )
+            }
+            PowerOff::Ignored(done) => console::last_words(
+                screen,
+                format_args!(
+                    "AriCodeOS: ACPI power-off had no effect (on CPU {cpu}; {done}; {}); {off}",
+                    prepared.smi
                 ),
-                PowerOff::Ignored { pm1a, pm1b, typ_a, typ_b, sci_en } => console::last_words(
-                    screen,
-                    format_args!(
-                        "AriCodeOS: ACPI power-off had no effect (S5 type {typ_a}/{typ_b} written to PM1a {pm1a:#x}, PM1b {pm1b:#x}, SCI_EN {}); {off}",
-                        sci_en as u8
-                    ),
-                ),
-            };
-        }
+            ),
+        };
     }
     finish(qemu::ExitCode::Success)
 }

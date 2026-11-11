@@ -8,6 +8,11 @@
 
 extern crate alloc;
 
+pub mod fadt;
+pub mod sleep;
+
+pub use fadt::{parse_fadt, Fadt};
+
 use alloc::vec::Vec;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -418,50 +423,6 @@ impl Dmar {
     }
 }
 
-/// What the kernel needs from the FADT (`FACP`) to power off through S5.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Fadt {
-    /// Physical address of the DSDT (`X_DSDT` when present and non-zero).
-    pub dsdt: u64,
-    /// Port of the SMI command register (0 if the system is ACPI-only).
-    pub smi_cmd: u32,
-    /// Value written to `smi_cmd` to switch the firmware to ACPI mode.
-    pub acpi_enable: u8,
-    /// I/O ports of the PM1a/PM1b control blocks (0 if absent).
-    pub pm1a_cnt: u32,
-    pub pm1b_cnt: u32,
-}
-
-/// Parses the fields of the FADT used for S5 (ACPI 6.x, table 5.9).
-pub fn parse_fadt(table: &[u8]) -> Result<Fadt, AcpiError> {
-    let h = validate_table(table, b"FACP")?;
-    let len = (h.length as usize).min(table.len());
-    let u32_at = |o: usize| -> u32 {
-        if o + 4 <= len {
-            u32::from_le_bytes(table[o..o + 4].try_into().unwrap())
-        } else {
-            0
-        }
-    };
-    if len < 72 {
-        return Err(AcpiError::Truncated);
-    }
-    let mut dsdt = u32_at(40) as u64;
-    if len >= 148 {
-        let x = u64::from_le_bytes(table[140..148].try_into().unwrap());
-        if x != 0 {
-            dsdt = x;
-        }
-    }
-    Ok(Fadt {
-        dsdt,
-        smi_cmd: u32_at(48),
-        acpi_enable: table[52],
-        pm1a_cnt: u32_at(64),
-        pm1b_cnt: u32_at(68),
-    })
-}
-
 /// `SLP_TYPa`/`SLP_TYPb` of the `\_S5_` package in a DSDT (or SSDT), found
 /// by scanning the AML for `_S5_` followed by `PackageOp`, as small loaders
 /// do without an AML interpreter. Each value is a byte (`BytePrefix` 0x0A
@@ -657,7 +618,7 @@ pub fn device_ids(aml: &[u8]) -> Vec<DeviceId> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use alloc::vec;
 
@@ -709,40 +670,6 @@ mod tests {
     }
 
     #[test]
-    fn fadt_fields_for_s5() {
-        let mut body = vec![0u8; 244 - 36];
-        let put = |b: &mut Vec<u8>, off: usize, v: &[u8]| {
-            b[off - 36..off - 36 + v.len()].copy_from_slice(v)
-        };
-        put(&mut body, 40, &0x7FE0_0000u32.to_le_bytes());
-        put(&mut body, 48, &0xB2u32.to_le_bytes());
-        put(&mut body, 52, &[0xA0]);
-        put(&mut body, 64, &0x604u32.to_le_bytes());
-        let f = parse_fadt(&table(b"FACP", &body)).unwrap();
-        assert_eq!(
-            f,
-            Fadt {
-                dsdt: 0x7FE0_0000,
-                smi_cmd: 0xB2,
-                acpi_enable: 0xA0,
-                pm1a_cnt: 0x604,
-                pm1b_cnt: 0
-            }
-        );
-        // X_DSDT wins when present.
-        put(&mut body, 140, &0x1_2345_0000u64.to_le_bytes());
-        assert_eq!(
-            parse_fadt(&table(b"FACP", &body)).unwrap().dsdt,
-            0x1_2345_0000
-        );
-        assert_eq!(
-            parse_fadt(&table(b"FACP", &body[..20])),
-            Err(AcpiError::Truncated)
-        );
-        assert!(parse_fadt(&table(b"APIC", &body)).is_err());
-    }
-
-    #[test]
     fn s5_package_variants() {
         // Name (_S5_, Package (4) { 0x05, 0x05, Zero, Zero }) with BytePrefix.
         let aml = [
@@ -774,7 +701,7 @@ mod tests {
         t
     }
 
-    fn table(sig: &[u8; 4], body: &[u8]) -> Vec<u8> {
+    pub(crate) fn table(sig: &[u8; 4], body: &[u8]) -> Vec<u8> {
         let mut t = Vec::new();
         t.extend_from_slice(sig);
         t.extend_from_slice(&((36 + body.len()) as u32).to_le_bytes());

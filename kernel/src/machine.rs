@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Edwin F. Veliz Jaramillo (lynxcraft) and AriCodeOS contributors
 // SPDX-License-Identifier: Apache-2.0
 //! Which machine this is, for `diag` (`sysinfo::MACHINE`): the make and
-//! model from SMBIOS, never its serial, and the device identifiers the ACPI
+//! model from SMBIOS, never its serial, how it powers off (the FADT), and
+//! the device identifiers the ACPI
 //! tables declare, which name devices no bus enumerates (a touchpad on I2C,
 //! its controller). Read only.
 
@@ -54,7 +55,8 @@ pub fn init(info: &BootInfo) {
     *SMBIOS.lock() = found;
 }
 
-/// The report: a `machine` line and `acpi` lines, as `diag` prints them.
+/// The report: a `machine` line, `power` lines (the FADT's power-off facts,
+/// incident 0065) and `acpi` lines, as `diag` prints them.
 pub fn report() -> String {
     let mut out = String::new();
     let entry = *SMBIOS.lock();
@@ -85,6 +87,8 @@ pub fn report() -> String {
             );
         }
     }
+    // Before the device identifiers, which a short buffer may cut.
+    crate::arch::x86_64::power::report(&mut out);
     crate::acpi::with(|a| {
         if a.ids.is_empty() {
             let _ = writeln!(out, "acpi    no device identifiers found");
