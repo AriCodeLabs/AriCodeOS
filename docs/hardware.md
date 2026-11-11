@@ -336,7 +336,13 @@ and always on the USB stick itself or a dedicated USB drive.
   reads the FADT and the `\_S5_` package of the DSDT and logs
   `acpi: power-off through S5 (SLP_TYP a/b, PM1a ..., PM1b ...)`. If the
   firmware ignores the request, the console says
-  `ACPI power-off had no effect; halting (it is safe to switch off)`.
+  `ACPI power-off had no effect (...); halting (it is safe to switch off)`,
+  with what was written, from which CPU and, on the office laptop's Intel
+  500 Series PCH (`8086:a082`), whether the chipset traps the write into the firmware (`SMI on SLP_EN`).
+  `diag` prints the FADT's power-off facts in its `power` lines: send them
+  with any report of a machine that does not power off. `poweroff.wait_ms=N`
+  sets how long each S5 write is given (3000 by default) and `poweroff.cpu=N`
+  the processor that makes it (the boot CPU, 0, by default).
 - The shell edits the line like a terminal: Left/Right, Home/End
   (Ctrl-A/Ctrl-E), insert and delete anywhere (Backspace, Delete), Ctrl-U to
   clear, Up/Down for the history.

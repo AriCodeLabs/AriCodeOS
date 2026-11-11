@@ -1892,6 +1892,19 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
   it, under `gui`) and shows a last line saying whether the S5 write was made
   and with what values (`power::PowerOff`). `poweroff_ignored` (tests only)
   skips the write (scenario `power.poweroff_ignored_desktop`).
+- Since the follow-up study (`docs/audits/2026-11-11-acpi-power-off-study.md`)
+  the power-off follows Linux/ACPICA and FreeBSD: the calling thread moves to
+  the boot CPU first (`scheduler::move_current_to`, `poweroff.cpu`), then
+  interrupts off and the other CPUs halted, then
+  `aricode_acpi::sleep::enter_s5` on the FADT `aricode_acpi::fadt` parses
+  (legacy and `X_` blocks, HW-reduced flag, sleep control/status registers):
+  `ACPI_ENABLE` if needed, `WAK_STS` cleared, GPEs disabled, all status
+  cleared, `SLP_TYP` then `SLP_TYP | SLP_EN` (PM1a before PM1b), a second
+  write after `poweroff.wait_ms`. Port I/O only; a refusal writes nothing and
+  is named in the last line. `poweroff_ignored` now skips only the `SLP_EN`
+  writes; `poweroff_from=N` (tests only) starts the call on CPU N (scenario
+  `power.acpi_shutdown_from_ap`). `diag` prints the FADT's facts and the
+  registers' state in `power` lines (`power::report`).
 - `aricode-lineedit`: the shell's line editor (cursor movement, insert and
   delete anywhere, Home/End, Ctrl-A/E/U, history), redrawing with plain text
   and backspace only; the framebuffer console's backspace wraps to the

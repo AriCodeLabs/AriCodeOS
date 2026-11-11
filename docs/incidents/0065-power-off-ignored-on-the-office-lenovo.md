@@ -84,12 +84,60 @@ Left as it is: if the compositor's CPU is halted between the two halves of
 `screen_take`, the surface it was taking is on that CPU's stack and the last lines go to
 serial only (no hang). The window is a few instructions at the desktop's start.
 
+## What changed (defect 1, branch `fix/acpi-power-off`)
+
+The study (`docs/audits/2026-11-11-acpi-power-off-study.md`, skill
+`aricodeos-device-study`) compared the sequence with Linux/ACPICA, FreeBSD,
+Haiku and the firmware side (coreboot's SMI handler), read the office
+machine's AML and the Intel 500 Series PCH datasheet. `\_S5` there is
+`{7, 0}` (found correctly by `find_s5`) and `\_PTS(5)` holds nothing that
+gates S5 (port-80 debug writes, the TPM's memory-overwrite SMI, Type-C exits
+from a D3cold AriCodeOS never enters). The sequence now follows the proven
+one:
+
+- `shutdown` first moves the calling thread to the boot CPU
+  (`scheduler::move_current_to`; `poweroff.cpu=N` chooses another), then
+  turns interrupts off and halts the others, as Linux and FreeBSD do. The
+  FADT, `\_S5_` and the chipset facts are gathered before the halt, so no
+  lock a halted CPU might hold is taken afterwards.
+- `aricode_acpi::fadt` parses the whole FADT: revision, flags
+  (`HW_REDUCED_ACPI`), PM1 event and control blocks and GPE0/GPE1 in their
+  legacy and `X_` (GAS) forms, the `X_` one winning as the specification
+  says, and the ACPI 5.0 sleep control/status registers. Short or corrupt
+  tables are refused.
+- `aricode_acpi::sleep::enter_s5`: `ACPI_ENABLE` if `SCI_EN` is clear
+  (bounded 3 s), `WAK_STS` cleared, every GPE disabled, every fixed and GPE
+  status bit cleared, `SLP_TYP` written alone and then `SLP_TYP | SLP_EN`,
+  PM1a before PM1b; after `poweroff.wait_ms` (3000 by default) one more
+  write, then the report. Hardware-reduced FADTs use the sleep control
+  register. Blocks outside I/O space are refused with the reason; a refusal
+  writes nothing.
+- The last line says the CPU, the values and registers written, `SCI_EN`
+  before and after, what the PM1 status and GPE steps did, how many
+  `SLP_EN` writes were made and, on the office machine's chipset
+  (`8086:a082`), whether the PCH traps `SLP_EN` into SMM
+  (`SMI_EN.SMI_ON_SLP_EN`, datasheet 631120-002 4.2.5).
+- `diag` has `power` lines: FADT revision and flags, SCI IRQ, `SMI_CMD`,
+  `\_S5_` values, every block with its form and length, and the registers
+  now (PM1a control and `SCI_EN`, PM1 status and enable, GPE bits enabled
+  and set, `SMI on SLP_EN`).
+- Tests: host tests for both modules; `power.acpi_shutdown_from_ap` (4
+  CPUs, `poweroff_from=3`, tests only) checks the move to the boot CPU and
+  the power-off; `power.poweroff_ignored_desktop` now runs the whole
+  sequence without `SLP_EN`; `diag.machine` checks the `power` lines.
+
+Not done, and why: no AML interpreter (`\_PTS` checked by hand for this
+firmware), no device quiesce (the veterans' quirks for this family are
+about waking right after S5, not an ignored one), no EFI `ResetSystem`
+(the kernel cannot call runtime services; Linux would not use it here
+either). See the study's sections 5 and 6.
+
 ## Next (defect 1)
 
-- With this build on the stick, the owner runs `shutdown` on the office machine and
-  photographs the last line: it says whether the write was made, and with what.
-- The `acpi.bin` saved on the office machine (DSDT and SSDTs) is decompiled with `iasl` on
-  the build host: `\_S5_`, `\_PTS`, `\_TTS` and what they touch (EC fields, SMI ports,
-  GPIO) say what this firmware expects before the write.
-- The fix follows the study (skill `aricodeos-device-study`), compared with Linux,
-  FreeBSD and Haiku, and is tested on the ASUS before the office machine.
+- With a build of this branch on the stick, the owner runs `diag` on the
+  office machine (the `power` lines) and then `shutdown`. If it powers off,
+  the incident closes. If not, the photo of the last line says what was
+  written, from which CPU, whether the PCH traps `SLP_EN`, and the `diag`
+  lines give the FADT's blocks: the next step (device quiesce, or the
+  firmware's SMI expectations) starts from them.
+- The fix is tested on the ASUS before the office machine.
