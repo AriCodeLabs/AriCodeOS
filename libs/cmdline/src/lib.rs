@@ -181,6 +181,12 @@ pub mod keys {
     /// between two reads of a client would (the installer's copy check,
     /// ADR 0072).
     pub const FSD_MUTATE: &str = "fsd_mutate";
+    /// `usb.hotplug=debounce:MS,recovery:MS,attempts:N,retry:MS,resets:N`
+    /// (any of them): usbd's hot-plug timings and counts instead of its
+    /// defaults (100, 50, 3, 200, 5), each within the bounds of
+    /// `aricode_xhci::hotplug::Policy::parse` (ADR 0087). A value it
+    /// refuses is said on the console and the defaults stay.
+    pub const USB_HOTPLUG: &str = "usb.hotplug";
     /// `smp=off`: do not start the application processors (real hardware).
     pub const SMP: &str = "smp";
     /// `iommu=off`: do not enable DMA translation (real hardware).

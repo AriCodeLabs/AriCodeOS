@@ -9,7 +9,7 @@
 //! and the clock and passes them in, with its timings and counts as a
 //! [`Policy`].
 
-use crate::op;
+use crate::{op, speed};
 
 /// Every timing and count of the hot-plug path, in one place: the driver
 /// passes it in rather than fixing them (the owner's no-hardcoding rule).
@@ -23,10 +23,15 @@ pub struct Policy {
     /// Linux waits 10 + 40 ("plus some extra", `hub_port_reset`) for the
     /// devices that need more, and so does this default.
     pub reset_recovery_ms: u64,
-    /// Enumeration attempts on one connection (Linux 4, Haiku 2).
+    /// Enumeration attempts on one connection (Linux 4, Haiku 2); also
+    /// how many times in a row a device may leave or change during its
+    /// enumeration before its port is left alone (`PortBounces`).
     pub attempts: u8,
     /// Pause before the next attempt: this times the attempts that failed.
     pub retry_ms: u64,
+    /// Port resets of one attempt when a USB2 connection changes during the
+    /// reset (Linux `PORT_RESET_TRIES` 5, `hub_port_wait_reset` -EAGAIN).
+    pub reset_tries: u8,
 }
 
 impl Policy {
@@ -35,7 +40,36 @@ impl Policy {
         reset_recovery_ms: 50,
         attempts: 3,
         retry_ms: 200,
+        reset_tries: 5,
     };
+
+    /// The policy `text` asks for, from the defaults: a comma-separated
+    /// list of `debounce:MS`, `recovery:MS`, `attempts:N`, `retry:MS`,
+    /// `resets:N` (the value of the boot key `usb.hotplug`). Each value is
+    /// bounded where the specifications or a working driver put it: the
+    /// debounce at least 100 ms (USB 2.0 7.1.7.3) and at most 2000 (Linux
+    /// gives up then), the reset recovery 10 ms (TRSTRCY) to 400 (it comes
+    /// out of a reset's 500 ms), 1 to 10 attempts and resets, a retry pause
+    /// up to 5000 ms. Anything else is refused with the reason.
+    pub fn parse(text: &str) -> Result<Self, &'static str> {
+        let mut p = Self::DEFAULT;
+        for item in text.split(',').filter(|i| !i.is_empty()) {
+            let (name, value) = item.split_once(':').ok_or("an item is not NAME:VALUE")?;
+            let value: u64 = value.parse().map_err(|_| "a value is not a number")?;
+            let within = |lo: u64, hi: u64, why: &'static str| {
+                (lo..=hi).contains(&value).then_some(value).ok_or(why)
+            };
+            match name {
+                "debounce" => p.debounce_ms = within(100, 2000, "debounce: 100 to 2000 ms")?,
+                "recovery" => p.reset_recovery_ms = within(10, 400, "recovery: 10 to 400 ms")?,
+                "attempts" => p.attempts = within(1, 10, "attempts: 1 to 10")? as u8,
+                "retry" => p.retry_ms = within(0, 5000, "retry: 0 to 5000 ms")?,
+                "resets" => p.reset_tries = within(1, 10, "resets: 1 to 10")? as u8,
+                _ => return Err("unknown item (debounce, recovery, attempts, retry, resets)"),
+            }
+        }
+        Ok(p)
+    }
 
     /// After `failed` attempts on one connection, at `now`: when to try
     /// again, or `None` once the attempts are spent.
@@ -91,6 +125,77 @@ pub fn port_action(portsc: u32, tracked: bool) -> PortAction {
     PortAction {
         detach: tracked && (connect_change || disabled_under),
         debounce: connected && (connect_change || disabled_under),
+    }
+}
+
+/// What a port's status says after a reset the driver issued.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AfterReset {
+    /// The reset is in progress (PR set), the port is not enabled yet, or
+    /// the connection is not back yet (some chips take a moment after the
+    /// reset, Linux `hub_port_wait_reset`): wait, up to the reset's time.
+    Waiting,
+    /// Reset done, the port enabled and still connected: go on.
+    Ready,
+    /// Reset again: a USB2 connection changed during the reset while a
+    /// device is still connected (Linux retries it, -EAGAIN), or the link
+    /// still needs a Warm Reset (`port_reset` picks it next).
+    Again,
+}
+
+/// `portsc` read after a reset the driver issued. A connect change on a
+/// USB3 port is not a reason to reset again: a USB3 connection may bounce
+/// across warm resets while the device connects fine (Linux ignores it
+/// likewise); the caller clears it with the other change bits.
+pub fn after_reset(portsc: u32) -> AfterReset {
+    if portsc & op::PORTSC_RESET != 0 || portsc & (op::PORTSC_CCS | op::PORTSC_CAS) == 0 {
+        return AfterReset::Waiting;
+    }
+    if port_reset(portsc) == PortReset::Warm {
+        return AfterReset::Again;
+    }
+    let usb3 = op::port_speed(portsc) >= speed::SUPER;
+    if portsc & op::PORTSC_CSC != 0 && !usb3 {
+        return AfterReset::Again;
+    }
+    if portsc & op::PORTSC_PED == 0 {
+        return AfterReset::Waiting;
+    }
+    AfterReset::Ready
+}
+
+/// How many times in a row a device left or changed while it was being
+/// enumerated, per root port. A port that reaches the limit is left alone
+/// until it is seen empty (`clear`), so a device that keeps bouncing does
+/// not keep the idle loop enumerating it.
+#[derive(Debug, Clone, Copy)]
+pub struct PortBounces {
+    counts: [u8; 256],
+}
+
+impl Default for PortBounces {
+    fn default() -> Self {
+        Self { counts: [0; 256] }
+    }
+}
+
+impl PortBounces {
+    /// One more change during an enumeration on `port`: true while the
+    /// port may still be enumerated (fewer than `limit` in a row).
+    pub fn note(&mut self, port: u8, limit: u8) -> bool {
+        let c = &mut self.counts[port as usize];
+        *c = c.saturating_add(1);
+        *c < limit
+    }
+
+    /// Whether `port` reached `limit`.
+    pub fn exhausted(&self, port: u8, limit: u8) -> bool {
+        self.counts[port as usize] >= limit
+    }
+
+    /// `port` was seen empty, or its device was enumerated: counted afresh.
+    pub fn clear(&mut self, port: u8) {
+        self.counts[port as usize] = 0;
     }
 }
 
@@ -433,6 +538,86 @@ mod tests {
         assert_eq!(p.retry_at(1000, 3), None);
         let once = Policy { attempts: 1, ..p };
         assert_eq!(once.retry_at(1000, 1), None);
+    }
+
+    #[test]
+    fn a_reset_is_done_only_when_the_port_is_enabled_on_the_same_connection() {
+        let hs = 3u32 << 10;
+        let ss = 4u32 << 10;
+        let base = PORTSC_POWER | PORTSC_CCS;
+        assert_eq!(after_reset(base | PORTSC_RESET | hs), AfterReset::Waiting);
+        assert_eq!(
+            after_reset(base | hs),
+            AfterReset::Waiting,
+            "not enabled yet"
+        );
+        assert_eq!(
+            after_reset(PORTSC_POWER | hs),
+            AfterReset::Waiting,
+            "connection not back yet"
+        );
+        assert_eq!(after_reset(base | PORTSC_PED | hs), AfterReset::Ready);
+        // USB2: a connect change during the reset, still connected: again.
+        assert_eq!(
+            after_reset(base | PORTSC_PED | PORTSC_CSC | hs),
+            AfterReset::Again
+        );
+        // USB3: the connection may bounce across a warm reset: ignored.
+        assert_eq!(
+            after_reset(base | PORTSC_PED | PORTSC_CSC | ss),
+            AfterReset::Ready
+        );
+        // A USB3 link still stuck where only a Warm Reset helps.
+        assert_eq!(
+            after_reset(base | pls(op::PLS_INACTIVE) | ss),
+            AfterReset::Again
+        );
+    }
+
+    #[test]
+    fn a_port_whose_device_keeps_changing_is_left_alone_until_empty() {
+        let mut b = PortBounces::default();
+        assert!(b.note(5, 3));
+        assert!(b.note(5, 3));
+        assert!(!b.exhausted(5, 3));
+        assert!(!b.note(5, 3), "the third one in a row reaches the limit");
+        assert!(b.exhausted(5, 3));
+        assert!(!b.exhausted(6, 3), "per port");
+        b.clear(5);
+        assert!(!b.exhausted(5, 3));
+        assert!(b.note(255, 3));
+    }
+
+    #[test]
+    fn the_policy_is_tuned_within_its_bounds() {
+        let p = Policy::parse("debounce:150,recovery:20,attempts:4,retry:0,resets:2").unwrap();
+        assert_eq!(
+            p,
+            Policy {
+                debounce_ms: 150,
+                reset_recovery_ms: 20,
+                attempts: 4,
+                retry_ms: 0,
+                reset_tries: 2
+            }
+        );
+        assert_eq!(Policy::parse("").unwrap(), Policy::DEFAULT);
+        assert_eq!(Policy::parse("attempts:2").unwrap().debounce_ms, 100);
+        for bad in [
+            "debounce:99",
+            "debounce:2001",
+            "recovery:9",
+            "recovery:401",
+            "attempts:0",
+            "attempts:11",
+            "resets:0",
+            "retry:5001",
+            "debounce",
+            "debounce:x",
+            "speed:3",
+        ] {
+            assert!(Policy::parse(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

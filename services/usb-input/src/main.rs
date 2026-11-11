@@ -60,7 +60,9 @@ use aricode_usb_storage::{
     after_transfer_failure, bytes_not_moved, check_csw_transfer, fault, scsi, Cbw, Cdb, Csw,
     CswError, CswStatus, Next, Stage, CSW_TEXT_LEN,
 };
-use aricode_xhci::hotplug::{self, PendingPort, PendingPorts, Policy, PortReset, Spares};
+use aricode_xhci::hotplug::{
+    self, AfterReset, PendingPort, PendingPorts, Policy, PortBounces, PortReset, Spares,
+};
 use aricode_xhci::{
     bulk_trbs, cap, completion, dci, endpoint_recovery, endpoint_status, ep_state, erst_entry, op,
     parse_storage_interface, rt, slot_reuse, slot_state, slot_status, soft_retry_applies, speed,
@@ -86,6 +88,14 @@ const SPARE_SLOTS: usize = MAX_DEVICES + 1;
 /// reset recovery, attempts, retry pause) are `aricode_xhci::hotplug::Policy`
 /// (`Controller::hotplug`), whose defaults say where each comes from.
 const PENDING_PORTS: usize = 16;
+/// Disable Slot commands that may wait for the one outstanding: one per
+/// device entry and one for a slot a late Enable Slot gave.
+const WAITING_DISABLES: usize = MAX_DEVICES + 1;
+/// A Disable Slot with no completion after this long is given up: its
+/// slot's memory and buffers are kept for good, never reused, and the
+/// commands behind it go ahead (Linux gives a command 5 s,
+/// `XHCI_CMD_DEFAULT_TIMEOUT`).
+const DISABLE_SLOT_GIVE_UP_MS: u64 = 5000;
 /// Bound of one enumeration of a device plugged in after boot, run from
 /// the idle loop (a HID takes a few control transfers: well under it).
 const ATTACH_STEP_MS: u64 = MAINTENANCE_STEP_MS;
@@ -100,10 +110,13 @@ const STORAGE_PRESENT: &str = "a storage device is already present; ignoring";
 const STORAGE_AFTER_BOOT: &str =
     "USB storage plugged in after boot is not served (init chose its disks at boot)";
 const TOO_MANY_DEVICES: &str = "too many devices";
-/// The connection changed while the enumeration ran (`prepare_port`,
-/// `hotplug::still_attached`): the port is debounced again for the device
-/// there now.
+/// The device left or changed while the enumeration ran
+/// (`hotplug::still_attached`): the port is debounced again for the device
+/// there now, `PortBounces` times in a row at most.
 const CONNECTION_CHANGED: &str = "the device on the port changed during its enumeration";
+/// Every port reset of an attempt saw the USB2 connection change
+/// (`reset_port`): an ordinary failure, retried as the `Policy` says.
+const RESET_BOUNCED: &str = "the connection changed at every port reset";
 const FINAL_REFUSALS: [&str; 4] = [
     NO_INTERFACES,
     STORAGE_PRESENT,
@@ -833,9 +846,16 @@ struct Controller {
     /// Disable Slot command TRB issued without a completion yet, and the
     /// slot it disables.
     pending_disable: Option<(u64, u8)>,
+    /// When that command was issued: without a completion within
+    /// `DISABLE_SLOT_GIVE_UP_MS` it is given up (`maintain_storage`).
+    pending_disable_since: u64,
     /// A slot whose Disable Slot was refused for lack of time: the idle
     /// loop issues it before anything else.
     slot_to_disable: Option<u8>,
+    /// Disable Slot commands waiting for the one outstanding: they never
+    /// overlap (a second one would replace the first one's bookkeeping).
+    /// The slot and its memory (`None` for a slot no device entry held).
+    waiting_disables: [Option<(u8, Option<SlotMemory>)>; WAITING_DISABLES],
     /// Client buffers of earlier requests whose TD could not be retired,
     /// kept until the outstanding Disable Slot completes: released when it
     /// released the slot, kept for good otherwise (incident 0017). Kept
@@ -881,8 +901,15 @@ struct Controller {
     /// Root ports with a new connection waiting for its debounce (USB 2.0
     /// 7.1.7.3), or for another enumeration attempt.
     pending_ports: PendingPorts<PENDING_PORTS>,
-    /// Hot-plug timings and counts (debounce, reset recovery, attempts).
+    /// Hot-plug timings and counts (debounce, reset recovery, attempts,
+    /// resets): `Policy::DEFAULT`, or the boot key `usb.hotplug`.
     hotplug: Policy,
+    /// Devices that changed during their enumeration, per port in a row.
+    bounces: PortBounces,
+    /// The slot of a device a failed report found unplugged although no
+    /// change was seen for its port (`ended_by_unplug`): `dispatch`
+    /// releases its held keys and buttons once the event is handled.
+    unplug_noticed: Option<u8>,
     /// Enable Slot commands issued that had no completion by their
     /// deadline: a late Success hands out a slot nobody uses, which is
     /// disabled again (`dispatch`).
@@ -1068,7 +1095,9 @@ impl Controller {
             inject_now: None,
             request_buffer: BufferFate::Release,
             pending_disable: None,
+            pending_disable_since: 0,
             slot_to_disable: None,
+            waiting_disables: [None; WAITING_DISABLES],
             owned: DeviceOwned::new(),
             owned_slot: None,
             disable_unreleased: false,
@@ -1096,7 +1125,9 @@ impl Controller {
             spare_slots: Spares::default(),
             pending_ports: PendingPorts::default(),
             hotplug: Policy::DEFAULT,
+            bounces: PortBounces::default(),
             late_enable: None,
+            unplug_noticed: None,
             booted: false,
             spare_storage: None,
             desc_buf,
@@ -1286,6 +1317,17 @@ impl Controller {
                 if !self.handle_transfer_event(ev) && !self.stray_on_hid(ev) {
                     self.stray_transfer(ev);
                 }
+                // A device found unplugged by a failed report lets go of
+                // what it held now, not only when it is detached.
+                if let Some(slot) = self.unplug_noticed.take() {
+                    if let Some(index) = self
+                        .devices
+                        .iter()
+                        .position(|d| d.as_ref().is_some_and(|d| d.slot == slot))
+                    {
+                        self.forget_inputs(index);
+                    }
+                }
             }
             trb_type::PORT_STATUS_CHANGE => self.port_change(ev.port_id()),
             trb_type::COMMAND_COMPLETION => {
@@ -1315,21 +1357,46 @@ impl Controller {
 
     /// A late completion (`code`, `slot`) of an Enable Slot whose
     /// enumeration had given up on it: a slot it enabled is used by nobody
-    /// and is disabled from the idle loop (`slot_to_disable`), unless
-    /// another one already waits there, when it stays enabled (printed and
-    /// recorded).
+    /// and waits to be disabled from the idle loop (`queue_disable`).
     fn late_slot(&mut self, code: u8, slot: u8) {
         if code != completion::SUCCESS || slot == 0 || slot > self.params.max_slots {
             return;
         }
         sys::print(b"usb-input: a late Enable Slot gave slot ");
         num(slot as u64);
-        if self.slot_to_disable.is_none() {
-            self.slot_to_disable = Some(slot);
-            sys::print(b", which nothing uses: it is disabled from the idle loop\n");
-        } else {
-            sys::print(b", which nothing uses; another Disable Slot waits, so it stays enabled\n");
-            record("usb slot leaked", slot as u64);
+        sys::print(b", which nothing uses: it is disabled from the idle loop\n");
+        self.queue_disable(slot, None);
+    }
+
+    /// A Disable Slot for `slot` (with its memory `mem`) waits behind the
+    /// one outstanding; the idle loop issues it next (`maintain_storage`).
+    /// With no room left the slot stays enabled and its memory and buffers
+    /// are kept for good (printed and recorded).
+    fn queue_disable(&mut self, slot: u8, mem: Option<SlotMemory>) {
+        sys::print(b"usb-input: Disable Slot of slot ");
+        num(slot as u64);
+        match self.waiting_disables.iter_mut().find(|w| w.is_none()) {
+            Some(w) => {
+                *w = Some((slot, mem));
+                sys::print(b" waits for the one outstanding\n");
+            }
+            None => {
+                sys::print(b": too many waiting; the slot stays enabled\n");
+                record("usb slot leaked", slot as u64);
+                if let Some(mem) = mem {
+                    self.abandon_slot_memory(
+                        &mem,
+                        b"its Disable Slot could not wait",
+                        completion::NO_EVENT,
+                    );
+                }
+                if self.owned_slot == Some(slot) {
+                    self.settle_owned(false, completion::NO_EVENT);
+                }
+                if self.request_buffer == BufferFate::Hold(slot) {
+                    self.request_buffer = BufferFate::ForGood;
+                }
+            }
         }
     }
 
@@ -1455,26 +1522,19 @@ impl Controller {
     /// a retried command): a completion decides the fate of the client
     /// buffers kept for the slot and of its memory (`slot_disabled`); a
     /// pending one is matched later in `dispatch`; a refused one is retried
-    /// by the idle loop first thing.
+    /// by the idle loop first thing. While another slot's Disable Slot is
+    /// outstanding this one waits behind it (`queue_disable`) and the
+    /// result is `Refused`: they never overlap.
     fn issue_disable_slot(&mut self, slot: u8, mem: Option<SlotMemory>, deadline: u64) -> Issued {
+        let other_outstanding = self.pending_disable.is_some()
+            || self.slot_to_disable.is_some_and(|s| s != slot)
+            || self.disabling.as_ref().is_some_and(|(s, _)| *s != slot);
+        if other_outstanding {
+            self.queue_disable(slot, mem);
+            return Issued::Refused;
+        }
         if let Some(mem) = mem {
-            if let Some((other, other_mem)) = self.disabling.replace((slot, mem)) {
-                sys::print(b"usb-input: Disable Slot of slot ");
-                num(other as u64);
-                sys::print(b" still outstanding\n");
-                self.abandon_slot_memory(
-                    &other_mem,
-                    b"another Disable Slot is outstanding",
-                    completion::NO_EVENT,
-                );
-                // Nothing will confirm that slot released either.
-                if self.owned_slot == Some(other) {
-                    self.settle_owned(false, completion::NO_EVENT);
-                }
-                if self.request_buffer == BufferFate::Hold(other) {
-                    self.request_buffer = BufferFate::ForGood;
-                }
-            }
+            self.disabling = Some((slot, mem));
         }
         let trb = Trb::disable_slot(slot);
         let mut issued = match step_deadline(self.clock.now(), deadline, COMMAND_TIMEOUT_MS) {
@@ -1489,7 +1549,10 @@ impl Controller {
         self.report_command(b"Disable Slot", trb, issued);
         match issued {
             Issued::Done(code, _) => self.slot_disabled(slot, code),
-            Issued::Pending(phys) => self.pending_disable = Some((phys, slot)),
+            Issued::Pending(phys) => {
+                self.pending_disable = Some((phys, slot));
+                self.pending_disable_since = self.clock.now();
+            }
             Issued::Refused => self.slot_to_disable = Some(slot),
         }
         issued
@@ -1552,6 +1615,9 @@ impl Controller {
             (sc & op::PORTSC_POWER) | (sc & op::PORTSC_CHANGE_BITS),
         );
         let now = self.clock.now();
+        if sc & (op::PORTSC_CCS | op::PORTSC_CAS) == 0 {
+            self.bounces.clear(port);
+        }
         let hid = self.hid_device_on(port);
         let action = hotplug::port_action(sc, hid.is_some());
         // Every entry on the port, one still being enumerated included
@@ -1655,14 +1721,23 @@ impl Controller {
                         {
                             return Ok(data_residual)
                         }
-                        // A short data stage: how much did not arrive. A
-                        // Success that may follow it for the same TRB
-                        // (Panther Point, audit 1 F15) changes nothing.
+                        // A short data stage: how much did not arrive.
                         completion::SHORT_PACKET => {
                             data_residual = ev.residual();
                             continue;
                         }
-                        completion::SUCCESS => continue,
+                        // Some controllers report a short data stage as
+                        // Success with a residual (Etron, ASMedia, VIA,
+                        // Renesas: Linux takes it as short); taken only when
+                        // no Short Packet came first, so the spurious
+                        // Success Panther Point sends after one (audit 1
+                        // F15) changes nothing.
+                        completion::SUCCESS => {
+                            if data.is_some() && ev.parameter == td[1] && data_residual == 0 {
+                                data_residual = ev.residual();
+                            }
+                            continue;
+                        }
                         code => {
                             self.report_control_failure(setup, code, start, Some(ev));
                             self.recover_endpoint(slot_index, 1, code, deadline);
@@ -1703,11 +1778,9 @@ impl Controller {
     /// Resets port `port` if it is not enabled or `force_reset` (a device
     /// that stopped answering: the last resort), clears its change bits and
     /// consumes the Port Status Change events this produced, within
-    /// `deadline`. Returns the port speed (PSIV). After a reset the device
-    /// gets its reset recovery time (USB 2.0 7.1.7.5, `Policy`) before
-    /// anything is sent to it; a connect change during the reset means the
-    /// device on the port is another one: the port is debounced again and
-    /// this enumeration fails (`CONNECTION_CHANGED`).
+    /// `deadline`. Returns the port speed (PSIV). A reset (`reset_port`)
+    /// ends only once the port is enabled on a settled connection and the
+    /// device had its reset recovery time.
     fn prepare_port(
         &mut self,
         port: u8,
@@ -1727,37 +1800,7 @@ impl Controller {
             let Some(reset_deadline) = step_deadline(self.clock.now(), deadline, 500) else {
                 return Err("no time left to reset the port");
             };
-            let keep = sc & op::PORTSC_POWER;
-            // The change bits of the connection being enumerated are
-            // cleared first, so one seen after the reset is new.
-            self.write_portsc(port, keep | (sc & op::PORTSC_CHANGE_BITS));
-            let reset = match hotplug::port_reset(sc) {
-                PortReset::Hot => op::PORTSC_RESET,
-                PortReset::Warm => {
-                    sys::print(b"usb-input: port ");
-                    num(port as u64);
-                    sys::print(b": link in SS.Inactive or Compliance Mode, or cold attach: Warm Port Reset (xHCI 4.19.1.2)\n");
-                    op::PORTSC_WPR
-                }
-            };
-            self.write_portsc(port, keep | reset);
-            // The recovery time comes out of the reset's 500 ms.
-            let enabled_by = reset_deadline.saturating_sub(self.hotplug.reset_recovery_ms);
-            while self.portsc(port) & op::PORTSC_PED == 0 {
-                if self.clock.now() >= enabled_by {
-                    return Err("the port is not enabled after the reset");
-                }
-                let _ = sys::irq_wait(IRQ, 5);
-            }
-            let sc = self.portsc(port);
-            if sc & op::PORTSC_CSC != 0 {
-                self.write_portsc(port, keep | (sc & op::PORTSC_CHANGE_BITS));
-                let now = self.clock.now();
-                self.queue_port(port, now);
-                return Err(CONNECTION_CHANGED);
-            }
-            let recovered = self.after(self.hotplug.reset_recovery_ms);
-            self.wait_until(recovered);
+            self.reset_port(port, reset_deadline)?;
         }
         // Clear the port change bits.
         let sc = self.portsc(port);
@@ -1771,6 +1814,75 @@ impl Controller {
             self.dispatch(ev);
         }
         Ok(spd)
+    }
+
+    /// Port reset of `port` by `reset_deadline`, its reset recovery
+    /// included. Each try clears the change bits seen so far, writes PR (or
+    /// WPR, `hotplug::port_reset`) and waits until `hotplug::after_reset`
+    /// says the reset is over: PR clear, the port enabled and connected.
+    /// The device then gets its recovery time (USB 2.0 7.1.7.5, `Policy`),
+    /// cut short only by the deadline. A USB2 connection that changed
+    /// during the reset or the recovery while a device is still there is
+    /// reset again, up to `Policy::reset_tries` (Linux
+    /// `hub_port_wait_reset`); a USB3 one may bounce across a warm reset
+    /// and is not (its change bit goes with the others). Fails when the
+    /// port is not enabled in time, or the connection changed at every
+    /// try; the boot and storage paths count such a failure like any other.
+    fn reset_port(&mut self, port: u8, reset_deadline: u64) -> Result<(), &'static str> {
+        let recovery = self.hotplug.reset_recovery_ms;
+        // The recovery time comes out of the reset's 500 ms.
+        let enabled_by = reset_deadline.saturating_sub(recovery);
+        let mut tries = 0u8;
+        loop {
+            tries += 1;
+            let sc = self.portsc(port);
+            let keep = sc & op::PORTSC_POWER;
+            self.write_portsc(port, keep | (sc & op::PORTSC_CHANGE_BITS));
+            let reset = match hotplug::port_reset(sc) {
+                PortReset::Hot => op::PORTSC_RESET,
+                PortReset::Warm => {
+                    sys::print(b"usb-input: port ");
+                    num(port as u64);
+                    sys::print(b": link in SS.Inactive or Compliance Mode, or cold attach: Warm Port Reset (xHCI 4.19.1.2)\n");
+                    op::PORTSC_WPR
+                }
+            };
+            self.write_portsc(port, keep | reset);
+            let mut state = AfterReset::Waiting;
+            let mut recovered = false;
+            while state != AfterReset::Again {
+                state = hotplug::after_reset(self.portsc(port));
+                match state {
+                    AfterReset::Waiting if self.clock.now() < enabled_by => {
+                        let _ = sys::irq_wait(IRQ, 5);
+                    }
+                    AfterReset::Waiting => {
+                        return Err(
+                            if self.portsc(port) & (op::PORTSC_CCS | op::PORTSC_CAS) == 0 {
+                                "the device left during the port reset"
+                            } else {
+                                "the port is not enabled after the reset"
+                            },
+                        );
+                    }
+                    AfterReset::Ready if recovered => return Ok(()),
+                    // Recovery, then a last look: a change during it is
+                    // a bounce like one during the reset.
+                    AfterReset::Ready => {
+                        let until = (self.clock.now() + recovery).min(reset_deadline);
+                        self.wait_until(until);
+                        recovered = true;
+                    }
+                    AfterReset::Again => {}
+                }
+            }
+            if tries >= self.hotplug.reset_tries {
+                return Err(RESET_BOUNCED);
+            }
+            sys::print(b"usb-input: port ");
+            num(port as u64);
+            sys::print(b": the connection changed during the port reset; reset again\n");
+        }
     }
 
     /// Enumerates a port with a device attached on a new slot: port reset,
@@ -3258,13 +3370,32 @@ impl Controller {
     fn maintain_storage(&mut self) {
         let now = self.clock.now();
         let step = now + MAINTENANCE_STEP_MS;
-        // A slot whose Disable Slot was refused for lack of time (or that
-        // a late Enable Slot gave) comes first: until it is disabled a held
-        // client buffer stays held and no re-enumeration starts. Not while
-        // another Disable Slot is pending: they never overlap.
+        // A Disable Slot that never completes is given up: its slot was
+        // not released, so its memory and held buffers are kept for good,
+        // and the ones waiting behind it go ahead.
+        if let Some((_, slot)) = self.pending_disable {
+            if now >= self.pending_disable_since + DISABLE_SLOT_GIVE_UP_MS {
+                sys::print(b"usb-input: Disable Slot of slot ");
+                num(slot as u64);
+                sys::print(b": no completion in ");
+                num(DISABLE_SLOT_GIVE_UP_MS);
+                sys::print(b" ms; given up\n");
+                record("usb cmd lost", slot as u64);
+                self.pending_disable = None;
+                self.slot_disabled(slot, completion::NO_EVENT);
+            }
+        }
+        // A slot whose Disable Slot was refused for lack of time comes
+        // first, then those waiting behind another one: until one is
+        // disabled a held client buffer stays held and no re-enumeration
+        // starts. Not while a Disable Slot is pending: they never overlap.
         if self.pending_disable.is_none() {
             if let Some(slot) = self.slot_to_disable.take() {
                 self.issue_disable_slot(slot, None, step);
+                return;
+            }
+            if let Some((slot, mem)) = self.waiting_disables.iter_mut().find_map(|w| w.take()) {
+                self.issue_disable_slot(slot, mem, step);
                 return;
             }
         }
@@ -3513,10 +3644,10 @@ impl Controller {
     /// (`Storage::reenumerations`), a run out of time counts too, and the
     /// storage is given up after `REENUMERATE_ATTEMPTS`.
     fn reenumerate_storage(&mut self, reset_port: bool, deadline: u64) {
-        if self.pending_disable.is_some() {
-            // The old slot is still being disabled: no new slot and no
-            // attempt counted until its completion is seen; looked at again
-            // after RESET_POLL_MS.
+        if self.disable_outstanding() {
+            // A slot is still being disabled: no new slot and no attempt
+            // counted until its completion is seen; looked at again after
+            // RESET_POLL_MS.
             say(b"re-enumeration waits for the pending Disable Slot");
             let not_before = self.after(RESET_POLL_MS);
             if let Some(st) = self.storage.as_mut() {
@@ -3551,7 +3682,7 @@ impl Controller {
             // The device the slot addressed is gone or given up (xHCI
             // 4.6.4, 4.19.2): its slot is released.
             self.disable_storage_slot(deadline);
-            if self.pending_disable.is_some() || self.slot_to_disable.is_some() {
+            if self.disable_outstanding() {
                 // Disable Slot not completed or refused: it is finished by
                 // the idle loop before the next attempt; this one is not
                 // counted.
@@ -4123,13 +4254,16 @@ impl Controller {
     }
 
     /// A Disable Slot was issued and has not completed (`disabling`,
-    /// `pending_disable`), or is waiting to be issued (`slot_to_disable`).
-    /// Nothing that may issue another one (a detach, an enumeration whose
-    /// failure releases its slot) starts meanwhile: a second one would
-    /// replace the first one's bookkeeping and abandon its memory
-    /// (`issue_disable_slot`).
+    /// `pending_disable`), or is waiting to be issued (`slot_to_disable`,
+    /// `waiting_disables`). Nothing that would issue another one from the
+    /// idle loop (a detach, an enumeration whose failure releases its slot,
+    /// a storage re-enumeration) starts meanwhile; one from a block request
+    /// waits in line (`issue_disable_slot`).
     fn disable_outstanding(&self) -> bool {
-        self.disabling.is_some() || self.pending_disable.is_some() || self.slot_to_disable.is_some()
+        self.disabling.is_some()
+            || self.pending_disable.is_some()
+            || self.slot_to_disable.is_some()
+            || self.waiting_disables.iter().any(Option::is_some)
     }
 
     /// Enumerates the device on the port of `p`, whose connection has been
@@ -4148,19 +4282,22 @@ impl Controller {
         let now = self.clock.now();
         let sc = self.portsc(port);
         if sc & op::PORTSC_CSC != 0 {
-            // A change whose event was not handled (or was lost): cleared
-            // here, so it is not seen again, and the debounce starts again.
-            self.write_portsc(
-                port,
-                (sc & op::PORTSC_POWER) | (sc & op::PORTSC_CHANGE_BITS),
-            );
-            self.queue_port(port, now);
+            // A change whose event was not handled yet (or was lost):
+            // handled here as its event would be (a served device on the
+            // port is gone, the storage's reconnect logic runs, the port
+            // is debounced again), and cleared so it is not seen again.
+            self.port_change(port);
             return;
         }
         if sc & (op::PORTSC_CCS | op::PORTSC_CAS) == 0 {
             sys::print(b"usb-input: port ");
             num(port as u64);
             sys::print(b": the device left before it was enumerated\n");
+            return;
+        }
+        // A device that kept changing during its enumeration: its port is
+        // left alone until it is seen empty (`PortBounces`).
+        if self.bounces.exhausted(port, self.hotplug.attempts) {
             return;
         }
         if self.storage.as_ref().is_some_and(|st| st.port == port) {
@@ -4198,6 +4335,7 @@ impl Controller {
         let deadline = self.after(ATTACH_STEP_MS);
         match self.enumerate_port(port, p.attempts > 0, REENUMERATE_READY_WAIT_MS, deadline) {
             Ok(()) => {
+                self.bounces.clear(port);
                 let slot = self
                     .hid_device_on(port)
                     .and_then(|i| self.devices[i].as_ref())
@@ -4216,11 +4354,24 @@ impl Controller {
                 num(port as u64);
                 sys::print(b": enumeration failed: ");
                 sys::print(why.as_bytes());
+                let connected = self.portsc(port) & (op::PORTSC_CCS | op::PORTSC_CAS) != 0;
                 if why == CONNECTION_CHANGED {
-                    sys::print(b"; the device there now is debounced again\n");
+                    if !connected {
+                        sys::print(b"; the port is empty now\n");
+                    } else if self.bounces.note(port, self.hotplug.attempts) {
+                        // Queued here too: a port disabled under the device
+                        // (PEC) raised no connect change to queue it.
+                        self.queue_port(port, self.clock.now());
+                        sys::print(b"; the device there now is debounced again\n");
+                    } else {
+                        self.pending_ports.forget(port);
+                        sys::print(
+                            b"; it kept changing: the port is left alone until it is empty\n",
+                        );
+                        record("usb port bouncing", port as u64);
+                    }
                     return;
                 }
-                let connected = self.portsc(port) & (op::PORTSC_CCS | op::PORTSC_CAS) != 0;
                 if FINAL_REFUSALS.contains(&why) || !connected {
                     sys::print(b"; the port is left alone until it sees a new connection\n");
                     return;
@@ -4292,6 +4443,7 @@ impl Controller {
                 if completion::is_success(code) {
                     self.last_report_ms = now;
                 }
+                let was_gone = dev.gone.is_some();
                 if !completion::is_success(code)
                     && ended_by_unplug(
                         &self.op,
@@ -4303,6 +4455,9 @@ impl Controller {
                         code,
                     )
                 {
+                    if !was_gone {
+                        self.unplug_noticed = Some(dev.slot);
+                    }
                     return true;
                 }
                 if injected || !completion::is_success(code) {
@@ -4358,9 +4513,16 @@ impl Controller {
     fn next_maintenance(&self) -> Option<u64> {
         let mut next = Deadline::NONE;
         // Behind a pending Disable Slot it waits for that completion's
-        // event, which wakes the loop.
-        if self.slot_to_disable.is_some() && self.pending_disable.is_none() {
-            next.include(0);
+        // event, which wakes the loop, or for its give-up time.
+        match self.pending_disable {
+            Some(_) => next.include(self.pending_disable_since + DISABLE_SLOT_GIVE_UP_MS),
+            None => {
+                if self.slot_to_disable.is_some()
+                    || self.waiting_disables.iter().any(Option::is_some)
+                {
+                    next.include(0);
+                }
+            }
         }
         match self.transport() {
             Some(Transport::ResetPending) => next.include(0),
@@ -4544,6 +4706,7 @@ impl Controller {
                 .find(|ep| ep.dci == ev.endpoint_id())
             {
                 sys::print(b"usb-input: stray transfer event on a HID endpoint\n");
+                let was_gone = dev.gone.is_some();
                 if !ended_by_unplug(
                     &self.op,
                     dev.slot,
@@ -4554,6 +4717,8 @@ impl Controller {
                     code,
                 ) {
                     ep.failed(dev.slot, code, ev, false, now);
+                } else if !was_gone {
+                    self.unplug_noticed = Some(dev.slot);
                 }
                 return true;
             }
@@ -4664,8 +4829,9 @@ fn portsc_of(op: &Mmio, port: u8) -> u32 {
 /// unplug, not a fault to record or recover (the EHCI driver's `unplugged`
 /// does the same). Printed. A port found without a connection while the
 /// device was not marked gone (its change was missed, or handled before
-/// the device had endpoints) marks it gone at `now`: the idle loop
-/// detaches it and releases what it held.
+/// the device had endpoints) marks it gone at `now`: the caller has its
+/// held keys and buttons released once its borrow ends
+/// (`Controller::unplug_noticed`), and the idle loop detaches it.
 #[allow(clippy::too_many_arguments)]
 fn ended_by_unplug(
     op: &Mmio,
@@ -5007,27 +5173,60 @@ impl FaultInject {
     }
 }
 
+/// The hot-plug policy the boot key `usb.hotplug` asks for (ADR 0087), or
+/// the defaults: without the key, or when it is refused (said and recorded).
+fn hotplug_policy(value: Option<&str>) -> Policy {
+    let Some(text) = value else {
+        return Policy::DEFAULT;
+    };
+    match Policy::parse(text) {
+        Ok(p) => {
+            sys::print(b"usb-input: usb.hotplug: debounce ");
+            num(p.debounce_ms);
+            sys::print(b" ms, reset recovery ");
+            num(p.reset_recovery_ms);
+            sys::print(b" ms, ");
+            num(p.attempts as u64);
+            sys::print(b" attempts, retry ");
+            num(p.retry_ms);
+            sys::print(b" ms, ");
+            num(p.reset_tries as u64);
+            sys::print(b" resets\n");
+            p
+        }
+        Err(why) => {
+            sys::print(b"usb-input: usb.hotplug refused: ");
+            sys::print(why.as_bytes());
+            sys::print(b"; the defaults stay\n");
+            record("usb hotplug key refused", 0);
+            Policy::DEFAULT
+        }
+    }
+}
+
 fn main(mask: u64) -> u64 {
     let clock = Clock(extra_handle(mask, 0));
     let mut args = [0u8; sys::CMDLINE_MAX];
-    let (strict, fault_inject) = match sys::cmdline(clock.0, &mut args) {
+    let (strict, fault_inject, hotplug) = match sys::cmdline(clock.0, &mut args) {
         Ok(text) => {
             let c = aricode_cmdline::CmdLine::new(text);
             (
                 c.has(aricode_cmdline::keys::STRICT),
                 FaultInject::parse(c.get(aricode_cmdline::keys::USB_FAULT)),
+                hotplug_policy(c.get(aricode_cmdline::keys::USB_HOTPLUG)),
             )
         }
         Err(_) => {
             say(b"cannot read the command line (too long or not text): boot flags ignored");
             record("usb cmdline unreadable", sys::CMDLINE_MAX as u64);
-            (false, FaultInject::None)
+            (false, FaultInject::None, Policy::DEFAULT)
         }
     };
     let mut ctl = match Controller::open(mask, clock) {
         Ok(mut c) => {
             c.strict = strict;
             c.fault_inject = fault_inject;
+            c.hotplug = hotplug;
             if strict {
                 say(b"strict mode: the first transport failure halts the driver");
             }
