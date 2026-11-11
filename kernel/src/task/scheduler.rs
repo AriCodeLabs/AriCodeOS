@@ -137,6 +137,7 @@ pub fn on_tick(now: u64, bsp: bool, from_user: bool) {
     if woke > 0 {
         kick_idle();
     }
+    cpu::current().count_tick();
     let expired = cpu::current().quantum_tick(QUANTUM_TICKS);
     if expired || woke > 0 {
         // Counted only when another thread takes the CPU: a lone thread
@@ -205,6 +206,43 @@ pub fn wake(tid: Tid) -> Result<(), aricode_sched::SchedError> {
 /// Sets the CPU `tid` may run on (`None` = any).
 pub fn set_affinity(tid: Tid, cpu: Option<usize>) -> Result<(), aricode_sched::SchedError> {
     with(|s| s.policy.set_affinity(tid, cpu))
+}
+
+/// How long [`move_current_to`] watches the target CPU's tick before
+/// pinning: ten ticks.
+const ALIVE_WAIT_MS: u64 = 10 * crate::time::MS_PER_TICK;
+
+/// Moves the calling thread to CPU `target` and keeps it there (the
+/// power-off, `arch::x86_64::power::move_to_poweroff_cpu`): pinned, then
+/// yielding until that CPU picks it up at its next switch, within its next
+/// tick (every CPU ticks; an idle one looks for ready threads on each).
+/// With interrupts on.
+///
+/// A pinned thread waits for its CPU without limit, so the target is first
+/// seen alive: its tick count must advance within [`ALIVE_WAIT_MS`], or
+/// nothing is pinned and the caller goes on where it is. A CPU that wedges
+/// in the instant between that check and the pin would still hold the
+/// thread; the window is one tick.
+pub fn move_current_to(target: usize) -> Result<(), &'static str> {
+    if target >= cpu::MAX_CPUS || !cpu::slot(target).is_online() {
+        return Err("is not online");
+    }
+    if cpu::id() as usize == target {
+        return Ok(());
+    }
+    let seen = cpu::slot(target).ticks();
+    let deadline = crate::time::uptime_us() + ALIVE_WAIT_MS * 1000;
+    while cpu::slot(target).ticks() == seen {
+        if crate::time::uptime_us() > deadline {
+            return Err("does not tick: left alone");
+        }
+        yield_now();
+    }
+    set_affinity(current_tid(), Some(target)).map_err(|_| "cannot be chosen")?;
+    while cpu::id() as usize != target {
+        yield_now();
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]

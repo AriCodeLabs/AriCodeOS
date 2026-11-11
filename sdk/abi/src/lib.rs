@@ -761,8 +761,9 @@ pub mod sysinfo {
     pub const MACHINE: u64 = 19;
     /// One `u64`: the bytes [`ACPI_AML`] answers with (ABI 13).
     pub const ACPI_AML_LEN: u64 = 20;
-    /// The firmware's DSDT and SSDTs, one after another, each whole with
-    /// its header, for a device study on another machine (ABI 13). No other
+    /// The firmware's DSDT and SSDTs, then its FADT (since incident 0065:
+    /// the power-off registers), one after another, each whole with its
+    /// header, for a device study on another machine (ABI 13). No other
     /// table: some hold what is not ours to copy (a Windows licence key in
     /// MSDM or SLIC). `TooBig` if the buffer is short.
     pub const ACPI_AML: u64 = 21;
