@@ -499,14 +499,13 @@ impl State {
             Err(IommuError::OutOfRange) => return Err("iommu: address beyond the unit width"),
             Err(_) => return Err("iommu: no frames for the tables"),
         }
-        dom.regions.insert(
-            start,
-            Mapped {
-                len: end - start,
-                tag,
-                mapped_ms: now_ms(),
-            },
-        );
+        // The first mapping's time stays (attach maps a device's RMRRs
+        // again each time; audit of incident 0064, L3).
+        dom.regions.entry(start).or_insert(Mapped {
+            len: end - start,
+            tag,
+            mapped_ms: now_ms(),
+        });
         for u in Self::units_of(dom) {
             self.units[u].invalidate_iotlb();
         }
@@ -812,12 +811,23 @@ impl State {
     }
 }
 
-fn site_slot_free() -> bool {
-    SITES.lock().iter().any(Option::is_none)
+/// Sites one device may hold: another device faulting first (the second
+/// xHCI, a firmware device) or one page faulting again must not take the
+/// slots of the device under study (audit of incident 0064, M2).
+const SITES_PER_DEVICE: usize = 2;
+
+/// Whether a fault of `source` at `page` gets a site: a free slot, fewer
+/// than `SITES_PER_DEVICE` for that device and none for that page yet.
+fn site_wanted(source: u16, page: u64) -> bool {
+    let sites = SITES.lock();
+    let of_device = sites.iter().flatten().filter(|s| s.source == source);
+    sites.iter().any(Option::is_none)
+        && of_device.clone().count() < SITES_PER_DEVICE
+        && !of_device.clone().any(|s| s.address == page)
 }
 
-/// Keeps `site` if fewer than `DMA_FAULT_SITES_KEPT` are kept: the first
-/// faults of the boot, which a loop of later ones does not push out.
+/// Keeps `site` in the first free slot: the first faults of the boot, which
+/// a loop of later ones does not push out.
 fn keep_site(site: DmaFaultSite) {
     let mut sites = SITES.lock();
     if let Some(slot) = sites.iter_mut().find(|s| s.is_none()) {
@@ -826,30 +836,32 @@ fn keep_site(site: DmaFaultSite) {
 }
 
 /// The sites kept (`sysinfo::DMA_FAULT_SITES`), oldest first, with `mine`
-/// set where the faulting device belongs to `caller`. Unless the caller
-/// owns that device or `manages` the system, the regions and the other
-/// domain's owner are left out: they hold the physical addresses of
-/// another process's buffers (audit of incident 0064, M1). The fault
+/// set where the faulting device belongs to `caller`. Only a caller that
+/// `manages` the system gets them whole. The device's own driver gets its
+/// own regions but not which other process maps the page or the
+/// allocator's state of its frame, which would let it probe any physical
+/// page (audit of incident 0064, L2); anyone else gets neither the regions
+/// either, which hold another process's buffer addresses (M1). The fault
 /// itself (device, access, page) is in `EVENTS` already.
 pub fn fault_sites(caller: u32, manages: bool) -> Vec<DmaFaultSite> {
-    SITES
-        .lock()
-        .iter()
+    // Copied out first: the vector is built without SITES held (it would
+    // reach the heap, and through it the VMM and the PMM; L1).
+    let kept = *SITES.lock();
+    kept.iter()
         .flatten()
         .map(|s| {
             let mine = caller != 0 && s.owner == caller;
-            if mine || manages {
-                DmaFaultSite { mine, ..*s }
-            } else {
-                DmaFaultSite {
-                    mine,
-                    other_owner: 0,
-                    region: SiteRegion::default(),
-                    below: SiteRegion::default(),
-                    above: SiteRegion::default(),
-                    ..*s
+            let mut out = DmaFaultSite { mine, ..*s };
+            if !manages {
+                out.other_owner = 0;
+                out.frame = 0;
+                if !mine {
+                    out.region = SiteRegion::default();
+                    out.below = SiteRegion::default();
+                    out.above = SiteRegion::default();
                 }
             }
+            out
         })
         .collect()
 }
@@ -903,7 +915,7 @@ pub fn on_fault_irq() {
                     // incident 0064, M3). Once every slot is taken the
                     // site is not worked out at all (fault storms, L5).
                     let owner = s.owners.get(&f.source_id).copied().unwrap_or(0);
-                    if site_slot_free() {
+                    if site_wanted(f.source_id, f.address) {
                         keep_site(s.site_of(&f, owner));
                     }
                     FAULTS.fetch_add(1, Ordering::Release);

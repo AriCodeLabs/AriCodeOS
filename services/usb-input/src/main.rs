@@ -60,7 +60,7 @@ use aricode_usb_storage::{
     after_transfer_failure, bytes_not_moved, check_csw_transfer, fault, scsi, Cbw, Cdb, Csw,
     CswError, CswStatus, Next, Stage, CSW_TEXT_LEN,
 };
-use aricode_xhci::arena::{self, Located, SpanLog};
+use aricode_xhci::arena::{self, label, Located, SpanLog};
 use aricode_xhci::hotplug::{
     self, AfterReset, PendingPort, PendingPorts, Policy, PortBounces, PortProtocols, PortReset,
     Spares, MAX_RESET_RECOVERY_MS, RESET_WINDOW_MS,
@@ -514,10 +514,10 @@ impl HidMemory {
         (XFER_RING_TRBS * Trb::LEN) as u64 + REPORTS_IN_FLIGHT as u64 * HID_REPORT_BYTES;
 
     fn alloc(arena: &mut Arena) -> Option<Self> {
-        let ring = Ring::new(arena, XFER_RING_TRBS, "hid ring")?;
+        let ring = Ring::new(arena, XFER_RING_TRBS, label::HID_RING)?;
         let mut reports = [(0, 0); REPORTS_IN_FLIGHT];
         for r in reports.iter_mut() {
-            *r = arena.alloc(HID_REPORT_BYTES, 64, "hid reports")?;
+            *r = arena.alloc(HID_REPORT_BYTES, 64, label::HID_REPORTS)?;
         }
         Some(Self { ring, reports })
     }
@@ -663,11 +663,11 @@ struct StorageMemory {
 impl StorageMemory {
     fn alloc(arena: &mut Arena) -> Option<Self> {
         Some(Self {
-            ring_in: Ring::new(arena, XFER_RING_TRBS, "bulk in ring")?,
-            ring_out: Ring::new(arena, XFER_RING_TRBS, "bulk out ring")?,
-            cbw: arena.alloc(64, 64, "cbw")?,
-            csw: arena.alloc(64, 64, "csw")?,
-            small: arena.alloc(64, 64, "small buffer")?,
+            ring_in: Ring::new(arena, XFER_RING_TRBS, label::BULK_IN_RING)?,
+            ring_out: Ring::new(arena, XFER_RING_TRBS, label::BULK_OUT_RING)?,
+            cbw: arena.alloc(64, 64, label::CBW)?,
+            csw: arena.alloc(64, 64, label::CSW)?,
+            small: arena.alloc(64, 64, label::SMALL)?,
         })
     }
 
@@ -1095,32 +1095,35 @@ impl Controller {
 
         // Structures: DCBAA, scratchpads, command ring, event ring and ERST.
         let slots = params.max_slots as u64;
-        let (dcbaa_phys, dcbaa_virt) =
-            arena.alloc((slots + 1) * 8, 64, "dcbaa").ok_or(exit::DMA)?;
+        let (dcbaa_phys, dcbaa_virt) = arena
+            .alloc((slots + 1) * 8, 64, label::DCBAA)
+            .ok_or(exit::DMA)?;
         if params.scratchpad_buffers > 0 {
             let n = params.scratchpad_buffers as u64;
             let (arr_phys, arr_virt) = arena
-                .alloc(n * 8, 64, "scratchpad array")
+                .alloc(n * 8, 64, label::SCRATCHPAD_ARRAY)
                 .ok_or(exit::DMA)?;
             for i in 0..n {
-                let (page_phys, _) = arena.alloc(4096, 4096, "scratchpad").ok_or(exit::DMA)?;
+                let (page_phys, _) = arena
+                    .alloc(4096, 4096, label::SCRATCHPAD)
+                    .ok_or(exit::DMA)?;
                 // SAFETY: scratchpad array entry inside the DMA buffer.
                 unsafe { ((arr_virt + 8 * i) as *mut u64).write_volatile(page_phys) };
             }
             // SAFETY: DCBAA entry 0.
             unsafe { (dcbaa_virt as *mut u64).write_volatile(arr_phys) };
         }
-        let cmd = Ring::new(&mut arena, CMD_RING_TRBS, "command ring").ok_or(exit::DMA)?;
+        let cmd = Ring::new(&mut arena, CMD_RING_TRBS, label::COMMAND_RING).ok_or(exit::DMA)?;
         let (ev_phys, ev_virt) = arena
-            .alloc((EVENT_RING_TRBS * Trb::LEN) as u64, 64, "event ring")
+            .alloc((EVENT_RING_TRBS * Trb::LEN) as u64, 64, label::EVENT_RING)
             .ok_or(exit::DMA)?;
-        let (erst_phys, erst_virt) = arena.alloc(16, 64, "erst").ok_or(exit::DMA)?;
+        let (erst_phys, erst_virt) = arena.alloc(16, 64, label::ERST).ok_or(exit::DMA)?;
         // SAFETY: ERST entry inside the DMA buffer.
         unsafe {
             (erst_virt as *mut [u8; 16]).write_volatile(erst_entry(ev_phys, EVENT_RING_TRBS as u16))
         };
         let events = EventRing::new(ev_phys, EVENT_RING_TRBS);
-        let desc_buf = arena.alloc(512, 64, "descriptor buffer").ok_or(exit::DMA)?;
+        let desc_buf = arena.alloc(512, 64, label::DESCRIPTOR).ok_or(exit::DMA)?;
 
         op.w32(op::CONFIG, params.max_slots as u32);
         op.w64(op::DCBAAP, dcbaa_phys);
@@ -1306,7 +1309,11 @@ impl Controller {
     /// write, and `check_dma_faults` must name the page.
     fn inject_dma_fault(&mut self) {
         // Without translation the write would land in whatever frame
-        // follows the arena: refused (audit of incident 0064, M2).
+        // follows the arena: refused (audit of incident 0064, M2). An
+        // active unit is enough to know this controller is translated:
+        // the kernel enables translation on every unit at boot, and a
+        // device outside every unit cannot be attached to a domain, which
+        // would have failed this driver's `mmio_map` of its BAR (L7).
         let mut b = [0u8; 24];
         let units = match sys::system_info(self.clock.0, abi::sysinfo::IOMMU, &mut b) {
             Ok(24) => u64::from_le_bytes(b[..8].try_into().unwrap_or([0; 8])),
@@ -2276,12 +2283,14 @@ impl Controller {
             mem.ep0.reset();
             return Some(mem);
         }
-        let dev_ctx =
-            self.arena
-                .alloc((DEVICE_CONTEXTS * ctx_bytes) as u64, 64, "device context")?;
-        let ep0 = Ring::new(&mut self.arena, XFER_RING_TRBS, "ep0 ring")?;
+        let dev_ctx = self.arena.alloc(
+            (DEVICE_CONTEXTS * ctx_bytes) as u64,
+            64,
+            label::DEVICE_CONTEXT,
+        )?;
+        let ep0 = Ring::new(&mut self.arena, XFER_RING_TRBS, label::EP0_RING)?;
         let in_len = (INPUT_CONTEXTS * ctx_bytes) as u64;
-        let (in_phys, in_virt) = self.arena.alloc(in_len, 64, "input context")?;
+        let (in_phys, in_virt) = self.arena.alloc(in_len, 64, label::INPUT_CONTEXT)?;
         Some(SlotMemory {
             dev_ctx,
             ep0,

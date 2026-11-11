@@ -244,7 +244,9 @@ pub const fn source_id(bus: u8, device: u8, function: u8) -> u16 {
 
 /// Name of a translation fault reason: the legacy-mode conditions of
 /// VT-d 4.0, 7.1.3 (LRT, LCT, LSS, LGN). 5h and 6h cover a page not
-/// mapped at all too: its entry has neither R nor W (incident 0064).
+/// mapped at all too: its entry has neither R nor W (incident 0064). Eh
+/// is LGN.4 of the 4.0 table (an output address in FEEx_xxxxh); older
+/// tables, and Linux's, stop at Dh.
 pub fn fault_reason_name(reason: u8) -> &'static str {
     match reason {
         0x1 => "root entry not present",

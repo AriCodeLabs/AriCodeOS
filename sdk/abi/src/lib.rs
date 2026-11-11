@@ -768,18 +768,22 @@ pub mod sysinfo {
     /// MSDM or SLIC). `TooBig` if the buffer is short.
     pub const ACPI_AML: u64 = 21;
     /// As many [`DmaFaultSite`] as fit, one per DMA fault the kernel kept
-    /// (the first [`DMA_FAULT_SITES_KEPT`] of the boot), oldest first: where
+    /// (the first of the boot, [`DMA_FAULT_SITES_KEPT`] at most), oldest first: where
     /// each faulting page lay against its device's domain, the firmware's
     /// memory map and the allocator (ABI 13; incident 0064). `mine` is set
-    /// in the entries whose device belongs to the caller.
+    /// in the entries whose device belongs to the caller. Whole only for a
+    /// caller with `MANAGE` on `SYSTEM`; the device's driver gets its own
+    /// entries without `other_owner` and `frame`, anyone else only the
+    /// fault and the page's memory-map kind.
     pub const DMA_FAULT_SITES: u64 = 22;
     /// As many [`ReservedRegion`] as fit: the firmware's reserved memory
     /// regions for DMA (DMAR RMRR, VT-d 4.0 8.4) with the devices they
     /// name (ABI 13; incident 0064). Empty without an IOMMU.
     pub const IOMMU_RESERVED: u64 = 23;
     /// DMA faults whose site the kernel keeps: the first ones of the boot,
-    /// which a loop of later ones must not push out.
-    pub const DMA_FAULT_SITES_KEPT: usize = 4;
+    /// which a loop of later ones must not push out; at most two per
+    /// device, one per page.
+    pub const DMA_FAULT_SITES_KEPT: usize = 8;
 
     /// The state of the GPU's engine ([`GPU`]).
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1217,8 +1221,9 @@ pub mod sysinfo {
         pub const OUTSIDE: u8 = 3;
         pub const NO_REGIONS: u8 = 4;
 
-        /// The page in the firmware's memory map; bit 7: the kernel's copy
-        /// of that kind is approximate (gaps merged to fit).
+        /// The page in the firmware's memory map (the kernel keeps an exact
+        /// copy, `aricode_pmm::KindMap`); `MEM_UNKNOWN | MEM_APPROXIMATE`
+        /// when no kept entry holds it and some entries did not fit.
         pub const MEM_UNKNOWN: u8 = 0;
         pub const MEM_FREE: u8 = 1;
         pub const MEM_BOOT: u8 = 2;
@@ -1226,6 +1231,7 @@ pub mod sysinfo {
         pub const MEM_ACPI: u8 = 4;
         pub const MEM_RESERVED: u8 = 5;
         pub const MEM_NONE: u8 = 6;
+        pub const MEM_MMIO: u8 = 7;
         pub const MEM_APPROXIMATE: u8 = 0x80;
 
         pub fn memory_name(memory: u8) -> &'static str {
@@ -1236,6 +1242,7 @@ pub mod sysinfo {
                 MEM_ACPI => "ACPI memory",
                 MEM_RESERVED => "firmware-reserved memory",
                 MEM_NONE => "in no range of the memory map",
+                MEM_MMIO => "MMIO in the memory map",
                 _ => "unknown memory",
             }
         }
@@ -1250,7 +1257,7 @@ pub mod sysinfo {
                 FRAME_FREE => "free",
                 FRAME_IN_USE => "in use",
                 FRAME_UNMANAGED => "not the allocator's",
-                _ => "?",
+                _ => "not given",
             }
         }
 

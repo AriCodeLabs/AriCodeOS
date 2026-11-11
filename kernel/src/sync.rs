@@ -13,9 +13,9 @@
 //! PROCESSES -> IOMMU    dropping a DMA buffer (handle table) removes it from the domains
 //! IOMMU -> PMM          domains request and return page-table frames, and a
 //!                       DMA fault reads its page's frame state (incident 0064)
-//! IOMMU -> SITES        a DMA fault keeps where its page lay (leaf)
-//! IOMMU -> pmm kinds    ... and what the firmware's map called it (leaves:
-//!                       FREE_AT_BOOT, BOOT, RUNTIME, ACPI, RESERVED)
+//! IOMMU -> SITES        a DMA fault keeps where its page lay (leaf: nothing
+//!                       is allocated with it held)
+//! IOMMU -> pmm::MAP     ... and what the firmware's map called it (leaf)
 //! ```
 //!
 //! Never the other way round: in particular, never enter the VMM with the PMM

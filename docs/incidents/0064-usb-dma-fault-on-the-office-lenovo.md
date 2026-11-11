@@ -92,11 +92,15 @@ PCH, process 8). 7991 MiB of RAM, 28 MiB in use at the report.
   cross a page and a ring a 64 KiB boundary (every arena is longer than 64 KiB, so it
   always holds one). Linux allocates contexts from a pool with a PAGESIZE boundary and
   whole-page ring segments (`xhci-mem.c`, `xhci_mem_init`); its only prefetch quirk is
-  Zhaoxin's (`XHCI_ZHAOXIN_TRB_FETCH`, two pages per segment). A controller that counts
-  within those boundaries reads wrapped addresses: within the page (still ours) or up to
-  64 KiB below a 64 KiB boundary, which leaves the arena only when that boundary lies less
-  than 64 KiB past its start. It is fixed as spec hardening; whether it was this fault is
-  for the next run to say.
+  Zhaoxin's (`XHCI_ZHAOXIN_TRB_FETCH`, two pages per segment). It is fixed as spec
+  hardening. **A wrapped read cannot itself have produced this page**: a context crossing a
+  page and read wrapped reads the start of its own page, inside the arena; every ring is
+  256 or 512 bytes, so a ring crossing a 64 KiB boundary and read wrapped reads the first
+  few hundred bytes of its own 64 KiB block, a page that is 64 KiB aligned (it would have
+  been 0x43b70000), while 0x43b76000 is 0x6000 into its block; every other structure is at
+  most 2 KiB. Only an indirect route remains: a context read wrapped hands the controller
+  garbage (a TR Dequeue Pointer, say), which it then follows. That is a pointer we never
+  gave, hypothesis 1 below.
 - **No RMRR can explain a fault on its own.** The kernel maps a device's reserved regions
   into the domain its driver gets (`State::attach`), so a read inside an RMRR of 00:14.0
   would not fault. Memory the firmware's USB stack used before boot is no RMRR (VT-d 4.0,
@@ -117,19 +121,20 @@ PCH, process 8). 7991 MiB of RAM, 28 MiB in use at the report.
 
 ### Hypotheses, most likely first
 
-1. **An address that was never ours**: memory the firmware used before boot (the
-   controller or the firmware's SMM handler still holding a pointer from then), or a
-   pointer read from a context crossing a page and wrapped. For: the page is far from what
-   the allocator had handed out; the read did not stop the controller. The next run says
-   it if the page is "loader or boot services memory" or "firmware-reserved" and far from
-   the arena, and whether `usb bios kept xhci` appears.
-2. **A wrap at a boundary the arena crossed**, now fixed. For: a real violation of the
-   specification on hardware whose controller may rely on it. Against: it needs the arena
-   right above the page. If the fault is gone in the next run with the arena's address
-   known and close, this was it.
-3. **A page of the arena the kernel did not map** (tables or invalidation). Against: the
+1. **An address that was never ours.** Either memory the firmware used before boot (the
+   controller or the firmware's SMM handler still holding a pointer from then), or garbage
+   the controller read as a pointer, for instance from a context it read wrapped across a
+   page (now impossible: the contexts are placed within a page). For: the page is far from
+   what the allocator had handed out; the read did not stop the controller. The next run's
+   `page` line says what the firmware's map called the page, and `below`/`above` how far
+   it is from the arena.
+2. **A page of the arena the kernel did not map** (tables or invalidation). Against: the
    IOMMU self-test and every translated QEMU scenario. The next run shows it as "in a
-   region still mapped".
+   region still mapped" (or, if the tables lost it, as a page inside the arena: the
+   driver's `usb dma in LABEL`).
+
+The boundary placement is not a hypothesis of its own: a wrapped read stays in pages the
+domain maps (see above).
 
 ## What changed (branch `fix/xhci-dma-fault`)
 
@@ -139,12 +144,16 @@ PCH, process 8). 7991 MiB of RAM, 28 MiB in use at the report.
   slots with four HID endpoints each and two storages placed that way at every phase
   against 64 KiB (host test).
 - The kernel tags each domain region (own buffer, client buffer, RMRR, framebuffer) with
-  its mapping time, remembers the regions each domain unmapped (8 own, 16 others) and, for
-  the first four DMA faults of the boot, keeps where the page lay: inside a live region,
-  inside one unmapped before (and when), or between the nearest regions below and above;
-  what the firmware's memory map called it; whether the allocator had the frame; which
-  RMRR holds it; which other domain maps it (`aricode_iommu::site`). New selectors
-  `DMA_FAULT_SITES` (whole only for the device's driver or a `MANAGE` holder) and
+  its first mapping time, remembers the regions each domain unmapped (8 own, 16 others)
+  and, for the first DMA faults of the boot (8 at most, two per device, one per page, so
+  the second xHCI or a repeated page cannot use up the slots), keeps where the page lay:
+  inside a live region, inside one unmapped before (and when), or between the nearest
+  regions below and above; what the firmware's memory map called it (from an exact copy of
+  the map, `aricode_pmm::KindMap`: no gap merged into a neighbour of another kind; MMIO
+  named); whether the allocator had the frame; which RMRR holds it; which other domain
+  maps it (`aricode_iommu::site`). New selectors `DMA_FAULT_SITES` (whole only for a
+  `MANAGE` holder such as the shell; the device's driver gets its own regions without the
+  other owner and the frame state; anyone else only the fault and the memory kind) and
   `IOMMU_RESERVED` (the RMRRs and their devices).
 - `diag` prints an `iommu` line, the RMRRs and, per kept fault, `in`, `below`, `above`,
   `page` and `domain` lines.
@@ -164,5 +173,15 @@ Boot a dev build with this branch, wait a minute, then `diag diag3.txt` and `acp
 acpi3.bin`. The report must be read for: the `dma fault 1` block (relation, `below` and
 `above` with their distances, the `page` line's memory kind and frame), the `rmrr` lines
 (an RMRR for 00:14.0 or none), the `usb dma ...` event from process 8 with its code, and
-`usb bios kept xhci` if present. No fault at all, with the same devices plugged, points at
-hypothesis 2.
+`usb bios kept xhci` if present. Reading it:
+
+- `page` says loader or boot services memory, runtime services or reserved, and the page is
+  far from the own DMA buffer (`below`/`above`): firmware memory, hypothesis 1, and
+  `usb bios kept xhci` says whether the firmware kept the controller.
+- `page` says RAM free at boot and the frame is in use, far from the arena: a garbage or
+  foreign pointer, hypothesis 1.
+- "in a region still mapped", or a driver event `usb dma in LABEL`: hypothesis 2.
+- No fault at all is weak evidence: the boot enumeration differs from run to run (the
+  first run faulted at 6.4 s, the second at 11.5 s). It fits the indirect route through a
+  wrapped context, which the placement now prevents, but proves nothing alone; another run
+  or two without one are needed before saying so.

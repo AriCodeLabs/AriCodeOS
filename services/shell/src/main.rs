@@ -1059,7 +1059,7 @@ fn dma() {
         print(b"  page  ");
         print(dma_site::memory_name(f.memory).as_bytes());
         if f.memory & dma_site::MEM_APPROXIMATE != 0 {
-            print(b" (approximate)");
+            print(b" (some map entries were not kept)");
         }
         print(b"; frame ");
         print(dma_site::frame_name(f.frame).as_bytes());

@@ -8,7 +8,7 @@
 
 use super::phys;
 use crate::sync::IrqLock;
-use aricode_pmm::{BitmapAllocator, Frame, RangeSet, Stats, FRAME_SIZE};
+use aricode_pmm::{BitmapAllocator, Frame, KindMap, RangeSet, Stats, FRAME_SIZE};
 use boot_protocol::{BootInfo, MemoryRegionKind};
 use log::{debug, info, warn};
 
@@ -20,39 +20,23 @@ static PMM: IrqLock<Option<BitmapAllocator<'static>>> = IrqLock::new(None);
 static RAM: IrqLock<RangeSet<64>> = IrqLock::new(RangeSet::new());
 static RESERVED: IrqLock<RangeSet<64>> = IrqLock::new(RangeSet::new());
 
-/// The map's kinds one by one, also kept past boot: what a DMA fault's
-/// page was to the firmware (incident 0064). The boot services' ranges are
-/// the most scattered.
-static FREE_AT_BOOT: IrqLock<RangeSet<64>> = IrqLock::new(RangeSet::new());
-static BOOT: IrqLock<RangeSet<128>> = IrqLock::new(RangeSet::new());
-static RUNTIME: IrqLock<RangeSet<32>> = IrqLock::new(RangeSet::new());
-static ACPI: IrqLock<RangeSet<32>> = IrqLock::new(RangeSet::new());
+/// The firmware's map entry by entry, also kept past boot: what a DMA
+/// fault's page was to the firmware (incident 0064). Exact: an entry that
+/// does not fit is counted, never merged into a neighbour of another kind.
+/// UEFI maps on real machines hold one to two hundred entries, many
+/// adjacent ones of one kind, which join.
+static MAP: IrqLock<KindMap<256>> = IrqLock::new(KindMap::new());
 
-/// What the firmware's map said `addr` was (`sysinfo::dma_site::MEM_*`,
-/// with `MEM_APPROXIMATE` when the kept copy of that kind merged gaps).
-/// The precise kinds first: an approximated set covers more than it was
-/// given, never less.
+/// What the firmware's map said `addr` was (`sysinfo::dma_site::MEM_*`):
+/// `MEM_UNKNOWN | MEM_APPROXIMATE` when no kept entry holds it and some
+/// did not fit.
 pub fn memory_kind(addr: u64) -> u8 {
     use aricode_abi::sysinfo::dma_site as d;
-    fn hit<const N: usize>(set: &IrqLock<RangeSet<N>>, addr: u64, kind: u8) -> Option<u8> {
-        let set = set.lock();
-        set.as_slice()
-            .iter()
-            .any(|&(s, e)| addr >= s && addr < e)
-            .then(|| {
-                kind | if set.approximated() {
-                    d::MEM_APPROXIMATE
-                } else {
-                    0
-                }
-            })
+    match MAP.lock().lookup(addr) {
+        aricode_pmm::kinds::Kind::Of(k) => k,
+        aricode_pmm::kinds::Kind::Outside => d::MEM_NONE,
+        aricode_pmm::kinds::Kind::Unknown => d::MEM_UNKNOWN | d::MEM_APPROXIMATE,
     }
-    hit(&RESERVED, addr, d::MEM_RESERVED)
-        .or_else(|| hit(&RUNTIME, addr, d::MEM_FIRMWARE))
-        .or_else(|| hit(&ACPI, addr, d::MEM_ACPI))
-        .or_else(|| hit(&FREE_AT_BOOT, addr, d::MEM_FREE))
-        .or_else(|| hit(&BOOT, addr, d::MEM_BOOT))
-        .unwrap_or(d::MEM_NONE)
 }
 
 /// The allocator's view of the frame holding `addr` now
@@ -133,12 +117,7 @@ pub fn init(info: &BootInfo) {
     }
     {
         let (mut ram, mut reserved) = (RAM.lock(), RESERVED.lock());
-        let (mut free, mut boot, mut runtime, mut acpi) = (
-            FREE_AT_BOOT.lock(),
-            BOOT.lock(),
-            RUNTIME.lock(),
-            ACPI.lock(),
-        );
+        let mut map = MAP.lock();
         for d in regions() {
             match d.kind() {
                 MemoryRegionKind::Free
@@ -148,13 +127,22 @@ pub fn init(info: &BootInfo) {
                 MemoryRegionKind::Reserved => reserved.add(d.phys_start, d.end()),
                 MemoryRegionKind::Mmio => {}
             }
-            match d.kind() {
-                MemoryRegionKind::Free => free.add(d.phys_start, d.end()),
-                MemoryRegionKind::Boot => boot.add(d.phys_start, d.end()),
-                MemoryRegionKind::Firmware => runtime.add(d.phys_start, d.end()),
-                MemoryRegionKind::Acpi => acpi.add(d.phys_start, d.end()),
-                MemoryRegionKind::Reserved | MemoryRegionKind::Mmio => {}
-            }
+            use aricode_abi::sysinfo::dma_site as k;
+            let kind = match d.kind() {
+                MemoryRegionKind::Free => k::MEM_FREE,
+                MemoryRegionKind::Boot => k::MEM_BOOT,
+                MemoryRegionKind::Firmware => k::MEM_FIRMWARE,
+                MemoryRegionKind::Acpi => k::MEM_ACPI,
+                MemoryRegionKind::Mmio => k::MEM_MMIO,
+                MemoryRegionKind::Reserved => k::MEM_RESERVED,
+            };
+            map.add(d.phys_start, d.end(), kind);
+        }
+        if map.dropped() > 0 {
+            warn!(
+                "pmm: {} memory map entries not kept for DMA fault reports",
+                map.dropped()
+            );
         }
         if ram.approximated() || reserved.approximated() {
             warn!("pmm: memory map with too many ranges: small gaps counted as memory");

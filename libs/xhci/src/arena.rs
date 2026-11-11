@@ -11,8 +11,8 @@
 //! segments the 64 KiB one. A controller may count addresses within those
 //! boundaries only (Linux allocates its contexts from a pool with a
 //! PAGESIZE boundary and whole-page ring segments; FreeBSD gives every
-//! context its own page), so a structure across one is read wrapped,
-//! from memory it does not hold.
+//! context its own page), so a structure across one is read wrapped: the
+//! controller takes another structure's bytes for its own.
 
 /// The page size every structure here is placed for: the controller's
 /// PAGESIZE must include it (`page_size_supported`).
@@ -38,6 +38,7 @@ pub fn within_boundaries(phys: u64, len: u64) -> bool {
 /// span no boundary they must not span.
 pub fn place(base: u64, next: u64, len: u64, align: u64) -> u64 {
     debug_assert!(align.is_power_of_two() && align <= PAGE);
+    debug_assert!(base.is_multiple_of(PAGE), "the arena starts on a page");
     let mut off = next.next_multiple_of(align);
     for b in [PAGE, BOUNDARY_64K] {
         let phys = base + off;
@@ -48,6 +49,52 @@ pub fn place(base: u64, next: u64, len: u64, align: u64) -> u64 {
     }
     off
 }
+
+/// What the driver's structures are called in its log and in `usb dma in
+/// LABEL` events: each at most `LABEL_MAX` bytes, so the event's 24 bytes
+/// hold it whole.
+pub mod label {
+    pub const DCBAA: &str = "dcbaa";
+    pub const SCRATCHPAD_ARRAY: &str = "scratch array";
+    pub const SCRATCHPAD: &str = "scratchpad";
+    pub const COMMAND_RING: &str = "command ring";
+    pub const EVENT_RING: &str = "event ring";
+    pub const ERST: &str = "erst";
+    pub const DESCRIPTOR: &str = "desc buffer";
+    pub const DEVICE_CONTEXT: &str = "device ctx";
+    pub const INPUT_CONTEXT: &str = "input ctx";
+    pub const EP0_RING: &str = "ep0 ring";
+    pub const HID_RING: &str = "hid ring";
+    pub const HID_REPORTS: &str = "hid reports";
+    pub const BULK_IN_RING: &str = "bulk in ring";
+    pub const BULK_OUT_RING: &str = "bulk out ring";
+    pub const CBW: &str = "cbw";
+    pub const CSW: &str = "csw";
+    pub const SMALL: &str = "small buffer";
+
+    pub const ALL: [&str; 17] = [
+        DCBAA,
+        SCRATCHPAD_ARRAY,
+        SCRATCHPAD,
+        COMMAND_RING,
+        EVENT_RING,
+        ERST,
+        DESCRIPTOR,
+        DEVICE_CONTEXT,
+        INPUT_CONTEXT,
+        EP0_RING,
+        HID_RING,
+        HID_REPORTS,
+        BULK_IN_RING,
+        BULK_OUT_RING,
+        CBW,
+        CSW,
+        SMALL,
+    ];
+}
+
+/// The longest label `usb dma in ` leaves room for in an event's name.
+pub const LABEL_MAX: usize = 24 - "usb dma in ".len();
 
 /// A structure placed in the arena: its offset, length and what it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -186,7 +233,8 @@ mod tests {
 
     #[test]
     fn placement_keeps_contexts_in_a_page_and_rings_off_64k() {
-        let base = 0x43B7_7000;
+        // Any page-aligned base 0x7000 past a 64 KiB boundary.
+        let base = 0x1_2347_7000;
         // A 2048-byte Device Context at offset 3008 would cross the page.
         assert_eq!(place(base, 3008, 2048, 64), 4096);
         // One that fits stays where it is.
@@ -200,7 +248,7 @@ mod tests {
         // Alignment first, then the boundaries.
         assert_eq!(place(base, 1, 16, 64), 64);
         // A structure larger than a page but under 64 KiB only keeps off
-        // the 64 KiB boundary: the arena at 0x43b77000 meets one 0x9000 in.
+        // the 64 KiB boundary: this arena meets one 0x9000 in.
         assert_eq!(place(base, 0x8000, 0x2000, 4096), 0x9000);
         assert_eq!(place(base, 0x6000, 0x2000, 4096), 0x6000);
         // Larger than 64 KiB: nothing to keep off.
@@ -337,6 +385,20 @@ mod tests {
     #[test]
     fn event_names_fit() {
         let mut out = [0u8; 24];
+        for l in label::ALL {
+            assert!(l.len() <= LABEL_MAX, "{l}");
+            let whole = Located::Inside {
+                offset: 0,
+                first: Some(Span {
+                    off: 0,
+                    len: 1,
+                    label: l,
+                }),
+                count: 1,
+                used: true,
+            };
+            assert!(event_name(&whole, &mut out).ends_with(l));
+        }
         let span = Span {
             off: 0,
             len: 1,
