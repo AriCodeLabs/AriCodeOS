@@ -3858,12 +3858,18 @@ impl Controller {
         sys::print(b")\n");
     }
 
-    /// The HID device entry on root port `port`, if any; the storage
-    /// device's entry is left to the storage logic.
+    /// The HID device entry on root port `port`, if any: one with a HID
+    /// endpoint. The storage device's entry is left to the storage logic,
+    /// also while a re-enumeration has taken `storage` out (it has no HID
+    /// endpoint), and so is an entry still being enumerated before its
+    /// endpoints exist (its own failures release it).
     fn hid_device_on(&self, port: u8) -> Option<usize> {
         let storage = self.storage.as_ref().and_then(|st| st.device);
         (0..MAX_DEVICES).find(|&i| {
-            Some(i) != storage && self.devices[i].as_ref().is_some_and(|d| d.port == port)
+            Some(i) != storage
+                && self.devices[i]
+                    .as_ref()
+                    .is_some_and(|d| d.port == port && d.endpoints.iter().any(Option::is_some))
         })
     }
 
