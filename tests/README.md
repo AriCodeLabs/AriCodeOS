@@ -121,6 +121,7 @@ usb_hid_msi = true              # that xHCI offers MSI only, no MSI-X (like 2012
 usb_hid_msi_and_msix = true     # that xHCI offers both (a refused MSI-X falls back to MSI, ADR 0051)
 usb_storage = true              # the test disk hangs off the xHCI as USB mass storage; there is no virtio-blk
 usb_xhci = true                 # an xHCI with nothing attached at boot and eight USB 2 ports (bus xhci.0), for [[host_hotplug]]
+usb_spare_disk = true           # a blank 1 MiB drive `spare` attached to nothing, for a [[host_hotplug]] stage with drive = "spare"
 host_https = true               # two host HTTPS servers (openssl s_server -www) on ports chosen per run, written {https_port} (cert from a
                                 # test CA installed as trusted_ca.der) and {https_untrusted_port} (self-signed) in stdin, kill_on and expect
 
@@ -169,9 +170,11 @@ action = "add"                  # add (default: device_add) or remove (device_de
 driver = "usb-kbd"              # add: QEMU device, bus, optional bus port and id: letters, digits, '.', '_' and '-' only
 bus = "ehci.0"
 port = "2"
-id = "hotkbd"                   # result in "[host] hotplug: usb-kbd added on ehci.0 port 2 as hotkbd" / "hotkbd removed";
-                                # a stage that never ran says "marker '...' never seen; stage N not run". A stage waits while
-                                # an input stage holds QEMU's single QMP connection. With [[boots]], on every boot.
+drive = "spare"                 # add: the QEMU drive behind a storage device (optional; usb_spare_disk)
+id = "hotkbd"                   # result in "[host] hotplug: usb-kbd added on ehci.0 port 2 as hotkbd" / "hotkbd removed".
+                                # A stage that never ran ("[host] hotplug: marker '...' never seen; stage N not run") or that
+                                # QEMU refused ("[host] hotplug failed: ...") fails the scenario whatever it expects. A stage
+                                # waits while an input stage holds QEMU's single QMP connection. With [[boots]], on every boot.
 
 [host_input]                    # optional: input injected through QMP when marker is seen
 marker = "INPUT_READY"

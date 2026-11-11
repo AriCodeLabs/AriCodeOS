@@ -42,7 +42,7 @@ action = "remove"
 id = "m1"
 
 [[host_hotplug]]
-marker = " detached"
+marker = "usb-input: port 5: device on slot 1 detached"
 driver = "usb-mouse"
 bus = "xhci.0"
 port = "2"
@@ -56,7 +56,7 @@ action = "remove"
 id = "m2"
 
 [[host_hotplug]]
-marker = " detached"
+marker = "usb-input: port 6: device on slot 1 detached"
 driver = "usb-kbd"
 bus = "xhci.0"
 port = "1"
@@ -116,7 +116,7 @@ serial_contains = [
     "usb-input: port 5: device plugged in; enumerating (attempt 1)",
     "usb-input: port 5: HID mouse (boot protocol, 4 bytes per report, endpoint 1)",
     "usb-input: port 5: device attached on slot 1, ",
-    "usb-input: port 5: the device on slot 1 is gone; it is detached from the idle loop",
+    "usb-input: port 5: the device on slot 1 is gone; the idle loop detaches it",
     "usb-input: Stop Endpoint slot 1 dci 3: completion code 1 (Success)",
     "usb-input: Disable Slot slot 1: completion code 1 (Success)",
     "usb-input: port 5: device on slot 1 detached",
@@ -162,9 +162,7 @@ serial_absent = [
     "usb cmd fail",
     "usb cmd pending",
     "usb cmd refused",
-    "on xhci.0 failed",
-    "removing m",
-    "never seen",
-    "QEMU ended before the delay",
     "[host] QMP: failed",
 ]
+# A hot-plug stage that did not run or that QEMU refused fails every
+# scenario by itself (`test.rs`, incident 0059).

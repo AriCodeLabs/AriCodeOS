@@ -219,6 +219,9 @@ pub struct HostHotplug {
     pub bus: Option<String>,
     /// The bus port (`add` only, optional): QEMU's USB port number.
     pub port: Option<String>,
+    /// The QEMU drive behind it (`add` only, optional): `spare` with
+    /// `usb_spare_disk`.
+    pub drive: Option<String>,
     pub id: String,
 }
 
@@ -238,10 +241,15 @@ impl HostHotplug {
                     ("driver", self.driver.as_ref()),
                     ("bus", self.bus.as_ref()),
                     ("port", self.port.as_ref()),
+                    ("drive", self.drive.as_ref()),
                 ]);
             }
             HotplugAction::Remove => {
-                if self.driver.is_some() || self.bus.is_some() || self.port.is_some() {
+                if self.driver.is_some()
+                    || self.bus.is_some()
+                    || self.port.is_some()
+                    || self.drive.is_some()
+                {
                     return Err(String::from(
                         "[[host_hotplug]] action \"remove\" names only the id",
                     ));
@@ -315,6 +323,37 @@ pub struct HostInput {
 const DEVICE_QUEUE: usize = 16;
 
 impl HostInput {
+    /// Button and key names go into hand-written QMP JSON: QEMU qcode and
+    /// button names only (letters, digits, '_' and '-', with '+' joining a
+    /// key combination).
+    fn check_names(&self) -> std::result::Result<(), String> {
+        let plain = |v: &str, plus: bool| {
+            !v.is_empty()
+                && v.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b) || (plus && b == b'+'))
+        };
+        let buttons = [("click", &self.click), ("button_down", &self.button_down)];
+        for (what, v) in buttons {
+            if let Some(v) = v.as_deref().filter(|v| !plain(v, false)) {
+                return Err(format!(
+                    "[host_input] {what} {v:?}: a QEMU button name (letters, digits, '_', '-')"
+                ));
+            }
+        }
+        let keys = self
+            .keys
+            .iter()
+            .chain(self.hold_key.as_ref().map(|(k, _)| k));
+        for k in keys {
+            if !plain(k, true) {
+                return Err(format!(
+                    "[host_input] key {k:?}: QEMU qcode names (letters, digits, '_', '-', '+')"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Incident 0022: the keys typed between two waits for the guest
     /// (`typing::plan` with `echo_prompt`, all of them without it) must fit
     /// in a device queue, counted in PS/2 bytes; a wall-clock delay does
@@ -614,6 +653,10 @@ pub struct Scenario {
     /// devices plugged in later (`[[host_hotplug]]` on bus `xhci.0`).
     #[serde(default)]
     pub usb_xhci: bool,
+    /// A blank 1 MiB drive `spare`, attached to nothing: a `[[host_hotplug]]`
+    /// stage plugs it in as a second USB stick (`drive = "spare"`).
+    #[serde(default)]
+    pub usb_spare_disk: bool,
     /// Also adds an EHCI with no devices: init launches the EHCI driver
     /// for it next to the xHCI driver (ADR 0031).
     #[serde(default)]
@@ -801,7 +844,8 @@ pub fn load_from(dir: &Path) -> Result<Vec<Scenario>> {
             s.check_placeholders()
                 .map_err(|e| format!("{}: {e}", path.display()))?;
             for h in s.host_input.iter().chain(&s.host_input_then) {
-                h.check_queue()
+                h.check_names()
+                    .and_then(|_| h.check_queue())
                     .map_err(|e| format!("{}: {e}", path.display()))?;
             }
             if !s.host_input_then.is_empty() && s.host_input.is_none() {
@@ -982,6 +1026,7 @@ mod tests {
             driver: Some(driver.to_string()),
             bus: Some(String::from("ehci.0")),
             port: Some(String::from("2")),
+            drive: Some(String::from("spare")),
             id: String::from("hot-1"),
         };
         assert!(h("usb-kbd").check().is_ok());
@@ -1024,6 +1069,7 @@ id = "m1"
             driver: Some(String::from("usb-kbd")),
             bus: None,
             port: None,
+            drive: None,
             id: String::from("k"),
         };
         assert!(remove_with_driver.check().is_err());
@@ -1136,6 +1182,25 @@ id = "m1"
         let err = input("").check_queue().unwrap_err();
         assert!(err.contains("types 18 key codes"), "{err}");
         input("echo_prompt = \"ari> \"").check_queue().unwrap();
+    }
+
+    #[test]
+    fn input_names_that_would_break_the_qmp_json_are_refused() {
+        let input = |body: &str| -> HostInput {
+            toml::from_str(&format!("marker = \"M\"\n{body}")).unwrap()
+        };
+        input("keys = [\"shift+dot\", \"kp_add\"]\nclick = \"wheel-up\"\nbutton_down = \"right\"")
+            .check_names()
+            .unwrap();
+        for bad in [
+            "click = \"left\\\"\"",
+            "button_down = \"a b\"",
+            "keys = [\"x}\"]",
+            "hold_key = [\"a,\", 10]",
+            "button_down = \"\"",
+        ] {
+            assert!(input(bad).check_names().is_err(), "{bad}");
+        }
     }
 
     fn scenario(name: &str, level: &str, areas: &str) -> Scenario {

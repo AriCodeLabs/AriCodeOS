@@ -31,6 +31,8 @@ pub struct UsbOptions {
     /// The xHCI even with nothing attached at boot, with eight USB 2 ports
     /// (hot-plug).
     pub xhci: bool,
+    /// A blank 1 MiB drive `spare` attached to no device (hot-plug).
+    pub spare_disk: bool,
     /// An EHCI with a USB keyboard and mouse (high speed) for the EHCI
     /// driver (ADR 0031).
     pub ehci_hid: bool,
@@ -158,6 +160,17 @@ fn base_command(
             "virtio-blk-pci,drive=disk0,disable-legacy=on,disable-modern=off,iommu_platform=on",
         ]);
     }
+    // A blank second disk attached to nothing: a hot-plug stage plugs it in
+    // as a second USB stick (`drive = "spare"`). A file that cannot be made
+    // makes QEMU refuse to start, which the run reports.
+    if usb.spare_disk {
+        let spare = disk.with_file_name("spare.img");
+        let _ = std::fs::File::create(&spare).and_then(|f| f.set_len(1 << 20));
+        q.args([
+            "-drive",
+            &format!("if=none,id=spare,format=raw,file={}", spare.display()),
+        ]);
+    }
     q.args([
         "-drive",
         &format!("if=pflash,format=raw,readonly=on,file={OVMF_CODE}"),
@@ -263,6 +276,7 @@ pub enum HotplugAction<'a> {
         driver: &'a str,
         bus: &'a str,
         port: Option<&'a str>,
+        drive: Option<&'a str>,
     },
     /// `device_del`.
     Remove,
@@ -278,30 +292,40 @@ pub struct Hotplug<'a> {
     pub id: &'a str,
 }
 
+/// How a hot-plug stage that QEMU refused starts (`test.rs` fails every
+/// scenario that shows it).
+pub const HOTPLUG_FAILED: &str = "[host] hotplug failed: ";
+
 fn run_hotplug(path: &Path, stage: &Hotplug) -> String {
     // Names checked by the scenario loader: plain names, safe in JSON.
     let id = stage.id;
     let (command, done, failed) = match stage.action {
-        HotplugAction::Add { driver, bus, port } => {
-            let at = port.map_or(String::new(), |p| format!(r#","port":"{p}""#));
+        HotplugAction::Add {
+            driver,
+            bus,
+            port,
+            drive,
+        } => {
+            let at = port.map_or(String::new(), |p| format!(r#","port":"{p}""#))
+                + &drive.map_or(String::new(), |d| format!(r#","drive":"{d}""#));
             let where_ = port.map_or(String::new(), |p| format!(" port {p}"));
             (
                 format!(
                     r#"{{"execute":"device_add","arguments":{{"driver":"{driver}","bus":"{bus}"{at},"id":"{id}"}}}}"#
                 ),
                 format!("{driver} added on {bus}{where_} as {id}"),
-                format!("{driver} on {bus} failed"),
+                format!("adding {driver} on {bus} as {id}"),
             )
         }
         HotplugAction::Remove => (
             format!(r#"{{"execute":"device_del","arguments":{{"id":"{id}"}}}}"#),
             format!("{id} removed"),
-            format!("removing {id} failed"),
+            format!("removing {id}"),
         ),
     };
     match Qmp::connect(path).and_then(|mut q| q.execute(&command)) {
         Ok(()) => format!("[host] hotplug: {done}"),
-        Err(e) => format!("[host] hotplug: {failed}: {e}"),
+        Err(e) => format!("{HOTPLUG_FAILED}{failed}: {e}"),
     }
 }
 
@@ -1690,8 +1714,10 @@ pub fn run_headless(
             // QEMU's QMP socket serves one client: not while an input
             // stage holds it.
             if input_thread.is_none() && hotplug_seen.is_some_and(|t| t.elapsed() >= h.delay) {
-                hotplug_results.push(run_hotplug(qmp.path(), h));
+                // The next stage looks from here: what the guest prints in
+                // answer may come before `device_add` returns.
                 hotplug_from = captured.lock().expect("capture").len();
+                hotplug_results.push(run_hotplug(qmp.path(), h));
                 hotplug_seen = None;
             }
         }

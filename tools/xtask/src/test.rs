@@ -698,6 +698,7 @@ pub fn run_scenario(
                         driver: h.driver.as_deref().unwrap_or_default(),
                         bus: h.bus.as_deref().unwrap_or_default(),
                         port: h.port.as_deref(),
+                        drive: h.drive.as_deref(),
                     },
                     HotplugAction::Remove => qemu::HotplugAction::Remove,
                 },
@@ -742,6 +743,7 @@ pub fn run_scenario(
                 legacy_controller: s.usb_legacy_controller,
                 storage: s.usb_storage,
                 xhci: s.usb_xhci,
+                spare_disk: s.usb_spare_disk,
                 ehci_hid: s.usb_ehci_hid,
                 ehci_storage: s.usb_ehci_storage,
                 ehci_companion_kbd: s.usb_ehci_companion_kbd,
@@ -819,8 +821,14 @@ pub fn run_scenario(
         }
         // A stage that never came sent nothing, so what follows proves nothing.
         // Its line also quotes the marker, which would satisfy a search for
-        // that text (incident 0059).
-        for needle in ["[host] QMP: marker '", "[host] flood: marker '"] {
+        // that text (incident 0059). A hot-plug stage QEMU refused did not
+        // happen either.
+        for needle in [
+            "[host] QMP: marker '",
+            "[host] flood: marker '",
+            "[host] hotplug: marker '",
+            qemu::HOTPLUG_FAILED,
+        ] {
             if let Some(line) = cap.serial.lines().find(|l| l.contains(needle)) {
                 problems.push(format!("{prefix}{line}"));
             }

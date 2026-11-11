@@ -34,4 +34,6 @@ serial_contains = [
     "[host] hotplug: usb-kbd added on ehci.0 as hotkbd",
     "ARICODEOS_SHUTDOWN",
 ]
-serial_absent = ["KERNEL PANIC", "hotplug: usb-kbd on ehci.0 failed", "marker 'AriInit: boot services completed' never seen"]
+# A hot-plug stage that did not run or that QEMU refused fails every
+# scenario (`test.rs`, incident 0059).
+serial_absent = ["KERNEL PANIC"]
