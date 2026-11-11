@@ -283,7 +283,7 @@ fn trim(s: &[u8]) -> &[u8] {
 
 fn help() {
     print(
-        b"commands:\n  help      this help\n  ps        processes\n  mem       physical memory\n  ls        AriFS files\n  cat NAME  show a file\n  write NAME TEXT  save TEXT to the file (creates it or replaces it entirely)\n  devices   PCI functions\n  services  boot services (--detail: supervisor state)\n  uptime    time since boot\n  sleep MS  wait MS milliseconds (at most 60000)\n  cpus      online processors and idle time per CPU\n  temp      the CPU's temperature\n  diag [NAME]  full report (uptime, mem, cpus, entropy, ps, stacks, services, net, devices); with NAME saves it to AriFS\n  acpidump NAME  save the firmware's DSDT and SSDTs to AriFS, for a device study\n  screenshot  the desktop's screen as a QOI image in base64, for an SSH client (the desktop says it was copied)\n  net       network configuration\n  ping IP   ICMP echo (4 attempts)\n  dns NAME  resolve a name\n  http URL  GET and show the body (http:// or https://)\n  run PROG  run an initrd program and wait\n\
+        b"commands:\n  help      this help\n  ps        processes\n  mem       physical memory\n  ls        AriFS files\n  cat NAME  show a file\n  write NAME TEXT  save TEXT to the file (creates it or replaces it entirely)\n  devices   PCI functions\n  services  boot services (--detail: supervisor state)\n  uptime    time since boot\n  sleep MS  wait MS milliseconds (at most 60000)\n  cpus      online processors and idle time per CPU\n  temp      the CPU's temperature\n  diag [NAME]  full report (uptime, mem, cpus, entropy, ps, stacks, services, net, devices); with NAME saves it to AriFS\n  acpidump NAME  save the firmware's DSDT, SSDTs and FADT to AriFS, for a device study\n  screenshot  the desktop's screen as a QOI image in base64, for an SSH client (the desktop says it was copied)\n  net       network configuration\n  ping IP   ICMP echo (4 attempts)\n  dns NAME  resolve a name\n  http URL  GET and show the body (http:// or https://)\n  run PROG  run an initrd program and wait\n\
   update [--channel stable|dev]  fetch and verify the signed index of every source of the channel (stable by default) and show what is new (installs nothing; ADR 0029, ADR 0045)\n  update add [--channel dev] URL|IP[:PORT]  register an update source (stable unless --channel dev)\n  update remove N|URL  unregister a source\n  update sources  list the sources\n  update profile add|remove NAME  follow a profile of the sources (upgrade installs its apps) or stop following it (its apps are deleted; ADR 0074)\n  update profiles  list the followed profiles\n  session [shell|desktop]  show or choose what the machine boots into: the text console, or the desktop of the desktop profile once installed (ADR 0074)\n  update apply [--allow-downgrade]  install the image in the UPDATE partition\n  update rollback  boot the system in the other slot next (no network; then `reboot`)\n  upgrade [--channel stable|dev] [--allow-downgrade]  install what the last `update` found (system into the inactive slot, then `reboot`; apps through the installer); only --channel moves the system to another channel\n  spawn PROG  launch it in the background (cannot be stopped)\n  repeat N CMD  repeat a command N times\n  reboot    reboot\n  shutdown  power off\n  exit      exit the shell\n",
     );
 }
@@ -568,7 +568,7 @@ fn diag(fs: &mut FsClient, net_client: &NetClient, mask: u64, rest: &[u8]) {
 }
 
 /// Creates the file `name`, or replaces it entirely, with `data`.
-/// `acpidump NAME`: the firmware's DSDT and SSDTs, as the kernel copies
+/// `acpidump NAME`: the firmware's DSDT, SSDTs and FADT, as the kernel copies
 /// them (`sysinfo::ACPI_AML`), saved to AriFS for a device study on the
 /// build host. Nothing else of the firmware's: no serial, no licence key.
 fn acpidump(fs: &mut FsClient, rest: &[u8]) {
@@ -599,13 +599,28 @@ fn acpidump(fs: &mut FsClient, rest: &[u8]) {
             return;
         }
     };
-    match save_file(fs, name, &data[..n]) {
+    let data = &data[..n.min(data.len())];
+    match save_file(fs, name, data) {
         Ok(n) => {
             print(b"acpidump: ");
             num(n as u64);
             print(b" bytes to ");
             print(name.as_bytes());
-            print(b"\n");
+            // Which tables: each header's signature, walking the lengths.
+            print(b" (");
+            let mut at = 0;
+            while let Some(head) = data.get(at..at + 8) {
+                let len = u32::from_le_bytes([head[4], head[5], head[6], head[7]]) as usize;
+                if len < 36 {
+                    break;
+                }
+                if at > 0 {
+                    print(b" ");
+                }
+                print(&head[..4]);
+                at += len;
+            }
+            print(b")\n");
         }
         Err(()) => print(b"acpidump: could not save the tables\n"),
     }

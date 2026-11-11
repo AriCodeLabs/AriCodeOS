@@ -3,12 +3,13 @@
 # does not when the S5 write comes from another processor. `poweroff_from=3`
 # first moves the shell's `shutdown` call to CPU 3; the kernel must then move
 # it to CPU 0 before interrupts go off and the other CPUs halt, and the
-# machine powers off through ACPI S5 (QEMU exits with 0 on its own).
+# machine powers off through ACPI S5 (QEMU exits with 0 on its own). A
+# `poweroff.wait_ms` below its floor is refused and logged, not taken.
 name = "power.acpi_shutdown_from_ap"
 description = "a shutdown called on another CPU moves to the boot CPU and powers off through ACPI S5"
 level = "full"
 areas = ["hardware", "shell"]
-cmdline = "shell poweroff_from=3"
+cmdline = "shell poweroff_from=3 poweroff.wait_ms=5"
 timeout_secs = 60
 cpus = 4
 stdin = ["shutdown"]
@@ -16,6 +17,7 @@ stdin = ["shutdown"]
 [expect]
 exit = 0
 serial_contains = [
+    "power: poweroff.wait_ms=5 refused: 500 to 60000 ms; 3000 kept",
     "AriCodeOS: poweroff_from: the call moved to CPU 3",
     "AriCodeOS: the power-off runs on CPU 0 (called on CPU 3)",
     "AriCodeOS: the other CPUs are halted for the power-off",

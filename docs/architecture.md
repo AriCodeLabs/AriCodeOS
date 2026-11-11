@@ -1900,8 +1900,12 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
   (legacy and `X_` blocks, HW-reduced flag, sleep control/status registers):
   `ACPI_ENABLE` if needed, `WAK_STS` cleared, GPEs disabled, all status
   cleared, `SLP_TYP` then `SLP_TYP | SLP_EN` (PM1a before PM1b), a second
-  write after `poweroff.wait_ms`. Port I/O only; a refusal writes nothing and
-  is named in the last line. `poweroff_ignored` now skips only the `SLP_EN`
+  write after `poweroff.wait_ms`. Port I/O only; an unusable `X_` form
+  falls back to a valid 32-bit port, a broken PM1b is skipped, PM1 blocks
+  use ACPI's default widths, as ACPICA does; a refusal writes nothing and is
+  named in the last line. The move to the boot CPU first checks that CPU's
+  tick advances (`Cpu::ticks`), so a wedged CPU leaves the power-off where it
+  was called instead of hanging it. `acpidump` saves the FADT with the AML. `poweroff_ignored` now skips only the `SLP_EN`
   writes; `poweroff_from=N` (tests only) starts the call on CPU N (scenario
   `power.acpi_shutdown_from_ap`). `diag` prints the FADT's facts and the
   registers' state in `power` lines (`power::report`).

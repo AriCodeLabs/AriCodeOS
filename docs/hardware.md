@@ -112,7 +112,7 @@ the QEMU scenarios: `cargo xtask usb-image --cmdline` refuses it, like
 every other test-only key (`qemu_exit`, `test=`, `usb_fault`, `blk_fault`,
 `restart_storm`, `service_hang`, `init_fail_late`, `input_restart`,
 `input_orphan`, `shell_fault`, `fsd_fault`, `fsd_mutate`, `pci_fault`, `gui_trace`,
-`gui_notice`, `poweroff_ignored`) and the keys AriBoot adds itself (`boot_slot`,
+`gui_notice`, `poweroff_ignored`, `poweroff_from`) and the keys AriBoot adds itself (`boot_slot`,
 `boot_pending`). If a stick's
 `cmdline.txt` is edited by hand to carry it, the screen says `AriInit:
 selftest: running the test-only boot checks` and the boot stops at
@@ -334,15 +334,20 @@ and always on the USB stick itself or a dedicated USB drive.
 
 - `shutdown` powers the machine off through ACPI S5: at boot the kernel
   reads the FADT and the `\_S5_` package of the DSDT and logs
-  `acpi: power-off through S5 (SLP_TYP a/b, PM1a ..., PM1b ...)`. If the
+  `acpi: power-off through S5 (SLP_TYP a/b, PM1a cnt ..., PM1b cnt ...,
+  PM1a evt ..., GPE0 ..., GPE1 ...; FADT rev ..., ... bytes)`. If the
   firmware ignores the request, the console says
   `ACPI power-off had no effect (...); halting (it is safe to switch off)`,
   with what was written, from which CPU and, on the office laptop's Intel
-  500 Series PCH (`8086:a082`), whether the chipset traps the write into the firmware (`SMI on SLP_EN`).
-  `diag` prints the FADT's power-off facts in its `power` lines: send them
-  with any report of a machine that does not power off. `poweroff.wait_ms=N`
-  sets how long each S5 write is given (3000 by default) and `poweroff.cpu=N`
-  the processor that makes it (the boot CPU, 0, by default).
+  500 Series PCH (`8086:a082`), whether the chipset traps the write into
+  the firmware (`SMI on SLP_EN`, the datasheet's `SMI_ON_SLP_EN`).
+  `diag` prints the FADT's power-off facts in its `power` lines, and
+  `acpidump NAME` saves the DSDT, the SSDTs and the FADT (never MSDM or
+  SLIC, which may carry a licence key): send both with any report of a
+  machine that does not power off. `poweroff.wait_ms=N` sets how long each
+  S5 write is given (3000 by default, 500 to 60000) and `poweroff.cpu=N`
+  the processor that makes it (the boot CPU, 0, by default); a refused
+  value is logged.
 - The shell edits the line like a terminal: Left/Right, Home/End
   (Ctrl-A/Ctrl-E), insert and delete anywhere (Backspace, Delete), Ctrl-U to
   clear, Up/Down for the history.

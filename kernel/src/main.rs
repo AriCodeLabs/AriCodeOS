@@ -84,12 +84,6 @@ pub unsafe extern "C" fn kernel_entry(boot_info: *const BootInfo) -> ! {
     let cmdline = CmdLine::new(unsafe { info.cmdline() });
     QEMU_EXIT.store(cmdline.has(keys::QEMU_EXIT), Ordering::Relaxed);
     POWEROFF_IGNORED.store(cmdline.has(keys::POWEROFF_IGNORED), Ordering::Relaxed);
-    let number = |key: &str| cmdline.get(key).and_then(|v| v.parse().ok());
-    arch::x86_64::power::configure(
-        number(keys::POWEROFF_CPU).map(|c: u64| c as usize),
-        number(keys::POWEROFF_WAIT_MS),
-        number(keys::POWEROFF_FROM).map(|c: u64| c as usize),
-    );
 
     framebuffer::set_info(info.framebuffer, info.video());
     // With `gui` the screen belongs to the user compositor: the kernel only
@@ -112,6 +106,12 @@ pub unsafe extern "C" fn kernel_entry(boot_info: *const BootInfo) -> ! {
         info!("cmdline: {}", cmdline.raw().trim());
     }
     trace!("logger active at level {level}");
+    // After the logger: a refused value is logged.
+    arch::x86_64::power::configure(
+        cmdline.get(keys::POWEROFF_CPU),
+        cmdline.get(keys::POWEROFF_WAIT_MS),
+        cmdline.get(keys::POWEROFF_FROM),
+    );
 
     report_framebuffer(info, has_fb, gui);
     report_kernel(info);

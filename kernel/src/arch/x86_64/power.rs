@@ -59,15 +59,40 @@ static POLICY: Policy = Policy {
     from: AtomicUsize::new(NO_CPU),
 };
 
-/// Sets the policy (`poweroff.cpu`, `poweroff.wait_ms`, `poweroff_from`).
-pub fn configure(cpu: Option<usize>, wait_ms: Option<u64>, from: Option<usize>) {
-    if let Some(c) = cpu {
+/// The shortest wait `poweroff.wait_ms` may set: below it a chipset that is
+/// slow to act would be reported as ignoring the write.
+pub const MIN_WAIT_MS: u64 = 500;
+/// The longest.
+pub const MAX_WAIT_MS: u64 = 60_000;
+
+/// Sets the policy from the command line's raw values (`poweroff.cpu`,
+/// `poweroff.wait_ms`, `poweroff_from`). A value that does not parse or is
+/// out of range is refused, logged, and the default kept.
+pub fn configure(cpu: Option<&str>, wait_ms: Option<&str>, from: Option<&str>) {
+    let cpu_index = |key: &str, v: &str| match v.parse::<usize>() {
+        Ok(c) if c < crate::cpu::MAX_CPUS => Some(c),
+        _ => {
+            log::warn!(
+                "power: {key}={v} refused: not a CPU number below {}",
+                crate::cpu::MAX_CPUS
+            );
+            None
+        }
+    };
+    if let Some(c) = cpu.and_then(|v| cpu_index("poweroff.cpu", v)) {
         POLICY.cpu.store(c, Ordering::Relaxed);
     }
-    if let Some(w) = wait_ms {
-        POLICY.wait_ms.store(w.min(60_000), Ordering::Relaxed);
+    if let Some(v) = wait_ms {
+        match v.parse::<u64>() {
+            Ok(w) if (MIN_WAIT_MS..=MAX_WAIT_MS).contains(&w) => {
+                POLICY.wait_ms.store(w, Ordering::Relaxed)
+            }
+            _ => log::warn!(
+                "power: poweroff.wait_ms={v} refused: {MIN_WAIT_MS} to {MAX_WAIT_MS} ms; {DEFAULT_WAIT_MS} kept"
+            ),
+        }
     }
-    if let Some(f) = from {
+    if let Some(f) = from.and_then(|v| cpu_index("poweroff_from", v)) {
         POLICY.from.store(f, Ordering::Relaxed);
     }
 }
@@ -87,8 +112,12 @@ pub fn move_to_poweroff_cpu() {
     }
     let called = crate::cpu::id();
     let want = POLICY.cpu.load(Ordering::Relaxed);
-    let online = want < crate::cpu::MAX_CPUS && crate::cpu::slot(want).is_online();
-    let target = if online { want } else { 0 };
+    let target = if crate::cpu::slot(want).is_online() {
+        want
+    } else {
+        crate::println!("AriCodeOS: poweroff.cpu={want} is not online; the boot CPU instead");
+        0
+    };
     match crate::task::scheduler::move_current_to(target) {
         Ok(()) => crate::println!(
             "AriCodeOS: the power-off runs on CPU {} (called on CPU {called})",
@@ -121,17 +150,13 @@ pub enum PowerOff {
 struct Ports;
 
 impl PortIo for Ports {
-    fn read8(&mut self, port: u16) -> u8 {
+    fn read16(&mut self, port: u16) -> u16 {
         // SAFETY: ports the FADT declares for the fixed hardware, checked
         // to lie within the I/O space by `aricode_acpi::sleep`.
-        unsafe { inb(port) }
-    }
-    fn read16(&mut self, port: u16) -> u16 {
-        // SAFETY: as `read8`.
         unsafe { inw(port) }
     }
     fn write8(&mut self, port: u16, value: u8) {
-        // SAFETY: as `read8`; the values are the ones ACPI defines.
+        // SAFETY: as `read16`; the values are the ones ACPI defines.
         unsafe { outb(port, value) }
     }
     fn write16(&mut self, port: u16, value: u16) {
@@ -144,8 +169,11 @@ impl PortIo for Ports {
 }
 
 /// What the power-off needs, gathered while interrupts are still on and
-/// the other CPUs run: after they are halted no lock they might hold (the
-/// ACPI tables', the PCI list's, the heap's) is taken again.
+/// the other CPUs run, so the sequence after the halt takes neither the
+/// ACPI tables' nor the PCI list's lock and allocates nothing. (The halt
+/// IPI is taken only with interrupts on, so a halted CPU holds no
+/// interrupt-disabling lock; the console's lock, which `println` and
+/// `last_words` take afterwards, is one of those.)
 pub struct Prepared {
     fadt: Option<Fadt>,
     s5: Option<(u8, u8)>,
@@ -187,7 +215,8 @@ pub fn acpi_poweroff(p: &Prepared, enter: bool) -> PowerOff {
 /// Chipsets whose `SMI_EN` register is known from their manual: the
 /// LPC/eSPI bridge's ID at 00:1f.0, and the manual. `SMI_EN` is at the
 /// ACPI base (the FADT's PM1a event block) plus 0x30; its bit 4,
-/// `SMI_ON_SLP_EN`, makes a `SLP_EN` write raise an SMI instead of the
+/// `SMI_ON_SLP_EN` in that datasheet (`SLP_SMI_EN` in older PCH datasheets
+/// and in coreboot), makes a `SLP_EN` write raise an SMI instead of the
 /// sleep, for the firmware's handler to finish (Intel 500 Series On-Package
 /// PCH datasheet vol. 2, 631120-002, 4.2.5). Other chipsets are not read.
 const SMI_EN_KNOWN: &[(u16, u16, &str)] = &[(0x8086, 0xA082, "Intel 500 Series PCH")];
@@ -235,10 +264,11 @@ pub fn report(out: &mut String) {
     };
     let _ = writeln!(
         out,
-        "power   FADT rev {}.{} ({} bytes), flags {:#x}: hardware-reduced {}, low-power S0 {}; SCI IRQ {}; SMI_CMD {:#x} ACPI_ENABLE {:#x}",
+        "power   FADT rev {}.{} ({} bytes, checksum {}), flags {:#x}: hardware-reduced {}, low-power S0 {}; SCI IRQ {}; SMI_CMD {:#x} ACPI_ENABLE {:#x}",
         f.revision,
         f.minor_revision,
         f.length,
+        if f.checksum_ok { "ok" } else { "bad, used anyway" },
         f.flags,
         f.hw_reduced() as u8,
         (f.flags & aricode_acpi::fadt::FLAG_LOW_POWER_S0 != 0) as u8,

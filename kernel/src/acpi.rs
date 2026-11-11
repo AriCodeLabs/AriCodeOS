@@ -25,6 +25,8 @@ pub struct AcpiInfo {
     /// Where the DSDT and SSDTs are, and their lengths: the AML a device
     /// study reads (`sysinfo::ACPI_AML`).
     pub aml: Vec<(u64, u32)>,
+    /// Where the FADT is, and its length: saved along with the AML.
+    pub fadt_table: Option<(u64, u32)>,
 }
 
 static ACPI: IrqLock<Option<AcpiInfo>> = IrqLock::new(None);
@@ -94,7 +96,13 @@ pub fn init(info: &BootInfo) {
                 Err(e) => warn!("acpi: invalid DMAR ({e:?})"),
             },
             b"FACP" => match aricode_acpi::parse_fadt(table) {
-                Ok(f) => acpi.fadt = Some(f),
+                Ok(f) => {
+                    if !f.checksum_ok {
+                        warn!("acpi: FADT checksum does not add up; used anyway, as ACPICA does");
+                    }
+                    acpi.fadt = Some(f);
+                    acpi.fadt_table = Some((addr, head.length));
+                }
                 Err(e) => warn!("acpi: invalid FADT ({e:?})"),
             },
             b"SSDT" => {
@@ -174,12 +182,15 @@ pub fn init(info: &BootInfo) {
     *ACPI.lock() = Some(acpi);
 }
 
-/// The DSDT and SSDTs, one after another, each whole with its header: the
-/// firmware's description of the machine's devices, for a study on the
-/// build host. Only these: other tables may hold what is not ours to copy
-/// (MSDM and SLIC carry a Windows licence key).
+/// The DSDT and SSDTs, then the FADT, one after another, each whole with
+/// its header: the firmware's description of the machine's devices and of
+/// its power-off registers, for a study on the build host. Only these:
+/// other tables may hold what is not ours to copy (MSDM and SLIC carry a
+/// Windows licence key). The FADT holds addresses, flags and port numbers,
+/// no serial and no key.
 pub fn aml_tables() -> Vec<u8> {
-    let at = with(|a| a.aml.clone());
+    let (mut at, fadt) = with(|a| (a.aml.clone(), a.fadt_table));
+    at.extend(fadt);
     let mut out = Vec::new();
     for (addr, len) in at {
         if let Some(t) = phys_slice(addr, len as usize) {
@@ -209,6 +220,7 @@ pub fn with<R>(f: impl FnOnce(&AcpiInfo) -> R) -> R {
         s5: None,
         ids: Vec::new(),
         aml: Vec::new(),
+        fadt_table: None,
     };
     let guard = ACPI.lock();
     f(guard.as_ref().unwrap_or(&EMPTY))

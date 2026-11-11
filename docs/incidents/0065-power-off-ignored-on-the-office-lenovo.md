@@ -98,8 +98,11 @@ one:
 - `shutdown` first moves the calling thread to the boot CPU
   (`scheduler::move_current_to`; `poweroff.cpu=N` chooses another), then
   turns interrupts off and halts the others, as Linux and FreeBSD do. The
-  FADT, `\_S5_` and the chipset facts are gathered before the halt, so no
-  lock a halted CPU might hold is taken afterwards.
+  FADT, `\_S5_` and the chipset facts are gathered before the halt, so the
+  sequence afterwards takes neither the ACPI tables' nor the PCI list's
+  lock and allocates nothing. The console's lock, which the last lines
+  take, is safe: the halt IPI is taken only with interrupts on, so a
+  halted CPU holds no interrupt-disabling lock.
 - `aricode_acpi::fadt` parses the whole FADT: revision, flags
   (`HW_REDUCED_ACPI`), PM1 event and control blocks and GPE0/GPE1 in their
   legacy and `X_` (GAS) forms, the `X_` one winning as the specification
@@ -125,6 +128,13 @@ one:
   CPUs, `poweroff_from=3`, tests only) checks the move to the boot CPU and
   the power-off; `power.poweroff_ignored_desktop` now runs the whole
   sequence without `SLP_EN`; `diag.machine` checks the `power` lines.
+
+After the independent audit (no High finding): an unusable `X_` form falls
+back to a valid 32-bit port, a broken PM1b is skipped while PM1a is still
+written, PM1 blocks use ACPI's default widths, a FADT with a bad checksum is
+used and said, the move to the boot CPU gives up (said) if that CPU's tick
+does not advance, `poweroff.*` values out of range are refused and logged,
+and `acpidump` saves the FADT too (study, "Follow-up").
 
 Not done, and why: no AML interpreter (`\_PTS` checked by hand for this
 firmware), no device quiesce (the veterans' quirks for this family are

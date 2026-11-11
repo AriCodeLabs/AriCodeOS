@@ -71,9 +71,10 @@ pub const ACPI_ENABLE_WAIT_MS: u64 = 3000;
 const ACPI_ENABLE_POLL_US: u64 = 100;
 
 /// Port I/O and a delay, as the kernel gives them (a fake register bank in
-/// the host tests).
+/// the host tests). PM1 registers are accessed 16 bits wide and GPE and
+/// sleep registers 8 bits wide, whatever access size the FADT's GAS gives,
+/// as ACPICA does with its default register widths.
 pub trait PortIo {
-    fn read8(&mut self, port: u16) -> u8;
     fn read16(&mut self, port: u16) -> u16;
     fn write8(&mut self, port: u16, value: u8);
     fn write16(&mut self, port: u16, value: u16);
@@ -96,13 +97,8 @@ pub struct Params {
 /// Why nothing was written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
-    /// The PM1a control block cannot be used.
+    /// The PM1a control block cannot be used (or reads all ones).
     Pm1aControl(BlockError),
-    /// A PM1b control block is declared but cannot be used: writing only
-    /// half of the pair is not the sequence the firmware expects.
-    Pm1bControl(BlockError),
-    /// The PM1a control block reads all ones: nothing answers there.
-    Pm1aFloating(u16),
     /// Hardware-reduced: the sleep control or status register cannot be used.
     SleepControl(BlockError),
     SleepStatus(BlockError),
@@ -112,10 +108,6 @@ impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Refusal::Pm1aControl(e) => write!(f, "PM1a control block {e}"),
-            Refusal::Pm1bControl(e) => write!(f, "PM1b control block {e}"),
-            Refusal::Pm1aFloating(p) => {
-                write!(f, "PM1a control block {p:#x} reads 0xffff, nothing answers")
-            }
             Refusal::SleepControl(e) => {
                 write!(f, "hardware-reduced, sleep control register {e}")
             }
@@ -160,11 +152,12 @@ pub struct Report {
     pub method: Method,
     pub typ_a: u8,
     pub typ_b: u8,
-    /// The control register written (PM1a or the sleep control register),
-    /// and PM1b if there is one.
+    /// The control register written (PM1a or the sleep control register).
     pub control_a: u16,
-    pub control_b: Option<u16>,
-    /// The value written with `SLP_EN` to the first.
+    /// PM1b: `None` if the FADT declares none, its port, or why it was
+    /// skipped (PM1a is written all the same, as ACPICA does).
+    pub control_b: Option<Result<u16, BlockError>>,
+    /// The value for the first, without `SLP_EN`.
     pub value_a: u16,
     /// `SCI_EN` before the sequence, and before the write (after
     /// `ACPI_ENABLE`, if it was needed and possible).
@@ -186,11 +179,14 @@ impl fmt::Display for Report {
             Method::Legacy => {
                 write!(
                     f,
-                    "S5 type {}/{} to PM1a {:#x} ({:#06x} with SLP_EN), PM1b ",
-                    self.typ_a, self.typ_b, self.control_a, self.value_a
+                    "S5 type {}/{} to PM1a {:#x} ",
+                    self.typ_a, self.typ_b, self.control_a
                 )?;
+                self.value(f, PM1_SLP_EN, 6)?;
+                write!(f, ", PM1b ")?;
                 match self.control_b {
-                    Some(b) => write!(f, "{b:#x}")?,
+                    Some(Ok(b)) => write!(f, "{b:#x}")?,
+                    Some(Err(e)) => write!(f, "skipped ({e})")?,
                     None => write!(f, "none")?,
                 }
                 write!(
@@ -208,13 +204,28 @@ impl fmt::Display for Report {
                     self.gpe[1]
                 )?;
             }
-            Method::SleepControl => write!(
-                f,
-                "hardware-reduced, S5 type {} to sleep control {:#x} ({:#04x})",
-                self.typ_a, self.control_a, self.value_a
-            )?,
+            Method::SleepControl => {
+                write!(
+                    f,
+                    "hardware-reduced, S5 type {} to sleep control {:#x} ",
+                    self.typ_a, self.control_a
+                )?;
+                self.value(f, SLEEP_EN as u16, 4)?;
+            }
         }
         write!(f, "; SLP_EN written {} times", self.slp_en_writes)
+    }
+}
+
+impl Report {
+    /// `(0x3e01 with SLP_EN)` once written, `(0x1e01, SLP_EN not written)`
+    /// otherwise.
+    fn value(&self, f: &mut fmt::Formatter, slp_en: u16, width: usize) -> fmt::Result {
+        if self.slp_en_writes > 0 {
+            write!(f, "({:#0width$x} with SLP_EN)", self.value_a | slp_en)
+        } else {
+            write!(f, "({:#0width$x}, SLP_EN not written)", self.value_a)
+        }
     }
 }
 
@@ -225,6 +236,9 @@ fn gas_port(g: &Gas) -> Result<u16, BlockError> {
     }
     if g.space != SPACE_IO {
         return Err(BlockError::NotIo(g.space));
+    }
+    if g.bit_offset != 0 {
+        return Err(BlockError::BitOffset(g.bit_offset));
     }
     if g.address >= 0x1_0000 {
         return Err(BlockError::Beyond(g.address));
@@ -279,18 +293,20 @@ pub fn enter_s5<T: PortIo>(
         .pm1a_cnt
         .io_ports(2, false)
         .map_err(Refusal::Pm1aControl)?;
-    let b_cnt = match fadt.pm1b_cnt.is_present() {
-        true => Some(
-            fadt.pm1b_cnt
-                .io_ports(2, false)
-                .map_err(Refusal::Pm1bControl)?,
-        ),
-        false => None,
-    };
     let a_now = io.read16(a_cnt);
     if a_now == 0xFFFF {
-        return Err(Refusal::Pm1aFloating(a_cnt));
+        return Err(Refusal::Pm1aControl(BlockError::Floating(a_cnt)));
     }
+    // A PM1b that cannot be used is skipped and said: PM1a is written all
+    // the same, as ACPICA does.
+    let control_b = fadt.pm1b_cnt.is_present().then(|| {
+        let b = fadt.pm1b_cnt.io_ports(2, false)?;
+        match io.read16(b) {
+            0xFFFF => Err(BlockError::Floating(b)),
+            _ => Ok(b),
+        }
+    });
+    let b_cnt = control_b.and_then(Result::ok);
     let evt = [halves(&fadt.pm1a_evt, 4), halves(&fadt.pm1b_evt, 4)];
     let pm1_status = step(&evt[0]);
     let gpe = [halves(&fadt.gpe0, 2), halves(&fadt.gpe1, 2)];
@@ -301,7 +317,7 @@ pub fn enter_s5<T: PortIo>(
     if !sci_en_before && fadt.smi_cmd != 0 && fadt.smi_cmd <= 0xFFFF && fadt.acpi_enable != 0 {
         io.write8(fadt.smi_cmd as u16, fadt.acpi_enable);
         acpi_enable_written = true;
-        let polls = params.acpi_enable_ms * 1000 / ACPI_ENABLE_POLL_US;
+        let polls = params.acpi_enable_ms.saturating_mul(1000) / ACPI_ENABLE_POLL_US;
         for _ in 0..polls {
             if io.read16(a_cnt) & PM1_SCI_EN != 0 {
                 break;
@@ -358,7 +374,7 @@ pub fn enter_s5<T: PortIo>(
         for _ in 0..2 {
             write(io, PM1_SLP_EN);
             slp_en_writes += 1;
-            io.delay_us(params.wait_ms * 1000);
+            io.delay_us(params.wait_ms.saturating_mul(1000));
         }
     }
     Ok(Report {
@@ -366,8 +382,8 @@ pub fn enter_s5<T: PortIo>(
         typ_a,
         typ_b,
         control_a: a_cnt,
-        control_b: b_cnt,
-        value_a: value_a | PM1_SLP_EN,
+        control_b,
+        value_a,
         sci_en_before,
         sci_en,
         acpi_enable_written,
@@ -389,13 +405,13 @@ fn enter_s5_reduced(
     let control = gas_port(&fadt.sleep_control).map_err(Refusal::SleepControl)?;
     let status = gas_port(&fadt.sleep_status).map_err(Refusal::SleepStatus)?;
     io.write8(status, SLEEP_WAK_STS);
-    let value = (typ_a << SLEEP_TYP_SHIFT) & SLEEP_TYP | SLEEP_EN;
+    let value = (typ_a << SLEEP_TYP_SHIFT) & SLEEP_TYP;
     let mut slp_en_writes = 0;
     if params.enter {
         for _ in 0..2 {
-            io.write8(control, value);
+            io.write8(control, value | SLEEP_EN);
             slp_en_writes += 1;
-            io.delay_us(params.wait_ms * 1000);
+            io.delay_us(params.wait_ms.saturating_mul(1000));
         }
     }
     Ok(Report {
@@ -432,9 +448,11 @@ mod tests {
 
     /// A register bank built from ACPI 6.5's fixed hardware and the Intel
     /// 500 Series On-Package PCH (631120-002, 4.2): PM1 status/enable at
-    /// 0x1800, PM1 control at 0x1804 (SCI_EN read/write, SLP_EN reads 0),
-    /// GPE0 status at 0x1860 and enables at 0x1870, SMI_CMD at 0xB2. Writes
-    /// are logged; `ACPI_ENABLE` sets SCI_EN after `sci_after` polls.
+    /// 0x1800, PM1 control at 0x1804, PM1b control at 0x1808, GPE0 status
+    /// at 0x1860 and enables at 0x1870, SMI_CMD at 0xB2. Control registers
+    /// read back exactly what they hold, so the sequence's own masking of
+    /// the write-only bits is what is tested. Writes are logged;
+    /// `ACPI_ENABLE` sets SCI_EN after `sci_after` polls.
     struct Bank {
         ops: Vec<Op>,
         pm1_cnt: u16,
@@ -463,14 +481,9 @@ mod tests {
     }
 
     impl PortIo for Bank {
-        fn read8(&mut self, _: u16) -> u8 {
-            0
-        }
         fn read16(&mut self, port: u16) -> u16 {
-            if self.floating {
-                return 0xFFFF;
-            }
             match port {
+                _ if self.floating => 0xFFFF,
                 0x1804 => {
                     if self.enabled {
                         self.polls += 1;
@@ -478,7 +491,7 @@ mod tests {
                             self.pm1_cnt |= PM1_SCI_EN;
                         }
                     }
-                    self.pm1_cnt & !(PM1_SLP_EN | PM1_GBL_RLS)
+                    self.pm1_cnt
                 }
                 0x1808 => self.pm1b_cnt,
                 _ => 0,
@@ -491,8 +504,10 @@ mod tests {
             self.ops.push(Op::W8(port, value));
         }
         fn write16(&mut self, port: u16, value: u16) {
-            if port == 0x1804 {
-                self.pm1_cnt = value;
+            match port {
+                0x1804 => self.pm1_cnt = value,
+                0x1808 if self.pm1b_cnt != 0xFFFF => self.pm1b_cnt = value,
+                _ => {}
             }
             self.ops.push(Op::W16(port, value));
         }
@@ -511,7 +526,7 @@ mod tests {
             address,
             len,
             source: Source::Extended,
-            mismatch: false,
+            ..Block::default()
         }
     }
 
@@ -563,6 +578,25 @@ mod tests {
         );
     }
 
+    /// What the control register reads back in the write-only (`SLP_EN`,
+    /// `GBL_RLS`) and sleep type bits is never written back: firmware or a
+    /// previous attempt left `SLP_TYP` 5 there.
+    #[test]
+    fn write_only_and_old_sleep_type_bits_are_masked() {
+        let mut bank = Bank::new(PM1_SCI_EN | PM1_GBL_RLS | PM1_SLP_EN | 5 << 10);
+        enter_s5(&tiger_lake(), (7, 0), &PARAMS, &mut bank).unwrap();
+        let control: Vec<u16> = bank
+            .writes()
+            .iter()
+            .filter_map(|o| match o {
+                Op::W16(0x1804, v) => Some(*v),
+                _ => None,
+            })
+            .collect();
+        let typ = PM1_SCI_EN | 7 << 10;
+        assert_eq!(control, vec![typ, typ | PM1_SLP_EN, typ | PM1_SLP_EN]);
+    }
+
     /// PM1a is written before PM1b, both with their own SLP_TYP, and the
     /// value read is the OR of both control registers.
     #[test]
@@ -589,7 +623,33 @@ mod tests {
                 Op::W16(0x1808, base | 3 << 10 | PM1_SLP_EN),
             ]
         );
-        assert_eq!(r.control_b, Some(0x1808));
+        assert_eq!(r.control_b, Some(Ok(0x1808)));
+    }
+
+    /// A PM1b that is unusable, or reads 0xffff, is skipped and said; PM1a
+    /// is written all the same, as ACPICA does, without PM1b's bits.
+    #[test]
+    fn unusable_pm1b_is_skipped() {
+        let mut f = tiger_lake();
+        f.pm1b_cnt = io(0x1808, 2);
+        let mut bank = Bank::new(PM1_SCI_EN);
+        bank.pm1b_cnt = 0xFFFF;
+        let r = enter_s5(&f, (7, 0), &PARAMS, &mut bank).unwrap();
+        assert_eq!(r.control_b, Some(Err(BlockError::Floating(0x1808))));
+        assert!(!bank
+            .writes()
+            .iter()
+            .any(|o| matches!(o, Op::W16(0x1808, _))));
+        assert!(bank
+            .writes()
+            .contains(&Op::W16(0x1804, PM1_SCI_EN | 7 << 10 | PM1_SLP_EN)));
+        assert!(format!("{r}").contains("PM1b skipped (0x1808 reads 0xffff, nothing answers)"));
+
+        f.pm1b_cnt = io(0xFFFF, 2);
+        let mut bank = Bank::new(PM1_SCI_EN);
+        let r = enter_s5(&f, (7, 0), &PARAMS, &mut bank).unwrap();
+        assert_eq!(r.control_b, Some(Err(BlockError::Beyond(0xFFFF))));
+        assert_eq!(r.slp_en_writes, 2);
     }
 
     /// With SCI_EN clear, ACPI_ENABLE goes to SMI_CMD first and SCI_EN is
@@ -619,7 +679,8 @@ mod tests {
         assert!(!bank.writes().iter().any(|o| matches!(o, Op::W8(0xB2, _))));
     }
 
-    /// `enter: false` (poweroff_ignored) does everything but SLP_EN.
+    /// `enter: false` (poweroff_ignored) does everything but SLP_EN, and
+    /// its report does not claim SLP_EN.
     #[test]
     fn without_entering() {
         let mut bank = Bank::new(PM1_SCI_EN);
@@ -637,6 +698,24 @@ mod tests {
             bank.writes().last(),
             Some(&Op::W16(0x1804, 0x0001 | 7 << 10))
         );
+        let s = format!("{r}");
+        assert!(
+            s.starts_with("S5 type 7/0 to PM1a 0x1804 (0x1c01, SLP_EN not written)"),
+            "{s}"
+        );
+    }
+
+    /// Huge waits from the public parameters saturate instead of wrapping.
+    #[test]
+    fn waits_saturate() {
+        let mut bank = Bank::new(PM1_SCI_EN);
+        let p = Params {
+            wait_ms: u64::MAX,
+            acpi_enable_ms: u64::MAX,
+            enter: true,
+        };
+        enter_s5(&tiger_lake(), (7, 0), &p, &mut bank).unwrap();
+        assert!(bank.writes().contains(&Op::Delay(u64::MAX)));
     }
 
     /// Refusals write nothing at all.
@@ -664,11 +743,14 @@ mod tests {
             ),
             (
                 Fadt {
-                    pm1b_cnt: io(0xFFFF, 2),
+                    pm1a_cnt: Block {
+                        bit_offset: 4,
+                        ..io(0x1804, 2)
+                    },
                     ..tiger_lake()
                 },
-                Refusal::Pm1bControl(BlockError::Beyond(0xFFFF)),
-                "PM1b control block at 0xffff, past the I/O ports",
+                Refusal::Pm1aControl(BlockError::BitOffset(4)),
+                "PM1a control block at bit offset 4",
             ),
             (
                 Fadt {
@@ -689,7 +771,7 @@ mod tests {
         bank.floating = true;
         assert_eq!(
             enter_s5(&tiger_lake(), (7, 0), &PARAMS, &mut bank),
-            Err(Refusal::Pm1aFloating(0x1804))
+            Err(Refusal::Pm1aControl(BlockError::Floating(0x1804)))
         );
         assert!(bank.writes().is_empty());
     }
@@ -745,14 +827,20 @@ mod tests {
         assert_eq!(r.method, Method::SleepControl);
         assert_eq!(
             format!("{r}"),
-            "hardware-reduced, S5 type 5 to sleep control 0x404 (0x34); SLP_EN written 2 times"
+            "hardware-reduced, S5 type 5 to sleep control 0x404 (0x34 with SLP_EN); SLP_EN written 2 times"
         );
-        // A sleep register in memory space is refused.
+        // A sleep register in memory space, or at a bit offset, is refused.
         f.sleep_status.space = SPACE_MEMORY;
         let mut bank = Bank::new(0);
         assert_eq!(
             enter_s5(&f, (5, 0), &PARAMS, &mut bank),
             Err(Refusal::SleepStatus(BlockError::NotIo(SPACE_MEMORY)))
+        );
+        f.sleep_status.space = SPACE_IO;
+        f.sleep_control.bit_offset = 2;
+        assert_eq!(
+            enter_s5(&f, (5, 0), &PARAMS, &mut bank),
+            Err(Refusal::SleepControl(BlockError::BitOffset(2)))
         );
         assert!(bank.writes().is_empty());
     }

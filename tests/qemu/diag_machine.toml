@@ -4,7 +4,7 @@
 # QEMU's q35 the PCI Express root bridge is PNP0A08, compatible with PNP0A03.
 # The `power` lines carry the FADT's power-off facts (incident 0065): QEMU's
 # q35 has its PM1 blocks at 0x600 and is in ACPI mode (SCI_EN 1).
-# `acpidump` saves the DSDT and SSDTs for a device study.
+# `acpidump` saves the DSDT, the SSDTs and the FADT for a device study.
 name = "diag.machine"
 description = "diag names the machine and the ACPI device identifiers; acpidump saves the AML"
 level = "smoke"
@@ -23,9 +23,11 @@ serial_contains = [
     "hardware-reduced 0",
     "power   S5 SLP_TYP 0/0; PM1a evt 0x600",
     "power   now: PM1a control 0x0001 (SCI_EN 1)",
+    "checksum ok",
     "SMI on SLP_EN not read (chipset not in the table)",
     "=== end of diagnostics ===",
-    " bytes to acpi.bin",
+    " bytes to acpi.bin (DSDT ",
+    " FACP)",
     "ARICODEOS_SHUTDOWN",
 ]
 serial_absent = ["KERNEL PANIC", "acpi    no device identifiers found"]

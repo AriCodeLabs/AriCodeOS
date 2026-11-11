@@ -75,7 +75,8 @@ Fix branch: `fix/acpi-power-off`.
     prevent entry to a sleeping state".
   - 4.2.2 PM1_CNT: `SLP_EN` write-only; `SLP_TYP` 111b is Soft Off (S5);
     the `SLP_TYP` bits live in the RTC well.
-  - 4.2.5 SMI_EN, bit 4 `SMI_ON_SLP_EN`: when set, a write that sets
+  - 4.2.5 SMI_EN, bit 4 `SMI_ON_SLP_EN` (this datasheet's name; older
+    PCH datasheets and coreboot call it `SLP_SMI_EN`): when set, a write that sets
     `SLP_EN` raises an SMI# **and the PCH does not enter the sleep state**;
     the SMI handler is expected to clear the bit and write `SLP_EN` itself.
     Bit 0 `GBL_SMI_EN` gates every SMI.
@@ -102,8 +103,10 @@ firmware's side, coreboot's Intel SMI handler
 | `_PTS(5)`, `_SST` | `acpi_enter_sleep_state_prep` | same (ACPICA) | same (ACPICA) | none (no AML) | none: checked harmless here (section 1) |
 | ACPI mode | at boot (`acpi_enable`, waits 3 s for `SCI_EN`) | at boot | at boot | at the power-off, if `SCI_EN` is 0 | same, bounded 3 s as ACPICA |
 | `WAK_STS` | cleared first | ACPICA | ACPICA | no | cleared |
-| GPEs | `acpi_disable_all_gpes()`, then all GPE and fixed status cleared, wake GPEs re-enabled | ACPICA | ACPICA | untouched | all disabled, all status cleared (no `_PRW` wake devices kept) |
-| Address forms | `X_` GAS when non-zero, else the 32-bit field (`acpi_tb_convert_fadt`) | ACPICA | ACPICA | 32-bit fields only | `X_` when non-zero, else 32-bit; mismatch reported |
+| GPEs | `acpi_power_off_prepare` and `acpi_hw_legacy_sleep` call `acpi_hw_disable_all_gpes()`; then `acpi_hw_clear_acpi_status()` writes every fixed status bit and every GPE status byte; then `acpi_hw_enable_all_wakeup_gpes()` | ACPICA | ACPICA | untouched | all disabled, all status cleared (no `_PRW` wake devices kept) |
+| Address forms | `X_` GAS when non-zero, else the 32-bit field (`acpi_tb_convert_fadt`); `acpi_force_32bit_fadt_addr` for corrupt 64-bit ones | ACPICA | ACPICA | 32-bit fields only | `X_` when non-zero and usable as I/O ports (I/O space, bit offset 0, below 0x10000), else a valid 32-bit field, said in `diag`; mismatch reported |
+| Widths | PM1 event 32 bits, PM1 control 16 (`acpi_gbl_use_default_register_widths`), GPE: the legacy byte length (`acpi_ev_gpe_initialize`) | ACPICA | ACPICA | none | the same; a differing FADT length is said (`FADT says N`) |
+| FADT checksum | warns, uses the table | ACPICA | ACPICA | refused the table | used, said at boot and in `diag` |
 | Write | `SLP_TYP` alone, then `SLP_TYP | SLP_EN` ("to workaround poorly implemented hardware"), PM1a then PM1b | ACPICA | ACPICA | one write, PM1b before PM1a | split, PM1a then PM1b |
 | Cache flush | only below S4 | | | | none (S5) |
 | If still on | waits 10 s, writes once more, then spins on `WAK_STS` forever | waits 1 s, prints "Power-off failed! - timeout" | `panic()` | ~10M spins, last line | waits `poweroff.wait_ms` (3 s), writes once more, waits, last line |
@@ -155,13 +158,17 @@ office machine's next `diag` and last line are the measurement.
 ## 6. Fail safe
 
 - Every block the sequence needs is checked before the first write: PM1a
-  control present, in I/O space, inside the port range, two bytes or more;
-  a declared PM1b that is not usable refuses the whole sequence (half a
-  write pair is not what the firmware expects); a PM1a control reading
-  0xFFFF (nothing answers) refuses too. A refusal writes nothing and the
-  last line names the reason.
-- Optional blocks (PM1 event, GPE0, GPE1) that are declared but unusable
-  (memory space, odd length, past the port range) are skipped and named.
+  control present, in I/O space, at bit offset 0, inside the port range; a
+  PM1a control reading 0xFFFF (nothing answers) refuses too. A refusal
+  writes nothing and the last line names the reason. An unusable `X_` form
+  with a valid 32-bit field falls back to the 32-bit port first (said).
+- A declared PM1b that is not usable, or reads 0xFFFF, is skipped and
+  named, and PM1a is written all the same, as ACPICA does. Optional blocks
+  (PM1 event, GPE0, GPE1) that are declared but unusable (memory space,
+  bit offset, odd length, past the port range) are skipped and named.
+- Access widths: 16 bits for PM1 registers, 8 for GPE and sleep registers,
+  whatever the GAS's access size says (ACPICA's default widths); the access
+  size is not checked.
 - EFI `ResetSystem(EfiResetShutdown)`: AriBoot calls `ExitBootServices` and
   passes neither the system table nor a virtual address map to the kernel,
   which never calls runtime services (no ADR covers them). Linux would not
@@ -231,6 +238,22 @@ What only the office machine can confirm: whether the write is now made
 (the last line), on which CPU, with which addresses and form, whether the
 PCH traps `SLP_EN` (`SMI on SLP_EN`), `SCI_EN` before and after, and
 whether this build powers it off.
+
+## Follow-up after the independent audit (2026-11-11)
+
+The audit of `5c619dd` found no High finding and judged the register
+semantics to match ACPICA. Its Medium finding was that the first version
+refused more than ACPICA and the old code did (an unusable `X_` form with a
+good 32-bit field, a broken PM1b, a zero PM1 control length): those now
+fall back, skip or take ACPI's default width, as in the table above. The
+Low ones: a bounded move to the boot CPU (its tick must advance within ten
+ticks, or the power-off runs where it was called, said), a FADT with a bad
+checksum used and said, saturating waits, `poweroff.wait_ms` 500 to 60000
+with refusals logged, a bit offset refused, `read8` removed, a prepared
+report no longer claiming `SLP_EN`, more host tests (masking of read-back
+write-only bits, a floating PM1b, every FADT length from 116 to 280).
+`acpidump` now saves the FADT too, so the next dump from the office
+machine carries its blocks.
 
 ## Sources
 

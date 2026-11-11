@@ -156,7 +156,8 @@ pub mod keys {
     pub const POWEROFF_CPU: &str = "poweroff.cpu";
     /// `poweroff.wait_ms=N`: how long the machine is given to go off after
     /// each of the two S5 writes before the kernel says it did not; 3000 by
-    /// default, at most 60000 (ACPICA waits 10000).
+    /// default, 500 to 60000 (ACPICA waits 10000). Other values are refused
+    /// and logged.
     pub const POWEROFF_WAIT_MS: &str = "poweroff.wait_ms";
     /// Tests only: `poweroff_from=N`, `shutdown` first moves the calling
     /// thread to CPU N, so a power-off called on another processor than
