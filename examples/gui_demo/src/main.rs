@@ -204,6 +204,15 @@ fn events(session: Handle, hw: Handle) -> u64 {
                     b"gui_demo D: a second read for one press\n"
                 });
             }
+            // Only the launcher offers applications in the dock (ADR 0078).
+            Event::Key(b'k') => {
+                sys::print(match win.dock_app(0, "gui_demo") {
+                    Err(WindowError::Status(Status::Denied)) => {
+                        b"gui_demo D: the dock refused its application\n" as &[u8]
+                    }
+                    _ => b"gui_demo D: the dock took its application\n",
+                });
+            }
             Event::Key(b'q') => {
                 sys::print(if repeats > 1 {
                     b"gui_demo D: the key repeated\n" as &[u8]

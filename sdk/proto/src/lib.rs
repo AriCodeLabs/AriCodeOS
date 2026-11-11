@@ -1234,7 +1234,18 @@ pub mod window {
         /// bytes. `Reply::value` is the width, and the height in its high 32
         /// bits. The desktop says that it was taken.
         Capture = 15,
+        /// The launcher's only (the session init made for the package `launcher`,
+        /// which alone holds `launch`): the dock offers application `width`, from 0
+        /// to [`MAX_DOCK_APPS`], named `title` (its package's name); an empty title
+        /// ends the list there. Choosing it sends [`Event::Launch`] to this window.
+        DockApp = 16,
+        /// The window goes to the dock, as its minimize circle does: the launcher
+        /// once it has given its applications to the dock, and once one opened.
+        Minimize = 17,
     }
+
+    /// Applications the dock offers at most.
+    pub const MAX_DOCK_APPS: usize = 12;
 
     /// Request (64 bytes).
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1341,6 +1352,8 @@ pub mod window {
                 13 => Op::Network,
                 14 => Op::SecondBuffer,
                 15 => Op::Capture,
+                16 => Op::DockApp,
+                17 => Op::Minimize,
                 _ => return None,
             };
             let mut req = Self::new(op);
@@ -1425,6 +1438,9 @@ pub mod window {
         Appearance { dark: bool },
         /// The owner chose an item of this window's menus, by the number it was given.
         Menu { id: u32 },
+        /// The launcher's window: the owner chose application `index` of those it
+        /// gave the dock ([`Op::DockApp`]).
+        Launch { index: u32 },
     }
 
     /// Reply (32 bytes): status, value and optional event.
@@ -1526,6 +1542,10 @@ pub mod window {
                     b[3] = 13;
                     b[16..20].copy_from_slice(&id.to_le_bytes());
                 }
+                Some(Event::Launch { index }) => {
+                    b[3] = 14;
+                    b[16..20].copy_from_slice(&index.to_le_bytes());
+                }
             }
             b
         }
@@ -1587,6 +1607,9 @@ pub mod window {
                 12 => Some(Event::Appearance { dark: b[16] != 0 }),
                 13 => Some(Event::Menu {
                     id: u32::from_le_bytes(b[16..20].try_into().ok()?),
+                }),
+                14 => Some(Event::Launch {
+                    index: u32::from_le_bytes(b[16..20].try_into().ok()?),
                 }),
                 11 => Some(Event::Configure {
                     width: u32::from_le_bytes(b[16..20].try_into().ok()?),
@@ -2129,7 +2152,13 @@ mod tests {
         let d = Request::decode(&r.encode()).unwrap();
         assert_eq!(d, r);
         assert_eq!(d.title_str(), "Demo A");
-        for op in [Op::Attach, Op::Detach, Op::Capture] {
+        for op in [
+            Op::Attach,
+            Op::Detach,
+            Op::Capture,
+            Op::DockApp,
+            Op::Minimize,
+        ] {
             let mut s = Request::new(op);
             s.window = 0x0102_0003;
             assert_eq!(Request::decode(&s.encode()), Some(s));
@@ -2744,6 +2773,7 @@ pub mod status {
                 Event::Appearance { dark: true },
                 Event::Appearance { dark: false },
                 Event::Menu { id: 0xFFFF_0003 },
+                Event::Launch { index: 11 },
                 Event::Wheel {
                     x: 1,
                     y: 2,

@@ -26,7 +26,7 @@ mouse_rel = [-506, -306]
 click = "left"
 
 [[host_input_then]]
-marker = "settings: window 1280x688"
+marker = "settings: window 1280x700"
 wait_ms = 500
 screendump = "zoomed"
 mouse_rel = [-80, -56]
@@ -35,9 +35,9 @@ click = "left"
 [expect]
 exit = 33
 serial_contains = [
-    "settings: window 1280x688",
+    "settings: window 1280x700",
     "settings: window 720x400",
     "ARICODEOS_SHUTDOWN",
 ]
-serial_order = ["settings: window 1280x688", "settings: window 720x400"]
+serial_order = ["settings: window 1280x700", "settings: window 720x400"]
 serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "settings: could not take"]

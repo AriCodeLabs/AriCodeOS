@@ -57,6 +57,10 @@ const KEY_TAB: u16 = 15;
 const KEY_ESC: u16 = 1;
 const KEY_ENTER: u16 = 28;
 const KEY_F10: u16 = 68;
+// The dock offers what the protocol lets the launcher give.
+const _: () = assert!(aricode_gfx::DOCK_APPS == aricode_proto::window::MAX_DOCK_APPS);
+/// Full screen, in or out: the desktop's, as Alt+Tab is.
+const KEY_F11: u16 = 87;
 const KEY_UP: u16 = 103;
 const KEY_LEFT: u16 = 105;
 const KEY_RIGHT: u16 = 106;
@@ -457,6 +461,13 @@ struct Compositor {
     notice_until: Option<u64>,
     /// A program asked for a copy of the screen, which is init's to ask: said once.
     said_capture: bool,
+    /// A program other than the launcher offered applications in the dock: said once.
+    said_dock_app: bool,
+    /// The session whose launcher gave the dock its applications: only its window
+    /// hears that one was chosen, and the list goes with it.
+    dock_giver: Option<u32>,
+    /// A resizable window shown full screen, and the place it goes back to.
+    full_back: Option<(u32, Rect)>,
     /// When the processor's heat is next looked at.
     heat_due_ms: u64,
     /// The processor's heat was said, and has not cooled since.
@@ -593,6 +604,11 @@ impl Compositor {
         let Some(s) = self.sessions[slot].take() else {
             return;
         };
+        // Its applications go with the launcher that gave them.
+        if self.dock_giver == Some(s.id) {
+            self.dock_giver = None;
+            self.desktop.set_dock_app(0, "");
+        }
         // While the focus still names it: a dead program's menu leaves nothing on screen.
         let focus = self.desktop.focus;
         let held = focus.is_some_and(|id| {
@@ -655,8 +671,7 @@ impl Compositor {
 
     /// A point of the screen in the content of window `id`.
     fn in_content(&self, id: u32, px: i32, py: i32) -> Option<(i32, i32)> {
-        let w = self.desktop.get(id)?;
-        Some((px - w.content.x, py - w.content.y))
+        self.desktop.to_content(id, px, py)
     }
 
     /// The window whose content is at a point of the screen: not its frame.
@@ -665,7 +680,10 @@ impl Compositor {
             Hit::Window { id, .. } => self
                 .desktop
                 .get(id)
-                .filter(|w| w.content.contains(px, py))
+                .filter(|w| {
+                    w.content.contains(px, py)
+                        || self.desktop.full_screen().is_some_and(|f| f.id == w.id)
+                })
                 .map(|w| w.id),
             _ => None,
         }
@@ -678,6 +696,10 @@ impl Compositor {
             return;
         }
         let (px, py) = self.desktop.pointer;
+        // Full screen, the top edge says again whose picture this is.
+        if py == 0 && self.notice_until.is_none() && self.desktop.full_screen().is_some() {
+            self.say_full_screen(now_ms);
+        }
         if self.pointer.drag.is_some() {
             return self.continue_drag(px, py, now_ms);
         }
@@ -704,9 +726,6 @@ impl Compositor {
     /// once if the size stays; otherwise when its program answers with that size,
     /// so it is never shown cut.
     fn place(&mut self, id: u32, to: Rect, now_ms: u64) {
-        let Some(w) = self.desktop.get(id).copied() else {
-            return;
-        };
         // No size a program can be asked for is larger than the screen under the
         // bar, less the title bar, or than `MAX_SIDE`.
         let room = self.desktop.drag_bounds();
@@ -718,6 +737,14 @@ impl Compositor {
             to.w.clamp(1, max_w.max(1)),
             to.h.clamp(1, max_h.max(1)),
         );
+        self.place_exactly(id, to, now_ms);
+    }
+
+    /// [`place`](Self::place), at a size that may be the whole screen's: full screen.
+    fn place_exactly(&mut self, id: u32, to: Rect, now_ms: u64) {
+        let Some(w) = self.desktop.get(id).copied() else {
+            return;
+        };
         let Some(c) = self.content(id) else {
             return;
         };
@@ -825,7 +852,103 @@ impl Compositor {
                 let full = snap_content(aricode_gfx::Snap::Full, &work);
                 self.place(id, full, now_ms);
             }
-            None => {}
+            // A window of a fixed size cannot fill the work area: it goes full screen,
+            // stretched (the owner, 2026-11-11).
+            None => self.toggle_full_screen(id, now_ms),
+        }
+    }
+
+    /// Shows `id` full screen, over the bar and the dock, or takes it back (F11, or
+    /// the zoom button of a window of a fixed size). A resizable window is asked for
+    /// the screen's size and given its own place back after; any other is stretched
+    /// at its proportions, and is until its program draws at the screen's size.
+    fn toggle_full_screen(&mut self, id: u32, now_ms: u64) {
+        let back = self.desktop.full_screen().map(|f| f.id);
+        self.leave_full_screen(now_ms);
+        if back == Some(id) {
+            return;
+        }
+        let Some(w) = self.desktop.get(id).copied() else {
+            return;
+        };
+        self.close_menu();
+        self.release_pointer();
+        self.set_focus(id);
+        self.desktop.set_full_screen(Some(id));
+        if w.resizable {
+            self.full_back = Some((id, w.content));
+            let screen = self.desktop.screen;
+            let size = Rect::new(
+                w.content.x,
+                w.content.y,
+                screen.w.min(MAX_SIDE),
+                screen.h.min(MAX_SIDE),
+            );
+            self.place_exactly(id, size, now_ms);
+        }
+        self.pointer.moved = true;
+        self.say_full_screen(now_ms);
+        say(b"full screen on");
+    }
+
+    /// The notice that names the program shown full screen, which covers the bar
+    /// that would: its picture could look like anything, the desktop included
+    /// (audit of full screen, M2). Again whenever the pointer touches the top edge.
+    fn say_full_screen(&mut self, now_ms: u64) {
+        let Some(w) = self.desktop.full_screen() else {
+            return;
+        };
+        let mut text = [0u8; aricode_gfx::STATUS_MAX];
+        let mut n = 0;
+        for part in [w.panel_name().as_bytes(), b": full screen, F11 leaves"] {
+            let take = part.len().min(text.len() - n);
+            text[n..n + take].copy_from_slice(&part[..take]);
+            n += take;
+        }
+        // A name cut inside a character says the rest without it.
+        let text = core::str::from_utf8(&text[..n]).unwrap_or("Full screen: F11 leaves");
+        self.show_notice(text, now_ms);
+    }
+
+    /// Back from full screen, if a window is: a resizable one to its place. What
+    /// the pointer held is let go: a drag or a grab begun before must not go on
+    /// against a window whose place just changed (audit of full screen, L1).
+    fn leave_full_screen(&mut self, now_ms: u64) {
+        let was = self.desktop.full_screen().is_some();
+        // Even hidden, it must not come back full screen (audit, L3).
+        self.desktop.set_full_screen(None);
+        let back = self.full_back.take();
+        // A window closed full screen has nothing to go back to (audit, L2).
+        let back = back.filter(|(id, _)| self.desktop.get(*id).is_some());
+        if !was && back.is_none() {
+            return;
+        }
+        self.release_pointer();
+        if let Some((id, place)) = back {
+            self.place_exactly(id, place, now_ms);
+        }
+        self.pointer.moved = true;
+        say(b"full screen off");
+    }
+
+    /// Ends a drag and lets a grabbed window know its buttons are up.
+    fn release_pointer(&mut self) {
+        self.pointer.drag = None;
+        if let Some(id) = self.pointer.grab.take() {
+            let (px, py) = self.desktop.pointer;
+            let held = core::mem::take(&mut self.pointer.grabbed);
+            if let Some((x, y)) = self.in_content(id, px, py) {
+                for button in 0..3u8 {
+                    if held & (1 << button) != 0 {
+                        let release = Event::Release {
+                            x,
+                            y,
+                            button: button + 1,
+                        };
+                        self.deliver_wanted(id, wants::POINTER, release);
+                    }
+                }
+            }
         }
     }
 
@@ -964,6 +1087,10 @@ impl Compositor {
     }
 
     fn menu_press_on(&mut self, x: i32, y: i32) -> bool {
+        // Full screen there is no bar to press: its place is the picture's.
+        if self.desktop.full_screen().is_some() {
+            return false;
+        }
         match self.menu_under(x, y) {
             MenuHit::Title(menu) => {
                 let same = self.menu_open.is_some_and(|o| o.menu == menu);
@@ -1046,7 +1173,9 @@ impl Compositor {
             return false;
         }
         let Some(open) = self.menu_open else {
-            if ev.code == KEY_F10 && ev.value == 1 && self.focused_menus().is_some() {
+            // The bar is not shown full screen: F10 is the program's.
+            let shown = self.desktop.full_screen().is_none();
+            if ev.code == KEY_F10 && ev.value == 1 && shown && self.focused_menus().is_some() {
                 self.keys.keyboard.feed(ev);
                 self.set_menu(Some(MenuOpen {
                     menu: 0,
@@ -1107,6 +1236,11 @@ impl Compositor {
             self.hide(id);
             self.refocus();
         } else {
+            if self.desktop.get(id).is_some_and(|w| w.hidden) {
+                sys::print(b"compositor: window ");
+                num(id as u64);
+                sys::print(b" back from the dock\n");
+            }
             self.desktop.set_hidden(id, false);
             self.set_focus(id);
         }
@@ -1176,8 +1310,13 @@ impl Compositor {
                     self.dock_clicked(id);
                     None
                 }
+                Hit::DockApp { index } if left => {
+                    self.dock_app_clicked(index);
+                    None
+                }
                 Hit::Notice if left => {
                     self.dismiss_notice();
+                    say(b"notice dismissed");
                     None
                 }
                 Hit::Close { id } if left => {
@@ -1504,6 +1643,27 @@ impl Compositor {
         self.forget_drag(closed.id);
         self.desktop.remove(closed.id);
         self.refocus();
+        self.launcher_if_alone();
+    }
+
+    /// The last window in sight closed while the launcher waits in the dock: it comes
+    /// back with the focus, so the desktop always has somewhere to type and the
+    /// keyboard alone reaches everything (audit of the dock, H1).
+    fn launcher_if_alone(&mut self) {
+        if self.desktop.front().is_some() {
+            return;
+        }
+        let launcher = self
+            .desktop
+            .iter()
+            .find(|w| w.hidden && w.program_name() == aricode_gfx::LAUNCHER)
+            .map(|w| w.id);
+        if let Some(id) = launcher {
+            self.desktop.set_hidden(id, false);
+            self.set_focus(id);
+            self.pointer.moved = true;
+            say(b"the launcher is back: no other window in sight");
+        }
     }
 
     fn set_focus(&mut self, id: u32) {
@@ -1568,10 +1728,22 @@ impl Compositor {
         if ev.kind != EV_KEY || !self.keys.repeat.follow(&ev, at) {
             return;
         }
-        // Alt+Tab is the desktop's: no window sees it.
+        // Alt+Tab is the desktop's: no window sees it. It leaves full screen first,
+        // or the window it brings would stay behind.
         if ev.code == KEY_TAB && ev.value == 1 && self.keys.keyboard.modifiers() & mods::ALT != 0 {
             self.keys.repeat.stop();
+            self.leave_full_screen(at);
             return self.cycle_windows();
+        }
+        // F11 too: full screen for the focused window, or back.
+        if ev.code == KEY_F11 {
+            if ev.value == 1 {
+                self.keys.repeat.stop();
+                if let Some(id) = self.desktop.focus {
+                    self.toggle_full_screen(id, at);
+                }
+            }
+            return;
         }
         if ev.code == KEY_LEFTALT && ev.value == 0 {
             self.switching = None;
@@ -1812,6 +1984,29 @@ impl Compositor {
                 self.damage.add(&bar);
                 answer(reply_to, Reply::status(status));
             }
+            Op::DockApp => self.dock_app(req, owner, reply_to),
+            Op::Minimize => {
+                if self.owned(req.window, owner).is_none() {
+                    return answer(reply_to, Reply::status(Status::BadWindow));
+                }
+                if self
+                    .desktop
+                    .full_screen()
+                    .is_some_and(|f| f.id == req.window)
+                {
+                    self.leave_full_screen(now_ms);
+                }
+                // Nothing held goes on into a hidden window (audit of the dock, L3).
+                let held = self.pointer.grab == Some(req.window)
+                    || self.pointer.drag.is_some_and(|d| d.id == req.window);
+                if held {
+                    self.release_pointer();
+                }
+                self.hide(req.window);
+                self.refocus();
+                self.pointer.moved = true;
+                answer(reply_to, Reply::ok(0));
+            }
             Op::ClipboardSet => self.clipboard_set(req, owner, reply_to, buf),
             Op::ClipboardGet => self.clipboard_get(req, owner, reply_to, buf),
             Op::Poll => {
@@ -1995,6 +2190,66 @@ impl Compositor {
         answer(reply_to, Reply::ok(u64::from(w) | u64::from(h) << 32));
     }
 
+    /// `Op::DockApp`: only the launcher's session, the one init made for the package
+    /// that holds `launch`, offers applications in the dock; a click on one goes back
+    /// to it as `Event::Launch`, and it alone can start what it offered.
+    fn dock_app(&mut self, req: Request, owner: usize, reply_to: Handle) {
+        if self.owned(req.window, owner).is_none() {
+            return answer(reply_to, Reply::status(Status::BadWindow));
+        }
+        let launcher = owner
+            .checked_sub(1)
+            .and_then(|i| self.sessions[i])
+            .filter(|s| &s.program[..s.program_len as usize] == aricode_gfx::LAUNCHER.as_bytes());
+        let Some(launcher) = launcher else {
+            if !core::mem::replace(&mut self.said_dock_app, true) {
+                say(b"a program other than the launcher offered applications in the dock: refused (said once)");
+            }
+            return answer(reply_to, Reply::status(Status::Denied));
+        };
+        // Another launcher's list is not this one's (audit of the dock, L1).
+        if self.dock_giver != Some(launcher.id) {
+            self.desktop.set_dock_app(0, "");
+            self.dock_giver = Some(launcher.id);
+        }
+        let status = if self
+            .desktop
+            .set_dock_app(req.width as usize, req.title_str())
+        {
+            Status::Ok
+        } else {
+            Status::Invalid
+        };
+        answer(reply_to, Reply::status(status));
+    }
+
+    /// An application the dock offers, not running: the launcher is asked to start
+    /// it. Nothing else can start it; with no launcher window there is nobody to ask.
+    fn dock_app_clicked(&mut self, index: usize) {
+        // The window of the launcher that gave the list, and no other.
+        let giver = self.dock_giver;
+        let launcher = self
+            .contents
+            .iter()
+            .flatten()
+            .find(|c| {
+                c.owner
+                    .checked_sub(1)
+                    .and_then(|i| self.sessions[i])
+                    .is_some_and(|s| Some(s.id) == giver)
+            })
+            .map(|c| c.id);
+        match launcher {
+            Some(id) => self.deliver(
+                id,
+                Event::Launch {
+                    index: index as u32,
+                },
+            ),
+            None => say(b"an application in the dock, with no launcher to start it"),
+        }
+    }
+
     /// Maps a program's buffer of at least `need` bytes for a clipboard request. It may
     /// be one a window shows: [`unmap_unused`](Self::unmap_unused) keeps that mapping.
     fn clipboard_buffer(buf: Option<Handle>, need: usize) -> Option<u64> {
@@ -2095,6 +2350,15 @@ impl Compositor {
             self.damage.add(&old);
         }
         self.desktop.resize(req.window, req.width, req.height);
+        // Full screen its picture is the whole screen's, whatever its size (audit, L4).
+        if self
+            .desktop
+            .full_screen()
+            .is_some_and(|f| f.id == req.window)
+        {
+            let screen = self.desktop.screen;
+            self.damage.add(&screen);
+        }
         if let Some(w) = self.desktop.get(req.window) {
             let new = w.frame();
             self.damage.add(&new);
@@ -2219,14 +2483,23 @@ impl Compositor {
     /// rectangles, at most once per `FRAME_MS` (changes that arrive sooner
     /// wait for the next frame and are merged into it).
     fn compose(&mut self, now_ms: u64) {
+        // A full-screen window keeps the focus: whatever takes it (a new window that
+        // opens in front, its own closing) ends full screen, so what has the keys shows.
+        if self
+            .desktop
+            .full_screen()
+            .is_some_and(|f| self.desktop.focus != Some(f.id))
+        {
+            self.leave_full_screen(now_ms);
+        }
         let scene = self.desktop.scene();
         self.shown.damage(&scene, &mut self.damage);
         self.shown = scene;
         for c in self.contents.iter_mut().flatten() {
             let Some(part) = c.dirty.take() else { continue };
             // A hidden window's pixels show when it does, through the scene.
-            if let Some(w) = self.desktop.get(c.id).filter(|w| !w.hidden) {
-                let at = Rect::new(w.content.x + part.x, w.content.y + part.y, part.w, part.h);
+            let shown = self.desktop.get(c.id).is_some_and(|w| !w.hidden);
+            if let Some(at) = self.desktop.shown_part(c.id, &part).filter(|_| shown) {
                 self.damage.add(&at);
             }
         }
@@ -2261,8 +2534,9 @@ impl Compositor {
                     // `SecondBuffer`, each checked to hold `width*height*4` bytes of
                     // the size it was given at; a resize drops the second.
                     let pixels = unsafe { core::slice::from_raw_parts_mut(c.virt as *mut u32, n) };
+                    // Full screen, `w.content` is where the picture is stretched to.
                     if let Some(src) = Canvas::new(pixels, c.width, c.height, c.width) {
-                        out.blit(&src, w.content.x, w.content.y);
+                        out.blit_scaled(&src, &w.content);
                     }
                 },
             );
@@ -2377,6 +2651,9 @@ fn main(inputs: u64) -> u64 {
         network_len: 0,
         notice_until: None,
         said_capture: false,
+        said_dock_app: false,
+        dock_giver: None,
+        full_back: None,
         heat_due_ms: 0,
         heat_said: false,
         contents: (0..MAX_WINDOWS).map(|_| None).collect(),

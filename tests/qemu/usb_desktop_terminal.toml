@@ -30,7 +30,7 @@ mouse_rel = [-506, -306]
 click = "left"
 
 [[host_input_then]]
-marker = "terminal: window 1280x688"
+marker = "terminal: window 1280x700"
 wait_ms = 500
 screendump = "zoomed"
 keys = ["e", "x", "i", "t", "ret"]
@@ -43,7 +43,7 @@ serial_contains = [
     "AriInit: launch terminal from AriFS (apps/terminal.aripkg version 1",
     "with manifest [window terminal]",
     "terminal: shell started",
-    "terminal: window 1280x688",
+    "terminal: window 1280x700",
     "terminal: the shell ended; closing (",
     "bytes of the shell's text shown)",
     "ARICODEOS_SHUTDOWN",

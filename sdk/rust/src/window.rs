@@ -6,8 +6,8 @@
 use crate::{self as sys, rights, rpc, Error, Handle};
 use aricode_gfx::Canvas;
 pub use aricode_proto::window::Event;
-pub use aricode_proto::window::{mods, wants, DamageRect, KeyState};
-use aricode_proto::window::{Op, Reply, Request, Status, MAX_CLIPBOARD, MAX_DAMAGE, MAX_TITLE};
+pub use aricode_proto::window::{mods, wants, DamageRect, KeyState, Status, MAX_DOCK_APPS};
+use aricode_proto::window::{Op, Reply, Request, MAX_CLIPBOARD, MAX_DAMAGE, MAX_TITLE};
 use core::cell::Cell;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -240,6 +240,23 @@ impl Window {
         req.width = menu;
         req.height = id;
         self.call(req, false).map(|_| ())
+    }
+
+    /// The launcher's only: the dock offers application `index` as `name`, its
+    /// package's name; an empty name ends the list there. The owner choosing it comes
+    /// back as [`Event::Launch`].
+    pub fn dock_app(&self, index: u32, name: &str) -> Result<(), WindowError> {
+        let mut req = self
+            .request(Op::DockApp)
+            .with_title(name)
+            .ok_or(WindowError::Invalid)?;
+        req.width = index;
+        self.call(req, false).map(|_| ())
+    }
+
+    /// Sends the window to the dock, as its minimize circle does.
+    pub fn minimize(&self) -> Result<(), WindowError> {
+        self.call(self.request(Op::Minimize), false).map(|_| ())
     }
 
     /// A buffer of `len` bytes for a clipboard request, given to `use_it` mapped.
