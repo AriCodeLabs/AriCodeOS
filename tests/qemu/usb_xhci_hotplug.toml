@@ -1,0 +1,170 @@
+# Plug and play on the xHCI: devices plugged in and out after boot. The
+# controller starts empty (`usb_xhci`, eight USB 2 ports); every stage
+# waits for the guest's answer to the stage before it (incident 0059: a
+# stage that never ran must fail the run, so each marker below is a line the
+# previous stage causes, and every line is required again in
+# `serial_contains` and `serial_order`).
+#  1. A mouse on port 1 (xHCI port 5) is debounced, enumerated from the idle
+#     loop and polled; a move reaches it ("first report").
+#  2. It is unplugged: its endpoint is stopped, its slot disabled and its
+#     memory kept for reuse.
+#  3. A mouse on another port (port 2, xHCI port 6) takes the same slot and
+#     memory (0 new bytes of the DMA arena); it is moved and its left button
+#     pressed and held, then it is unplugged with the button down: the
+#     driver must release the button for the reader.
+#  4. A keyboard on port 1 again (same port as the first mouse) reuses the
+#     slot and memory once more.
+#  5. Three more mice fill the driver's four device entries; a fifth device
+#     is refused with a line on the console, not a crash.
+#  6. The hot-plugged keyboard types `shutdown`: its keys reach the shell
+#     through the input service (the only way this run can end with 33).
+name = "usb.xhci_hotplug"
+description = "usbd: mice and a keyboard plugged in and out after boot are enumerated, detached and served, reusing slots and memory"
+level = "release"
+areas = ["usb", "drivers", "input"]
+cmdline = "qemu_exit shell"
+usb_xhci = true
+no_virtio_input = true
+timeout_secs = 120
+
+[[host_hotplug]]
+marker = "AriInit: boot services completed"
+delay_ms = 2000
+driver = "usb-mouse"
+bus = "xhci.0"
+port = "1"
+id = "m1"
+
+[[host_hotplug]]
+marker = "usb-input: first report from slot"
+delay_ms = 300
+action = "remove"
+id = "m1"
+
+[[host_hotplug]]
+marker = " detached"
+driver = "usb-mouse"
+bus = "xhci.0"
+port = "2"
+id = "m2"
+
+# After the move and the held button of the second input stage.
+[[host_hotplug]]
+marker = "usb-input: first report from slot"
+delay_ms = 1000
+action = "remove"
+id = "m2"
+
+[[host_hotplug]]
+marker = " detached"
+driver = "usb-kbd"
+bus = "xhci.0"
+port = "1"
+id = "k1"
+
+[[host_hotplug]]
+marker = "HID keyboard (boot protocol"
+delay_ms = 300
+driver = "usb-mouse"
+bus = "xhci.0"
+port = "2"
+id = "m3"
+
+[[host_hotplug]]
+marker = "new bytes of the DMA arena"
+driver = "usb-mouse"
+bus = "xhci.0"
+port = "3"
+id = "m4"
+
+[[host_hotplug]]
+marker = "new bytes of the DMA arena"
+driver = "usb-mouse"
+bus = "xhci.0"
+port = "4"
+id = "m5"
+
+[[host_hotplug]]
+marker = "new bytes of the DMA arena"
+driver = "usb-mouse"
+bus = "xhci.0"
+port = "5"
+id = "m6"
+
+[host_input]
+marker = "HID mouse (boot protocol"
+wait_ms = 500
+mouse_rel = [10, -5]
+
+[[host_input_then]]
+marker = "HID mouse (boot protocol"
+wait_ms = 500
+mouse_rel = [3, 4]
+button_down = "left"
+
+[[host_input_then]]
+marker = "device entries are in use"
+wait_ms = 300
+key_delay_ms = 30
+echo_prompt = "ari> "
+keys = ["s", "h", "u", "t", "d", "o", "w", "n", "ret"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "usb-input: device ready: USB HID (no devices)",
+    "usb-input: port 5: device plugged in; enumerating (attempt 1)",
+    "usb-input: port 5: HID mouse (boot protocol, 4 bytes per report, endpoint 1)",
+    "usb-input: port 5: device attached on slot 1, ",
+    "usb-input: port 5: the device on slot 1 is gone; it is detached from the idle loop",
+    "usb-input: Stop Endpoint slot 1 dci 3: completion code 1 (Success)",
+    "usb-input: Disable Slot slot 1: completion code 1 (Success)",
+    "usb-input: port 5: device on slot 1 detached",
+    "usb-input: reusing the DMA memory of a released slot",
+    "usb-input: port 6: device attached on slot 1, 0 new bytes of the DMA arena",
+    "usb-input: slot 1: held keys and buttons released (1)",
+    "usb-input: port 6: device on slot 1 detached",
+    "usb-input: port 5: HID keyboard (boot protocol, 8 bytes per report, endpoint 1)",
+    "usb-input: port 5: device attached on slot 1, 0 new bytes of the DMA arena",
+    "usb-input: port 9: device not enumerated: all 4 device entries are in use (MAX_DEVICES)",
+    "[host] hotplug: usb-mouse added on xhci.0 port 1 as m1",
+    "[host] hotplug: m1 removed",
+    "[host] hotplug: usb-mouse added on xhci.0 port 2 as m2",
+    "[host] hotplug: m2 removed",
+    "[host] hotplug: usb-kbd added on xhci.0 port 1 as k1",
+    "[host] hotplug: usb-mouse added on xhci.0 port 5 as m6",
+    "[host] QMP: 3 input events sent",
+    "[host] QMP: 18 input events sent",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_order = [
+    "usb-input: port 5: HID mouse (boot protocol",
+    "usb-input: first report from slot 1",
+    "usb-input: port 5: device on slot 1 detached",
+    "usb-input: port 6: HID mouse (boot protocol",
+    "usb-input: port 6: device attached on slot 1, 0 new bytes of the DMA arena",
+    "usb-input: first report from slot 1",
+    "usb-input: slot 1: held keys and buttons released (1)",
+    "usb-input: port 6: device on slot 1 detached",
+    "usb-input: port 5: HID keyboard (boot protocol",
+    "usb-input: port 5: device attached on slot 1, 0 new bytes of the DMA arena",
+    "usb-input: port 8: device attached on slot 4, ",
+    "usb-input: port 9: device not enumerated: all 4 device entries are in use",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = [
+    "KERNEL PANIC",
+    "'usb_input' killed",
+    "enumeration failed",
+    "slot memory abandoned",
+    "stray transfer event",
+    "usb hid err",
+    "usb cmd fail",
+    "usb cmd pending",
+    "usb cmd refused",
+    "on xhci.0 failed",
+    "removing m",
+    "never seen",
+    "QEMU ended before the delay",
+    "[host] QMP: failed",
+]

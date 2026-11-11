@@ -3,7 +3,7 @@
 //! Test level orchestration: unit (host) -> smoke/full (QEMU), the QEMU
 //! scenarios run `--jobs N` at a time (ADR 0040).
 
-use crate::scenario::{self, Level, Scenario};
+use crate::scenario::{self, HotplugAction, Level, Scenario};
 use crate::{build, image, parallel, ports, qemu, suite_lock, Cli, Result};
 use std::fmt::Write as _;
 use std::path::Path;
@@ -678,6 +678,7 @@ pub fn run_scenario(
                 mouse_steps: h.mouse_steps,
                 wait_ms: h.wait_ms,
                 click: h.click.as_deref(),
+                button_down: h.button_down.as_deref(),
                 drag: h.drag,
                 drag_steps: h.drag_steps,
                 hold_key: h.hold_key.as_ref().map(|(k, ms)| (k.as_str(), *ms)),
@@ -686,13 +687,23 @@ pub fn run_scenario(
                 echo_prompt: h.echo_prompt.as_deref(),
             })
             .collect();
-        let hotplug = s.host_hotplug.as_ref().map(|h| qemu::Hotplug {
-            marker: &h.marker,
-            delay: Duration::from_millis(h.delay_ms),
-            driver: &h.driver,
-            bus: &h.bus,
-            id: &h.id,
-        });
+        let hotplug = s
+            .host_hotplug
+            .iter()
+            .map(|h| qemu::Hotplug {
+                marker: &h.marker,
+                delay: Duration::from_millis(h.delay_ms),
+                action: match h.action {
+                    HotplugAction::Add => qemu::HotplugAction::Add {
+                        driver: h.driver.as_deref().unwrap_or_default(),
+                        bus: h.bus.as_deref().unwrap_or_default(),
+                        port: h.port.as_deref(),
+                    },
+                    HotplugAction::Remove => qemu::HotplugAction::Remove,
+                },
+                id: &h.id,
+            })
+            .collect();
         let ssh_probe = match (&s.host_ssh, &ssh_key) {
             (Some(h), Some(key)) => Some(qemu::SshProbe {
                 marker: &h.marker,
@@ -730,6 +741,7 @@ pub fn run_scenario(
                 hid_only_input: s.usb_hid_only_input || s.no_virtio_input,
                 legacy_controller: s.usb_legacy_controller,
                 storage: s.usb_storage,
+                xhci: s.usb_xhci,
                 ehci_hid: s.usb_ehci_hid,
                 ehci_storage: s.usb_ehci_storage,
                 ehci_companion_kbd: s.usb_ehci_companion_kbd,
