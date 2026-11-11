@@ -80,6 +80,31 @@ pub fn lend_framebuffer() -> Option<MmioSurface> {
     wait_fb().detach()
 }
 
+/// The machine is ending (a power-off the firmware ignored) and no process
+/// will run again, the other CPUs being halted: the console takes the
+/// screen back from its holders, if it had lent it, so its last lines are
+/// seen on the screen and not only on serial (incident 0065). The holders'
+/// mappings stay; nothing runs that could use them.
+pub fn take_screen_for_good() {
+    let surface = {
+        let mut lease = LEASE.lock();
+        lease.lent.take().or_else(|| lease.returned.take())
+    };
+    HELD.store(false, Ordering::Release);
+    if let Some(surface) = surface {
+        wait_fb().reattach(surface);
+        log::info!("console: the screen is the console's again for the machine's last lines");
+    }
+    paint_all();
+}
+
+/// Paints everything pending at once, whatever the interrupt state: for
+/// the end of the machine only, where no tick is left to lose (incident
+/// 0031 is why every other path paints a row per hold).
+pub fn paint_all() {
+    wait_fb().redraw(usize::MAX);
+}
+
 /// Takes the lent screen back and redraws the console's text on it (the
 /// lines logged while it was lent included).
 pub fn take_back_framebuffer(surface: MmioSurface) {

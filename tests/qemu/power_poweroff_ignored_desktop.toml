@@ -1,0 +1,39 @@
+# Incident 0065: on the office Lenovo the firmware ignored the S5 write and
+# the desktop stayed frozen on screen, since the kernel's last line went to
+# serial only while the compositor held the screen. `poweroff_ignored`
+# skips the S5 write as that firmware did; the kernel must then halt every
+# CPU, take the screen back from the compositor and show its last lines. The
+# runner cuts the power on the last line: QEMU stays on, as that machine did.
+name = "power.poweroff_ignored_desktop"
+description = "a power-off the firmware ignores ends with the console's last lines on screen, not a frozen desktop"
+level = "release"
+areas = ["hardware", "usb", "gui", "shell"]
+# The desktop as on the laptop: started by init from the stick's profile,
+# without `gui`, so the console lends the compositor a screen it was
+# drawing on (with `gui` it would have none to take back).
+selftest = false
+disk = "usb-image"
+install = ["desktop/launcher"]
+stick_profiles = ["desktop:launcher"]
+timeout_secs = 120
+
+[[boots]]
+cmdline = "shell poweroff_ignored"
+stdin = ["sleep 12000", "shutdown"]
+kill_on = "AriCodeOS: ACPI power-off had no effect; halting (it is safe to switch off)"
+[boots.expect]
+killed = true
+serial_contains = [
+    "launcher: ready",
+    "console: the screen is lent to process",
+    "AriCodeOS: poweroff_ignored: the S5 write is skipped",
+    "console: the screen is the console's again for the machine's last lines",
+]
+serial_order = [
+    "AriCodeOS: shutting down",
+    "ARICODEOS_SHUTDOWN",
+    "AriCodeOS: poweroff_ignored: the S5 write is skipped",
+    "console: the screen is the console's again for the machine's last lines",
+    "AriCodeOS: ACPI power-off had no effect; halting (it is safe to switch off)",
+]
+serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW"]

@@ -49,6 +49,9 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// If `true`, the kernel terminates QEMU when done or on panic.
 /// Set once from the command line, before any possible panic.
 static QEMU_EXIT: AtomicBool = AtomicBool::new(false);
+/// `poweroff_ignored`: `shutdown` skips the S5 write, as firmware that
+/// ignores it does (incident 0065), so the path after it is tested.
+static POWEROFF_IGNORED: AtomicBool = AtomicBool::new(false);
 
 /// Entry point. See `boot_protocol::KernelEntry` for the contract.
 ///
@@ -80,6 +83,7 @@ pub unsafe extern "C" fn kernel_entry(boot_info: *const BootInfo) -> ! {
     // SAFETY: AriBoot copied the cmdline to kernel memory reachable through the physical map.
     let cmdline = CmdLine::new(unsafe { info.cmdline() });
     QEMU_EXIT.store(cmdline.has(keys::QEMU_EXIT), Ordering::Relaxed);
+    POWEROFF_IGNORED.store(cmdline.has(keys::POWEROFF_IGNORED), Ordering::Relaxed);
 
     framebuffer::set_info(info.framebuffer, info.video());
     // With `gui` the screen belongs to the user compositor: the kernel only
@@ -575,11 +579,28 @@ fn run_user_program(name: &str) {
 /// `qemu_exit` it terminates QEMU successfully; otherwise it powers the
 /// machine off through ACPI S5 and, if the firmware does not cooperate,
 /// halts the CPU.
+///
+/// Interrupts go off and the other CPUs are halted first, as Linux stops
+/// them before the S5 write (`native_machine_shutdown`), so no process
+/// runs from here on (before, the halt left the scheduler running). If
+/// the power stays on, the console takes the screen back from whoever held
+/// it (the desktop) and shows the last line: under a desktop it would
+/// otherwise go to serial only and leave a frozen picture (incident 0065).
 pub fn shutdown() -> ! {
     println!("ARICODEOS_SHUTDOWN");
     if !QEMU_EXIT.load(Ordering::Relaxed) {
-        arch::x86_64::power::acpi_poweroff();
+        // SAFETY: interrupts off for good on this CPU: nothing is scheduled
+        // here again, and the halt below then never wakes.
+        unsafe { core::arch::asm!("cli", options(nomem, nostack)) };
+        arch::x86_64::smp::halt_others();
+        if POWEROFF_IGNORED.load(Ordering::Relaxed) {
+            println!("AriCodeOS: poweroff_ignored: the S5 write is skipped");
+        } else {
+            arch::x86_64::power::acpi_poweroff();
+        }
+        console::take_screen_for_good();
         println!("AriCodeOS: ACPI power-off had no effect; halting (it is safe to switch off)");
+        console::paint_all();
     }
     finish(qemu::ExitCode::Success)
 }
