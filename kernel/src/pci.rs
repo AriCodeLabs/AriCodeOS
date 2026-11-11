@@ -379,6 +379,18 @@ pub fn find(vendor: u16, device: u16) -> Option<usize> {
         .position(|d| d.header.vendor == vendor && d.header.device == device && !d.is_claimed())
 }
 
+/// Vendor and device ID of the function at `bus:device.function`, if it
+/// was enumerated (claimed or not).
+pub fn id_at(bus: u8, device: u8, function: u8) -> Option<(u16, u16)> {
+    DEVICES
+        .lock()
+        .iter()
+        .find(|d| {
+            d.address.bus == bus && d.address.device == device && d.address.function == function
+        })
+        .map(|d| (d.header.vendor, d.header.device))
+}
+
 /// Packed information (`aricode_abi::pci_info`) for function `index`.
 pub fn info_packed(index: usize) -> Option<u64> {
     let devs = DEVICES.lock();

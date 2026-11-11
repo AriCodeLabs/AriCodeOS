@@ -1,8 +1,10 @@
 # Incident 0065: on the office Lenovo the firmware ignored the S5 write and
 # the desktop stayed frozen on screen, since the kernel's last line went to
 # serial only while the compositor held the screen. `poweroff_ignored`
-# skips the S5 write as that firmware did; the kernel must then halt the
-# other CPU (two here, so the halt is exercised), take the screen back from
+# runs the S5 sequence without its SLP_EN writes, as that firmware ignored
+# them; the kernel must move to the boot CPU, halt the other CPU (two here,
+# so the halt is exercised), clear the wake status and the GPEs (q35's GPE0
+# block), take the screen back from
 # the compositor and paint its last lines there. The runner cuts the power
 # once the console says the lines are on the screen: QEMU stays on, as that
 # machine did. (The pixels themselves are not compared: the console's
@@ -37,7 +39,9 @@ serial_contains = [
 serial_order = [
     "AriCodeOS: shutting down",
     "ARICODEOS_SHUTDOWN",
+    "AriCodeOS: the power-off runs on CPU 0",
     "AriCodeOS: the other CPUs are halted for the power-off",
+    "AriCodeOS: power-off prepared on CPU 0: S5 type 0/0 to PM1a 0x604",
     "AriCodeOS: poweroff_ignored: the S5 write was skipped; halting (it is safe to switch off)",
     "console: the last lines are on the screen",
 ]

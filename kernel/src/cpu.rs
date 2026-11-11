@@ -62,6 +62,9 @@ pub struct Cpu {
     /// it either sees this CPU among those to invalidate, or this CPU loads the
     /// tables after the change.
     cr3: AtomicU64,
+    /// Timer ticks this CPU has taken: another CPU sees it alive when this
+    /// advances (the power-off's move to the boot CPU).
+    ticks: AtomicU64,
     tables: PerCpuCell<Tables>,
     /// TSC cycles with the idle thread running (`sysinfo::IDLE`, incident
     /// 0020): written by this CPU in `set_current`, read by any CPU.
@@ -96,6 +99,7 @@ impl Cpu {
             idle_running: AtomicBool::new(false),
             idle_tid: AtomicU32::new(u32::MAX),
             cr3: AtomicU64::new(0),
+            ticks: AtomicU64::new(0),
             tables: PerCpuCell::new(Tables::new()),
             idle: IrqLock::new(IdleClock::new()),
         }
@@ -163,6 +167,14 @@ impl Cpu {
     /// quantum starts again at `quantum` even if no switch follows
     /// (`aricode_sched::quantum_tick`, incident 0023). Only from this CPU
     /// with IF = 0 (the timer handler), so load and store do not race.
+    /// Counts a timer tick on this CPU (owning CPU only, from its tick).
+    pub fn count_tick(&self) {
+        self.ticks.fetch_add(1, Ordering::Relaxed);
+    }
+    /// Timer ticks this CPU has taken; any CPU may read it.
+    pub fn ticks(&self) -> u64 {
+        self.ticks.load(Ordering::Relaxed)
+    }
     pub fn quantum_tick(&self, quantum: u32) -> bool {
         let left = self.quantum_left.load(Ordering::Relaxed);
         let (left, expired) = aricode_sched::quantum_tick(left, quantum);

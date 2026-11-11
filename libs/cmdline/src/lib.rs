@@ -150,9 +150,22 @@ pub mod keys {
     /// `boot_commit=HEX`: added by AriBoot with `boot_slot` for a
     /// development build, the commit it was built from (ADR 0045).
     pub const BOOT_COMMIT: &str = "boot_commit";
-    /// Tests only: `poweroff_ignored`, `shutdown` skips the ACPI S5 write,
-    /// as firmware that ignores it does, so what follows a power-off that
-    /// had no effect is tested (incident 0065).
+    /// `poweroff.cpu=N`: the processor the power-off runs on; 0, the boot
+    /// CPU, by default, as Linux and FreeBSD do (incident 0065). A CPU not
+    /// online means the boot CPU.
+    pub const POWEROFF_CPU: &str = "poweroff.cpu";
+    /// `poweroff.wait_ms=N`: how long the machine is given to go off after
+    /// each of the two S5 writes before the kernel says it did not; 3000 by
+    /// default, 500 to 60000 (ACPICA waits 10000). Other values are refused
+    /// and logged.
+    pub const POWEROFF_WAIT_MS: &str = "poweroff.wait_ms";
+    /// Tests only: `poweroff_from=N`, `shutdown` first moves the calling
+    /// thread to CPU N, so a power-off called on another processor than
+    /// the boot CPU is exercised (incident 0065).
+    pub const POWEROFF_FROM: &str = "poweroff_from";
+    /// Tests only: `poweroff_ignored`, `shutdown` runs the ACPI S5 sequence
+    /// but skips its `SLP_EN` writes, as firmware that ignores them does, so
+    /// what follows a power-off that had no effect is tested (incident 0065).
     pub const POWEROFF_IGNORED: &str = "poweroff_ignored";
     /// Tests only: `init_fail_late`, init fails after the services and before
     /// confirming.
@@ -265,6 +278,7 @@ pub mod keys {
     pub const TEST_ONLY: &[&str] = &[
         QEMU_EXIT,
         TEST,
+        POWEROFF_FROM,
         POWEROFF_IGNORED,
         INIT_FAIL_LATE,
         RESTART_STORM,
