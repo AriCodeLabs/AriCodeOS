@@ -361,6 +361,9 @@ pub struct Expect {
     pub killed: bool,
     /// The kernel seed store after this boot (ADR 0043).
     pub seed_store: Option<SeedStore>,
+    /// A `screenshot` in the serial log, "WIDTHxHEIGHT": decoded whole and checked
+    /// against the length and SHA-256 its last line gives ([`check_screenshot`]).
+    pub screenshot: Option<String>,
 }
 
 impl Expect {
@@ -372,7 +375,47 @@ impl Expect {
             && self.serial_once.is_empty()
             && !self.killed
             && self.seed_store.is_none()
+            && self.screenshot.is_none()
     }
+}
+
+/// The first `screenshot` in `serial`, checked whole: the Base64 lines between its
+/// markers, their length and SHA-256 as its last line says, and a QOI image of
+/// `size` ("WIDTHxHEIGHT") that decodes to exactly its pixels. The image's bytes,
+/// or what is wrong.
+pub fn check_screenshot(serial: &str, size: &str) -> std::result::Result<Vec<u8>, String> {
+    let lines: Vec<&str> = serial.lines().map(|l| l.trim_end_matches('\r')).collect();
+    let begin = lines
+        .iter()
+        .position(|l| *l == "-----BEGIN QOI-----")
+        .ok_or("screenshot: no begin marker")?;
+    let end = begin
+        + lines[begin..]
+            .iter()
+            .position(|l| *l == "-----END QOI-----")
+            .ok_or("screenshot: no end marker")?;
+    let text: String = lines[begin + 1..end].concat();
+    let data = aricode_ssh::base64::decode(text.as_bytes()).ok_or("screenshot: not Base64")?;
+    let said = lines
+        .get(end + 1)
+        .and_then(|l| l.strip_prefix("screenshot: "))
+        .ok_or("screenshot: no length line")?;
+    let digest: String = aricode_crypto::sha256::sha256(&data)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let want = format!("{} bytes, SHA-256 {digest}", data.len());
+    if said != want {
+        return Err(format!(
+            "screenshot: the shell said '{said}', the log holds '{want}'"
+        ));
+    }
+    let image = aricode_qoi::decode(&data).ok_or("screenshot: not a whole QOI image")?;
+    let got = format!("{}x{}", image.width, image.height);
+    if got != size {
+        return Err(format!("screenshot: {got}, not {size}"));
+    }
+    Ok(data)
 }
 
 /// Index in `order` of the first text not found after the previous one in
@@ -619,6 +662,7 @@ impl Expect {
             serial_once: all(&self.serial_once),
             killed: self.killed,
             seed_store: self.seed_store,
+            screenshot: self.screenshot.clone(),
         }
     }
 
@@ -847,6 +891,46 @@ pub fn select<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn screenshot_log(width: u32, height: u32) -> (String, Vec<u8>) {
+        let mut data = Vec::new();
+        let mut e = aricode_qoi::Encoder::new(width, height, |b: &[u8]| data.extend_from_slice(b));
+        for i in 0..width * height {
+            e.push(i.wrapping_mul(2_654_435_761));
+        }
+        e.finish();
+        let mut log = String::from(
+            "ari> screenshot\r\nscreenshot: 4x3, QOI in Base64 follows\r\n-----BEGIN QOI-----\r\n",
+        );
+        for chunk in data.chunks(57) {
+            log.push_str(std::str::from_utf8(&aricode_ssh::base64::encode(chunk, true)).unwrap());
+            log.push_str("\r\n");
+        }
+        let digest: String = aricode_crypto::sha256::sha256(&data)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        log.push_str(&format!(
+            "-----END QOI-----\r\nscreenshot: {} bytes, SHA-256 {digest}\r\n",
+            data.len()
+        ));
+        (log, data)
+    }
+
+    #[test]
+    fn a_screenshot_is_checked_whole() {
+        let (log, data) = screenshot_log(40, 30);
+        assert_eq!(check_screenshot(&log, "40x30"), Ok(data));
+        assert!(check_screenshot(&log, "41x30").is_err());
+        // A line lost on the way: the length and digest no longer match.
+        let mut lines: Vec<&str> = log.lines().collect();
+        lines.remove(4);
+        assert!(check_screenshot(&lines.join("\n"), "40x30").is_err());
+        // No end: the session lost output.
+        let cut = log.replace("-----END QOI-----", "");
+        assert!(check_screenshot(&cut, "40x30").is_err());
+        assert!(check_screenshot("nothing here", "40x30").is_err());
+    }
 
     #[test]
     fn hotplug_names_are_plain() {

@@ -121,7 +121,7 @@ fn main(_arg: u64) -> u64 {
     // A copy of the screen is the owner's shells' alone.
     let screen = sys::dma_alloc(hw, 4096)
         .map_err(LaunchError::Ipc)
-        .and_then(|buffer| launch::screen(apps, buffer, 4096))
+        .and_then(|buffer| launch::screen(apps, buffer))
         .map(|_| ());
     kept &= check(b"a copy of the screen", screen, b"denied");
     kept &= check(b"gui_demo", launch::spawn(apps, "gui_demo", 0), b"started");

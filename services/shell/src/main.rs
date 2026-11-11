@@ -98,8 +98,23 @@ fn quiet() -> bool {
 
 /// Sends `b` to the session output in IPC-sized pieces.
 fn session_write(b: &[u8]) {
-    for chunk in b.chunks(abi::IPC_MAX_DATA) {
-        let _ = sys::ipc_send(SESSION_OUT, chunk, &[], 2000);
+    let _ = session_write_all(b);
+}
+
+/// [`session_write`], saying whether every piece went: sshd stops taking output
+/// while its client is slow, and a piece that waits past 2 s is lost.
+fn session_write_all(b: &[u8]) -> bool {
+    b.chunks(abi::IPC_MAX_DATA)
+        .all(|chunk| sys::ipc_send(SESSION_OUT, chunk, &[], 2000).is_ok())
+}
+
+/// [`print`] for output that must arrive whole or be known lost (`screenshot`).
+fn print_whole(b: &[u8]) -> bool {
+    if session() {
+        session_write_all(b)
+    } else {
+        sys::print(b);
+        true
     }
 }
 
@@ -597,11 +612,12 @@ fn acpidump(fs: &mut FsClient, rest: &[u8]) {
 }
 
 /// `screenshot`: the desktop's screen, as last composed, as a QOI image in
-/// Base64 between two marker lines, for the owner over SSH:
-/// `ssh HOST screenshot | sed -n '/BEGIN QOI/,/END QOI/p' | grep -v QOI |
-/// base64 -d > screen.qoi`. Init asks the compositor for it, for a shell only,
-/// and says so; the desktop shows that the screen was copied. The image is
-/// encoded as it is printed: nothing the size of the screen but its copy.
+/// Base64 between two marker lines, for the owner over SSH (the recipe is in
+/// `docs/hardware.md`); the last line gives its length and SHA-256, and output
+/// the session lost ends it with no end marker. Init asks the compositor for it,
+/// for a shell only, and says so; the desktop shows that the screen was copied.
+/// The image is encoded as it is printed: nothing the size of the screen but its
+/// copy.
 fn screenshot() {
     use aricode_rt::sys::launch::{self, LaunchError, Status};
     let mut b = [0u8; abi::sysinfo::Framebuffer::LEN];
@@ -613,6 +629,10 @@ fn screenshot() {
         return;
     };
     let (w, h) = (info.width, info.height);
+    if w == 0 || h == 0 {
+        print(b"screenshot: no screen\n");
+        return;
+    }
     let len = (u64::from(w) * u64::from(h) * 4).next_multiple_of(4096);
     let Some((dma, virt)) = sys::dma_alloc(HW, len)
         .ok()
@@ -632,7 +652,7 @@ fn screenshot() {
     );
     let size = match given
         .map_err(LaunchError::Ipc)
-        .and_then(|g| launch::screen(BROKER, g, len))
+        .and_then(|g| launch::screen(BROKER, g))
     {
         Ok(size) if size == (w, h) => size,
         Ok(_) => {
@@ -641,6 +661,10 @@ fn screenshot() {
         }
         Err(LaunchError::Status(Status::NotFound)) => {
             print(b"screenshot: no desktop runs\n");
+            return release();
+        }
+        Err(LaunchError::Status(Status::Limit)) => {
+            print(b"screenshot: one copy every 2 s at most; try again\n");
             return release();
         }
         Err(_) => {
@@ -662,20 +686,37 @@ fn screenshot() {
         encoder.push(px);
     }
     encoder.finish();
-    let total = out.finish();
-    print(b"-----END QOI-----\nscreenshot: ");
-    num(total);
-    print(b" bytes\n");
+    match out.finish() {
+        Some((total, digest)) => {
+            print(b"-----END QOI-----\nscreenshot: ");
+            num(total);
+            print(b" bytes, SHA-256 ");
+            let mut hex = [0u8; 64];
+            for (i, byte) in digest.iter().enumerate() {
+                const DIGITS: &[u8; 16] = b"0123456789abcdef";
+                hex[2 * i] = DIGITS[(byte >> 4) as usize];
+                hex[2 * i + 1] = DIGITS[(byte & 0xF) as usize];
+            }
+            print(&hex);
+            print(b"\n");
+        }
+        None => print(
+            b"\nscreenshot: the session did not take all the output; the image is incomplete\n",
+        ),
+    }
     release();
 }
 
-/// Bytes printed as Base64 lines of 76 characters, several lines a print.
+/// Bytes printed as Base64 lines of 76 characters, several lines a print, and
+/// their SHA-256. Once a print is lost, nothing more is printed.
 struct Base64Lines {
     line: [u8; 57],
     held: usize,
     text: [u8; 77 * 52],
     text_len: usize,
     total: u64,
+    hash: aricode_crypto::sha256::Sha256,
+    lost: bool,
 }
 
 impl Base64Lines {
@@ -686,10 +727,16 @@ impl Base64Lines {
             text: [0; 77 * 52],
             text_len: 0,
             total: 0,
+            hash: aricode_crypto::sha256::Sha256::new(),
+            lost: false,
         }
     }
 
     fn put(&mut self, bytes: &[u8]) {
+        if self.lost {
+            return;
+        }
+        self.hash.update(bytes);
         for &byte in bytes {
             self.line[self.held] = byte;
             self.held += 1;
@@ -702,8 +749,7 @@ impl Base64Lines {
 
     fn end_line(&mut self) {
         if self.text_len + 77 > self.text.len() {
-            print(&self.text[..self.text_len]);
-            self.text_len = 0;
+            self.flush();
         }
         let encoded = aricode_ssh::base64::encode(&self.line[..self.held], true);
         self.text[self.text_len..self.text_len + encoded.len()].copy_from_slice(&encoded);
@@ -712,13 +758,21 @@ impl Base64Lines {
         self.held = 0;
     }
 
-    /// Prints what is held; the bytes put in all.
-    fn finish(mut self) -> u64 {
+    fn flush(&mut self) {
+        if !self.lost && !print_whole(&self.text[..self.text_len]) {
+            self.lost = true;
+        }
+        self.text_len = 0;
+    }
+
+    /// Prints what is held; the bytes put in all and their SHA-256, or `None` if
+    /// some of the output was lost.
+    fn finish(mut self) -> Option<(u64, [u8; 32])> {
         if self.held > 0 {
             self.end_line();
         }
-        print(&self.text[..self.text_len]);
-        self.total
+        self.flush();
+        (!self.lost).then(|| (self.total, self.hash.finish()))
     }
 }
 

@@ -819,6 +819,15 @@ pub fn run_scenario(
                 expect.serial_order[i]
             ));
         }
+        if let Some(size) = &expect.screenshot {
+            match scenario::check_screenshot(&cap.serial, size) {
+                // Kept beside the log, for a look with any QOI viewer or ffmpeg.
+                Ok(image) => {
+                    let _ = std::fs::write(workdir.join("screenshot.qoi"), image);
+                }
+                Err(why) => problems.push(format!("{prefix}{why}")),
+            }
+        }
         if cap.timed_out {
             problems.push(format!("{prefix}timeout {}s", s.timeout_secs));
         }

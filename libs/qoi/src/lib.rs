@@ -13,6 +13,9 @@
 
 #![no_std]
 
+#[cfg(any(test, feature = "decode"))]
+extern crate alloc;
+
 /// The bytes before the pixels.
 pub const HEADER_LEN: usize = 14;
 /// What ends the stream.
@@ -154,64 +157,90 @@ impl<F: FnMut(&[u8])> Encoder<F> {
     }
 }
 
+/// A decoded image: `0x00RRGGBB` pixels, row after row.
+#[cfg(any(test, feature = "decode"))]
+pub struct Image {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: alloc::vec::Vec<u32>,
+}
+
+/// Decodes a 3- or 4-channel image, alpha dropped, written from the specification:
+/// what the test runner checks a `screenshot` with. `None` for anything malformed:
+/// a bad header or end, an op cut short, or not exactly width x height pixels.
+#[cfg(any(test, feature = "decode"))]
+pub fn decode(data: &[u8]) -> Option<Image> {
+    if data.len() < HEADER_LEN + END.len() || &data[..4] != b"qoif" {
+        return None;
+    }
+    let width = u32::from_be_bytes(data[4..8].try_into().ok()?);
+    let height = u32::from_be_bytes(data[8..12].try_into().ok()?);
+    if !matches!(data[12], 3 | 4) || data[data.len() - END.len()..] != END {
+        return None;
+    }
+    let count = (width as usize).checked_mul(height as usize)?;
+    let body = &data[HEADER_LEN..data.len() - END.len()];
+    // Every op gives at least one pixel: no more pixels than bytes are possible
+    // but for runs, so the vector is bounded by what the data can say.
+    let mut pixels = alloc::vec::Vec::with_capacity(count.min(body.len() * 62));
+    let mut index = [[0u8; 4]; 64];
+    let mut px = [0u8, 0, 0, 255];
+    let mut i = 0;
+    while i < body.len() {
+        let b = body[i];
+        i += 1;
+        let mut run = 1;
+        if b == OP_RGB {
+            px[..3].copy_from_slice(body.get(i..i + 3)?);
+            i += 3;
+        } else if b == 0xFF {
+            px.copy_from_slice(body.get(i..i + 4)?);
+            i += 4;
+        } else {
+            match b & 0xC0 {
+                OP_INDEX => px = index[(b & 0x3F) as usize],
+                OP_DIFF => {
+                    px[0] = px[0].wrapping_add((b >> 4 & 3).wrapping_sub(2));
+                    px[1] = px[1].wrapping_add((b >> 2 & 3).wrapping_sub(2));
+                    px[2] = px[2].wrapping_add((b & 3).wrapping_sub(2));
+                }
+                OP_LUMA => {
+                    let dg = (b & 0x3F).wrapping_sub(32);
+                    let next = *body.get(i)?;
+                    i += 1;
+                    px[0] = px[0].wrapping_add(dg.wrapping_add((next >> 4).wrapping_sub(8)));
+                    px[1] = px[1].wrapping_add(dg);
+                    px[2] = px[2].wrapping_add(dg.wrapping_add((next & 0xF).wrapping_sub(8)));
+                }
+                _ => run = (b & 0x3F) as usize + 1,
+            }
+        }
+        let at =
+            (px[0] as usize * 3 + px[1] as usize * 5 + px[2] as usize * 7 + px[3] as usize * 11)
+                % 64;
+        index[at] = px;
+        if pixels.len() + run > count {
+            return None;
+        }
+        let value = u32::from(px[0]) << 16 | u32::from(px[1]) << 8 | u32::from(px[2]);
+        pixels.extend(core::iter::repeat_n(value, run));
+    }
+    (pixels.len() == count).then_some(Image {
+        width,
+        height,
+        pixels,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
     use super::*;
     use std::vec::Vec;
 
-    /// A decoder written from the specification, to check the encoder.
     fn decode(data: &[u8]) -> (u32, u32, Vec<u32>) {
-        assert_eq!(&data[..4], b"qoif");
-        let w = u32::from_be_bytes(data[4..8].try_into().unwrap());
-        let h = u32::from_be_bytes(data[8..12].try_into().unwrap());
-        assert_eq!(data[12], 3);
-        assert_eq!(&data[data.len() - 8..], &END);
-        let body = &data[HEADER_LEN..data.len() - 8];
-        let mut index = [[0u8; 4]; 64];
-        let mut px = [0u8, 0, 0, 255];
-        let mut out = Vec::new();
-        let mut i = 0;
-        while i < body.len() {
-            let b = body[i];
-            i += 1;
-            let mut run = 1;
-            if b == OP_RGB {
-                px[..3].copy_from_slice(&body[i..i + 3]);
-                i += 3;
-            } else if b == 0xFF {
-                px.copy_from_slice(&body[i..i + 4]);
-                i += 4;
-            } else {
-                match b & 0xC0 {
-                    OP_INDEX => px = index[(b & 0x3F) as usize],
-                    OP_DIFF => {
-                        px[0] = px[0].wrapping_add((b >> 4 & 3).wrapping_sub(2));
-                        px[1] = px[1].wrapping_add((b >> 2 & 3).wrapping_sub(2));
-                        px[2] = px[2].wrapping_add((b & 3).wrapping_sub(2));
-                    }
-                    OP_LUMA => {
-                        let dg = (b & 0x3F).wrapping_sub(32);
-                        let next = body[i];
-                        i += 1;
-                        px[0] = px[0].wrapping_add(dg.wrapping_add((next >> 4).wrapping_sub(8)));
-                        px[1] = px[1].wrapping_add(dg);
-                        px[2] = px[2].wrapping_add(dg.wrapping_add((next & 0xF).wrapping_sub(8)));
-                    }
-                    _ => run = (b & 0x3F) as usize + 1,
-                }
-            }
-            let at = (px[0] as usize * 3
-                + px[1] as usize * 5
-                + px[2] as usize * 7
-                + px[3] as usize * 11)
-                % 64;
-            index[at] = px;
-            for _ in 0..run {
-                out.push(u32::from(px[0]) << 16 | u32::from(px[1]) << 8 | u32::from(px[2]));
-            }
-        }
-        (w, h, out)
+        let image = super::decode(data).expect("a valid image");
+        (image.width, image.height, image.pixels)
     }
 
     fn encode(w: u32, h: u32, pixels: &[u32]) -> Vec<u8> {
@@ -276,6 +305,27 @@ mod tests {
         let want: Vec<u32> = pixels.iter().map(|p| p & 0xFF_FFFF).collect();
         assert_eq!(decoded, want);
         assert!(data.len() as u64 <= max_len(w, h));
+    }
+
+    #[test]
+    fn the_decoder_refuses_what_is_malformed() {
+        let good = encode(3, 2, &[1, 2, 3, 4, 5, 6]);
+        assert!(super::decode(&good).is_some());
+        // Cut short, a pixel short, a pixel more, a wrong end, a wrong magic.
+        assert!(super::decode(&good[..good.len() - 1]).is_none());
+        assert!(super::decode(&encode(3, 2, &[1, 2, 3, 4, 5])).is_none());
+        assert!(super::decode(&encode(3, 2, &[1, 2, 3, 4, 5, 6, 7])).is_none());
+        let mut bad_end = good.clone();
+        *bad_end.last_mut().unwrap() = 2;
+        assert!(super::decode(&bad_end).is_none());
+        let mut bad_magic = good.clone();
+        bad_magic[0] = b'x';
+        assert!(super::decode(&bad_magic).is_none());
+        // An RGB op whose bytes are missing.
+        let mut cut = Vec::from(header(1, 1));
+        cut.extend_from_slice(&[OP_RGB, 1]);
+        cut.extend_from_slice(&END);
+        assert!(super::decode(&cut).is_none());
     }
 
     #[test]

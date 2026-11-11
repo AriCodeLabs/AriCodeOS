@@ -80,15 +80,15 @@ pub fn spawn(broker: Handle, name: &str, arg: u64) -> Result<(), LaunchError> {
     }
 }
 
-/// A copy of the screen into `buffer` (a DMA buffer of `len` bytes, given up
-/// whatever the outcome), for the owner's shell; its width and height. The
-/// broker refuses it on the launcher's endpoint, and `NotFound` means no
-/// desktop runs.
-pub fn screen(broker: Handle, buffer: Handle, len: u64) -> Result<(u32, u32), LaunchError> {
+/// A copy of the screen into `buffer` (a DMA buffer of the screen's size, given
+/// up whatever the outcome), for the owner's shell; its width and height. The
+/// broker refuses it on the launcher's endpoint, `NotFound` means no desktop
+/// runs and `Limit` a copy asked for less than 2 s after the last.
+pub fn screen(broker: Handle, buffer: Handle) -> Result<(u32, u32), LaunchError> {
     let mut msg = [0u8; Reply::LEN];
     let len = rpc::call(
         broker,
-        &Request::screen(len).encode(),
+        &Request::screen().encode(),
         &[buffer],
         rpc::GRACE_MS,
         SCREEN_MS,

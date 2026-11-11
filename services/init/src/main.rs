@@ -814,8 +814,13 @@ fn report_network_address(net_service: Handle, wait_ms: u64) {
 /// Bound of each wait (send, reply) of a network health request.
 const NET_CALL_MS: u64 = 250;
 /// How long init waits for the compositor to copy the screen: a copy of the
-/// largest screen takes milliseconds, and the compositor may be in a frame.
+/// largest screen takes milliseconds, and the compositor may be in a frame. Its
+/// queue is waited for less: a compositor that takes no request is hung.
 const SCREEN_CALL_MS: u64 = 1000;
+const SCREEN_SEND_MS: u64 = 250;
+/// At most one copy of the screen this often: a hung compositor costs init 1.25 s
+/// a copy, and a loop of them must not keep it there.
+const SCREEN_EVERY_MS: u64 = 2000;
 /// How often the desktop's bar is told the network's address.
 const NETWORK_REPORT_MS: u64 = 5000;
 /// And after a service did not answer.
@@ -2185,6 +2190,9 @@ struct Broker {
     /// When the bar is next told the network's address, and what it was told last.
     network_due: Option<u64>,
     network_said: alloc::string::String,
+    /// When the screen was last copied for a shell: one copy every
+    /// `SCREEN_EVERY_MS`, so a loop of them cannot keep init waiting.
+    screen_copied: Option<u64>,
     /// Where `terminal` holders ask for session shells (ADR 0074 phase C).
     terminals: Sessions,
     /// Where `settings` holders ask (ADR 0074 phase C).
@@ -2364,6 +2372,7 @@ impl Broker {
             running: [None; MAX_RUNNING + DESKTOP_SLOTS],
             offered: Offered::new(),
             network_due: None,
+            screen_copied: None,
             network_said: alloc::string::String::new(),
             terminals: Sessions {
                 endpoint: sys::endpoint_create()?,
@@ -2678,7 +2687,7 @@ impl Broker {
         };
         // A copy of the screen: the second handle is its buffer, not a console.
         if req.is_screen() {
-            return self.copy_screen(&req, reply_to, console);
+            return self.copy_screen(&req, reply_to, console, from_shell.is_some());
         }
         // A console comes only with the flag that announces it, and never
         // for a detached program, which may outlive the session. A list is
@@ -2731,7 +2740,13 @@ impl Broker {
     /// session's or a terminal's (the only holders of the endpoints served here; the
     /// launcher's refuses it). Each copy is said here, and on the desktop by the
     /// compositor.
-    fn copy_screen(&self, req: &LaunchRequest, reply_to: Handle, buffer: Option<Handle>) {
+    fn copy_screen(
+        &mut self,
+        req: &LaunchRequest,
+        reply_to: Handle,
+        buffer: Option<Handle>,
+        terminal: bool,
+    ) {
         let refuse = |status, why: &[u8]| {
             if let Some(b) = buffer {
                 let _ = sys::handle_close(b);
@@ -2741,7 +2756,7 @@ impl Broker {
             sys::print(b"\n");
             reply(reply_to, LaunchReply::status(status));
         };
-        if req.flags != LaunchRequest::SCREEN || !req.name_str().is_empty() {
+        if req.flags != LaunchRequest::SCREEN || !req.name_str().is_empty() || req.arg != 0 {
             return refuse(LaunchStatus::Invalid, b"malformed request");
         }
         let Some(buffer) = buffer else {
@@ -2750,20 +2765,37 @@ impl Broker {
         let Some(compositor) = self.compositor else {
             return refuse(LaunchStatus::NotFound, b"no desktop runs");
         };
+        let now = now_ms();
+        if self
+            .screen_copied
+            .is_some_and(|at| now.saturating_sub(at) < SCREEN_EVERY_MS)
+        {
+            return refuse(LaunchStatus::Limit, b"one copy every 2 s");
+        }
+        self.screen_copied = Some(now);
+        let who: &[u8] = if terminal {
+            b"a Terminal's shell"
+        } else {
+            b"the console's or an SSH session's shell"
+        };
         // `capture` gives the buffer to the compositor, or closes it.
-        match sys::window::capture(compositor, buffer, SCREEN_CALL_MS) {
+        match sys::window::capture(compositor, buffer, SCREEN_SEND_MS, SCREEN_CALL_MS) {
             Ok((w, h)) => {
                 let mut b = [0u8; 20];
                 sys::print(b"AriInit: the screen (");
                 sys::print(aricode_rt::fmt_u64(u64::from(w), &mut b));
                 sys::print(b"x");
                 sys::print(aricode_rt::fmt_u64(u64::from(h), &mut b));
-                sys::print(b") was copied for a shell\n");
+                sys::print(b") was copied for ");
+                sys::print(who);
+                sys::print(b"\n");
                 let value = u64::from(w) | u64::from(h) << 32;
                 reply(reply_to, LaunchReply::exited(value));
             }
             Err(_) => {
-                sys::print(b"AriInit: the compositor did not copy the screen\n");
+                sys::print(b"AriInit: the compositor did not copy the screen for ");
+                sys::print(who);
+                sys::print(b"\n");
                 reply(reply_to, LaunchReply::status(LaunchStatus::Failed));
             }
         }

@@ -8,4 +8,8 @@ description = "QOI image encoder, streaming and allocation free (no_std)"
 [lib]
 path = "src/lib.rs"
 
+[features]
+# The decoder, with `alloc`: the test runner's check of a screenshot.
+decode = []
+
 [dependencies]

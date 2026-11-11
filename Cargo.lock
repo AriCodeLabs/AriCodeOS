@@ -2109,6 +2109,7 @@ dependencies = [
  "aricode-net",
  "aricode-pkg",
  "aricode-proto",
+ "aricode-qoi",
  "aricode-ssh",
  "aricode-update-index",
  "serde",

@@ -434,19 +434,21 @@ pub fn set_network(compositor: Handle, text: &str, wait_ms: u64) -> Result<(), W
 
 /// Init only, over the compositor's main endpoint, for the owner's shell: the screen
 /// as last composed into `buffer` (a DMA buffer, given up whatever the outcome),
-/// `0x00RRGGBB` rows; its width and height. Waits `wait_ms` at most.
+/// `0x00RRGGBB` rows; its width and height. Waits `send_ms` at most for the
+/// compositor to take the request, and `reply_ms` for its answer.
 pub fn capture(
     compositor: Handle,
     buffer: Handle,
-    wait_ms: u64,
+    send_ms: u64,
+    reply_ms: u64,
 ) -> Result<(u32, u32), WindowError> {
     let mut msg = [0u8; Reply::LEN];
     let len = rpc::call(
         compositor,
         &Request::new(Op::Capture).encode(),
         &[buffer],
-        wait_ms,
-        wait_ms,
+        send_ms,
+        reply_ms,
         &mut msg,
     )
     .map_err(WindowError::Ipc)?;

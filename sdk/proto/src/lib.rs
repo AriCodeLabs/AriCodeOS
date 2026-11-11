@@ -1635,9 +1635,10 @@ pub mod launch {
         pub const LIST: u8 = 4;
         /// The owner's shell asks for a copy of the screen (the window
         /// protocol's `Capture`): a second handle follows the reply endpoint,
-        /// the DMA buffer it goes to, of `arg` bytes. Only on the shells'
-        /// endpoints, never the launcher's; the reply's `value` is the width,
-        /// and the height in its high 32 bits. The name is empty.
+        /// the DMA buffer it goes to, which the compositor checks holds the
+        /// screen. Only on the shells' endpoints, never the launcher's; the
+        /// reply's `value` is the width, and the height in its high 32 bits. The
+        /// name is empty and `arg` 0.
         pub const SCREEN: u8 = 8;
 
         /// `None` if the name does not fit.
@@ -1665,11 +1666,10 @@ pub mod launch {
             }
         }
 
-        /// The request for a copy of the screen into a buffer of `len` bytes
-        /// (`SCREEN`).
-        pub fn screen(len: u64) -> Self {
+        /// The request for a copy of the screen (`SCREEN`).
+        pub fn screen() -> Self {
             Self {
-                arg: len,
+                arg: 0,
                 name: [0; MAX_NAME],
                 name_len: 0,
                 flags: Self::SCREEN,
@@ -2080,8 +2080,8 @@ mod tests {
         let req = Request::decode(&Request::list(3).encode()).unwrap();
         assert!(req.is_list() && !req.is_detached() && req.arg == 3);
         assert_eq!(req.name_str(), "");
-        let screen = Request::decode(&Request::screen(1 << 23).encode()).unwrap();
-        assert!(screen.is_screen() && !screen.is_list() && screen.arg == 1 << 23);
+        let screen = Request::decode(&Request::screen().encode()).unwrap();
+        assert!(screen.is_screen() && !screen.is_list() && screen.arg == 0);
         assert_eq!(screen.flags, Request::SCREEN);
         let e = Entry::decode(&Entry::named("editor").unwrap().encode()).unwrap();
         assert_eq!((e.status, e.name_str()), (Status::Ok, "editor"));
