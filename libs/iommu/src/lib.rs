@@ -8,6 +8,8 @@
 
 #![no_std]
 
+pub mod site;
+
 use aricode_x86_paging::{FrameAlloc, PhysMap, PAGE_SIZE};
 
 /// Register offsets of a remapping unit.
@@ -240,7 +242,9 @@ pub const fn source_id(bus: u8, device: u8, function: u8) -> u16 {
     (bus as u16) << 8 | (device as u16 & 0x1F) << 3 | (function as u16 & 0x7)
 }
 
-/// Name of a translation fault reason (table from the specification).
+/// Name of a translation fault reason: the legacy-mode conditions of
+/// VT-d 4.0, 7.1.3 (LRT, LCT, LSS, LGN). 5h and 6h cover a page not
+/// mapped at all too: its entry has neither R nor W (incident 0064).
 pub fn fault_reason_name(reason: u8) -> &'static str {
     match reason {
         0x1 => "root entry not present",
@@ -249,13 +253,14 @@ pub fn fault_reason_name(reason: u8) -> &'static str {
         0x4 => "address beyond supported width",
         0x5 => "write to page without write permission",
         0x6 => "read from page without read permission",
-        0x7 => "second-level entry not present",
+        0x7 => "error reading a second-level paging entry",
         0x8 => "error reading root table",
         0x9 => "error reading context table",
         0xA => "reserved field in root entry",
         0xB => "reserved field in context entry",
         0xC => "reserved field in second-level paging",
-        0xD => "error reading second-level paging",
+        0xD => "translation type blocks the request",
+        0xE => "output address in the interrupt range",
         _ => "unknown reason",
     }
 }
@@ -270,13 +275,14 @@ pub fn fault_reason_short(reason: u8) -> &'static str {
         0x4 => "beyond address width",
         0x5 => "no write permission",
         0x6 => "no read permission",
-        0x7 => "page not mapped",
+        0x7 => "paging entry unreadable",
         0x8 => "root table unreadable",
         0x9 => "context table unreadable",
         0xA => "root entry reserved bit",
         0xB => "context reserved bit",
         0xC => "paging reserved bit",
-        0xD => "paging unreadable",
+        0xD => "blocked by context",
+        0xE => "to interrupt range",
         _ => "unknown reason",
     }
 }
@@ -600,7 +606,18 @@ mod tests {
         assert_eq!((f.bus(), f.device(), f.function()), (0, 2, 0));
         assert_eq!(f.reason, 7);
         assert!(f.is_read);
-        assert_eq!(fault_reason_name(7), "second-level entry not present");
+        assert_eq!(
+            fault_reason_name(7),
+            "error reading a second-level paging entry"
+        );
+        assert_eq!(
+            fault_reason_name(6),
+            "read from page without read permission"
+        );
+        assert_eq!(
+            fault_reason_name(0xE),
+            "output address in the interrupt range"
+        );
         assert_eq!(fault_reason_name(0x77), "unknown reason");
         assert_eq!(source_id(1, 31, 7), 0x01FF);
     }

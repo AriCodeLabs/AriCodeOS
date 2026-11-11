@@ -20,6 +20,57 @@ static PMM: IrqLock<Option<BitmapAllocator<'static>>> = IrqLock::new(None);
 static RAM: IrqLock<RangeSet<64>> = IrqLock::new(RangeSet::new());
 static RESERVED: IrqLock<RangeSet<64>> = IrqLock::new(RangeSet::new());
 
+/// The map's kinds one by one, also kept past boot: what a DMA fault's
+/// page was to the firmware (incident 0064). The boot services' ranges are
+/// the most scattered.
+static FREE_AT_BOOT: IrqLock<RangeSet<64>> = IrqLock::new(RangeSet::new());
+static BOOT: IrqLock<RangeSet<128>> = IrqLock::new(RangeSet::new());
+static RUNTIME: IrqLock<RangeSet<32>> = IrqLock::new(RangeSet::new());
+static ACPI: IrqLock<RangeSet<32>> = IrqLock::new(RangeSet::new());
+
+/// What the firmware's map said `addr` was (`sysinfo::dma_site::MEM_*`,
+/// with `MEM_APPROXIMATE` when the kept copy of that kind merged gaps).
+/// The precise kinds first: an approximated set covers more than it was
+/// given, never less.
+pub fn memory_kind(addr: u64) -> u8 {
+    use aricode_abi::sysinfo::dma_site as d;
+    fn hit<const N: usize>(set: &IrqLock<RangeSet<N>>, addr: u64, kind: u8) -> Option<u8> {
+        let set = set.lock();
+        set.as_slice()
+            .iter()
+            .any(|&(s, e)| addr >= s && addr < e)
+            .then(|| {
+                kind | if set.approximated() {
+                    d::MEM_APPROXIMATE
+                } else {
+                    0
+                }
+            })
+    }
+    hit(&RESERVED, addr, d::MEM_RESERVED)
+        .or_else(|| hit(&RUNTIME, addr, d::MEM_FIRMWARE))
+        .or_else(|| hit(&ACPI, addr, d::MEM_ACPI))
+        .or_else(|| hit(&FREE_AT_BOOT, addr, d::MEM_FREE))
+        .or_else(|| hit(&BOOT, addr, d::MEM_BOOT))
+        .unwrap_or(d::MEM_NONE)
+}
+
+/// The allocator's view of the frame holding `addr` now
+/// (`sysinfo::dma_site::FRAME_*`).
+pub fn frame_state(addr: u64) -> u8 {
+    use aricode_abi::sysinfo::dma_site as d;
+    let f = Frame::from_addr(addr & !(FRAME_SIZE - 1));
+    with(|p| {
+        if p.is_free(f) {
+            d::FRAME_FREE
+        } else if (f.number() as usize) < p.frames() {
+            d::FRAME_IN_USE
+        } else {
+            d::FRAME_UNMANAGED
+        }
+    })
+}
+
 /// Calls `f` with each range a device BAR must not cover, and what it is.
 pub fn for_each_firmware_range(mut f: impl FnMut(u64, u64, &'static str)) {
     for &(start, end) in RAM.lock().as_slice() {
@@ -82,6 +133,12 @@ pub fn init(info: &BootInfo) {
     }
     {
         let (mut ram, mut reserved) = (RAM.lock(), RESERVED.lock());
+        let (mut free, mut boot, mut runtime, mut acpi) = (
+            FREE_AT_BOOT.lock(),
+            BOOT.lock(),
+            RUNTIME.lock(),
+            ACPI.lock(),
+        );
         for d in regions() {
             match d.kind() {
                 MemoryRegionKind::Free
@@ -90,6 +147,13 @@ pub fn init(info: &BootInfo) {
                 | MemoryRegionKind::Acpi => ram.add(d.phys_start, d.end()),
                 MemoryRegionKind::Reserved => reserved.add(d.phys_start, d.end()),
                 MemoryRegionKind::Mmio => {}
+            }
+            match d.kind() {
+                MemoryRegionKind::Free => free.add(d.phys_start, d.end()),
+                MemoryRegionKind::Boot => boot.add(d.phys_start, d.end()),
+                MemoryRegionKind::Firmware => runtime.add(d.phys_start, d.end()),
+                MemoryRegionKind::Acpi => acpi.add(d.phys_start, d.end()),
+                MemoryRegionKind::Reserved | MemoryRegionKind::Mmio => {}
             }
         }
         if ram.approximated() || reserved.approximated() {

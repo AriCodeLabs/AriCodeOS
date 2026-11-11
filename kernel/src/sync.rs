@@ -11,7 +11,11 @@
 //! heap.mapped -> VMM    and therefore heap.mapped -> PMM
 //! PROCESSES -> SCHED    process::wait queries the scheduler
 //! PROCESSES -> IOMMU    dropping a DMA buffer (handle table) removes it from the domains
-//! IOMMU -> PMM          domains request and return page-table frames
+//! IOMMU -> PMM          domains request and return page-table frames, and a
+//!                       DMA fault reads its page's frame state (incident 0064)
+//! IOMMU -> SITES        a DMA fault keeps where its page lay (leaf)
+//! IOMMU -> pmm kinds    ... and what the firmware's map called it (leaves:
+//!                       FREE_AT_BOOT, BOOT, RUNTIME, ACPI, RESERVED)
 //! ```
 //!
 //! Never the other way round: in particular, never enter the VMM with the PMM

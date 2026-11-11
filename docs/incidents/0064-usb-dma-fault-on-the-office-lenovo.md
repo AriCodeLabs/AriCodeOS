@@ -5,7 +5,8 @@
   xHCI 8086:a0ed at 00:14.0), booted from the dev build 66 stick; the report is `diag-lenovo.txt`
   (`~/aricode-scratch/laptop/diag-lenovo.txt`, not in the repository: it came from a
   machine that is not ours).
-- Work branch: `feature/acpidump`, from `develop` at `7aad3e7`.
+- Work branch: `feature/acpidump`, from `develop` at `7aad3e7`; then `fix/xhci-dma-fault`,
+  from `develop` at `bd3c686`, after the second run.
 
 ## What was seen
 
@@ -41,7 +42,127 @@ No fix without the cause (ADR 0028).
 - `acpidump NAME` saves the firmware's DSDT and SSDTs, for the touchpad study and to see
   how the firmware describes this xHCI (its ports and their `_UPC`, `_PLD`).
 
-## Next
+## Second office run (2026-11-11, dev build 68, commit af612d8)
 
-The owner runs, on the office machine, `diag diag2.txt` and `acpidump acpi.bin`. With the
-page known, the xHCI driver's own mappings at that moment say what the controller read.
+`diag2.txt` and the firmware's tables (`acpi.bin`, decompiled) stay outside the repository
+(`~/aricode-scratch/lenovo/`). The lines that matter:
+
+    [1.148 s] process 7 'usb_input' created
+    [1.277 s] process 8 'usb_input' created
+    [11.466 s] DMA fault from 00:14.0, read at 43b76000: no read permission
+    [11.915 s] process 9 'ps2_input' created
+    [14.650 s] process 10 'fsd' created
+    [14.715 s] fault reported by process 8: usb sense 5 20 00 (code 5)
+
+Two xHCIs: 00:0d.0 (8086:9a13, the Type-C subsystem, process 7) and 00:14.0 (8086:a0ed, the
+PCH, process 8). 7991 MiB of RAM, 28 MiB in use at the report.
+
+### What the code and the specifications settle
+
+- **The page was never the driver's to lose.** usb-input has one DMA allocation, its arena,
+  made before the controller is reset and never freed; every pointer it hands the
+  controller (DCBAA and scratchpad array, rings and their link TRBs, ERST, contexts, the
+  descriptor, report, CBW and CSW buffers) is inside it. The only other memory it maps is
+  the client buffers of block requests, and fsd, the first client, started at 14.650 s,
+  three seconds after the fault. Slot memory that a Disable Slot releases or a
+  re-enumeration hands on stays in the arena and stays mapped. So at 11.466 s no page the
+  driver had mapped and unmapped existed: the controller read an address it formed itself
+  (a wrap at a boundary, a prefetch), one it got from somewhere other than this driver, or
+  one the kernel failed to map.
+- **The reason means "not mapped in this domain".** VT-d 4.0, 7.1.3, LGN.3 (6h): a read
+  that found no read permission, which a page absent from the second-level tables gives
+  too. The fault record holds only the page (bits 63:12). Our names for 7h and Dh were
+  wrong ("entry not present", "error reading paging"): 7h is an error reading a paging
+  entry (LSS.1) and Dh a request the context's translation type blocks (LCT.5); fixed, and
+  Eh (LGN.4) added.
+- **The controller kept working.** The storage on 00:14.0 answered a command at 14.715 s
+  and the mouse worked. A DMA error a controller acts on sets HSE and halts it (xHCI 1.2,
+  5.4.2), so the read was one whose result it did not need, or one it retried elsewhere.
+- **The page is far from where the allocator was working.** The kernel's allocator hands
+  out the lowest free frame (`BitmapAllocator::allocate`, `allocate_contiguous` from its
+  hint) and only 28 MiB were in use; 0x43b76000 is at 1083 MiB. Unless this firmware's map
+  leaves the first gigabyte to boot services that come back later, the arena was well
+  below the page. That cannot be proven from the report: it holds neither the memory map
+  nor the arena's address.
+- **Boundaries: a real defect of ours, maybe not this one.** xHCI 1.2, chapter 6 before
+  Table 6-1: no structure of up to 64 KiB may span a 64 KiB boundary and none of up to
+  PAGESIZE a PAGESIZE boundary; the table gives the Device Context, each input context and
+  the DCBAA the PAGESIZE boundary and the ring segments the 64 KiB one. The arena packed
+  structures with 64-byte alignment only, so a Device Context or an Input Context could
+  cross a page and a ring a 64 KiB boundary (every arena is longer than 64 KiB, so it
+  always holds one). Linux allocates contexts from a pool with a PAGESIZE boundary and
+  whole-page ring segments (`xhci-mem.c`, `xhci_mem_init`); its only prefetch quirk is
+  Zhaoxin's (`XHCI_ZHAOXIN_TRB_FETCH`, two pages per segment). A controller that counts
+  within those boundaries reads wrapped addresses: within the page (still ours) or up to
+  64 KiB below a 64 KiB boundary, which leaves the arena only when that boundary lies less
+  than 64 KiB past its start. It is fixed as spec hardening; whether it was this fault is
+  for the next run to say.
+- **No RMRR can explain a fault on its own.** The kernel maps a device's reserved regions
+  into the domain its driver gets (`State::attach`), so a read inside an RMRR of 00:14.0
+  would not fault. Memory the firmware's USB stack used before boot is no RMRR (VT-d 4.0,
+  8.4 excludes regions that are DMA targets only before boot). Whether this DMAR has an
+  RMRR at all is unknown: `acpidump` saves the DSDT and SSDTs only. The DSDT's XHCI device
+  (`_SB.PC00.XHCI`, `_ADR` 0x00140000) has no memory OperationRegion; its ports say which
+  are internal (`_UPC` connectable, `_PLD` not visible): HS05 (`CAMA`, a camera), HS06,
+  HS07 and HS10 (Bluetooth, power resource `BTPR` in an SSDT). So besides the mouse and the
+  stick, process 8 enumerated internal devices at boot, which is why its boot enumeration
+  took until about 11.9 s (one port used its 10 s budget).
+- **The sense was SYNCHRONIZE CACHE.** usb-input sends INQUIRY, TEST UNIT READY, REQUEST
+  SENSE, READ CAPACITY(10), READ(10), WRITE(10) and SYNCHRONIZE CACHE(10). Sixty-five
+  milliseconds after fsd started (AriFS mounting, which writes and flushes when it
+  recovers or migrates), only the last is one a stick answers with ILLEGAL REQUEST,
+  INVALID COMMAND OPERATION CODE; the driver then takes the flush as a no-op
+  (`Sense::command_unsupported`). Unrelated to the fault, and not a failure. It is now
+  recorded as `usb no sync cache` in both USB drivers, so a report names the command.
+
+### Hypotheses, most likely first
+
+1. **An address that was never ours**: memory the firmware used before boot (the
+   controller or the firmware's SMM handler still holding a pointer from then), or a
+   pointer read from a context crossing a page and wrapped. For: the page is far from what
+   the allocator had handed out; the read did not stop the controller. The next run says
+   it if the page is "loader or boot services memory" or "firmware-reserved" and far from
+   the arena, and whether `usb bios kept xhci` appears.
+2. **A wrap at a boundary the arena crossed**, now fixed. For: a real violation of the
+   specification on hardware whose controller may rely on it. Against: it needs the arena
+   right above the page. If the fault is gone in the next run with the arena's address
+   known and close, this was it.
+3. **A page of the arena the kernel did not map** (tables or invalidation). Against: the
+   IOMMU self-test and every translated QEMU scenario. The next run shows it as "in a
+   region still mapped".
+
+## What changed (branch `fix/xhci-dma-fault`)
+
+- usb-input places every arena structure off the page and 64 KiB boundaries
+  (`aricode_xhci::arena::place`), checks PAGESIZE offers 4 KiB pages, and logs each
+  structure with a label; the arena grew to 128 KiB plus the scratchpads, which holds ten
+  slots with four HID endpoints each and two storages placed that way at every phase
+  against 64 KiB (host test).
+- The kernel tags each domain region (own buffer, client buffer, RMRR, framebuffer) with
+  its mapping time, remembers the regions each domain unmapped (8 own, 16 others) and, for
+  the first four DMA faults of the boot, keeps where the page lay: inside a live region,
+  inside one unmapped before (and when), or between the nearest regions below and above;
+  what the firmware's memory map called it; whether the allocator had the frame; which
+  RMRR holds it; which other domain maps it (`aricode_iommu::site`). New selectors
+  `DMA_FAULT_SITES` (whole only for the device's driver or a `MANAGE` holder) and
+  `IOMMU_RESERVED` (the RMRRs and their devices).
+- `diag` prints an `iommu` line, the RMRRs and, per kept fault, `in`, `below`, `above`,
+  `page` and `domain` lines.
+- usb-input asks the kernel, at most once a second while its loop runs and at once after
+  the boot enumeration, whether a fault came; for its own it prints the page against the
+  arena (the structure on it, or how far before or past the arena) and records
+  `usb dma in LABEL` / `usb dma past arena` / `usb dma before arena` with the offset or
+  distance. A firmware that keeps the controller after the handoff is recorded
+  (`usb bios kept xhci`).
+- Scenario `usb.dma_fault_site` (`usb_fault=dma`): a descriptor read into the page past
+  the arena; the kernel's site, the driver's naming and `diag`'s lines are checked, and
+  the storage still works.
+
+## Next office run
+
+Boot a dev build with this branch, wait a minute, then `diag diag3.txt` and `acpidump
+acpi3.bin`. The report must be read for: the `dma fault 1` block (relation, `below` and
+`above` with their distances, the `page` line's memory kind and frame), the `rmrr` lines
+(an RMRR for 00:14.0 or none), the `usb dma ...` event from process 8 with its code, and
+`usb bios kept xhci` if present. No fault at all, with the same devices plugged, points at
+hypothesis 2.

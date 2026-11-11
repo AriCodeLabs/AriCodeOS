@@ -230,6 +230,10 @@ pub mod keys {
     /// 0017) or `hid` (a HID report is treated as a
     /// transaction error: the interrupt endpoint is stopped and recovered
     /// from the idle loop, its report TRBs queued again).
+    /// `usb_fault=dma` alone makes the xHCI driver, once its boot
+    /// enumeration is over, read a device descriptor into the page right
+    /// past its DMA arena: the IOMMU blocks the write and the driver must
+    /// name the page from the kernel's report (incident 0064).
     /// The EHCI driver (ADR 0031) understands `N` and `idle` with `cbw`
     /// (followed by a real Reset Recovery), `csw`, `short-csw` and
     /// `short-data`.
