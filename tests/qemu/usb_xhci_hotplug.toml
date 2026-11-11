@@ -18,11 +18,13 @@
 #     is refused with a line on the console, not a crash.
 #  6. The hot-plugged keyboard types `shutdown`: its keys reach the shell
 #     through the input service (the only way this run can end with 33).
+# The policy is tuned with the boot key `usb.hotplug` (ADR 0087), and the
+# ports' protocols come from the Supported Protocol capabilities.
 name = "usb.xhci_hotplug"
 description = "usbd: mice and a keyboard plugged in and out after boot are enumerated, detached and served, reusing slots and memory"
 level = "release"
 areas = ["usb", "drivers", "input"]
-cmdline = "qemu_exit shell"
+cmdline = "qemu_exit shell usb.hotplug=debounce:150,recovery:20"
 usb_xhci = true
 no_virtio_input = true
 timeout_secs = 120
@@ -112,6 +114,9 @@ keys = ["s", "h", "u", "t", "d", "o", "w", "n", "ret"]
 [expect]
 exit = 33
 serial_contains = [
+    "usb-input: usb.hotplug: debounce 150 ms, reset recovery 20 ms, 3 attempts, retry 200 ms, 5 resets, 3 bounces",
+    "usb-input: USB 3 ports 1 to 4",
+    "usb-input: USB 2 ports 5 to 12",
     "usb-input: device ready: USB HID (no devices)",
     "usb-input: port 5: device plugged in; enumerating (attempt 1)",
     "usb-input: port 5: HID mouse (boot protocol, 4 bytes per report, endpoint 1)",

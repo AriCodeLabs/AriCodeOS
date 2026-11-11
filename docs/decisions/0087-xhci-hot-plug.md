@@ -47,27 +47,39 @@ failed.
 7. **Storage keeps its own logic**: re-enumerated on its own port as before.
 8. **One policy, as parameters.** Debounce (100 ms), reset recovery (50 ms:
    USB 2.0 TRSTRCY is 10 ms, Linux waits 50), attempts (3), the retry
-   pause (200 ms times the failed attempts) and port resets per attempt (5,
-   Linux `PORT_RESET_TRIES`) are one `aricode_xhci::hotplug::Policy` the
-   driver passes in. The boot key
-   `usb.hotplug=debounce:MS,recovery:MS,attempts:N,retry:MS,resets:N` (any
-   of them) tunes it within bounds the specifications set (a debounce of at
-   least 100 ms, a recovery of at least 10 ms); a refused value is said and
-   the defaults stay.
+   pause (200 ms times the failed attempts), port resets per attempt (5,
+   Linux `PORT_RESET_TRIES`) and the bounce limit (3, see 10) are one
+   `aricode_xhci::hotplug::Policy` the driver passes in. The boot key
+   `usb.hotplug=debounce:MS,recovery:MS,attempts:N,retry:MS,resets:N,bounces:N`
+   (any of them) tunes it within these bounds: debounce 100 to 2000 ms
+   (USB 2.0 7.1.7.3; Linux gives up at 2000), recovery 10 to 200 ms
+   (TRSTRCY; it comes on top of the reset's own 500 ms window, so a long
+   recovery never shortens the reset, which a USB3 warm reset needs), 1 to
+   10 attempts and resets, 2 to 10 bounces, a retry pause up to 5000 ms. A
+   refused value is said and the defaults stay.
 9. **Disable Slot commands never overlap.** One is outstanding at a time;
    any other, whether from the idle loop or from a block request giving up
-   the storage's endpoint, waits in line (`waiting_disables`) and is issued
-   when the one before completes. One with no completion in 5 s (Linux's
-   command timeout) is given up: its slot's memory and held buffers are
-   kept for good, never reused, and the line moves on.
+   the storage's endpoint, waits in line, first in first out
+   (`waiting_disables`), and is issued when the one before completes. One
+   with no completion in 5 s (Linux's command timeout) is given up: its
+   slot's memory and held buffers are kept for good, never reused, and the
+   line moves on. The command ring is not aborted (Linux sets CRCR.CA);
+   instead a completion is only taken for a command if both its TRB and its
+   slot match, so a late completion after the ring wrapped is never taken
+   for a newer command.
 10. **Resets and enumerations stand only on a settled connection.** A reset
     ends when PR is clear and the port enabled and connected; a USB2
     connection that changes during the reset or its recovery is reset again
     (up to 5 times, as Linux), a USB3 one that bounces across a warm reset
-    is not. An enumeration only stands if the device it addressed is still
-    the one on its port (`still_attached`); otherwise the port is debounced
-    again, at most `attempts` times in a row before it is left alone until
-    it is empty (`PortBounces`).
+    is not. Which ports are USB3 comes from the controller's Supported
+    Protocol capabilities (xHCI 7.2), with the negotiated speed as the
+    fallback for a port none names. When the resets run out (or the reset
+    window does) the port's change bits are cleared, so the bounces queue
+    nothing anew. An enumeration only stands if the device it addressed is
+    still the one on its port (`still_attached`); otherwise the port is
+    debounced again. A device that changes during its enumeration or
+    bounces at every reset `bounces` times in a row has its port left alone
+    until it is empty (`PortBounces`).
 
 ## Left for the owner
 
