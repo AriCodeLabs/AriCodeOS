@@ -9,6 +9,11 @@
 //! it (a stray click starts nothing); "Leave the desktop" ends the desktop
 //! session and gives the screen back to the text console.
 //!
+//! The applications it offers go to the dock too, as small icons a click opens
+//! (the owner, 2026-11-11: the list should not stay on screen). Once one is
+//! open the launcher goes to the dock itself, from where its icon or Alt+Tab
+//! brings it back. A compositor too old to take them leaves it as it was.
+//!
 //! Handles, in the broker's order: its compositor session, the launch
 //! endpoint (both endpoints, send only) and `HARDWARE`.
 #![no_std]
@@ -19,7 +24,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use aricode_rt::sys::launch::{self, LaunchError, Status};
-use aricode_rt::sys::window::{wants, Event, Window};
+use aricode_rt::sys::window::{wants, Event, Window, MAX_DOCK_APPS};
 use aricode_rt::sys::{self, kind, permissions, Handle};
 use aricode_ui::{Action, Dialog, Fill, Id, ListIcons, Space, Stack, Style, Theme, Tone, Ui};
 
@@ -128,6 +133,19 @@ impl Launcher {
         say(parts);
     }
 
+    /// Gives the dock the applications offered, in order; whether it took them.
+    fn give_dock(&self, win: &Window) -> bool {
+        let given = self
+            .names
+            .iter()
+            .take(MAX_DOCK_APPS)
+            .enumerate()
+            .all(|(i, name)| win.dock_app(i as u32, name).is_ok());
+        let ended =
+            self.names.len() >= MAX_DOCK_APPS || win.dock_app(self.names.len() as u32, "").is_ok();
+        given && ended
+    }
+
     /// Asks the broker again which applications it may offer.
     fn refresh(&mut self, apps: Handle) {
         let mut names: Vec<String> = Vec::new();
@@ -187,15 +205,23 @@ impl Launcher {
         );
     }
 
-    /// Starts the selected application.
-    fn open(&mut self, apps: Handle) {
+    /// Starts the selected application; whether it started.
+    fn open(&mut self, apps: Handle) -> bool {
         let Some(i) = self.ui.selected(self.list) else {
-            return;
+            return false;
         };
         let app = String::from(self.ui.row(self.list, i));
+        self.start(apps, &app)
+    }
+
+    /// Starts application `app`; whether it started.
+    fn start(&mut self, apps: Handle, app: &str) -> bool {
         let name = app.as_bytes();
-        match launch::spawn(apps, &app, 0) {
-            Ok(()) => self.set_status(false, &[b"started ", name]),
+        match launch::spawn(apps, app, 0) {
+            Ok(()) => {
+                self.set_status(false, &[b"started ", name]);
+                true
+            }
             Err(e) => {
                 let why: &[u8] = match e {
                     LaunchError::Status(Status::Limit) => b": the desktop's 6 slots are full",
@@ -206,6 +232,7 @@ impl Launcher {
                     LaunchError::Ipc(_) => b": the broker did not answer",
                 };
                 self.set_status(true, &[name, why]);
+                false
             }
         }
     }
@@ -259,6 +286,10 @@ fn main(_arg: u64) -> u64 {
     }
     let mut l = Launcher::new(win.starts_dark());
     l.refresh(apps);
+    let mut docked = l.give_dock(&win);
+    if docked {
+        say(&[b"gave the dock its applications"]);
+    }
     for i in 0..l.ui.list_len(l.list) {
         say(&[b"offers ", l.ui.row(l.list, i).as_bytes()]);
     }
@@ -284,25 +315,45 @@ fn main(_arg: u64) -> u64 {
                     win.resize(hw, width, height, |c| ui.paint_all(c))
                 });
             }
+            // The owner chose an application in the dock.
+            Event::Launch { index } => {
+                let app = l.names.get(index as usize).cloned();
+                if let Some(app) = app {
+                    if l.start(apps, &app) && docked {
+                        let _ = win.minimize();
+                    }
+                }
+            }
             event => l.ui.handle(event),
         }
+        let mut started = false;
         while let Some(action) = l.ui.next_action() {
             match action {
                 Action::Pressed(id) if id == l.leaving.yes => break 'running,
                 Action::Pressed(id) if id == l.leaving.no => l.ui.answered(),
                 Action::Pressed(id) if id == l.leave => l.ask_to_leave(),
-                Action::Pressed(id) if id == l.open => l.open(apps),
-                Action::Pressed(id) if id == l.refresh => l.refresh(apps),
+                Action::Pressed(id) if id == l.open => started |= l.open(apps),
+                Action::Pressed(id) if id == l.refresh => {
+                    l.refresh(apps);
+                    docked = l.give_dock(&win);
+                }
                 Action::Menu(MENU_LEAVE) => l.ask_to_leave(),
-                Action::Menu(MENU_OPEN) => l.open(apps),
-                Action::Menu(MENU_REFRESH) => l.refresh(apps),
-                Action::Activated(..) | Action::Submitted(_) => l.open(apps),
+                Action::Menu(MENU_OPEN) => started |= l.open(apps),
+                Action::Menu(MENU_REFRESH) => {
+                    l.refresh(apps);
+                    docked = l.give_dock(&win);
+                }
+                Action::Activated(..) | Action::Submitted(_) => started |= l.open(apps),
                 Action::Edited(id) if id == l.search => l.show_matches(),
                 Action::Arrow(_, up) => l.ui.select_next(l.list, up),
                 _ => {}
             }
         }
         l.show(&mut win);
+        // Out of the way of what just opened: the dock brings it back.
+        if started && docked {
+            let _ = win.minimize();
+        }
     }
     say(&[b"leaving the desktop"]);
     let _ = win.close();

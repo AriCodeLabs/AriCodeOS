@@ -657,8 +657,42 @@ pub enum MenuHit {
     None,
 }
 
-/// A running program's place in the dock: its window and rectangle.
-pub type Dock = [Option<(u32, Rect)>; MAX_WINDOWS];
+/// Applications the dock offers at most (the window protocol's `MAX_DOCK_APPS`).
+pub const DOCK_APPS: usize = 12;
+/// Places in the dock: the applications offered and every window.
+pub const DOCK_PLACES: usize = DOCK_APPS + MAX_WINDOWS;
+/// The package whose windows lead the dock: the launcher, which offers the rest.
+pub const LAUNCHER: &str = "launcher";
+
+/// What a place of the dock is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DockItem {
+    /// A window: its program's own, or the application offered it belongs to.
+    Window(u32),
+    /// An application offered and not running: a click asks the launcher for it.
+    App(usize),
+}
+
+/// The dock's places, in order, and their rectangles.
+pub type Dock = [Option<(DockItem, Rect)>; DOCK_PLACES];
+
+/// An application's package name, as the launcher gave it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AppName {
+    name: [u8; MENU_LABEL],
+    len: u8,
+}
+
+impl AppName {
+    const EMPTY: Self = Self {
+        name: [0; MENU_LABEL],
+        len: 0,
+    };
+
+    fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.name[..self.len as usize]).unwrap_or("")
+    }
+}
 /// The longest text the bar shows at its right end, in bytes.
 pub const STATUS_MAX: usize = 48;
 
@@ -793,7 +827,7 @@ impl Theme {
         dock_indicator_h: 3,
         dock_gap: 4,
         dock_pad: 4,
-        dock_margin: 6,
+        dock_margin: 0,
         menu_row_h: 22,
         menu_pad: 4,
         menu_gap: 16,
@@ -1116,6 +1150,10 @@ pub enum Hit {
     Dock {
         id: u32,
     },
+    /// An application the dock offers, not running: `index` of the launcher's list.
+    DockApp {
+        index: usize,
+    },
     /// Window and coordinates relative to the content (negative on the frame).
     Window {
         id: u32,
@@ -1184,6 +1222,8 @@ pub struct Desktop {
     notice_len: u8,
     /// The window shown full screen, over the bar and the dock.
     full: Option<u32>,
+    /// The applications the launcher offers in the dock, in its order.
+    apps: [AppName; DOCK_APPS],
     pub theme: Theme,
 }
 
@@ -1204,6 +1244,7 @@ impl Desktop {
             notice: [0; STATUS_MAX],
             notice_len: 0,
             full: None,
+            apps: [AppName::EMPTY; DOCK_APPS],
             theme: Theme::LIGHT,
         }
     }
@@ -1270,6 +1311,37 @@ impl Desktop {
         self.get(self.full?).filter(|w| !w.hidden)
     }
 
+    /// The dock offers application `index` as `name` (a package's name, as the
+    /// launcher gives it); an empty name ends the list there. `false`, and nothing
+    /// changes, past the end of the list or for a name too long or not one word of
+    /// lowercase letters, digits, `-` and `_`.
+    pub fn set_dock_app(&mut self, index: usize, name: &str) -> bool {
+        let count = self.apps.iter().take_while(|a| a.len > 0).count();
+        let word = name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_');
+        if index > count || index >= DOCK_APPS || name.len() > MENU_LABEL || !word {
+            return false;
+        }
+        if name.is_empty() {
+            self.apps[index..].fill(AppName::EMPTY);
+            return true;
+        }
+        let mut app = AppName::EMPTY;
+        app.name[..name.len()].copy_from_slice(name.as_bytes());
+        app.len = name.len() as u8;
+        self.apps[index] = app;
+        true
+    }
+
+    /// The name of application `index` the dock offers.
+    pub fn dock_app(&self, index: usize) -> Option<&str> {
+        self.apps
+            .get(index)
+            .filter(|a| a.len > 0)
+            .map(AppName::as_str)
+    }
+
     /// Shows `id` full screen, or no window with `None`.
     pub fn set_full_screen(&mut self, id: Option<u32>) {
         self.full = id.filter(|&id| self.get(id).is_some());
@@ -1308,8 +1380,11 @@ impl Desktop {
                 from + (p as i64 * shown as i64 + real - 1).div_euclid(real) as i32
             };
             let (x0, y0) = (lo(part.x, at.x, at.w, cw), lo(part.y, at.y, at.h, ch));
-            let x1 = hi(part.x + part.w as i32, at.x, at.w, cw);
-            let y1 = hi(part.y + part.h as i32, at.y, at.h, ch);
+            // A pixel more at the far edges: `blit_scaled` steps in fixed point,
+            // which can show the part's last source pixel one screen pixel later
+            // than the exact ratio says (audit of full screen, M1).
+            let x1 = hi(part.x + part.w as i32, at.x, at.w, cw) + 1;
+            let y1 = hi(part.y + part.h as i32, at.y, at.h, ch) + 1;
             let r = Rect::new(x0, y0, (x1 - x0).max(0) as u32, (y1 - y0).max(0) as u32);
             return Some(r.intersect(&at));
         }
@@ -1391,8 +1466,11 @@ impl Desktop {
             };
         }
         let (dock, places) = self.dock();
-        if let Some((id, _)) = places.iter().flatten().find(|(_, p)| p.contains(x, y)) {
-            return Hit::Dock { id: *id };
+        if let Some((item, _)) = places.iter().flatten().find(|(_, p)| p.contains(x, y)) {
+            return match *item {
+                DockItem::Window(id) => Hit::Dock { id },
+                DockItem::App(index) => Hit::DockApp { index },
+            };
         }
         if dock.contains(x, y) || self.bar().contains(x, y) {
             return Hit::Panel;
@@ -1484,24 +1562,45 @@ impl Desktop {
         Rect::new(0, t.bar_h as i32, self.screen.w, h as u32)
     }
 
-    /// The dock, and each running program's place in it: centred, in the order they
-    /// opened, narrower when many would not fit. Empty with nothing running.
+    /// The dock, and its places: the launcher's window first, then the applications
+    /// it offers (one that runs is its first window, marked as running), then every
+    /// other window in the order they opened. Centred and on the screen's bottom
+    /// edge, narrower when many would not fit; empty with nothing to show.
     pub fn dock(&self) -> (Rect, Dock) {
         let t = &self.theme;
-        let mut places = [None; MAX_WINDOWS];
-        let n = self.count as i32;
+        let mut places: Dock = [None; DOCK_PLACES];
+        let mut items = [DockItem::App(0); DOCK_PLACES];
+        let mut n = 0;
+        let open = || self.windows.iter().flatten();
+        for w in open().filter(|w| w.program_name() == LAUNCHER) {
+            items[n] = DockItem::Window(w.id);
+            n += 1;
+        }
+        for (index, app) in self.apps.iter().take_while(|a| a.len > 0).enumerate() {
+            let name = app.as_str();
+            items[n] = open()
+                .find(|w| w.program_name() == name && name != LAUNCHER)
+                .map_or(DockItem::App(index), |w| DockItem::Window(w.id));
+            n += 1;
+        }
+        for w in open() {
+            if !items[..n].contains(&DockItem::Window(w.id)) {
+                items[n] = DockItem::Window(w.id);
+                n += 1;
+            }
+        }
         if n == 0 {
             return (Rect::new(0, 0, 0, 0), places);
         }
+        let count = n as i32;
         let around = 2 * (t.dock_pad + t.dock_margin);
-        let room = self.screen.w as i32 - around - (n - 1) * t.dock_gap;
-        let w = (room / n).clamp(1, t.dock_item.0 as i32);
-        let all = n * w + (n - 1) * t.dock_gap;
+        let room = self.screen.w as i32 - around - (count - 1) * t.dock_gap;
+        let w = (room / count).clamp(1, t.dock_item.0 as i32);
+        let all = count * w + (count - 1) * t.dock_gap;
         let y = self.screen.h as i32 - t.dock_margin - t.dock_pad - t.dock_item.1 as i32;
         let mut x = (self.screen.w as i32 - all) / 2;
-        let open = self.windows.iter().flatten();
-        for (slot, window) in places.iter_mut().zip(open) {
-            *slot = Some((window.id, Rect::new(x, y, w as u32, t.dock_item.1)));
+        for (slot, item) in places.iter_mut().zip(&items[..n]) {
+            *slot = Some((*item, Rect::new(x, y, w as u32, t.dock_item.1)));
             x += w + t.dock_gap;
         }
         let outer = Rect::new(
@@ -1513,11 +1612,19 @@ impl Desktop {
         (outer, places)
     }
 
-    /// The hovered program and the maximum area its name may paint. Geometry is
+    /// The name a dock place shows on hover.
+    fn dock_name(&self, item: DockItem) -> Option<&str> {
+        match item {
+            DockItem::Window(id) => self.get(id).map(Window::panel_name),
+            DockItem::App(index) => self.dock_app(index).map(Icon::application_name),
+        }
+    }
+
+    /// The hovered place and the maximum area its name may paint. Geometry is
     /// independent of the font so the scene can invalidate the old and new bubble.
-    fn dock_hint(&self) -> Option<(u32, Rect)> {
+    fn dock_hint(&self) -> Option<(DockItem, Rect)> {
         let (dock, places) = self.dock();
-        let (id, place) = places
+        let (item, place) = places
             .into_iter()
             .flatten()
             .find(|(_, r)| r.contains(self.pointer.0, self.pointer.1))?;
@@ -1526,7 +1633,7 @@ impl Desktop {
         let x = (place.x + place.w as i32 / 2 - w as i32 / 2).clamp(0, (self.screen.w - w) as i32);
         let y = dock.y - self.theme.dock_hint_gap - h as i32;
         // On a very short display there is no room above the dock.
-        (y >= self.bar().bottom()).then_some((id, Rect::new(x, y, w, h)))
+        (y >= self.bar().bottom()).then_some((item, Rect::new(x, y, w, h)))
     }
 
     /// Where a menu's title is in the bar: after the focused window's name.
@@ -1746,6 +1853,7 @@ impl Desktop {
             bar: self.bar(),
             dock: self.dock().0,
             dock_hint: self.dock_hint(),
+            apps: self.apps,
             status: self.status,
             notice: self.notice,
             notice_at: self.notice_box(),
@@ -1906,10 +2014,10 @@ impl Desktop {
             }
         }
         self.compose_notice(out, labels);
-        if let Some((id, bounds)) = self.dock_hint() {
-            if let Some(w) = self.get(id).filter(|_| bounds.intersects(clip)) {
+        if let Some((item, bounds)) = self.dock_hint() {
+            if let Some(name) = self.dock_name(item).filter(|_| bounds.intersects(clip)) {
                 let pad = t.bar_margin;
-                let width = (labels.width(w.panel_name()) + 2 * pad).max(0) as u32;
+                let width = (labels.width(name) + 2 * pad).max(0) as u32;
                 let width = width.min(bounds.w);
                 let bubble = Rect::new(
                     bounds.x + (bounds.w - width) as i32 / 2,
@@ -1927,7 +2035,7 @@ impl Desktop {
                 draw_fitted_label(
                     &mut out.clipped(&room),
                     labels,
-                    w.panel_name(),
+                    name,
                     &room,
                     bubble.y + bubble.h as i32 / 2,
                     t.bar_ink,
@@ -1938,20 +2046,36 @@ impl Desktop {
         if !dock.intersects(clip) {
             return;
         }
-        out.rounded(&dock, RADIUS, t.dock);
-        for (id, place) in places.iter().flatten() {
-            let Some(w) = self.get(*id) else { continue };
-            if self.focus == Some(*id) {
+        // On the screen's bottom edge: rounded at the top only, its lower corners
+        // below the screen.
+        let below = if dock.bottom() >= self.screen.bottom() {
+            RADIUS as u32
+        } else {
+            0
+        };
+        out.rounded(
+            &Rect::new(dock.x, dock.y, dock.w, dock.h + below),
+            RADIUS,
+            t.dock,
+        );
+        for (item, place) in places.iter().flatten() {
+            let (program, window) = match *item {
+                DockItem::Window(id) => match self.get(id) {
+                    Some(w) => (w.program_name(), Some(w)),
+                    None => continue,
+                },
+                DockItem::App(index) => match self.dock_app(index) {
+                    Some(name) => (name, None),
+                    None => continue,
+                },
+            };
+            let focused = window.is_some_and(|w| self.focus == Some(w.id));
+            if focused {
                 out.rounded(place, RADIUS, t.dock_active);
             }
-            let ink = if w.hidden {
-                t.dock_quiet_ink
-            } else {
-                t.dock_ink
-            };
             let mut inside = out.clipped(place);
             let size = t.dock_icon.min(place.w.saturating_sub(8));
-            Icon::application(w.program_name()).draw(
+            Icon::application(program).draw(
                 &mut inside,
                 Rect::new(
                     place.x + (place.w - size) as i32 / 2,
@@ -1960,9 +2084,16 @@ impl Desktop {
                     size,
                 ),
             );
-            // A line for the active window, a dot for another visible window,
-            // and an outlined dot for a minimized one: colour is not the only cue.
-            let width = if self.focus == Some(*id) { 16 } else { 5 };
+            // An application not running has no mark. A line for the active
+            // window, a dot for another visible window, and an outlined dot for a
+            // minimized one: colour is not the only cue.
+            let Some(w) = window else { continue };
+            let ink = if w.hidden {
+                t.dock_quiet_ink
+            } else {
+                t.dock_ink
+            };
+            let width = if focused { 16 } else { 5 };
             let mark = Rect::new(
                 place.x + (place.w as i32 - width) / 2,
                 place.bottom() - t.dock_indicator_h as i32 - 3,
@@ -2018,7 +2149,8 @@ pub struct Scene {
     cursor: Cursor,
     bar: Rect,
     dock: Rect,
-    dock_hint: Option<(u32, Rect)>,
+    dock_hint: Option<(DockItem, Rect)>,
+    apps: [AppName; DOCK_APPS],
     status: [u8; STATUS_MAX],
     notice: [u8; STATUS_MAX],
     notice_at: Rect,
@@ -2070,6 +2202,7 @@ impl Scene {
             damage.add(&self.bar);
             damage.add(&newer.bar);
         }
+        let same_for_panels = same_for_panels && self.apps == newer.apps;
         if !same_for_panels {
             damage.add(&self.dock);
             damage.add(&newer.dock);
@@ -2292,11 +2425,11 @@ mod tests {
         let mut d = Desktop::new(800, 600);
         let (empty, places) = d.dock();
         assert!(empty.is_empty(), "nothing running, nothing shown");
-        assert_eq!(places, [None; MAX_WINDOWS]);
+        assert_eq!(places, [None; DOCK_PLACES]);
         let a = d.create(100, 100, "A").unwrap();
         let (dock, places) = d.dock();
         let (id, place) = places[0].unwrap();
-        assert_eq!(id, a);
+        assert_eq!(id, DockItem::Window(a));
         let t = Theme::LIGHT;
         assert_eq!(dock.bottom(), 600 - t.dock_margin);
         assert_eq!(dock.x + dock.right(), 800, "centred");
@@ -2309,7 +2442,7 @@ mod tests {
         // Hiding keeps its place, and marks the dock as changed.
         let before = d.scene();
         d.set_hidden(a, true);
-        assert_eq!(d.dock().1[0], Some((a, place)));
+        assert_eq!(d.dock().1[0], Some((DockItem::Window(a), place)));
         let mut damage = Damage::new(Rect::new(0, 0, 800, 600));
         before.damage(&d.scene(), &mut damage);
         assert!(damage.rects().iter().any(|r| r.intersects(&place)));
@@ -2324,6 +2457,76 @@ mod tests {
             last_right = p.right();
         }
         assert_eq!(places.iter().flatten().count(), 8);
+    }
+
+    #[test]
+    fn the_dock_offers_the_launchers_applications_and_marks_those_running() {
+        let mut d = Desktop::new(1366, 768);
+        let launcher = d.create(400, 420, "Launcher").unwrap();
+        d.set_program(launcher, b"launcher");
+        for (i, name) in ["terminal", "editor", "pista"].into_iter().enumerate() {
+            assert!(d.set_dock_app(i, name));
+        }
+        // Past the end of the list, too long, or not a package name: refused.
+        assert!(!d.set_dock_app(5, "files"));
+        assert!(!d.set_dock_app(3, "Files"));
+        assert!(!d.set_dock_app(3, "a name"));
+        assert!(!d.set_dock_app(3, "x".repeat(25).as_str()));
+        let items = |d: &Desktop| {
+            let (_, places) = d.dock();
+            places
+                .into_iter()
+                .flatten()
+                .map(|(i, _)| i)
+                .collect::<std::vec::Vec<_>>()
+        };
+        assert_eq!(
+            items(&d),
+            [
+                DockItem::Window(launcher),
+                DockItem::App(0),
+                DockItem::App(1),
+                DockItem::App(2)
+            ]
+        );
+        // Open, an application is its first window; another program's window
+        // follows the list; a second window of one offered has its own place.
+        let other = d.create(100, 100, "x").unwrap();
+        d.set_program(other, b"bench3d");
+        let term = d.create(100, 100, "t").unwrap();
+        d.set_program(term, b"terminal");
+        let term2 = d.create(100, 100, "t2").unwrap();
+        d.set_program(term2, b"terminal");
+        assert_eq!(
+            items(&d),
+            [
+                DockItem::Window(launcher),
+                DockItem::Window(term),
+                DockItem::App(1),
+                DockItem::App(2),
+                DockItem::Window(other),
+                DockItem::Window(term2)
+            ]
+        );
+        // A click on one not running names it; on one running, its window.
+        let (dock, places) = d.dock();
+        let (_, editor) = places[2].unwrap();
+        assert_eq!(d.hit(editor.x + 2, editor.y + 2), Hit::DockApp { index: 1 });
+        let (_, terminal) = places[1].unwrap();
+        assert_eq!(
+            d.hit(terminal.x + 2, terminal.y + 2),
+            Hit::Dock { id: term }
+        );
+        // On the screen's bottom edge.
+        assert_eq!(dock.bottom(), 768);
+        // A shorter list, and the dock repaints.
+        let before = d.scene();
+        assert!(d.set_dock_app(1, ""));
+        assert_eq!(d.dock_app(1), None);
+        assert_eq!(d.dock_app(2), None, "the list ends there");
+        let mut damage = Damage::new(d.screen);
+        before.damage(&d.scene(), &mut damage);
+        assert!(covers(&damage, &before.dock));
     }
 
     #[test]
@@ -2374,9 +2577,9 @@ mod tests {
     fn windows_fit_between_the_bar_and_the_dock() {
         let mut d = Desktop::new(1280, 800);
         let work = d.work();
-        assert_eq!((work.y, work.h), (24, 800 - 24 - 60));
+        assert_eq!((work.y, work.h), (24, 800 - 24 - 48));
         let full = snap_content(Snap::Full, &work);
-        assert_eq!((full.x, full.y, full.w, full.h), (0, 24 + 28, 1280, 688));
+        assert_eq!((full.x, full.y, full.w, full.h), (0, 24 + 28, 1280, 700));
         let low = snap_content(Snap::BottomRight, &work);
         assert_eq!(low.bottom(), work.bottom());
         // A title bar never goes under the bar.
@@ -2716,6 +2919,38 @@ mod tests {
         assert!(d.full_screen().is_none());
         d.set_full_screen(Some(a));
         assert!(d.full_screen().is_none(), "no such window");
+    }
+
+    #[test]
+    fn a_stretched_parts_damage_covers_every_pixel_that_shows_it() {
+        // Every screen pixel `blit_scaled` paints from a source pixel of the part
+        // lies inside what `shown_part` says changed.
+        for (cw, ch, sw, sh) in [
+            (400, 300, 1280, 800),
+            (960, 540, 1366, 768),
+            (300, 200, 1366, 768),
+        ] {
+            let mut d = Desktop::new(sw, sh);
+            let a = d.create(cw, ch, "a").unwrap();
+            d.set_full_screen(Some(a));
+            let at = d.full_rect(d.get(a).unwrap());
+            let step = ((cw as u64) << 16) / at.w as u64;
+            for (px, pw) in [(0, cw / 2), (cw / 3, 7), (cw - 1, 1), (17, 1)] {
+                let part = Rect::new(px as i32, 0, pw, ch);
+                let damaged = d.shown_part(a, &part).unwrap();
+                for dx in 0..at.w {
+                    let sx = (((dx as u64 * step) >> 16) as u32).min(cw - 1);
+                    if sx >= px && sx < px + pw {
+                        let x = at.x + dx as i32;
+                        assert!(
+                            x >= damaged.x && x < damaged.right(),
+                            "{cw}->{}: source {sx} at {x}, damage {damaged:?}",
+                            at.w
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -3413,10 +3648,13 @@ mod tests {
         let (dock, places) = m.desktop.dock();
         assert_eq!((dock.w, dock.h), (388, 48));
         m.frame();
-        for (id, place) in places.into_iter().flatten() {
+        for (item, place) in places.into_iter().flatten() {
+            let DockItem::Window(id) = item else {
+                panic!("only windows here");
+            };
             m.desktop.pointer = (place.x + place.w as i32 / 2, place.y + 10);
             let (hint_id, hint) = m.desktop.dock_hint().unwrap();
-            assert_eq!(hint_id, id);
+            assert_eq!(hint_id, item);
             assert!(hint.x >= 0 && hint.right() <= 800 && hint.bottom() < dock.y);
             assert_eq!(
                 m.desktop.hit(m.desktop.pointer.0, m.desktop.pointer.1),

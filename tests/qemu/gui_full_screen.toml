@@ -47,10 +47,22 @@ marker = "gui_demo D: window presented"
 wait_ms = 300
 keys = ["f11"]
 
+# Full screen, a click on the notice takes it away, and the pointer at the top edge
+# brings it back: whose picture this is can always be asked. The notice is at
+# (888,36), 380x36; the pointer is at the zoom circle, (88,48).
 [[host_input_then]]
 marker = "compositor: window 2 is now 1280x800"
 wait_ms = 300
 screendump = "resized"
+mouse_rel = [912, 2]
+click = "left"
+
+[[host_input_then]]
+marker = "compositor: notice dismissed"
+mouse_rel = [0, -300]
+
+[[host_input_then]]
+marker = "compositor: notice: gui_demo: full screen, F11 leaves"
 keys = ["f11"]
 
 [[host_input_then]]
@@ -60,7 +72,7 @@ keys = ["q"]
 [expect]
 exit = 33
 serial_contains = [
-    "compositor: notice: Full screen: F11 to leave",
+    "compositor: notice: gui_demo: full screen, F11 leaves",
     "gui_demo A: click button 1 at (200,150)",
     "gui_demo A: key 'a'",
     "compositor: window 2 is now 1280x800",
@@ -77,6 +89,8 @@ serial_order = [
     "gui_demo A: window closed",
     "compositor: full screen on",
     "compositor: window 2 is now 1280x800",
+    "compositor: notice dismissed",
+    "compositor: notice: gui_demo: full screen, F11 leaves",
     "compositor: full screen off",
     "compositor: window 2 is now 400x300",
 ]
