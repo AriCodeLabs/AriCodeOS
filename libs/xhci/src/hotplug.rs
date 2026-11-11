@@ -3,12 +3,56 @@
 //! Root port hot-plug (study `docs/audits/2026-11-11-xhci-hot-plug-study.md`):
 //! what a Port Status Change means for the driver (xHCI 4.19.2, USB 2.0
 //! 11.24.2.7.2), the connect debounce (USB 2.0 7.1.7.3), which reset brings
-//! a port's link back (xHCI 4.19.1.2, 4.19.5.1), and the pool where the
-//! memory of released devices waits to be reused. Pure logic: the driver
-//! reads PORTSC and the clock and passes them in, with its policies (the
-//! debounce interval, the retry delay) as parameters.
+//! a port's link back (xHCI 4.19.1.2), whether an enumeration still
+//! addresses the device on its port, and the pool where the memory of
+//! released devices waits to be reused. Pure logic: the driver reads PORTSC
+//! and the clock and passes them in, with its timings and counts as a
+//! [`Policy`].
 
 use crate::op;
+
+/// Every timing and count of the hot-plug path, in one place: the driver
+/// passes it in rather than fixing them (the owner's no-hardcoding rule).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Policy {
+    /// A connection is enumerated after this long without a change: USB
+    /// 2.0 7.1.7.3 (TATTDB) asks at least 100 ms; Linux and Haiku use 100.
+    pub debounce_ms: u64,
+    /// Pause between the end of a port reset and the first request to the
+    /// device: USB 2.0 7.1.7.5 (TRSTRCY) gives the device at least 10 ms;
+    /// Linux waits 10 + 40 ("plus some extra", `hub_port_reset`) for the
+    /// devices that need more, and so does this default.
+    pub reset_recovery_ms: u64,
+    /// Enumeration attempts on one connection (Linux 4, Haiku 2).
+    pub attempts: u8,
+    /// Pause before the next attempt: this times the attempts that failed.
+    pub retry_ms: u64,
+}
+
+impl Policy {
+    pub const DEFAULT: Self = Self {
+        debounce_ms: 100,
+        reset_recovery_ms: 50,
+        attempts: 3,
+        retry_ms: 200,
+    };
+
+    /// After `failed` attempts on one connection, at `now`: when to try
+    /// again, or `None` once the attempts are spent.
+    pub fn retry_at(&self, now: u64, failed: u8) -> Option<u64> {
+        (failed < self.attempts).then(|| now + self.retry_ms * failed as u64)
+    }
+}
+
+/// Whether the device an enumeration addressed is still the one on its
+/// port when the enumeration ends: the port has a connection, and no
+/// connect change happened since the enumeration began, neither one seen in
+/// `portsc` now (its event not handled yet) nor one handled while it ran
+/// (`changed`). Otherwise the slot addresses a device that left or was
+/// replaced (xHCI 4.19.2) and the enumeration must fail, releasing it.
+pub fn still_attached(portsc: u32, changed: bool) -> bool {
+    !changed && portsc & (op::PORTSC_CCS | op::PORTSC_CAS) != 0 && portsc & op::PORTSC_CSC == 0
+}
 
 /// What a port change asks of the driver.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,15 +150,11 @@ pub struct PendingPorts<const N: usize> {
 
 impl<const N: usize> Default for PendingPorts<N> {
     fn default() -> Self {
-        Self::new()
+        Self { entries: [None; N] }
     }
 }
 
 impl<const N: usize> PendingPorts<N> {
-    pub const fn new() -> Self {
-        Self { entries: [None; N] }
-    }
-
     /// A connection change on `port` at `now`: its debounce starts again,
     /// due at `now + debounce_ms`, with no attempts counted (a new
     /// connection is a new device).
@@ -127,13 +167,30 @@ impl<const N: usize> PendingPorts<N> {
     }
 
     /// `p` failed an attempt: queued again, due at `at`, with that attempt
-    /// counted.
+    /// counted, unless its port changed meanwhile (`requeue`).
     pub fn retry(&mut self, p: PendingPort, at: u64) -> Result<(), Full> {
-        self.put(PendingPort {
-            port: p.port,
+        self.requeue(PendingPort {
             due: at,
             attempts: p.attempts.saturating_add(1),
+            ..p
         })
+    }
+
+    /// `p` could not be handled yet (its port waits for something else):
+    /// queued again, due at `at`, with its attempts as they were, unless
+    /// its port changed meanwhile (`requeue`).
+    pub fn defer(&mut self, p: PendingPort, at: u64) -> Result<(), Full> {
+        self.requeue(PendingPort { due: at, ..p })
+    }
+
+    /// A port taken out and put back. If a connect change queued it again
+    /// in between, that entry stays: a new connection starts with its own
+    /// debounce and no attempts counted.
+    fn requeue(&mut self, p: PendingPort) -> Result<(), Full> {
+        if self.entries.iter().flatten().any(|e| e.port == p.port) {
+            return Ok(());
+        }
+        self.put(p)
     }
 
     fn put(&mut self, p: PendingPort) -> Result<(), Full> {
@@ -161,11 +218,6 @@ impl<const N: usize> PendingPorts<N> {
         self.entries.iter().flatten().map(|p| p.due).min()
     }
 
-    /// Whether `port` waits.
-    pub fn contains(&self, port: u8) -> bool {
-        self.entries.iter().flatten().any(|p| p.port == port)
-    }
-
     /// `port` no longer waits (its connection is being handled another
     /// way, e.g. by the boot enumeration).
     pub fn forget(&mut self, port: u8) {
@@ -188,15 +240,11 @@ pub struct Spares<T: Copy, const N: usize> {
 
 impl<T: Copy, const N: usize> Default for Spares<T, N> {
     fn default() -> Self {
-        Self::new()
+        Self { entries: [None; N] }
     }
 }
 
 impl<T: Copy, const N: usize> Spares<T, N> {
-    pub const fn new() -> Self {
-        Self { entries: [None; N] }
-    }
-
     /// Keeps `item` for reuse; gives it back when the pool is full.
     pub fn put(&mut self, item: T) -> Result<(), T> {
         match self.entries.iter_mut().find(|e| e.is_none()) {
@@ -217,10 +265,12 @@ impl<T: Copy, const N: usize> Spares<T, N> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    extern crate std;
     use op::{
         PORTSC_CAS, PORTSC_CCS, PORTSC_CSC, PORTSC_PEC, PORTSC_PED, PORTSC_POWER, PORTSC_PRC,
         PORTSC_RESET,
     };
+    use std::vec::Vec;
 
     const fn pls(state: u8) -> u32 {
         (state as u32) << 5
@@ -302,9 +352,16 @@ mod tests {
         );
     }
 
+    /// The ports queued, in no particular order.
+    fn ports<const N: usize>(q: &PendingPorts<N>) -> Vec<u8> {
+        let mut v: Vec<u8> = q.entries.iter().flatten().map(|p| p.port).collect();
+        v.sort();
+        v
+    }
+
     #[test]
     fn a_change_restarts_the_debounce_and_forgets_attempts() {
-        let mut q = PendingPorts::<2>::new();
+        let mut q = PendingPorts::<2>::default();
         q.changed(3, 1000, 100).unwrap();
         assert_eq!(q.next_due(), Some(1100));
         assert!(q.take_due(1099).is_none(), "not stable for 100 ms yet");
@@ -314,26 +371,45 @@ mod tests {
         assert!(q.take_due(1100).is_none());
         let p = q.take_due(1150).unwrap();
         assert_eq!((p.port, p.attempts), (3, 0));
-        assert!(!q.contains(3));
-        // A failed attempt comes back counted; a new change forgets it.
+        assert!(ports(&q).is_empty());
+        // A failed attempt comes back counted; deferring keeps the count.
         q.retry(p, 1400).unwrap();
         let p = q.take_due(1400).unwrap();
         assert_eq!(p.attempts, 1);
+        q.defer(p, 1500).unwrap();
+        let p = q.take_due(1500).unwrap();
+        assert_eq!((p.due, p.attempts), (1500, 1));
+        // A change while the port is queued for a retry: a new connection.
         q.retry(p, 1600).unwrap();
-        q.changed(3, 1500, 100).unwrap();
-        let p = q.take_due(1600).unwrap();
-        assert_eq!((p.due, p.attempts), (1600, 0));
+        q.changed(3, 1550, 100).unwrap();
+        let p = q.take_due(1650).unwrap();
+        assert_eq!((p.due, p.attempts), (1650, 0));
+    }
+
+    #[test]
+    fn a_new_connection_queued_during_an_attempt_is_not_overwritten() {
+        let mut q = PendingPorts::<2>::default();
+        q.changed(4, 0, 100).unwrap();
+        let p = q.take_due(100).unwrap();
+        // While the attempt ran, the device was replaced: queued afresh.
+        q.changed(4, 150, 100).unwrap();
+        // The failed attempt's retry and a deferral leave that entry alone.
+        q.retry(PendingPort { attempts: 2, ..p }, 900).unwrap();
+        q.defer(p, 900).unwrap();
+        let p = q.take_due(250).unwrap();
+        assert_eq!((p.port, p.due, p.attempts), (4, 250, 0));
+        assert_eq!(q.next_due(), None);
     }
 
     #[test]
     fn the_earliest_port_goes_first_and_a_full_queue_says_so() {
-        let mut q = PendingPorts::<2>::new();
+        let mut q = PendingPorts::<2>::default();
         q.changed(5, 2000, 100).unwrap();
         q.changed(1, 1000, 100).unwrap();
         assert_eq!(q.changed(2, 1000, 100), Err(Full));
         // A port already queued still fits.
         q.changed(5, 1500, 100).unwrap();
-        assert!(q.contains(5) && q.contains(1) && !q.contains(2));
+        assert_eq!(ports(&q), [1, 5]);
         assert_eq!(q.take_due(3000).map(|p| p.port), Some(1));
         assert_eq!(q.take_due(3000).map(|p| p.port), Some(5));
         assert_eq!(q.take_due(3000), None);
@@ -342,14 +418,39 @@ mod tests {
         q.changed(7, 0, 100).unwrap();
         q.changed(8, 0, 100).unwrap();
         q.forget(7);
-        assert!(!q.contains(7));
+        assert_eq!(ports(&q), [8]);
         q.changed(9, 0, 100).unwrap();
-        assert!(q.contains(8) && q.contains(9));
+        assert_eq!(ports(&q), [8, 9]);
+    }
+
+    #[test]
+    fn the_policy_spaces_retries_and_stops_after_its_attempts() {
+        let p = Policy::DEFAULT;
+        assert!(p.debounce_ms >= 100, "USB 2.0 7.1.7.3");
+        assert!(p.reset_recovery_ms >= 10, "USB 2.0 7.1.7.5");
+        assert_eq!(p.retry_at(1000, 1), Some(1200));
+        assert_eq!(p.retry_at(1000, 2), Some(1400));
+        assert_eq!(p.retry_at(1000, 3), None);
+        let once = Policy { attempts: 1, ..p };
+        assert_eq!(once.retry_at(1000, 1), None);
+    }
+
+    #[test]
+    fn an_enumeration_holds_only_while_the_same_device_is_there() {
+        let here = PORTSC_POWER | PORTSC_CCS | PORTSC_PED;
+        assert!(still_attached(here, false));
+        // Unplugged while it ran, the change already handled (CSC cleared).
+        assert!(!still_attached(PORTSC_POWER, true));
+        assert!(!still_attached(here, true), "replugged: a new device");
+        // Unplugged, its event not handled yet.
+        assert!(!still_attached(PORTSC_POWER | PORTSC_CSC, false));
+        // Replugged, its event not handled yet.
+        assert!(!still_attached(here | PORTSC_CSC, false));
     }
 
     #[test]
     fn spares_are_reused_and_a_full_pool_hands_the_item_back() {
-        let mut s = Spares::<u32, 2>::new();
+        let mut s = Spares::<u32, 2>::default();
         assert_eq!(s.take(), None);
         s.put(1).unwrap();
         s.put(2).unwrap();

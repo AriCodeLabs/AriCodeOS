@@ -732,7 +732,12 @@ impl Trb {
         t.parameter = buffer_phys;
         t.status = len as u32;
         if device_to_host {
-            t.control |= TRB_DIR_IN;
+            // ISP: a short IN data stage raises a Short Packet event with
+            // its residual (xHCI 4.10.1.1), so the driver knows how many
+            // bytes arrived; without it the controller moves on to the
+            // Status Stage silently (Linux sets it likewise,
+            // `xhci_queue_ctrl_tx`).
+            t.control |= TRB_DIR_IN | TRB_ISP;
         }
         t
     }
@@ -1531,7 +1536,13 @@ mod tests {
         assert_eq!((no_data.control >> 16) & 3, 0);
         let d = Trb::data_stage(0x9000, 18, true);
         assert!(d.control & TRB_DIR_IN != 0);
+        assert!(
+            d.control & TRB_ISP != 0,
+            "a short descriptor reports its residual"
+        );
         assert_eq!(d.status, 18);
+        let out = Trb::data_stage(0x9000, 18, false);
+        assert_eq!(out.control & (TRB_DIR_IN | TRB_ISP), 0);
         let st = Trb::status_stage(false);
         assert!(st.control & TRB_IOC != 0 && st.control & TRB_DIR_IN == 0);
         let n = Trb::normal(0xA000, 8);
