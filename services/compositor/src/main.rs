@@ -1601,12 +1601,13 @@ impl Compositor {
         if (owner == MAIN)
             != matches!(
                 req.op,
-                Op::Attach | Op::Detach | Op::Appearance | Op::Timezone | Op::Network
+                Op::Attach | Op::Detach | Op::Appearance | Op::Timezone | Op::Network | Op::Capture
             )
         {
             return answer(reply_to, Reply::status(Status::Invalid));
         }
         match req.op {
+            Op::Capture => self.capture(reply_to, buf, now_ms),
             Op::Attach => self.attach(&req, reply_to, now_ms),
             Op::Detach => self.detach(reply_to, req.window),
             Op::Appearance => {
@@ -1961,6 +1962,27 @@ impl Compositor {
             }
         }
         answer(reply_to, Reply::status(status));
+    }
+
+    /// `Op::Capture`, from init for the owner's shell: the back buffer, the screen as
+    /// last composed, into a DMA buffer, row after row without the stride's padding.
+    /// The desktop says so: whoever sits at it knows the screen was copied.
+    fn capture(&mut self, reply_to: Handle, buf: Option<Handle>, now_ms: u64) {
+        let (w, h) = (self.screen.info.width, self.screen.info.height);
+        let need = w as usize * h as usize * 4;
+        let Some(virt) = Self::clipboard_buffer(buf, need) else {
+            sys::print(b"compositor: a screen copy came without a buffer of its size: refused\n");
+            return answer(reply_to, Reply::status(Status::BadHandles));
+        };
+        // SAFETY: mapped and at least `need` bytes, checked above. Only written.
+        let out = unsafe { core::slice::from_raw_parts_mut(virt as *mut u32, need / 4) };
+        let stride = self.screen.info.stride as usize;
+        for (y, row) in out.chunks_exact_mut(w as usize).enumerate() {
+            row.copy_from_slice(&self.screen.back[y * stride..y * stride + w as usize]);
+        }
+        self.unmap_unused(virt);
+        self.show_notice("Screen copied for the owner's shell", now_ms);
+        answer(reply_to, Reply::ok(u64::from(w) | u64::from(h) << 32));
     }
 
     /// Maps a program's buffer of at least `need` bytes for a clipboard request. It may

@@ -80,6 +80,32 @@ pub fn spawn(broker: Handle, name: &str, arg: u64) -> Result<(), LaunchError> {
     }
 }
 
+/// A copy of the screen into `buffer` (a DMA buffer of `len` bytes, given up
+/// whatever the outcome), for the owner's shell; its width and height. The
+/// broker refuses it on the launcher's endpoint, and `NotFound` means no
+/// desktop runs.
+pub fn screen(broker: Handle, buffer: Handle, len: u64) -> Result<(u32, u32), LaunchError> {
+    let mut msg = [0u8; Reply::LEN];
+    let len = rpc::call(
+        broker,
+        &Request::screen(len).encode(),
+        &[buffer],
+        rpc::GRACE_MS,
+        SCREEN_MS,
+        &mut msg,
+    )
+    .map_err(LaunchError::Ipc)?;
+    let reply = Reply::decode(&msg[..len]).ok_or(LaunchError::Ipc(Error::Invalid))?;
+    match reply.status {
+        Status::Ok => Ok((reply.value as u32, (reply.value >> 32) as u32)),
+        s => Err(LaunchError::Status(s)),
+    }
+}
+
+/// How long `screen` waits: the broker waits for the compositor, which may
+/// be composing a frame.
+const SCREEN_MS: u64 = 5_000;
+
 /// The `index`-th installed application the launcher may offer (ADR 0074
 /// phase C): `Ok(None)` past the last one. Only on the endpoint of the
 /// `launch` capability; the broker answers from a list it makes again at

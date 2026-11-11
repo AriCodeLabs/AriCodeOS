@@ -813,6 +813,9 @@ fn report_network_address(net_service: Handle, wait_ms: u64) {
 
 /// Bound of each wait (send, reply) of a network health request.
 const NET_CALL_MS: u64 = 250;
+/// How long init waits for the compositor to copy the screen: a copy of the
+/// largest screen takes milliseconds, and the compositor may be in a frame.
+const SCREEN_CALL_MS: u64 = 1000;
 /// How often the desktop's bar is told the network's address.
 const NETWORK_REPORT_MS: u64 = 5000;
 /// And after a service did not answer.
@@ -2673,6 +2676,10 @@ impl Broker {
         let Some(req) = LaunchRequest::decode(&msg[..n]) else {
             return refuse(LaunchStatus::Invalid);
         };
+        // A copy of the screen: the second handle is its buffer, not a console.
+        if req.is_screen() {
+            return self.copy_screen(&req, reply_to, console);
+        }
         // A console comes only with the flag that announces it, and never
         // for a detached program, which may outlive the session. A list is
         // the launcher's, and unknown flags are nobody's.
@@ -2716,6 +2723,48 @@ impl Broker {
                     from_launcher: false,
                     from_shell,
                 });
+            }
+        }
+    }
+
+    /// `SCREEN`: a copy of the screen for the owner's shell, the console's, an SSH
+    /// session's or a terminal's (the only holders of the endpoints served here; the
+    /// launcher's refuses it). Each copy is said here, and on the desktop by the
+    /// compositor.
+    fn copy_screen(&self, req: &LaunchRequest, reply_to: Handle, buffer: Option<Handle>) {
+        let refuse = |status, why: &[u8]| {
+            if let Some(b) = buffer {
+                let _ = sys::handle_close(b);
+            }
+            sys::print(b"AriInit: screen copy refused: ");
+            sys::print(why);
+            sys::print(b"\n");
+            reply(reply_to, LaunchReply::status(status));
+        };
+        if req.flags != LaunchRequest::SCREEN || !req.name_str().is_empty() {
+            return refuse(LaunchStatus::Invalid, b"malformed request");
+        }
+        let Some(buffer) = buffer else {
+            return refuse(LaunchStatus::Invalid, b"no buffer");
+        };
+        let Some(compositor) = self.compositor else {
+            return refuse(LaunchStatus::NotFound, b"no desktop runs");
+        };
+        // `capture` gives the buffer to the compositor, or closes it.
+        match sys::window::capture(compositor, buffer, SCREEN_CALL_MS) {
+            Ok((w, h)) => {
+                let mut b = [0u8; 20];
+                sys::print(b"AriInit: the screen (");
+                sys::print(aricode_rt::fmt_u64(u64::from(w), &mut b));
+                sys::print(b"x");
+                sys::print(aricode_rt::fmt_u64(u64::from(h), &mut b));
+                sys::print(b") was copied for a shell\n");
+                let value = u64::from(w) | u64::from(h) << 32;
+                reply(reply_to, LaunchReply::exited(value));
+            }
+            Err(_) => {
+                sys::print(b"AriInit: the compositor did not copy the screen\n");
+                reply(reply_to, LaunchReply::status(LaunchStatus::Failed));
             }
         }
     }
@@ -2913,6 +2962,10 @@ impl Broker {
             let _ = sys::ipc_send(reply_to, &entry.encode(), &[], 0);
             let _ = sys::handle_close(reply_to);
             return;
+        }
+        if req.is_screen() {
+            sys::print(b"AriInit: refused, the launcher asked for a copy of the screen\n");
+            return refuse(LaunchStatus::Denied);
         }
         let name = req.name_str();
         if !req.is_detached() || req.has_console() || nh == 2 || req.flags != LaunchRequest::DETACH

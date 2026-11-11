@@ -4,7 +4,7 @@
 //! it presents a window, starts `gui_demo` through the broker's launch
 //! endpoint, and checks that the broker refuses the rest (an application
 //! without a window, a system program, itself, a launch waited for, a
-//! console, a list with another flag), and that its own pool holds six
+//! console, a list with another flag, a copy of the screen), and that its own pool holds six
 //! applications. Then it waits 4 s, so the demos' windows close, and
 //! exits; in the desktop
 //! session that ends the desktop and gives the console back its screen and
@@ -118,6 +118,12 @@ fn main(_arg: u64) -> u64 {
         launch::run_with_console(apps, "hello_ext", 7, console).map(|_| ()),
         b"invalid",
     );
+    // A copy of the screen is the owner's shells' alone.
+    let screen = sys::dma_alloc(hw, 4096)
+        .map_err(LaunchError::Ipc)
+        .and_then(|buffer| launch::screen(apps, buffer, 4096))
+        .map(|_| ());
+    kept &= check(b"a copy of the screen", screen, b"denied");
     kept &= check(b"gui_demo", launch::spawn(apps, "gui_demo", 0), b"started");
     // The launcher's own pool (ADR 0074 phase C): six applications at
     // once, whatever the shell runs: five more demos, then `Limit`.

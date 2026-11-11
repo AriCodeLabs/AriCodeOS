@@ -177,6 +177,19 @@ The 166 MiB cover the ARI0 partition of the USB image, last since ADR 0072
 (LBA 208896 to 339967). A stick written before it has ARI0 at LBA 133120
 to 139263, and 70 MiB are enough; `fs-cat` reads either version of AriFS.
 
+### The screen without photos
+
+Over SSH, `screenshot` gives the desktop's screen as last composed, as a QOI
+image in Base64 between two marker lines. Only the owner's shells get it (the
+console's, an SSH session's or the Terminal's; the launcher's endpoint is
+refused); init logs each copy and the desktop shows "Screen copied for the
+owner's shell", so whoever sits at the machine knows.
+
+```bash
+ssh -p 22 ari@LAPTOP screenshot | sed -n '/BEGIN QOI/,/END QOI/p' | grep -v QOI | base64 -d > screen.qoi
+ffmpeg -loglevel error -i screen.qoi screen.png
+```
+
 ### Entropy: does the laptop have `rdrand`?
 
 Read it from `diag` (on the console, over SSH, or saved with `diag NAME`
