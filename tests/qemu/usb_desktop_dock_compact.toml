@@ -9,7 +9,10 @@ selftest = false
 disk = "usb-image"
 install = ["desktop/launcher", "desktop/terminal", "desktop/files", "desktop/editor", "desktop/settings"]
 stick_profiles = ["desktop:launcher,terminal,files,editor,settings"]
-stdin = ["sleep 18000", "shutdown"]
+# `shutdown` once the last stage (the picture) is done: a fixed sleep ran out
+# under a loaded host before settings started (2026-11-11).
+stdin = ["shutdown"]
+stdin_after_input = true
 timeout_secs = 90
 
 [host_input]

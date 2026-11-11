@@ -662,6 +662,7 @@ pub fn run_scenario(
         let input = qemu::Input {
             prompt: &s.prompt,
             lines: &run.stdin,
+            after_input: s.stdin_after_input,
         };
         let probe = s.host_tcp.as_ref().map(|h| qemu::TcpProbe {
             marker: &h.marker,

@@ -561,6 +561,11 @@ pub struct Scenario {
     /// output shows `prompt` (the first one at the first prompt).
     #[serde(default)]
     pub stdin: Vec<String>,
+    /// The console lines wait until every `[host_input]` stage is done: a
+    /// scenario that ends with `shutdown` once its last stage has run,
+    /// instead of after a fixed `sleep` that a loaded host outlasts.
+    #[serde(default)]
+    pub stdin_after_input: bool,
     /// Text announcing that the system is waiting for a line.
     #[serde(default = "default_prompt")]
     pub prompt: String,

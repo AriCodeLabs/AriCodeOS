@@ -96,6 +96,8 @@ selftest = true                 # default: init also runs its test clients (they
 timeout_secs = 30
 stdin = ["ls", "shutdown"]      # optional: lines the runner types on the serial console
 prompt = "ari> "                # each line is sent when the prompt appears once more (default "ari> ")
+stdin_after_input = true         # optional: the lines wait until every [host_input] stage is done
+                                 # (end with `shutdown` after the last stage, not after a fixed sleep)
 
 [host_tcp]                      # optional: TCP probe from the host into the guest (hostfwd 127.0.0.1:<port of the run> -> :7)
 marker = "TCP_LISTEN_READY"     # when seen on the serial, xtask connects and sends payload

@@ -1457,6 +1457,8 @@ pub struct Capture {
 pub struct Input<'a> {
     pub prompt: &'a str,
     pub lines: &'a [String],
+    /// The lines wait until every input stage is done.
+    pub after_input: bool,
 }
 
 fn count_occurrences(haystack: &[u8], needle: &[u8]) -> usize {
@@ -1647,8 +1649,9 @@ pub fn run_headless(
                 break None;
             }
         }
-        let input_held =
-            options.flood.is_some() && !flood_ready.load(std::sync::atomic::Ordering::SeqCst);
+        let input_held = (options.flood.is_some()
+            && !flood_ready.load(std::sync::atomic::Ordering::SeqCst))
+            || (input.after_input && input_results.len() < input_probes.len());
         if sent < input.lines.len() && !input_held {
             let prompts =
                 count_occurrences(&captured.lock().expect("capture"), input.prompt.as_bytes());
