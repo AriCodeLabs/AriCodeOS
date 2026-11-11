@@ -62,10 +62,12 @@ Haiku (MIT) could be adopted, but nothing needed copying.
 | Linux `port_event` | PEC with the port disabled under a device: "disabled by hub (EMI?), re-enabling" and a re-enumeration | Taken (`port_action`: `detach` + `debounce`) |
 | Linux `hub_port_warm_reset_required`, `xhci-hub.c` CAS handling, FreeBSD `UPS_PORT_LS_SS_INA` | Warm reset for a USB3 port in SS.Inactive or Compliance Mode, or with Cold Attach Status; Linux also fakes Compliance on CAS and has `XHCI_COMP_MODE_QUIRK` for parts that enter Compliance without CAS | Taken (`port_reset`); the link state is ignored while PR is set (Linux `handle_port_status`: not reliable during a reset). The compliance-mode timer quirk (TI/some Intel parts after S3) is not needed without suspend |
 | Linux `hub_port_connect_change` | Tries to "resuscitate" a device on CSC if its descriptors read the same | Not taken: for boot HID a fresh enumeration loses nothing (held keys are released), and treating CSC as a new device cannot keep a stale slot for a different device |
-| Linux `hub_port_connect` | `PORT_INIT_TRIES` 4 attempts, power cycle halfway, "unable to enumerate USB device" | Retries with a port reset, `ATTACH_ATTEMPTS` 3 (Haiku makes 2); no port power cycle (PPC is optional and not read) |
+| Linux `hub_port_connect` | `PORT_INIT_TRIES` 4 attempts, power cycle halfway, "unable to enumerate USB device" | Retries with a port reset, `hotplug::Policy::attempts` 3 (Haiku makes 2); no port power cycle (PPC is optional and not read) |
+| Linux `hub_port_reset` | Waits TRSTRCY 10 ms "plus some extra" (50 ms in all) after a reset before addressing the device | Taken: `Policy::reset_recovery_ms` 50, out of the reset's 500 ms allowance |
+| Linux `xhci_queue_ctrl_tx` | Sets ISP on an IN data stage, so a short descriptor reports how much arrived | Taken (`Trb::data_stage`); the driver reads only the bytes received, never what an earlier device left in the shared buffer |
 | Linux `xhci_free_dev` / `xhci_disable_slot` | Frees the virt device even when Disable Slot fails ("Unsuccessful disable slot") | Guarded already (incident 0017, audit 5 M1): memory becomes a spare only after Success or Slot Not Enabled, otherwise it is abandoned with a line |
 | Linux input core (`input_dev_release_keys`) | Releases the keys a vanishing device held | Taken: `release_all` at the moment the port change is seen, before the slot goes |
-| FreeBSD `uhub_reattach_port` | Clears C_CONNECTION, frees the old child first, waits the power-up delay, resets; if the connection changed during the reset it tries once more ("device vanished") | The order (old device out first) is ours too: a gone device is detached before its port is enumerated again; a connect change during the reset queues the port again |
+| FreeBSD `uhub_reattach_port` | Clears C_CONNECTION, frees the old child first, waits the power-up delay, resets; if the connection changed during the reset it tries once more ("device vanished") | The order (old device out first) is ours too: a gone device is detached before its port is enumerated again. A connect change during the reset fails the enumeration and debounces the port again (`prepare_port` clears the change bits before the reset, so a CSC after it is new) |
 | FreeBSD `xhci_device_uninit` | Disable Slot, free the device extension | Same order, with the completion checked |
 | Haiku `Hub::Explore` / `_DebouncePort` | Polls the ports; debounces with a stable time; 2 tries; disables the port on failure | We act on events instead of polling (Haiku's xHCI ignores Port Status Change Events and only traces them, so a change waits for the next explore round) |
 | Haiku `XHCI::CleanupDevice` / `_RemoveEndpointForPipe` | Stops endpoints, Disable Slot, deletes the memory without checking the completion | Endpoints stopped first, as here; completion checked (above) |
@@ -83,8 +85,21 @@ Other failure modes guarded:
 - Slot leaks: a failed enumeration still disables its slot (already
   there); the keyboard and mouse counts it raised are lowered with it
   (`forget_inputs`, which also fixes the boot path).
-- A Disable Slot never overlaps another one (a second would abandon the
-  first one's memory): the detach waits for it.
+- A Disable Slot never overlaps another one (a second would replace the
+  first one's bookkeeping and abandon its memory): a detach and an
+  enumeration from the idle loop wait while one is outstanding
+  (`disable_outstanding`), and a slot waiting to be disabled is issued
+  only once no other is pending.
+- A device unplugged or replaced while it was being enumerated: every
+  entry on a port that sees a connect change is flagged, and the HID
+  enumeration checks `hotplug::still_attached` before it queues reports,
+  failing (its slot released) when the device there is not the one it
+  addressed; the new one is debounced. A HID whose port has no connection
+  although no change was seen is taken as gone by its first failed report.
+- A change whose event was lost leaves CSC set: the enumeration due on that
+  port clears it and debounces again instead of waiting forever.
+- An Enable Slot that completes after its enumeration gave up hands out a
+  slot nobody uses: it is disabled when the late completion arrives.
 
 ## 4. Real hardware
 
@@ -98,7 +113,7 @@ a USB3 port whose PLS reads SS.Inactive or Compliance or whose CAS is set.
 |---|---|
 | Interrupts | Port Status Change Events wake the driver (MSI/MSI-X, ADR 0044); no port polling |
 | Memory | Slot memory now carries the HID rings and report buffers and is pooled (`SPARE_SLOTS` = `MAX_DEVICES` + 1) once released: plugging and unplugging does not grow the arena (QEMU: 2880 bytes for the first mouse, 0 for every later device on a released slot) |
-| Time | Each attach or detach is one idle-loop step: attach bounded by `ATTACH_STEP_MS` (3 s; a HID takes a few ms in QEMU), detach by `MAINTENANCE_STEP_MS` |
+| Time | Each attach or detach is one idle-loop step: attach bounded by `ATTACH_STEP_MS` (3 s; a HID takes a few ms in QEMU), detach by `MAINTENANCE_STEP_MS`. The timings and counts are one `hotplug::Policy` (debounce 100 ms, reset recovery 50 ms, 3 attempts, retry pause 200 ms times the failed attempts) |
 | Ports | One pending entry per port waiting (`PENDING_PORTS` 16); a full queue is refused on the console |
 | Power | Port power switching and link power management are not used (PPC, U1/U2 left as reset) |
 
@@ -140,13 +155,23 @@ a USB3 port whose PLS reads SS.Inactive or Compliance or whose CAS is set.
 ## 8. Tests and expected lines
 
 - Host: `aricode-xhci` `hotplug::tests` (port actions, reset kind,
-  debounce queue, spare pool), `aricode-input` `release_all` tests, xtask
-  hot-plug stage parsing.
+  debounce queue with retries and deferrals that never overwrite a newer
+  connection, the policy, `still_attached`, spare pool), the data stage's
+  ISP, `aricode-input` `release_all` tests, xtask hot-plug stage parsing
+  and input name checks.
 - QEMU `usb.xhci_hotplug` (level release): mouse plugged in, moved,
   unplugged; a mouse on another port reusing slot and memory, unplugged with
   its button held (released); a keyboard on the first port; three more
   mice; a fifth device refused; the hot-plugged keyboard types `shutdown`.
   Each stage waits for the line the previous one causes.
+- QEMU `usb.xhci_hotplug_storage` (level release): the same xHCI serves the
+  boot stick while 600 writes run; a mouse, a keyboard and a second mouse
+  fill the four entries with the stick; a third mouse is refused; a second
+  stick is refused (`a storage device is already present`); writes go on
+  after it, and the hot-plugged keyboard types `cat probe.txt` and
+  `shutdown`.
+- A stage that never ran or that QEMU refused fails every scenario
+  (`test.rs`), not only those that list its line.
 - Expected lines on a real machine:
 
 ```text
@@ -154,6 +179,6 @@ usb-input: port 5 status change: PORTSC ... CCS=1 ... CSC=1 ...
 usb-input: port 5: device plugged in; enumerating (attempt 1)
 usb-input: port 5: HID mouse (boot protocol, 4 bytes per report, endpoint 1)
 usb-input: port 5: device attached on slot 1, 0 new bytes of the DMA arena
-usb-input: port 5: the device on slot 1 is gone; it is detached from the idle loop
+usb-input: port 5: the device on slot 1 is gone; the idle loop detaches it
 usb-input: port 5: device on slot 1 detached
 ```

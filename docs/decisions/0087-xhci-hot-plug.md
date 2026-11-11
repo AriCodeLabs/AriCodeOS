@@ -45,6 +45,14 @@ failed.
    unsupported device, storage plugged in after boot and a second storage
    device are refused with a line and not retried.
 7. **Storage keeps its own logic**: re-enumerated on its own port as before.
+8. **One policy, as parameters.** Debounce (100 ms), reset recovery (50 ms:
+   USB 2.0 TRSTRCY is 10 ms, Linux waits 50), attempts (3) and the retry
+   pause (200 ms times the failed attempts) are one
+   `aricode_xhci::hotplug::Policy` the driver passes in.
+9. **Disable Slot commands never overlap**, and an enumeration only stands
+   if the device it addressed is still the one on its port
+   (`still_attached`); a connect change during a port reset debounces the
+   port again.
 
 ## Left for the owner
 
@@ -61,7 +69,9 @@ failed.
 - QEMU scenario `usb.xhci_hotplug` (release level) covers plug, unplug,
   re-plug on the same and another port, slot and memory reuse, a held button
   released on unplug, the fifth-device refusal, and a hot-plugged keyboard
-  typing into the shell. The runner's `[[host_hotplug]]` gained unplug
+  typing into the shell. `usb.xhci_hotplug_storage` does it next to the boot stick
+  while it serves writes, with the stick counted among the four devices and
+  a second stick refused. The runner's `[[host_hotplug]]` gained unplug
   stages, each after the guest's answer to the previous one.
 - Real hardware has not run it yet: the office laptop's trace lines are in
   the study.
