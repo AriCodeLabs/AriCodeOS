@@ -6,8 +6,8 @@
 use crate::{self as sys, rights, rpc, Error, Handle};
 use aricode_gfx::Canvas;
 pub use aricode_proto::window::Event;
-pub use aricode_proto::window::{mods, wants, DamageRect, KeyState, MAX_DOCK_APPS};
-use aricode_proto::window::{Op, Reply, Request, Status, MAX_CLIPBOARD, MAX_DAMAGE, MAX_TITLE};
+pub use aricode_proto::window::{mods, wants, DamageRect, KeyState, Status, MAX_DOCK_APPS};
+use aricode_proto::window::{Op, Reply, Request, MAX_CLIPBOARD, MAX_DAMAGE, MAX_TITLE};
 use core::cell::Cell;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

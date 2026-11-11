@@ -65,9 +65,11 @@ mouse_rel = [0, -300]
 marker = "compositor: notice: gui_demo: full screen, F11 leaves"
 keys = ["f11"]
 
+# A program that is not the launcher cannot put itself in the dock.
 [[host_input_then]]
 marker = "compositor: window 2 is now 400x300"
-keys = ["q"]
+keys = ["k", "q"]
+key_delay_ms = 200
 
 [expect]
 exit = 33
@@ -77,6 +79,8 @@ serial_contains = [
     "gui_demo A: key 'a'",
     "compositor: window 2 is now 1280x800",
     "compositor: window 2 is now 400x300",
+    "gui_demo D: the dock refused its application",
+    "compositor: a program other than the launcher offered applications in the dock: refused (said once)",
     "gui_demo D: done",
     "ARICODEOS_SHUTDOWN",
 ]

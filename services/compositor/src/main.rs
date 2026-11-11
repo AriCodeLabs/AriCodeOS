@@ -463,6 +463,9 @@ struct Compositor {
     said_capture: bool,
     /// A program other than the launcher offered applications in the dock: said once.
     said_dock_app: bool,
+    /// The session whose launcher gave the dock its applications: only its window
+    /// hears that one was chosen, and the list goes with it.
+    dock_giver: Option<u32>,
     /// A resizable window shown full screen, and the place it goes back to.
     full_back: Option<(u32, Rect)>,
     /// When the processor's heat is next looked at.
@@ -601,6 +604,11 @@ impl Compositor {
         let Some(s) = self.sessions[slot].take() else {
             return;
         };
+        // Its applications go with the launcher that gave them.
+        if self.dock_giver == Some(s.id) {
+            self.dock_giver = None;
+            self.desktop.set_dock_app(0, "");
+        }
         // While the focus still names it: a dead program's menu leaves nothing on screen.
         let focus = self.desktop.focus;
         let held = focus.is_some_and(|id| {
@@ -1635,6 +1643,27 @@ impl Compositor {
         self.forget_drag(closed.id);
         self.desktop.remove(closed.id);
         self.refocus();
+        self.launcher_if_alone();
+    }
+
+    /// The last window in sight closed while the launcher waits in the dock: it comes
+    /// back with the focus, so the desktop always has somewhere to type and the
+    /// keyboard alone reaches everything (audit of the dock, H1).
+    fn launcher_if_alone(&mut self) {
+        if self.desktop.front().is_some() {
+            return;
+        }
+        let launcher = self
+            .desktop
+            .iter()
+            .find(|w| w.hidden && w.program_name() == aricode_gfx::LAUNCHER)
+            .map(|w| w.id);
+        if let Some(id) = launcher {
+            self.desktop.set_hidden(id, false);
+            self.set_focus(id);
+            self.pointer.moved = true;
+            say(b"the launcher is back: no other window in sight");
+        }
     }
 
     fn set_focus(&mut self, id: u32) {
@@ -1967,6 +1996,12 @@ impl Compositor {
                 {
                     self.leave_full_screen(now_ms);
                 }
+                // Nothing held goes on into a hidden window (audit of the dock, L3).
+                let held = self.pointer.grab == Some(req.window)
+                    || self.pointer.drag.is_some_and(|d| d.id == req.window);
+                if held {
+                    self.release_pointer();
+                }
                 self.hide(req.window);
                 self.refocus();
                 self.pointer.moved = true;
@@ -2165,14 +2200,17 @@ impl Compositor {
         let launcher = owner
             .checked_sub(1)
             .and_then(|i| self.sessions[i])
-            .is_some_and(|s| {
-                &s.program[..s.program_len as usize] == aricode_gfx::LAUNCHER.as_bytes()
-            });
-        if !launcher {
+            .filter(|s| &s.program[..s.program_len as usize] == aricode_gfx::LAUNCHER.as_bytes());
+        let Some(launcher) = launcher else {
             if !core::mem::replace(&mut self.said_dock_app, true) {
                 say(b"a program other than the launcher offered applications in the dock: refused (said once)");
             }
             return answer(reply_to, Reply::status(Status::Denied));
+        };
+        // Another launcher's list is not this one's (audit of the dock, L1).
+        if self.dock_giver != Some(launcher.id) {
+            self.desktop.set_dock_app(0, "");
+            self.dock_giver = Some(launcher.id);
         }
         let status = if self
             .desktop
@@ -2188,11 +2226,19 @@ impl Compositor {
     /// An application the dock offers, not running: the launcher is asked to start
     /// it. Nothing else can start it; with no launcher window there is nobody to ask.
     fn dock_app_clicked(&mut self, index: usize) {
+        // The window of the launcher that gave the list, and no other.
+        let giver = self.dock_giver;
         let launcher = self
-            .desktop
+            .contents
             .iter()
-            .find(|w| w.program_name() == aricode_gfx::LAUNCHER)
-            .map(|w| w.id);
+            .flatten()
+            .find(|c| {
+                c.owner
+                    .checked_sub(1)
+                    .and_then(|i| self.sessions[i])
+                    .is_some_and(|s| Some(s.id) == giver)
+            })
+            .map(|c| c.id);
         match launcher {
             Some(id) => self.deliver(
                 id,
@@ -2606,6 +2652,7 @@ fn main(inputs: u64) -> u64 {
         notice_until: None,
         said_capture: false,
         said_dock_app: false,
+        dock_giver: None,
         full_back: None,
         heat_due_ms: 0,
         heat_said: false,

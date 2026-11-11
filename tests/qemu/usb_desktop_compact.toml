@@ -1,4 +1,4 @@
-# At 800x600 a quarter-screen launcher has 400x230 pixels of content. Four apps
+# At 800x600 a quarter-screen launcher has 400x236 pixels of content. Four apps
 # make its controls taller than that. Shift+Tab must reveal Leave, and the same
 # visible control must answer a pointer click, not the clipped Open button.
 name = "usb.desktop_compact"
@@ -20,7 +20,7 @@ drag = [-220, -60]
 keys = ["shift+tab"]
 
 [[host_input_then]]
-marker = "compositor: window 1 is now 400x230"
+marker = "compositor: window 1 is now 400x236"
 wait_ms = 300
 screendump = "compact"
 mouse_rel = [90, 267]
@@ -28,5 +28,5 @@ click = "left"
 
 [expect]
 exit = 33
-serial_order = ["launcher: ready", "compositor: window 1 is now 400x230", "launcher: asks to leave the desktop", "ARICODEOS_SHUTDOWN"]
+serial_order = ["launcher: ready", "compositor: window 1 is now 400x236", "launcher: asks to leave the desktop", "ARICODEOS_SHUTDOWN"]
 serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "launcher: started editor", "launcher: started files", "launcher: started settings", "launcher: started terminal"]

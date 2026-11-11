@@ -691,3 +691,33 @@ QOI was chosen over PNG: one pass, no deflate encoder, about 19 KB for an empty 
 desktop, and ffmpeg reads it. The [audit](../audits/2026-11-11-remote-screen.md) found no high
 finding.
 
+
+## Full screen and a dock that offers the applications (2026-11-11)
+
+The owner, from the laptop: windows could not go full screen, Pista's zoom circle did
+nothing, and the application list stayed on screen, too large, where other desktops keep
+small icons on the screen's edge. The remote screen above showed what they saw: a one-icon
+dock and the launcher's 400x420 window.
+
+**Full screen.** F11 shows the focused window over the bar and the dock, and so does the zoom
+circle of a window of a fixed size, where filling the work area means nothing. A resizable
+window is asked for the screen's size and given its place back after; a fixed one is
+stretched at its proportions, nearest pixel, with black bands, and its clicks reach it in its
+own pixels. Only the owner enters it (F11 and Alt+Tab never reach a program), menus stay
+closed, and anything that takes the focus away ends it. The bar that names the program is not
+shown, so a full-screen picture could look like the desktop itself: the notice names the
+program and says F11 leaves, and the pointer at the top edge shows it again. The
+[audit](../audits/2026-11-11-full-screen-and-dock.md) found no high finding.
+
+**The dock offers the applications.** The launcher gives the dock the applications the broker
+lets it offer (window op `DockApp`), and the compositor takes them only from the session init
+made for the package `launcher`, the one that holds `launch`. The dock shows the launcher's
+window, then those applications, then every other window. A running application is its first
+window, with the usual mark; one not running has no mark, and a click on it goes back to the
+launcher as `Event::Launch`: the launcher alone starts it, through the broker, which checks it
+as before. Once an application opens, the launcher steps aside to the dock (`Minimize`); its
+icon or Alt+Tab brings it back, so the keyboard path stays. The dock sits on the screen's
+bottom edge, rounded at the top only, and the work area grows 12 pixels.
+
+Not done yet: the dock on the left or right edge, as an owner's setting, and icons that
+grow with the screen's size.

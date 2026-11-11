@@ -24,7 +24,8 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use aricode_rt::sys::launch::{self, LaunchError, Status};
-use aricode_rt::sys::window::{wants, Event, Window, MAX_DOCK_APPS};
+use aricode_rt::sys::window::Status as WinStatus;
+use aricode_rt::sys::window::{wants, Event, Window, WindowError, MAX_DOCK_APPS};
 use aricode_rt::sys::{self, kind, permissions, Handle};
 use aricode_ui::{Action, Dialog, Fill, Id, ListIcons, Space, Stack, Style, Theme, Tone, Ui};
 
@@ -60,6 +61,10 @@ struct Launcher {
     empty: Id,
     /// Every application offered; the list shows those that match.
     names: Vec<String>,
+    /// What the dock took, in its order: `Event::Launch` names a place of this, not
+    /// of `names`, so a name the dock could not hold never shifts the rest (audit of
+    /// the dock, M1).
+    docked: Vec<String>,
     list: Id,
     open: Id,
     refresh: Id,
@@ -112,6 +117,7 @@ impl Launcher {
             search,
             empty,
             names: Vec::new(),
+            docked: Vec::new(),
             list,
             open,
             refresh,
@@ -133,17 +139,33 @@ impl Launcher {
         say(parts);
     }
 
-    /// Gives the dock the applications offered, in order; whether it took them.
-    fn give_dock(&self, win: &Window) -> bool {
-        let given = self
-            .names
-            .iter()
-            .take(MAX_DOCK_APPS)
-            .enumerate()
-            .all(|(i, name)| win.dock_app(i as u32, name).is_ok());
-        let ended =
-            self.names.len() >= MAX_DOCK_APPS || win.dock_app(self.names.len() as u32, "").is_ok();
-        given && ended
+    /// Gives the dock the applications offered, in order, skipping a name it cannot
+    /// hold (one too long for it); whether it took the list. On any other refusal the
+    /// dock is emptied, so it never shows a list the launcher does not hold.
+    fn give_dock(&mut self, win: &Window) -> bool {
+        self.docked.clear();
+        for name in &self.names {
+            if self.docked.len() == MAX_DOCK_APPS {
+                break;
+            }
+            let at = self.docked.len() as u32;
+            match win.dock_app(at, name) {
+                Ok(()) => self.docked.push(name.clone()),
+                // Not a name the protocol carries: only the list offers it.
+                Err(WindowError::Invalid) | Err(WindowError::Status(WinStatus::Invalid)) => {}
+                Err(_) => {
+                    self.docked.clear();
+                    let _ = win.dock_app(0, "");
+                    return false;
+                }
+            }
+        }
+        let end = self.docked.len() as u32;
+        if (end as usize) < MAX_DOCK_APPS && win.dock_app(end, "").is_err() {
+            self.docked.clear();
+            return false;
+        }
+        true
     }
 
     /// Asks the broker again which applications it may offer.
@@ -317,7 +339,7 @@ fn main(_arg: u64) -> u64 {
             }
             // The owner chose an application in the dock.
             Event::Launch { index } => {
-                let app = l.names.get(index as usize).cloned();
+                let app = l.docked.get(index as usize).cloned();
                 if let Some(app) = app {
                     if l.start(apps, &app) && docked {
                         let _ = win.minimize();

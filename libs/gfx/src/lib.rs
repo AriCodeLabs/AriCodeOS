@@ -676,16 +676,20 @@ pub enum DockItem {
 /// The dock's places, in order, and their rectangles.
 pub type Dock = [Option<(DockItem, Rect)>; DOCK_PLACES];
 
+/// The longest application name the dock holds: what the window protocol's title
+/// carries. A longer package name is not offered there, only in the launcher.
+pub const APP_NAME_MAX: usize = 24;
+
 /// An application's package name, as the launcher gave it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AppName {
-    name: [u8; MENU_LABEL],
+    name: [u8; APP_NAME_MAX],
     len: u8,
 }
 
 impl AppName {
     const EMPTY: Self = Self {
-        name: [0; MENU_LABEL],
+        name: [0; APP_NAME_MAX],
         len: 0,
     };
 
@@ -1313,14 +1317,14 @@ impl Desktop {
 
     /// The dock offers application `index` as `name` (a package's name, as the
     /// launcher gives it); an empty name ends the list there. `false`, and nothing
-    /// changes, past the end of the list or for a name too long or not one word of
-    /// lowercase letters, digits, `-` and `_`.
+    /// changes, past the end of the list or for what is not a package name (letters,
+    /// digits, `-` and `_`, as packages are named) of at most [`APP_NAME_MAX`] bytes.
     pub fn set_dock_app(&mut self, index: usize, name: &str) -> bool {
         let count = self.apps.iter().take_while(|a| a.len > 0).count();
         let word = name
             .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_');
-        if index > count || index >= DOCK_APPS || name.len() > MENU_LABEL || !word {
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+        if index > count || index >= DOCK_APPS || name.len() > APP_NAME_MAX || !word {
             return false;
         }
         if name.is_empty() {
@@ -2469,9 +2473,12 @@ mod tests {
         }
         // Past the end of the list, too long, or not a package name: refused.
         assert!(!d.set_dock_app(5, "files"));
-        assert!(!d.set_dock_app(3, "Files"));
         assert!(!d.set_dock_app(3, "a name"));
         assert!(!d.set_dock_app(3, "x".repeat(25).as_str()));
+        // Any package name the protocol carries fits: capitals, and 24 bytes.
+        assert!(d.set_dock_app(3, "x".repeat(24).as_str()));
+        assert!(d.set_dock_app(3, "Notes"));
+        assert!(d.set_dock_app(3, ""), "and the list ends again");
         let items = |d: &Desktop| {
             let (_, places) = d.dock();
             places
