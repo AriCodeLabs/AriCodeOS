@@ -17,7 +17,9 @@ use crate::memory::{phys, pmm, vmm};
 use crate::sync::IrqLock;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+use aricode_abi::sysinfo::{dma_site, DmaFaultSite, ReservedRegion, SiteRegion};
 use aricode_acpi::Dmar;
+use aricode_iommu::site::{self, History, Region};
 use aricode_iommu::{
     ccmd, fectl, fsts, gcmd, iotlb, regs, Capability, ContextEntry, ExtendedCapability,
     FaultRecord, IommuError, RootEntry, SecondLevel,
@@ -114,13 +116,90 @@ impl Unit {
     }
 }
 
+/// A mapped region of a domain: its length, what it holds
+/// (`sysinfo::dma_site::OWN`..) and when it was mapped (ms since boot).
+#[derive(Clone, Copy)]
+struct Mapped {
+    len: u64,
+    tag: u8,
+    mapped_ms: u32,
+}
+
+/// Regions each domain remembers having unmapped, to tell a device that
+/// kept a stale pointer from one reading past a buffer (incident 0064):
+/// its own buffers apart from the client buffers a block driver maps and
+/// unmaps on every request, which would push them out.
+const UNMAPPED_OWN_KEPT: usize = 8;
+const UNMAPPED_OTHER_KEPT: usize = 16;
+
 struct Domain {
     did: u16,
     tables: Tables,
-    /// Mapped regions (page start -> length).
-    regions: BTreeMap<u64, u64>,
+    /// Mapped regions (page start -> length, tag, time).
+    regions: BTreeMap<u64, Mapped>,
+    /// The last regions it unmapped: its own buffers, and the others.
+    unmapped_own: History<UNMAPPED_OWN_KEPT>,
+    unmapped: History<UNMAPPED_OTHER_KEPT>,
     /// (unit, source id) of the assigned devices.
     devices: Vec<(usize, u16)>,
+}
+
+impl Domain {
+    fn live(&self) -> impl Iterator<Item = Region> + Clone + '_ {
+        self.regions.iter().map(|(&start, m)| Region {
+            start,
+            len: m.len,
+            tag: m.tag,
+            mapped_ms: m.mapped_ms,
+            unmapped_ms: 0,
+        })
+    }
+
+    /// Removes the region starting at `start` from the tables and the
+    /// bookkeeping, remembering it; whether it had it.
+    fn unmap(&mut self, start: u64, now_ms: u32) -> bool {
+        let Some(m) = self.regions.remove(&start) else {
+            return false;
+        };
+        for page in (start..start + m.len).step_by(PAGE_SIZE as usize) {
+            let _ = self.tables.unmap_4k(page);
+        }
+        let gone = Region {
+            start,
+            len: m.len,
+            tag: m.tag,
+            mapped_ms: m.mapped_ms,
+            unmapped_ms: now_ms.max(1),
+        };
+        if m.tag == dma_site::OWN {
+            self.unmapped_own.push(gone);
+        } else {
+            self.unmapped.push(gone);
+        }
+        true
+    }
+
+    fn unmapped(&self) -> impl Iterator<Item = &Region> {
+        self.unmapped_own.iter().chain(self.unmapped.iter())
+    }
+
+    fn unmapped_total(&self) -> u32 {
+        self.unmapped_own
+            .total()
+            .saturating_add(self.unmapped.total())
+    }
+
+    /// Whether a live region holds `page`. Every region starting at or
+    /// below it is looked at: two reserved regions may overlap.
+    fn maps(&self, page: u64) -> bool {
+        self.regions
+            .range(..=page)
+            .any(|(&start, m)| page < start.saturating_add(m.len))
+    }
+}
+
+fn now_ms() -> u32 {
+    crate::time::uptime_ms().min(u32::MAX as u64) as u32
 }
 
 struct State {
@@ -140,6 +219,9 @@ struct State {
 
 static IOMMU: IrqLock<Option<State>> = IrqLock::new(None);
 static FAULTS: AtomicU64 = AtomicU64::new(0);
+/// Where the first DMA faults of the boot lay (`sysinfo::DMA_FAULT_SITES`).
+static SITES: IrqLock<[Option<DmaFaultSite>; aricode_abi::sysinfo::DMA_FAULT_SITES_KEPT]> =
+    IrqLock::new([None; aricode_abi::sysinfo::DMA_FAULT_SITES_KEPT]);
 
 fn clflush(addr: u64) {
     // SAFETY: writes the cache line of a table entry back to memory.
@@ -254,14 +336,17 @@ pub fn init(framebuffer: &boot_protocol::FramebufferInfo) {
     // controllers (class 03), which scan the framebuffer without any
     // AriCodeOS driver claiming them. One identity domain each, with a key
     // outside the PID range.
-    let mut firmware: Vec<(u16, Vec<(u64, u64)>)> = Vec::new();
+    // Per device: its ranges as (base, length, `dma_site` tag).
+    type Ranges = Vec<(u64, u64, u8)>;
+    let mut firmware: Vec<(u16, Ranges)> = Vec::new();
     for r in &state.dmar.reserved {
         for scope in r.scopes.iter().filter(|s| s.path.len() == 1) {
             let (dev, func) = scope.path[0];
             let sid = aricode_iommu::source_id(scope.start_bus, dev, func);
+            let range = (r.base, r.limit + 1 - r.base, dma_site::RESERVED);
             match firmware.iter_mut().find(|(s, _)| *s == sid) {
-                Some((_, ranges)) => ranges.push((r.base, r.limit + 1 - r.base)),
-                None => firmware.push((sid, alloc::vec![(r.base, r.limit + 1 - r.base)])),
+                Some((_, ranges)) => ranges.push(range),
+                None => firmware.push((sid, alloc::vec![range])),
             }
         }
     }
@@ -269,7 +354,7 @@ pub fn init(framebuffer: &boot_protocol::FramebufferInfo) {
         let sid = aricode_iommu::source_id(bus, dev, func);
         let mut ranges = Vec::new();
         if framebuffer.address != 0 {
-            ranges.push((framebuffer.address, framebuffer.size));
+            ranges.push((framebuffer.address, framebuffer.size, dma_site::FRAMEBUFFER));
         }
         match firmware.iter_mut().find(|(s, _)| *s == sid) {
             Some((_, r)) => r.extend(ranges),
@@ -280,8 +365,8 @@ pub fn init(framebuffer: &boot_protocol::FramebufferInfo) {
     for (i, (sid, ranges)) in firmware.iter().enumerate() {
         let key = u32::MAX - i as u32;
         let mut ok = true;
-        for &(base, len) in ranges {
-            if let Err(e) = state.map_range(key, base, len) {
+        for &(base, len, tag) in ranges {
+            if let Err(e) = state.map_range(key, base, len, tag) {
                 warn!("iommu: device {sid:#06x}: region {base:#x}+{len:#x}: {e}");
                 ok = false;
             }
@@ -350,11 +435,11 @@ pub fn stats() -> (u64, u64, u64) {
         )
     })
     .unwrap_or((0, 0));
-    (units, domains, FAULTS.load(Ordering::Relaxed))
+    (units, domains, FAULTS.load(Ordering::Acquire))
 }
 
 pub fn faults() -> u64 {
-    FAULTS.load(Ordering::Relaxed)
+    FAULTS.load(Ordering::Acquire)
 }
 
 impl State {
@@ -382,6 +467,8 @@ impl State {
                     did,
                     tables,
                     regions: BTreeMap::new(),
+                    unmapped_own: History::new(),
+                    unmapped: History::new(),
                     devices: Vec::new(),
                 },
             );
@@ -397,7 +484,7 @@ impl State {
         units
     }
 
-    fn map_range(&mut self, pid: u32, phys: u64, len: u64) -> Result<(), &'static str> {
+    fn map_range(&mut self, pid: u32, phys: u64, len: u64, tag: u8) -> Result<(), &'static str> {
         let start = phys & !(PAGE_SIZE - 1);
         let end = (phys + len).next_multiple_of(PAGE_SIZE);
         let dom = self.domain(pid)?;
@@ -412,7 +499,13 @@ impl State {
             Err(IommuError::OutOfRange) => return Err("iommu: address beyond the unit width"),
             Err(_) => return Err("iommu: no frames for the tables"),
         }
-        dom.regions.insert(start, end - start);
+        // The first mapping's time stays (attach maps a device's RMRRs
+        // again each time; audit of incident 0064, L3).
+        dom.regions.entry(start).or_insert(Mapped {
+            len: end - start,
+            tag,
+            mapped_ms: now_ms(),
+        });
         for u in Self::units_of(dom) {
             self.units[u].invalidate_iotlb();
         }
@@ -482,7 +575,7 @@ impl State {
             .map(|r| (r.base, r.limit + 1 - r.base))
             .collect();
         for (base, len) in reserved {
-            self.map_range(key, base, len)?;
+            self.map_range(key, base, len, dma_site::RESERVED)?;
         }
         if self.owners.get(&source) == Some(&key) {
             return Ok(());
@@ -563,16 +656,17 @@ pub fn attach(pid: u32, source: u16) -> Result<(), &'static str> {
     with(|s| s.attach(pid, source)).unwrap_or(Ok(()))
 }
 
-/// Identity-maps `[phys, phys+len)` in the domain of `pid`. Returns whether
+/// Identity-maps `[phys, phys+len)` in the domain of `pid`, as what `tag`
+/// says it holds (`sysinfo::dma_site::OWN` or `CLIENT`). Returns whether
 /// this call added it (`false`: the domain had it, or there is no IOMMU).
-pub fn map_region(pid: u32, phys: u64, len: u64) -> Result<bool, &'static str> {
+pub fn map_region(pid: u32, phys: u64, len: u64, tag: u8) -> Result<bool, &'static str> {
     with(|s| {
         let start = phys & !(PAGE_SIZE - 1);
         let had = s
             .domains
             .get(&pid)
             .is_some_and(|d| d.regions.contains_key(&start));
-        s.map_range(pid, phys, len).map(|()| !had)
+        s.map_range(pid, phys, len, tag).map(|()| !had)
     })
     .unwrap_or(Ok(false))
 }
@@ -586,11 +680,8 @@ pub fn unmap_region(pid: u32, phys: u64) {
         let Some(dom) = s.domains.get_mut(&pid) else {
             return;
         };
-        let Some(len) = dom.regions.remove(&start) else {
+        if !dom.unmap(start, now_ms()) {
             return;
-        };
-        for page in (start..start + len).step_by(PAGE_SIZE as usize) {
-            let _ = dom.tables.unmap_4k(page);
         }
         for u in State::units_of(dom) {
             s.units[u].invalidate_iotlb();
@@ -605,11 +696,9 @@ pub fn unmap_everywhere(phys: u64, len: u64) {
     let _ = len;
     with(|s| {
         let mut affected: Vec<usize> = Vec::new();
+        let now = now_ms();
         for dom in s.domains.values_mut() {
-            if let Some(l) = dom.regions.remove(&start) {
-                for page in (start..start + l).step_by(PAGE_SIZE as usize) {
-                    let _ = dom.tables.unmap_4k(page);
-                }
+            if dom.unmap(start, now) {
                 affected.extend(State::units_of(dom));
             }
         }
@@ -657,6 +746,157 @@ pub fn release(pid: u32) {
     });
 }
 
+impl State {
+    /// Where the page of fault `f` lies (incident 0064): against the
+    /// domain of `owner` (the key `owners` gives its device), the other
+    /// domains, the reserved regions, the firmware's memory map and the
+    /// allocator. Addresses and sizes only.
+    fn site_of(&self, f: &FaultRecord, owner: u32) -> DmaFaultSite {
+        let page = f.address;
+        let dom = self.domains.get(&owner).filter(|_| owner != 0);
+        let found = match dom {
+            Some(d) => site::locate(page, d.live(), d.unmapped()),
+            None => site::locate(page, core::iter::empty(), core::iter::empty()),
+        };
+        let wire = |r: Option<Region>| {
+            r.map(|r| SiteRegion {
+                start: r.start,
+                len: r.len,
+                tag: r.tag,
+                mapped_ms: r.mapped_ms,
+                unmapped_ms: r.unmapped_ms,
+            })
+            .unwrap_or_default()
+        };
+        let other_owner = self
+            .domains
+            .iter()
+            .find(|(k, d)| **k != owner && d.maps(page))
+            .map_or(0, |(k, _)| {
+                if *k > FIRMWARE_KEYS {
+                    dma_site::FIRMWARE_DOMAIN
+                } else {
+                    *k
+                }
+            });
+        let rmrr = self
+            .dmar
+            .reserved
+            .iter()
+            .position(|r| page >= r.base && page <= r.limit)
+            .map_or(0, |i| (i + 1).min(u8::MAX as usize) as u8);
+        DmaFaultSite {
+            at_us: crate::time::uptime_us(),
+            address: page,
+            source: f.source_id,
+            write: !f.is_read,
+            reason: f.reason,
+            owner: if owner > FIRMWARE_KEYS {
+                dma_site::FIRMWARE_DOMAIN
+            } else {
+                owner
+            },
+            relation: found.relation as u8,
+            memory: crate::memory::pmm::memory_kind(page),
+            frame: crate::memory::pmm::frame_state(page),
+            mine: false,
+            other_owner,
+            rmrr,
+            regions: dom.map_or(0, |d| d.regions.len().min(u16::MAX as usize) as u16),
+            unmapped_total: dom.map_or(0, |d| d.unmapped_total()),
+            region: wire(found.region),
+            below: wire(found.below),
+            above: wire(found.above),
+        }
+    }
+}
+
+/// Sites one device may hold: another device faulting first (the second
+/// xHCI, a firmware device) or one page faulting again must not take the
+/// slots of the device under study (audit of incident 0064, M2).
+const SITES_PER_DEVICE: usize = 2;
+
+/// Whether a fault of `source` at `page` gets a site: a free slot, fewer
+/// than `SITES_PER_DEVICE` for that device and none for that page yet.
+fn site_wanted(source: u16, page: u64) -> bool {
+    let sites = SITES.lock();
+    let of_device = sites.iter().flatten().filter(|s| s.source == source);
+    sites.iter().any(Option::is_none)
+        && of_device.clone().count() < SITES_PER_DEVICE
+        && !of_device.clone().any(|s| s.address == page)
+}
+
+/// Keeps `site` in the first free slot: the first faults of the boot, which
+/// a loop of later ones does not push out.
+fn keep_site(site: DmaFaultSite) {
+    let mut sites = SITES.lock();
+    if let Some(slot) = sites.iter_mut().find(|s| s.is_none()) {
+        *slot = Some(site);
+    }
+}
+
+/// The sites kept (`sysinfo::DMA_FAULT_SITES`), oldest first, with `mine`
+/// set where the faulting device belongs to `caller`. Only a caller that
+/// `manages` the system gets them whole. The device's own driver gets its
+/// own regions but not which other process maps the page or the
+/// allocator's state of its frame, which would let it probe any physical
+/// page (audit of incident 0064, L2); anyone else gets neither the regions
+/// either, which hold another process's buffer addresses (M1). The fault
+/// itself (device, access, page) is in `EVENTS` already.
+pub fn fault_sites(caller: u32, manages: bool) -> Vec<DmaFaultSite> {
+    // Copied out first: the vector is built without SITES held (it would
+    // reach the heap, and through it the VMM and the PMM; L1).
+    let kept = *SITES.lock();
+    kept.iter()
+        .flatten()
+        .map(|s| {
+            let mine = caller != 0 && s.owner == caller;
+            let mut out = DmaFaultSite { mine, ..*s };
+            if !manages {
+                out.other_owner = 0;
+                out.frame = 0;
+                if !mine {
+                    out.region = SiteRegion::default();
+                    out.below = SiteRegion::default();
+                    out.above = SiteRegion::default();
+                }
+            }
+            out
+        })
+        .collect()
+}
+
+/// The DMAR's reserved regions (`sysinfo::IOMMU_RESERVED`).
+pub fn reserved_regions() -> Vec<ReservedRegion> {
+    with(|s| {
+        s.dmar
+            .reserved
+            .iter()
+            .map(|r| {
+                let mut out = ReservedRegion {
+                    base: r.base,
+                    limit: r.limit,
+                    devices: r.scopes.len().min(u8::MAX as usize) as u8,
+                    bridged: r
+                        .scopes
+                        .iter()
+                        .filter(|sc| sc.path.len() != 1)
+                        .count()
+                        .min(u8::MAX as usize) as u8,
+                    scopes: [0; ReservedRegion::SCOPES],
+                };
+                for (slot, sc) in out.scopes.iter_mut().zip(&r.scopes) {
+                    if let Some(&(dev, func)) = sc.path.first() {
+                        *slot = aricode_iommu::source_id(sc.start_bus, dev, func);
+                    }
+                }
+                out
+            })
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
 /// Fault interrupt of a unit: reports and clears each record.
 pub fn on_fault_irq() {
     with(|s| {
@@ -670,11 +910,18 @@ pub fn on_fault_irq() {
                 let off = fro + 16 * n;
                 let (low, high) = (u.r64(off), u.r64(off + 8));
                 if let Some(f) = FaultRecord::decode(low, high) {
-                    FAULTS.fetch_add(1, Ordering::Relaxed);
+                    // The site first, the count after it (Release): whoever
+                    // sees the count move finds the site kept (audit of
+                    // incident 0064, M3). Once every slot is taken the
+                    // site is not worked out at all (fault storms, L5).
+                    let owner = s.owners.get(&f.source_id).copied().unwrap_or(0);
+                    if site_wanted(f.source_id, f.address) {
+                        keep_site(s.site_of(&f, owner));
+                    }
+                    FAULTS.fetch_add(1, Ordering::Release);
                     // Charged to the share of the process whose domain has
                     // the device: a driver making it fault in a loop
                     // overwrites only its own events (incident 0040).
-                    let owner = s.owners.get(&f.source_id).copied().unwrap_or(0);
                     crate::events::record_caused(
                         owner,
                         aricode_abi::sysinfo::EventKind::DmaFault,

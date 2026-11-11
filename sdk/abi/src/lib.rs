@@ -767,6 +767,23 @@ pub mod sysinfo {
     /// table: some hold what is not ours to copy (a Windows licence key in
     /// MSDM or SLIC). `TooBig` if the buffer is short.
     pub const ACPI_AML: u64 = 21;
+    /// As many [`DmaFaultSite`] as fit, one per DMA fault the kernel kept
+    /// (the first of the boot, [`DMA_FAULT_SITES_KEPT`] at most), oldest first: where
+    /// each faulting page lay against its device's domain, the firmware's
+    /// memory map and the allocator (ABI 13; incident 0064). `mine` is set
+    /// in the entries whose device belongs to the caller. Whole only for a
+    /// caller with `MANAGE` on `SYSTEM`; the device's driver gets its own
+    /// entries without `other_owner` and `frame`, anyone else only the
+    /// fault and the page's memory-map kind.
+    pub const DMA_FAULT_SITES: u64 = 22;
+    /// As many [`ReservedRegion`] as fit: the firmware's reserved memory
+    /// regions for DMA (DMAR RMRR, VT-d 4.0 8.4) with the devices they
+    /// name (ABI 13; incident 0064). Empty without an IOMMU.
+    pub const IOMMU_RESERVED: u64 = 23;
+    /// DMA faults whose site the kernel keeps: the first ones of the boot,
+    /// which a loop of later ones must not push out; at most two per
+    /// device, one per page.
+    pub const DMA_FAULT_SITES_KEPT: usize = 8;
 
     /// The state of the GPU's engine ([`GPU`]).
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1176,6 +1193,244 @@ pub mod sysinfo {
                 code: u64::from_le_bytes(b[16..24].try_into().ok()?),
                 name,
                 name_len: b[9].min(EVENT_NAME_LEN as u8),
+            })
+        }
+    }
+
+    /// Codes of a [`DmaFaultSite`] (incident 0064).
+    pub mod dma_site {
+        /// What a region of a domain holds.
+        pub const OWN: u8 = 1;
+        pub const CLIENT: u8 = 2;
+        pub const RESERVED: u8 = 3;
+        pub const FRAMEBUFFER: u8 = 4;
+
+        pub fn tag_name(tag: u8) -> &'static str {
+            match tag {
+                OWN => "own DMA buffer",
+                CLIENT => "client buffer",
+                RESERVED => "firmware RMRR",
+                FRAMEBUFFER => "framebuffer",
+                _ => "region",
+            }
+        }
+
+        /// The page against the domain (`aricode_iommu::site::Relation`).
+        pub const IN_REGION: u8 = 1;
+        pub const IN_UNMAPPED: u8 = 2;
+        pub const OUTSIDE: u8 = 3;
+        pub const NO_REGIONS: u8 = 4;
+
+        /// The page in the firmware's memory map (the kernel keeps an exact
+        /// copy, `aricode_pmm::KindMap`); `MEM_UNKNOWN | MEM_APPROXIMATE`
+        /// when no kept entry holds it and some entries did not fit.
+        pub const MEM_UNKNOWN: u8 = 0;
+        pub const MEM_FREE: u8 = 1;
+        pub const MEM_BOOT: u8 = 2;
+        pub const MEM_FIRMWARE: u8 = 3;
+        pub const MEM_ACPI: u8 = 4;
+        pub const MEM_RESERVED: u8 = 5;
+        pub const MEM_NONE: u8 = 6;
+        pub const MEM_MMIO: u8 = 7;
+        pub const MEM_APPROXIMATE: u8 = 0x80;
+
+        pub fn memory_name(memory: u8) -> &'static str {
+            match memory & !MEM_APPROXIMATE {
+                MEM_FREE => "RAM free at boot",
+                MEM_BOOT => "loader or boot services memory (returned to the allocator)",
+                MEM_FIRMWARE => "runtime services memory",
+                MEM_ACPI => "ACPI memory",
+                MEM_RESERVED => "firmware-reserved memory",
+                MEM_NONE => "in no range of the memory map",
+                MEM_MMIO => "MMIO in the memory map",
+                _ => "unknown memory",
+            }
+        }
+
+        /// The page's frame in the allocator when the fault came.
+        pub const FRAME_FREE: u8 = 1;
+        pub const FRAME_IN_USE: u8 = 2;
+        pub const FRAME_UNMANAGED: u8 = 3;
+
+        pub fn frame_name(frame: u8) -> &'static str {
+            match frame {
+                FRAME_FREE => "free",
+                FRAME_IN_USE => "in use",
+                FRAME_UNMANAGED => "not the allocator's",
+                _ => "not given",
+            }
+        }
+
+        /// `other_owner` for a firmware identity domain.
+        pub const FIRMWARE_DOMAIN: u32 = u32::MAX;
+    }
+
+    /// A region of a domain as a [`DmaFaultSite`] reports it: `len` 0 for
+    /// none; times in ms since boot, `unmapped_ms` 0 while mapped.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct SiteRegion {
+        pub start: u64,
+        pub len: u64,
+        pub tag: u8,
+        pub mapped_ms: u32,
+        pub unmapped_ms: u32,
+    }
+
+    impl SiteRegion {
+        pub const LEN: usize = 32;
+
+        pub fn present(&self) -> bool {
+            self.len != 0
+        }
+
+        fn encode(&self, b: &mut [u8]) {
+            b[..8].copy_from_slice(&self.start.to_le_bytes());
+            b[8..16].copy_from_slice(&self.len.to_le_bytes());
+            b[16..20].copy_from_slice(&self.mapped_ms.to_le_bytes());
+            b[20..24].copy_from_slice(&self.unmapped_ms.to_le_bytes());
+            b[24] = self.tag;
+        }
+
+        fn decode(b: &[u8]) -> Self {
+            let u64_at = |o: usize| u64::from_le_bytes(b[o..o + 8].try_into().unwrap_or([0; 8]));
+            let u32_at = |o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap_or([0; 4]));
+            Self {
+                start: u64_at(0),
+                len: u64_at(8),
+                mapped_ms: u32_at(16),
+                unmapped_ms: u32_at(20),
+                tag: b[24],
+            }
+        }
+    }
+
+    /// Where the page of a DMA fault lay ([`DMA_FAULT_SITES`], 136 bytes):
+    /// the fault (time, address, device, access, reason, the process whose
+    /// domain had the device), the page against that domain (`relation`:
+    /// `dma_site::IN_REGION`..; `region` the region it is or was in, `below`
+    /// and `above` the nearest live ones), against the memory map and the
+    /// allocator, whether another domain maps it (`other_owner`, a pid or
+    /// `FIRMWARE_DOMAIN`, 0 none) and which reserved region holds it
+    /// (`rmrr`, 1-based index into [`IOMMU_RESERVED`], 0 none). Addresses
+    /// and sizes only: no contents.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct DmaFaultSite {
+        pub at_us: u64,
+        pub address: u64,
+        pub source: u16,
+        pub write: bool,
+        pub reason: u8,
+        pub owner: u32,
+        pub relation: u8,
+        pub memory: u8,
+        pub frame: u8,
+        pub mine: bool,
+        pub other_owner: u32,
+        pub rmrr: u8,
+        /// Live regions of the domain, and regions it unmapped in all.
+        pub regions: u16,
+        pub unmapped_total: u32,
+        pub region: SiteRegion,
+        pub below: SiteRegion,
+        pub above: SiteRegion,
+    }
+
+    impl DmaFaultSite {
+        pub const LEN: usize = 40 + 3 * SiteRegion::LEN;
+
+        pub fn encode(&self) -> [u8; Self::LEN] {
+            let mut b = [0u8; Self::LEN];
+            b[..8].copy_from_slice(&self.at_us.to_le_bytes());
+            b[8..16].copy_from_slice(&self.address.to_le_bytes());
+            b[16..18].copy_from_slice(&self.source.to_le_bytes());
+            b[18] = self.write as u8;
+            b[19] = self.reason;
+            b[20..24].copy_from_slice(&self.owner.to_le_bytes());
+            b[24] = self.relation;
+            b[25] = self.memory;
+            b[26] = self.frame;
+            b[27] = self.mine as u8;
+            b[28..32].copy_from_slice(&self.other_owner.to_le_bytes());
+            b[32] = self.rmrr;
+            b[34..36].copy_from_slice(&self.regions.to_le_bytes());
+            b[36..40].copy_from_slice(&self.unmapped_total.to_le_bytes());
+            self.region.encode(&mut b[40..72]);
+            self.below.encode(&mut b[72..104]);
+            self.above.encode(&mut b[104..136]);
+            b
+        }
+
+        pub fn decode(b: &[u8]) -> Option<Self> {
+            if b.len() < Self::LEN {
+                return None;
+            }
+            let u32_at = |o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap_or([0; 4]));
+            Some(Self {
+                at_us: u64::from_le_bytes(b[..8].try_into().ok()?),
+                address: u64::from_le_bytes(b[8..16].try_into().ok()?),
+                source: u16::from_le_bytes([b[16], b[17]]),
+                write: b[18] != 0,
+                reason: b[19],
+                owner: u32_at(20),
+                relation: b[24],
+                memory: b[25],
+                frame: b[26],
+                mine: b[27] != 0,
+                other_owner: u32_at(28),
+                rmrr: b[32],
+                regions: u16::from_le_bytes([b[34], b[35]]),
+                unmapped_total: u32_at(36),
+                region: SiteRegion::decode(&b[40..72]),
+                below: SiteRegion::decode(&b[72..104]),
+                above: SiteRegion::decode(&b[104..136]),
+            })
+        }
+    }
+
+    /// A reserved memory region of the firmware's DMAR ([`IOMMU_RESERVED`],
+    /// 32 bytes): `[base, limit]` (limit inclusive, VT-d 4.0 8.4) and up to
+    /// [`ReservedRegion::SCOPES`] of the devices it names (`bus << 8 | dev
+    /// << 3 | fn`), out of `devices`; a device behind a bridge (a path of
+    /// more than one step) is named by its first step and counts in
+    /// `bridged`, since the kernel gives identity domains only to devices
+    /// on the root bus.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct ReservedRegion {
+        pub base: u64,
+        pub limit: u64,
+        pub devices: u8,
+        pub bridged: u8,
+        pub scopes: [u16; ReservedRegion::SCOPES],
+    }
+
+    impl ReservedRegion {
+        pub const LEN: usize = 32;
+        pub const SCOPES: usize = 4;
+
+        pub fn encode(&self) -> [u8; Self::LEN] {
+            let mut b = [0u8; Self::LEN];
+            b[..8].copy_from_slice(&self.base.to_le_bytes());
+            b[8..16].copy_from_slice(&self.limit.to_le_bytes());
+            b[16] = self.devices;
+            b[17] = self.bridged;
+            for (i, s) in self.scopes.iter().enumerate() {
+                b[18 + 2 * i..20 + 2 * i].copy_from_slice(&s.to_le_bytes());
+            }
+            b
+        }
+
+        pub fn decode(b: &[u8]) -> Option<Self> {
+            if b.len() < Self::LEN {
+                return None;
+            }
+            Some(Self {
+                base: u64::from_le_bytes(b[..8].try_into().ok()?),
+                limit: u64::from_le_bytes(b[8..16].try_into().ok()?),
+                devices: b[16],
+                bridged: b[17],
+                scopes: core::array::from_fn(|i| {
+                    u16::from_le_bytes([b[18 + 2 * i], b[19 + 2 * i]])
+                }),
             })
         }
     }
@@ -2276,6 +2531,61 @@ mod tests {
         let mut b = d.encode();
         b[11 * 4 + 3] = 1;
         assert_eq!(Dispatch::decode(&b), None);
+    }
+
+    #[test]
+    fn dma_fault_site_and_reserved_region_round_trip() {
+        use super::sysinfo::{dma_site, DmaFaultSite, ReservedRegion, SiteRegion};
+        let site = DmaFaultSite {
+            at_us: 11_466_000,
+            address: 0x43B7_6000,
+            source: 0x00A0,
+            write: false,
+            reason: 6,
+            owner: 8,
+            relation: dma_site::OUTSIDE,
+            memory: dma_site::MEM_BOOT | dma_site::MEM_APPROXIMATE,
+            frame: dma_site::FRAME_FREE,
+            mine: true,
+            other_owner: dma_site::FIRMWARE_DOMAIN,
+            rmrr: 2,
+            regions: 3,
+            unmapped_total: 70_000,
+            region: SiteRegion::default(),
+            below: SiteRegion {
+                start: 0x43B5_0000,
+                len: 0x2_4000,
+                tag: dma_site::OWN,
+                mapped_ms: 1281,
+                unmapped_ms: 0,
+            },
+            above: SiteRegion {
+                start: 0x5000_0000,
+                len: 0x1000,
+                tag: dma_site::CLIENT,
+                mapped_ms: 14_700,
+                unmapped_ms: 14_800,
+            },
+        };
+        let bytes = site.encode();
+        assert_eq!(bytes.len(), DmaFaultSite::LEN);
+        assert_eq!(DmaFaultSite::decode(&bytes), Some(site));
+        assert_eq!(DmaFaultSite::decode(&bytes[..DmaFaultSite::LEN - 1]), None);
+        assert!(!site.region.present() && site.below.present());
+        assert_eq!(
+            dma_site::memory_name(site.memory),
+            dma_site::memory_name(dma_site::MEM_BOOT)
+        );
+
+        let r = ReservedRegion {
+            base: 0x3E2E_0000,
+            limit: 0x3E2F_FFFF,
+            devices: 5,
+            bridged: 1,
+            scopes: [0x00A0, 0x0010, 0x0100, 0xFFFF],
+        };
+        assert_eq!(ReservedRegion::decode(&r.encode()), Some(r));
+        assert_eq!(ReservedRegion::decode(&r.encode()[..31]), None);
     }
 
     #[test]

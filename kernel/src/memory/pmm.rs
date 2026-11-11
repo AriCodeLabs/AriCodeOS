@@ -8,7 +8,7 @@
 
 use super::phys;
 use crate::sync::IrqLock;
-use aricode_pmm::{BitmapAllocator, Frame, RangeSet, Stats, FRAME_SIZE};
+use aricode_pmm::{BitmapAllocator, Frame, KindMap, RangeSet, Stats, FRAME_SIZE};
 use boot_protocol::{BootInfo, MemoryRegionKind};
 use log::{debug, info, warn};
 
@@ -19,6 +19,41 @@ static PMM: IrqLock<Option<BitmapAllocator<'static>>> = IrqLock::new(None);
 /// (ADR 0051). Kept past boot, when the map itself is gone.
 static RAM: IrqLock<RangeSet<64>> = IrqLock::new(RangeSet::new());
 static RESERVED: IrqLock<RangeSet<64>> = IrqLock::new(RangeSet::new());
+
+/// The firmware's map entry by entry, also kept past boot: what a DMA
+/// fault's page was to the firmware (incident 0064). Exact: an entry that
+/// does not fit is counted, never merged into a neighbour of another kind.
+/// UEFI maps on real machines hold one to two hundred entries, many
+/// adjacent ones of one kind, which join.
+static MAP: IrqLock<KindMap<256>> = IrqLock::new(KindMap::new());
+
+/// What the firmware's map said `addr` was (`sysinfo::dma_site::MEM_*`):
+/// `MEM_UNKNOWN | MEM_APPROXIMATE` when no kept entry holds it and some
+/// did not fit.
+pub fn memory_kind(addr: u64) -> u8 {
+    use aricode_abi::sysinfo::dma_site as d;
+    match MAP.lock().lookup(addr) {
+        aricode_pmm::kinds::Kind::Of(k) => k,
+        aricode_pmm::kinds::Kind::Outside => d::MEM_NONE,
+        aricode_pmm::kinds::Kind::Unknown => d::MEM_UNKNOWN | d::MEM_APPROXIMATE,
+    }
+}
+
+/// The allocator's view of the frame holding `addr` now
+/// (`sysinfo::dma_site::FRAME_*`).
+pub fn frame_state(addr: u64) -> u8 {
+    use aricode_abi::sysinfo::dma_site as d;
+    let f = Frame::from_addr(addr & !(FRAME_SIZE - 1));
+    with(|p| {
+        if p.is_free(f) {
+            d::FRAME_FREE
+        } else if (f.number() as usize) < p.frames() {
+            d::FRAME_IN_USE
+        } else {
+            d::FRAME_UNMANAGED
+        }
+    })
+}
 
 /// Calls `f` with each range a device BAR must not cover, and what it is.
 pub fn for_each_firmware_range(mut f: impl FnMut(u64, u64, &'static str)) {
@@ -82,6 +117,7 @@ pub fn init(info: &BootInfo) {
     }
     {
         let (mut ram, mut reserved) = (RAM.lock(), RESERVED.lock());
+        let mut map = MAP.lock();
         for d in regions() {
             match d.kind() {
                 MemoryRegionKind::Free
@@ -91,6 +127,22 @@ pub fn init(info: &BootInfo) {
                 MemoryRegionKind::Reserved => reserved.add(d.phys_start, d.end()),
                 MemoryRegionKind::Mmio => {}
             }
+            use aricode_abi::sysinfo::dma_site as k;
+            let kind = match d.kind() {
+                MemoryRegionKind::Free => k::MEM_FREE,
+                MemoryRegionKind::Boot => k::MEM_BOOT,
+                MemoryRegionKind::Firmware => k::MEM_FIRMWARE,
+                MemoryRegionKind::Acpi => k::MEM_ACPI,
+                MemoryRegionKind::Mmio => k::MEM_MMIO,
+                MemoryRegionKind::Reserved => k::MEM_RESERVED,
+            };
+            map.add(d.phys_start, d.end(), kind);
+        }
+        if map.dropped() > 0 {
+            warn!(
+                "pmm: {} memory map entries not kept for DMA fault reports",
+                map.dropped()
+            );
         }
         if ram.approximated() || reserved.approximated() {
             warn!("pmm: memory map with too many ranges: small gaps counted as memory");

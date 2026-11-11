@@ -60,6 +60,7 @@ use aricode_usb_storage::{
     after_transfer_failure, bytes_not_moved, check_csw_transfer, fault, scsi, Cbw, Cdb, Csw,
     CswError, CswStatus, Next, Stage, CSW_TEXT_LEN,
 };
+use aricode_xhci::arena::{self, label, Located, SpanLog};
 use aricode_xhci::hotplug::{
     self, AfterReset, PendingPort, PendingPorts, Policy, PortBounces, PortProtocols, PortReset,
     Spares, MAX_RESET_RECOVERY_MS, RESET_WINDOW_MS,
@@ -214,6 +215,9 @@ const BOOT_READY_WAIT_MS: u64 = 2000;
 const REENUMERATE_READY_WAIT_MS: u64 = 500;
 /// Bound of the boot-time enumeration of one port.
 const BOOT_ENUMERATION_MS: u64 = 10_000;
+/// How often the service loop asks the kernel whether a DMA fault came
+/// (`check_dma_faults`): one system call, and only when the loop runs.
+const DMA_CHECK_MS: u64 = 1000;
 /// Wait before a HID recovery attempt, times the attempts already made
 /// (the backoff of `Transport::Reenumerate`, `RESET_POLL_MS`): a device
 /// that keeps failing is given time to settle instead of being given up
@@ -310,20 +314,30 @@ impl Clock {
     }
 }
 
-/// Linear allocator inside the driver's DMA buffer (64-byte alignment).
+/// Structures the arena's log names (contiguous ones with one label make
+/// one entry): the fixed ones and those of ten slots with four HID
+/// endpoints each and two storage devices.
+const ARENA_LOG: usize = 128;
+
+/// Linear allocator inside the driver's DMA buffer: each structure placed
+/// off the boundaries the controller may not cross (`arena::place`, xHCI
+/// 1.2 chapter 6) and logged with what it is, so the page of a DMA fault
+/// can be named (incident 0064).
 struct Arena {
     region: DmaRegion,
     next: u64,
+    log: SpanLog<ARENA_LOG>,
 }
 
 impl Arena {
-    fn alloc(&mut self, len: u64, align: u64) -> Option<(u64, u64)> {
-        let off = self.next.next_multiple_of(align);
+    fn alloc(&mut self, len: u64, align: u64, label: &'static str) -> Option<(u64, u64)> {
+        let off = arena::place(self.region.phys, self.next, len, align);
         if off + len > self.region.len {
             return None;
         }
         self.next = off + len;
         self.region.slice_mut(off, len).fill(0);
+        self.log.record(off, len, label);
         Some((self.region.phys + off, self.region.virt + off))
     }
 }
@@ -347,8 +361,8 @@ struct Ring {
 }
 
 impl Ring {
-    fn new(arena: &mut Arena, trbs: usize) -> Option<Self> {
-        let (phys, virt) = arena.alloc((trbs * Trb::LEN) as u64, 64)?;
+    fn new(arena: &mut Arena, trbs: usize, label: &'static str) -> Option<Self> {
+        let (phys, virt) = arena.alloc((trbs * Trb::LEN) as u64, 64, label)?;
         let state = ProducerRing::new(phys, trbs);
         let (li, link) = state.initial_link();
         write_trb(virt + (li * Trb::LEN) as u64, &link);
@@ -500,10 +514,10 @@ impl HidMemory {
         (XFER_RING_TRBS * Trb::LEN) as u64 + REPORTS_IN_FLIGHT as u64 * HID_REPORT_BYTES;
 
     fn alloc(arena: &mut Arena) -> Option<Self> {
-        let ring = Ring::new(arena, XFER_RING_TRBS)?;
+        let ring = Ring::new(arena, XFER_RING_TRBS, label::HID_RING)?;
         let mut reports = [(0, 0); REPORTS_IN_FLIGHT];
         for r in reports.iter_mut() {
-            *r = arena.alloc(HID_REPORT_BYTES, 64)?;
+            *r = arena.alloc(HID_REPORT_BYTES, 64, label::HID_REPORTS)?;
         }
         Some(Self { ring, reports })
     }
@@ -649,11 +663,11 @@ struct StorageMemory {
 impl StorageMemory {
     fn alloc(arena: &mut Arena) -> Option<Self> {
         Some(Self {
-            ring_in: Ring::new(arena, XFER_RING_TRBS)?,
-            ring_out: Ring::new(arena, XFER_RING_TRBS)?,
-            cbw: arena.alloc(64, 64)?,
-            csw: arena.alloc(64, 64)?,
-            small: arena.alloc(64, 64)?,
+            ring_in: Ring::new(arena, XFER_RING_TRBS, label::BULK_IN_RING)?,
+            ring_out: Ring::new(arena, XFER_RING_TRBS, label::BULK_OUT_RING)?,
+            cbw: arena.alloc(64, 64, label::CBW)?,
+            csw: arena.alloc(64, 64, label::CSW)?,
+            small: arena.alloc(64, 64, label::SMALL)?,
         })
     }
 
@@ -840,6 +854,7 @@ struct Controller {
     /// `strict` boot flag: halt on the first transport failure.
     strict: bool,
     /// `usb_fault=N|idle[:cbw|:csw|:short-csw|:short-data|:reenum|:unreleased|:reset|:hid]`
+    /// or `usb_fault=dma`
     /// (tests): an injected failure.
     fault_inject: FaultInject,
     /// The injected failure due in the current request, until it is used.
@@ -934,6 +949,11 @@ struct Controller {
     /// The ports were routed from the EHCI controllers to the xHCI (Intel):
     /// devices need more time to show up.
     ports_switched: bool,
+    /// The kernel's DMA fault count last read, the fault sites already
+    /// named and when to look again (`check_dma_faults`, incident 0064).
+    dma_faults_seen: u64,
+    dma_sites_seen: usize,
+    dma_check_at: u64,
 }
 
 /// Input events decoded from HID reports, waiting for the client.
@@ -986,6 +1006,8 @@ mod exit {
     pub const START_TIMEOUT: u64 = 14;
     /// `strict`: a transport failure halted the driver (ADR 0028).
     pub const TRANSPORT_FAULT: u64 = 15;
+    /// PAGESIZE offers no 4 KiB pages, which the arena is laid out for.
+    pub const PAGE_SIZE: u64 = 16;
 }
 
 impl Controller {
@@ -1037,8 +1059,22 @@ impl Controller {
         let op = Mmio(base.0 + caplength);
         let runtime = Mmio(base.0 + rtsoff);
         let doorbells = Mmio(base.0 + dboff);
+        // The arena is laid out for 4 KiB pages (scratchpads, the PAGESIZE
+        // boundary of the contexts, xHCI 1.2 5.4.3 and chapter 6).
+        let pagesize = op.r32(op::PAGESIZE);
+        if !arena::page_size_supported(pagesize) {
+            sys::print(b"usb-input: PAGESIZE ");
+            hex(pagesize as u64);
+            sys::print(b" has no 4 KiB pages: not driving this controller\n");
+            record("usb pagesize not 4k", pagesize as u64);
+            return Err(exit::PAGE_SIZE);
+        }
         let region = DmaRegion::alloc(params.dma_arena_bytes()).map_err(|_| exit::DMA)?;
-        let mut arena = Arena { region, next: 0 };
+        let mut arena = Arena {
+            region,
+            next: 0,
+            log: SpanLog::new(),
+        };
 
         // The firmware may still own the controller (SMM):
         // ask it to hand it over before touching it.
@@ -1059,29 +1095,35 @@ impl Controller {
 
         // Structures: DCBAA, scratchpads, command ring, event ring and ERST.
         let slots = params.max_slots as u64;
-        let (dcbaa_phys, dcbaa_virt) = arena.alloc((slots + 1) * 8, 64).ok_or(exit::DMA)?;
+        let (dcbaa_phys, dcbaa_virt) = arena
+            .alloc((slots + 1) * 8, 64, label::DCBAA)
+            .ok_or(exit::DMA)?;
         if params.scratchpad_buffers > 0 {
             let n = params.scratchpad_buffers as u64;
-            let (arr_phys, arr_virt) = arena.alloc(n * 8, 64).ok_or(exit::DMA)?;
+            let (arr_phys, arr_virt) = arena
+                .alloc(n * 8, 64, label::SCRATCHPAD_ARRAY)
+                .ok_or(exit::DMA)?;
             for i in 0..n {
-                let (page_phys, _) = arena.alloc(4096, 4096).ok_or(exit::DMA)?;
+                let (page_phys, _) = arena
+                    .alloc(4096, 4096, label::SCRATCHPAD)
+                    .ok_or(exit::DMA)?;
                 // SAFETY: scratchpad array entry inside the DMA buffer.
                 unsafe { ((arr_virt + 8 * i) as *mut u64).write_volatile(page_phys) };
             }
             // SAFETY: DCBAA entry 0.
             unsafe { (dcbaa_virt as *mut u64).write_volatile(arr_phys) };
         }
-        let cmd = Ring::new(&mut arena, CMD_RING_TRBS).ok_or(exit::DMA)?;
+        let cmd = Ring::new(&mut arena, CMD_RING_TRBS, label::COMMAND_RING).ok_or(exit::DMA)?;
         let (ev_phys, ev_virt) = arena
-            .alloc((EVENT_RING_TRBS * Trb::LEN) as u64, 64)
+            .alloc((EVENT_RING_TRBS * Trb::LEN) as u64, 64, label::EVENT_RING)
             .ok_or(exit::DMA)?;
-        let (erst_phys, erst_virt) = arena.alloc(16, 64).ok_or(exit::DMA)?;
+        let (erst_phys, erst_virt) = arena.alloc(16, 64, label::ERST).ok_or(exit::DMA)?;
         // SAFETY: ERST entry inside the DMA buffer.
         unsafe {
             (erst_virt as *mut [u8; 16]).write_volatile(erst_entry(ev_phys, EVENT_RING_TRBS as u16))
         };
         let events = EventRing::new(ev_phys, EVENT_RING_TRBS);
-        let desc_buf = arena.alloc(512, 64).ok_or(exit::DMA)?;
+        let desc_buf = arena.alloc(512, 64, label::DESCRIPTOR).ok_or(exit::DMA)?;
 
         op.w32(op::CONFIG, params.max_slots as u32);
         op.w64(op::DCBAAP, dcbaa_phys);
@@ -1143,7 +1185,165 @@ impl Controller {
             keyboards: 0,
             mice: 0,
             ports_switched,
+            dma_faults_seen: 0,
+            dma_sites_seen: 0,
+            dma_check_at: 0,
         }))
+    }
+
+    /// Names the page of each DMA fault of this driver's controller the
+    /// kernel kept (incident 0064): which structure of the arena it holds,
+    /// or how far before or past the arena it lies; printed with the
+    /// arena's address and size and recorded as `usb dma ...` with that
+    /// offset or distance as the code. The kernel's own report (`diag`)
+    /// says where the page lies against the domain and the memory map; this
+    /// adds what only the driver knows. At most once per `DMA_CHECK_MS`,
+    /// and only when the kernel's count moved.
+    fn check_dma_faults(&mut self, now: u64) {
+        use abi::sysinfo::{DmaFaultSite, DMA_FAULT_SITES, DMA_FAULT_SITES_KEPT, IOMMU};
+        if now < self.dma_check_at {
+            return;
+        }
+        self.dma_check_at = now + DMA_CHECK_MS;
+        let mut b = [0u8; 24];
+        if sys::system_info(self.clock.0, IOMMU, &mut b) != Ok(24) {
+            return;
+        }
+        let faults = u64::from_le_bytes(b[16..24].try_into().unwrap_or([0; 8]));
+        if faults == self.dma_faults_seen {
+            return;
+        }
+        self.dma_faults_seen = faults;
+        let mut buf = [0u8; DmaFaultSite::LEN * DMA_FAULT_SITES_KEPT];
+        let Ok(n) = sys::system_info(self.clock.0, DMA_FAULT_SITES, &mut buf) else {
+            return;
+        };
+        let sites = buf[..n].as_chunks::<{ DmaFaultSite::LEN }>().0;
+        for (i, chunk) in sites.iter().enumerate().skip(self.dma_sites_seen) {
+            self.dma_sites_seen = i + 1;
+            if let Some(site) = DmaFaultSite::decode(chunk).filter(|s| s.mine) {
+                self.name_dma_fault(&site);
+            }
+        }
+    }
+
+    fn name_dma_fault(&self, site: &abi::sysinfo::DmaFaultSite) {
+        let region = &self.arena.region;
+        let page_off = site.address.wrapping_sub(region.phys) as i64;
+        let located = self.arena.log.locate(page_off, region.len, self.arena.next);
+        sys::print(b"usb-input: DMA fault, ");
+        sys::print(if site.write {
+            b"write at "
+        } else {
+            b"read at "
+        });
+        hex(site.address);
+        sys::print(b" (DMA arena ");
+        hex(region.phys);
+        sys::print(b", ");
+        num(region.len);
+        sys::print(b" bytes, ");
+        num(self.arena.next);
+        sys::print(b" handed out): ");
+        let span = |s: &arena::Span| {
+            sys::print(s.label.as_bytes());
+            sys::print(b" at +");
+            hex(s.off);
+            sys::print(b", ");
+            num(s.len);
+            sys::print(b" bytes");
+        };
+        let code = match located {
+            Located::Before { distance, first } => {
+                num(distance);
+                sys::print(b" bytes before the arena");
+                if let Some(s) = first {
+                    sys::print(b"; first structure ");
+                    span(&s);
+                }
+                distance
+            }
+            Located::After { distance, last } => {
+                num(distance);
+                sys::print(b" bytes past the arena's end");
+                if let Some(s) = last {
+                    sys::print(b"; last structure ");
+                    span(&s);
+                }
+                distance
+            }
+            Located::Inside {
+                offset,
+                first,
+                count,
+                used,
+            } => {
+                sys::print(b"page at +");
+                hex(offset);
+                match first {
+                    Some(s) => {
+                        sys::print(b", ");
+                        num(count as u64);
+                        sys::print(b" structure(s) on it, the first ");
+                        span(&s);
+                    }
+                    None if used => sys::print(b", no structure on it"),
+                    None => sys::print(b", past the part handed out"),
+                }
+                offset
+            }
+        };
+        if self.arena.log.dropped > 0 {
+            sys::print(b" (");
+            num(self.arena.log.dropped as u64);
+            sys::print(b" structures not in the log)");
+        }
+        sys::print(b"\n");
+        let mut name = [0u8; 24];
+        record(arena::event_name(&located, &mut name), code);
+    }
+
+    /// `usb_fault=dma` (tests, incident 0064): one descriptor read whose
+    /// data stage points at the page right past the DMA arena, which the
+    /// controller's domain does not map: the IOMMU blocks and reports the
+    /// write, and `check_dma_faults` must name the page.
+    fn inject_dma_fault(&mut self) {
+        // Without translation the write would land in whatever frame
+        // follows the arena: refused (audit of incident 0064, M2). An
+        // active unit is enough to know this controller is translated:
+        // the kernel enables translation on every unit at boot, and a
+        // device outside every unit cannot be attached to a domain, which
+        // would have failed this driver's `mmio_map` of its BAR (L7).
+        let mut b = [0u8; 24];
+        let units = match sys::system_info(self.clock.0, abi::sysinfo::IOMMU, &mut b) {
+            Ok(24) => u64::from_le_bytes(b[..8].try_into().unwrap_or([0; 8])),
+            _ => 0,
+        };
+        if units == 0 {
+            say(b"usb_fault=dma refused: DMA is not translated here");
+            return;
+        }
+        let Some(index) = self.devices.iter().position(Option::is_some) else {
+            say(b"usb_fault=dma: no device to read a descriptor from");
+            return;
+        };
+        let past = self.arena.region.phys + self.arena.region.len;
+        sys::print(b"usb-input: injected fault: a descriptor read into ");
+        hex(past);
+        sys::print(b", the page past the DMA arena\n");
+        let deadline = self.after(CONTROL_TIMEOUT_MS + EP0_RECOVERY_MS + 1000);
+        let result = self.control(
+            index,
+            SetupPacket::get_descriptor(aricode_xhci::request::DESC_DEVICE, 0, 18),
+            Some((past, 18)),
+            deadline,
+        );
+        sys::print(b"usb-input: the injected descriptor read ");
+        sys::print(if result.is_ok() {
+            b"completed\n"
+        } else {
+            b"failed\n"
+        });
     }
 
     fn portsc(&self, port: u8) -> u32 {
@@ -2083,10 +2283,14 @@ impl Controller {
             mem.ep0.reset();
             return Some(mem);
         }
-        let dev_ctx = self.arena.alloc((DEVICE_CONTEXTS * ctx_bytes) as u64, 64)?;
-        let ep0 = Ring::new(&mut self.arena, XFER_RING_TRBS)?;
+        let dev_ctx = self.arena.alloc(
+            (DEVICE_CONTEXTS * ctx_bytes) as u64,
+            64,
+            label::DEVICE_CONTEXT,
+        )?;
+        let ep0 = Ring::new(&mut self.arena, XFER_RING_TRBS, label::EP0_RING)?;
         let in_len = (INPUT_CONTEXTS * ctx_bytes) as u64;
-        let (in_phys, in_virt) = self.arena.alloc(in_len, 64)?;
+        let (in_phys, in_virt) = self.arena.alloc(in_len, 64, label::INPUT_CONTEXT)?;
         Some(SlotMemory {
             dev_ctx,
             ep0,
@@ -4045,16 +4249,20 @@ impl Controller {
             Ok(_) => true,
             Err(ScsiFail::Failed) => {
                 let sense = self.sense(budget);
-                if let Some(sense) = sense {
-                    record_sense(&sense);
-                }
                 if sense.is_some_and(|s| s.command_unsupported()) {
+                    // Named after the command: a bare `usb sense 5 20 00`
+                    // in a report did not say which command the device
+                    // refused (incident 0064).
+                    record(fault::SYNC_UNSUPPORTED, scsi::Sense::ILLEGAL_REQUEST as u64);
                     if let Some(st) = self.storage.as_mut() {
                         st.sync_cache = false;
                     }
                     say(b"the device does not support SYNCHRONIZE CACHE; flush is a no-op");
                     true
                 } else {
+                    if let Some(sense) = sense {
+                        record_sense(&sense);
+                    }
                     self.report_error(b"SYNCHRONIZE CACHE", 0, sense);
                     false
                 }
@@ -4960,11 +5168,15 @@ fn bios_handoff(base: &Mmio, bar_len: u64, clock: &Clock) {
                 while base.r32(off) & BIOS_OWNED != 0 && clock.now() < deadline {
                     let _ = sys::irq_wait(IRQ, 5);
                 }
-                say(if base.r32(off) & BIOS_OWNED == 0 {
-                    b"the firmware released the xHCI"
+                if base.r32(off) & BIOS_OWNED == 0 {
+                    say(b"the firmware released the xHCI");
                 } else {
-                    b"the firmware does not release the xHCI; continuing"
-                });
+                    // In `diag` too: a firmware still driving the
+                    // controller (SMM) reaches memory the driver never
+                    // gave it (incident 0064).
+                    say(b"the firmware does not release the xHCI; continuing");
+                    record("usb bios kept xhci", 0);
+                }
             }
             let ctl = base.r32(off + 4);
             base.w32(off + 4, (ctl & KEEP) | EVENTS);
@@ -5186,6 +5398,9 @@ enum FaultInject {
     Count(u32, Injection),
     /// The first block request (HID report) after two idle seconds (once).
     AfterIdle(Injection),
+    /// `usb_fault=dma`: once the boot enumeration is over, a descriptor
+    /// read into the page past the DMA arena (`inject_dma_fault`).
+    Dma,
 }
 
 impl FaultInject {
@@ -5195,6 +5410,9 @@ impl FaultInject {
         let Some(value) = value else {
             return Self::None;
         };
+        if value == "dma" {
+            return Self::Dma;
+        }
         let (when, stage) = value.split_once(':').unwrap_or((value, "cbw"));
         let stage = match stage {
             "cbw" => Injection::Cbw,
@@ -5223,7 +5441,7 @@ impl FaultInject {
             }
         }
         match *self {
-            Self::None => None,
+            Self::None | Self::Dma => None,
             Self::Count(1, stage) => {
                 *self = Self::None;
                 Some(stage)
@@ -5313,6 +5531,7 @@ fn main(mask: u64) -> u64 {
                 exit::DMA => b"DMA memory (buffer too small)\n",
                 exit::RESET_TIMEOUT => b"the controller does not complete the reset\n",
                 exit::START_TIMEOUT => b"the controller does not start\n",
+                exit::PAGE_SIZE => b"PAGESIZE without 4 KiB pages\n",
                 _ => b"unknown step\n",
             });
             return step;
@@ -5356,6 +5575,10 @@ fn main(mask: u64) -> u64 {
     sys::print(b"usb-input: device ready: ");
     sys::print(device_name(&ctl).as_bytes());
     sys::print(b"\n");
+    if matches!(ctl.fault_inject, FaultInject::Dma) {
+        ctl.fault_inject = FaultInject::None;
+        ctl.inject_dma_fault();
+    }
     ctl.arena_after_boot = ctl.arena.next;
     // From here on a new connection is a device plugged in after boot,
     // enumerated from the idle loop (`maintain_ports`).
@@ -5416,6 +5639,7 @@ fn main(mask: u64) -> u64 {
             serve(&mut ctl, which, &msg[..n], &handles[..nh], now);
         }
         let now = ctl.clock.now();
+        ctl.check_dma_faults(now);
         ctl.pending.queue.settle(now);
         ctl.pending.tell_gone_reader();
         let mut next = Deadline::NONE;

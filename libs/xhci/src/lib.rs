@@ -10,6 +10,7 @@
 
 #![no_std]
 
+pub mod arena;
 pub mod hotplug;
 
 /// Capability registers (from the BAR0 base).
@@ -237,12 +238,16 @@ impl Params {
         operational <= bar_len && runtime <= bar_len && doorbells <= bar_len
     }
 
-    /// Bytes of DMA buffer the driver needs: 64 KiB for the DCBAA,
+    /// Bytes of DMA buffer the driver needs: 128 KiB for the DCBAA,
     /// rings, ERST and device contexts, plus one page for each
     /// scratchpad the controller asks for (2012 Intel parts ask for dozens;
-    /// QEMU none) and one spare for scratchpad alignment.
+    /// QEMU none) and one spare for scratchpad alignment. The 128 KiB hold
+    /// ten slots' memory with four HID endpoints each and two storage
+    /// devices' even with 64-byte contexts, each placed off the page and
+    /// 64 KiB boundaries (`arena::place`, incident 0064), which costs up
+    /// to a third more than packing them did.
     pub fn dma_arena_bytes(&self) -> u64 {
-        const BASE: u64 = 64 * 1024;
+        const BASE: u64 = 128 * 1024;
         const PAGE: u64 = 4096;
         BASE + (self.scratchpad_buffers as u64 + 1) * PAGE
     }
@@ -1475,10 +1480,10 @@ mod tests {
         );
         assert_eq!(Params::decode(0, 0, 4).context_bytes(), 64);
         // Without scratchpads the base is enough; with 35, 35 more pages plus a spare one.
-        assert_eq!(Params::decode(0, 0, 4).dma_arena_bytes(), 64 * 1024 + 4096);
+        assert_eq!(Params::decode(0, 0, 4).dma_arena_bytes(), 128 * 1024 + 4096);
         assert_eq!(
             Params::decode(0, 1 << 21 | 3 << 27, 4).dma_arena_bytes(),
-            64 * 1024 + 36 * 4096
+            128 * 1024 + 36 * 4096
         );
         assert_eq!(speed::default_ep0_max_packet(speed::FULL), 8);
         assert_eq!(speed::default_ep0_max_packet(speed::HIGH), 64);

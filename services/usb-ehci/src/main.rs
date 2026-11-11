@@ -3131,16 +3131,18 @@ impl Ehci {
             Ok(_) => true,
             Err(ScsiFail::Failed) => {
                 let sense = self.sense();
-                if let Some(sense) = sense {
-                    record_sense(&sense);
-                }
                 if sense.is_some_and(|s| s.command_unsupported()) {
+                    // Named after the command (incident 0064).
+                    record(fault::SYNC_UNSUPPORTED, scsi::Sense::ILLEGAL_REQUEST as u64);
                     if let Some(st) = self.storage.as_mut() {
                         st.sync_cache = false;
                     }
                     say(b"the device does not support SYNCHRONIZE CACHE; flush is a no-op");
                     true
                 } else {
+                    if let Some(sense) = sense {
+                        record_sense(&sense);
+                    }
                     self.report_error(b"SYNCHRONIZE CACHE", 0, sense);
                     false
                 }

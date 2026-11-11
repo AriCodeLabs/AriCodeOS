@@ -1605,10 +1605,28 @@ kernel/src/iommu.rs            units, per-process domains, attach/map_region/unm
   decodes them (`bus:dev.fn`, read/write, address, reason), clears
   and counts them; `system_info(IOMMU)` returns units, domains and
   faults.
+- Fault sites (incident 0064): each domain region carries what it holds
+  (own `dma_alloc` buffer, client buffer, RMRR, framebuffer) and when it
+  was mapped, and each domain remembers the last regions it unmapped (8
+  own, 16 others). For the first faults of the boot (`DMA_FAULT_SITES_KEPT`,
+  8; at most two per device and one per page, so another device cannot
+  use up the slots) the handler keeps a `DmaFaultSite`: the page against
+  its device's domain (in a live region, in one unmapped before and when,
+  or between the nearest regions below and above), the firmware's memory
+  map kind (`pmm::memory_kind`, from an exact copy of the map kept past
+  boot, `aricode_pmm::KindMap`), the frame's state in the allocator, the
+  RMRR and any other domain that maps it (`aricode_iommu::site`).
+  `sysinfo::DMA_FAULT_SITES` publishes them whole only to a `MANAGE`
+  holder; the device's own driver (`mine`) gets its regions, not the other
+  owner or the frame state; anyone else neither; `sysinfo::IOMMU_RESERVED` lists
+  the RMRRs with their devices. `diag` prints both; the xHCI driver names
+  the page against its arena's log of structures.
 - QEMU: `-device intel-iommu,aw-bits=48` before the devices and
   `iommu_platform=on` on each virtio device; the transport accepts
   `VIRTIO_F_ACCESS_PLATFORM` whenever it is offered. Lock order:
-  `PROCESSES -> IOMMU -> PMM`; never the reverse.
+  `PROCESSES -> IOMMU -> PMM`; never the reverse. The fault handler also
+  takes `SITES` and the kept memory map (`pmm::MAP`) under `IOMMU`; both
+  are leaves (`fault_sites` copies `SITES` out before building its vector).
 - Tests: `test=iommu` (`dma_rogue`) and `iommu.enabled`; with
   `--cpus 4` the whole suite runs translated under SMP.
 
@@ -1625,11 +1643,18 @@ services/usb-input             usbd: xHCI controller, enumeration, interrupt end
   checks CAPLENGTH/HCIVERSION (the capability registers are read as
   32-bit words: QEMU does not handle 16-bit accesses) and, if it is not an
   xHCI, exits with 0 without fuss.
-- Memory: one 64 KiB DMA buffer split with a linear allocator
-  (DCBAA, scratchpads, 16-TRB command ring, 32-TRB event
-  ring, ERST, device contexts and input context, 16-TRB transfer
-  rings and reports). With the IOMMU enabled, that buffer
-  is all the controller can touch.
+- Memory: one DMA buffer of 128 KiB plus a page per scratchpad, split
+  with a linear allocator (DCBAA, scratchpads, 16-TRB command ring,
+  32-TRB event ring, ERST, device contexts and input context, 16-TRB
+  transfer rings and reports). Each structure is placed so that none of
+  up to 4 KiB spans a page boundary and none of up to 64 KiB spans a
+  64 KiB boundary (xHCI 1.2 chapter 6, Table 6-1; `aricode_xhci::arena`),
+  and logged with its label so a DMA fault's page can be named
+  (incident 0064). The driver refuses a controller whose PAGESIZE has no
+  4 KiB pages. With the IOMMU enabled, that buffer, the client buffers of
+  the requests in flight and the controller's RMRRs, if the firmware
+  declares any (mapped into the driver's domain when it takes the
+  device), are all the controller can touch.
 - Enumeration per port with a connected device: port reset if it is
   not enabled, `Enable Slot`, `Address Device` with EP0 at the speed's default
   packet size, device `GET_DESCRIPTOR`

@@ -540,6 +540,7 @@ fn diag(fs: &mut FsClient, net_client: &NetClient, mask: u64, rest: &[u8]) {
     screen();
     gpu();
     events();
+    dma();
     print(b"=== end of diagnostics ===\n");
     if name.is_empty() {
         return;
@@ -878,6 +879,211 @@ fn events() {
             EventKind::None => print(b"?"),
         }
         print(b"\n");
+    }
+}
+
+/// `n` bytes as KiB when whole, bytes otherwise.
+fn size(n: u64) {
+    num(if n.is_multiple_of(1024) { n / 1024 } else { n });
+    print(if n.is_multiple_of(1024) {
+        b" KiB"
+    } else {
+        b" bytes"
+    });
+}
+
+/// Milliseconds since boot as seconds with three decimals.
+fn at_ms(ms: u64) {
+    num(ms / 1000);
+    print(b".");
+    let frac = ms % 1000;
+    if frac < 100 {
+        print(b"0");
+    }
+    if frac < 10 {
+        print(b"0");
+    }
+    num(frac);
+    print(b" s");
+}
+
+fn bdf(source: u16) {
+    hex((source >> 8) as u64, 2);
+    print(b":");
+    hex((source >> 3 & 0x1F) as u64, 2);
+    print(b".");
+    num((source & 7) as u64);
+}
+
+/// One region of a fault site: what it holds, where, how big and when
+/// it was mapped (and unmapped).
+fn site_region(r: &abi::sysinfo::SiteRegion) {
+    print(abi::sysinfo::dma_site::tag_name(r.tag).as_bytes());
+    print(b" 0x");
+    hex(r.start, 8);
+    print(b", ");
+    size(r.len);
+    print(b", mapped at ");
+    at_ms(r.mapped_ms as u64);
+    if r.unmapped_ms != 0 {
+        print(b", unmapped at ");
+        at_ms(r.unmapped_ms as u64);
+    }
+}
+
+/// The IOMMU, its reserved regions (DMAR RMRR) and where the page of each
+/// DMA fault the kernel kept lay (incident 0064): which region of its
+/// device's domain held it or lies nearest, whether it was ever mapped
+/// and when it was unmapped, what the firmware's memory map and the
+/// allocator say of it.
+fn dma() {
+    use abi::sysinfo::{dma_site, DmaFaultSite, ReservedRegion};
+    let mut b = [0u8; 24];
+    if sys::system_info(SYSTEM, abi::sysinfo::IOMMU, &mut b) != Ok(24) {
+        return;
+    }
+    let word = |i: usize| u64::from_le_bytes(b[8 * i..8 * i + 8].try_into().unwrap_or([0; 8]));
+    if word(0) == 0 {
+        print(b"iommu   none: DMA is not translated\n");
+        return;
+    }
+    print(b"iommu   ");
+    num(word(0));
+    print(b" unit(s), ");
+    num(word(1));
+    print(b" process domain(s), ");
+    num(word(2));
+    print(b" DMA fault(s)\n");
+    let mut buf = [0u8; ReservedRegion::LEN * 16];
+    let n = sys::system_info(SYSTEM, abi::sysinfo::IOMMU_RESERVED, &mut buf).unwrap_or(0);
+    if n == 0 {
+        print(b"rmrr    none\n");
+    }
+    for (i, chunk) in buf[..n]
+        .as_chunks::<{ ReservedRegion::LEN }>()
+        .0
+        .iter()
+        .enumerate()
+    {
+        let Some(r) = ReservedRegion::decode(chunk) else {
+            continue;
+        };
+        print(b"rmrr    ");
+        num(i as u64 + 1);
+        print(b": 0x");
+        hex(r.base, 8);
+        print(b"-0x");
+        hex(r.limit, 8);
+        print(b" for");
+        for s in r
+            .scopes
+            .iter()
+            .take((r.devices as usize).min(ReservedRegion::SCOPES))
+        {
+            print(b" ");
+            bdf(*s);
+        }
+        if r.devices as usize > ReservedRegion::SCOPES {
+            print(b" and ");
+            num(r.devices as u64 - ReservedRegion::SCOPES as u64);
+            print(b" more");
+        }
+        if r.bridged > 0 {
+            print(b" (");
+            num(r.bridged as u64);
+            print(b" behind a bridge)");
+        }
+        print(b"\n");
+    }
+    let mut buf = [0u8; DmaFaultSite::LEN * abi::sysinfo::DMA_FAULT_SITES_KEPT];
+    let n = sys::system_info(SYSTEM, abi::sysinfo::DMA_FAULT_SITES, &mut buf).unwrap_or(0);
+    for (i, chunk) in buf[..n]
+        .as_chunks::<{ DmaFaultSite::LEN }>()
+        .0
+        .iter()
+        .enumerate()
+    {
+        let Some(f) = DmaFaultSite::decode(chunk) else {
+            continue;
+        };
+        print(b"dma fault ");
+        num(i as u64 + 1);
+        print(b" [");
+        at_ms(f.at_us / 1000);
+        print(b"] ");
+        bdf(f.source);
+        print(if f.write {
+            b" write at 0x"
+        } else {
+            b" read at 0x"
+        });
+        hex(f.address, 8);
+        match f.owner {
+            0 => print(b", no domain"),
+            dma_site::FIRMWARE_DOMAIN => print(b", firmware identity domain"),
+            pid => {
+                print(b", domain of process ");
+                num(pid as u64);
+            }
+        }
+        print(b": ");
+        print(match f.relation {
+            dma_site::IN_REGION => b"in a region still mapped".as_slice(),
+            dma_site::IN_UNMAPPED => b"in a region unmapped before",
+            dma_site::OUTSIDE => b"in no region the domain has or had",
+            _ => b"the domain has no regions",
+        });
+        print(b"\n");
+        if f.region.present() {
+            print(b"  in    ");
+            site_region(&f.region);
+            print(b"; page at +0x");
+            let off = f.address.saturating_sub(f.region.start);
+            hex(off, (64 - off.leading_zeros() as usize).div_ceil(4).max(1));
+            print(b"\n");
+        }
+        if f.below.present() {
+            print(b"  below ");
+            site_region(&f.below);
+            print(b"; the page starts ");
+            size(f.address.saturating_sub(f.below.start + f.below.len));
+            print(b" past its end\n");
+        }
+        if f.above.present() {
+            print(b"  above ");
+            site_region(&f.above);
+            print(b"; the page ends ");
+            size(f.above.start.saturating_sub(f.address + 4096));
+            print(b" before it\n");
+        }
+        print(b"  page  ");
+        print(dma_site::memory_name(f.memory).as_bytes());
+        if f.memory & dma_site::MEM_APPROXIMATE != 0 {
+            print(b" (some map entries were not kept)");
+        }
+        print(b"; frame ");
+        print(dma_site::frame_name(f.frame).as_bytes());
+        print(b" at the fault; ");
+        match f.rmrr {
+            0 => print(b"in no RMRR"),
+            r => {
+                print(b"in RMRR ");
+                num(r as u64);
+            }
+        }
+        match f.other_owner {
+            0 => print(b"; no other domain maps it"),
+            dma_site::FIRMWARE_DOMAIN => print(b"; a firmware identity domain maps it"),
+            pid => {
+                print(b"; mapped by process ");
+                num(pid as u64);
+            }
+        }
+        print(b"\n  domain ");
+        num(f.regions as u64);
+        print(b" region(s) mapped, ");
+        num(f.unmapped_total as u64);
+        print(b" unmapped since it was made\n");
     }
 }
 

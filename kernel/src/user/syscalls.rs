@@ -314,6 +314,24 @@ fn system_info(h: Handle, kind: u64, ptr: u64, len: u64) -> Result<u64, Error> {
             }
             v
         }
+        sysinfo::DMA_FAULT_SITES => {
+            let max = (len as usize) / sysinfo::DmaFaultSite::LEN;
+            let caller = process::current_pid().map_or(0, |p| p.0);
+            let manages = system_object(h, Rights::MANAGE).is_ok();
+            crate::iommu::fault_sites(caller, manages)
+                .iter()
+                .take(max)
+                .flat_map(|s| s.encode())
+                .collect()
+        }
+        sysinfo::IOMMU_RESERVED => {
+            let max = (len as usize) / sysinfo::ReservedRegion::LEN;
+            crate::iommu::reserved_regions()
+                .iter()
+                .take(max)
+                .flat_map(|r| r.encode())
+                .collect()
+        }
         sysinfo::IOMMU => {
             let (units, domains, faults) = crate::iommu::stats();
             let mut v = units.to_le_bytes().to_vec();
@@ -1031,12 +1049,15 @@ fn mmio_map(h: Handle) -> Result<u64, Error> {
             // A buffer this call put in the domain leaves it with the
             // mapping (`mmio_unmap`) or with the last handle after it; one
             // the process allocated stays.
-            None if held.is_some() => crate::iommu::map_region(pid.0, phys, len).map(|added| {
-                if added && !process::foreign_in_domain(phys) {
-                    // Unmapped meanwhile by another thread of the process.
-                    crate::iommu::unmap_region(pid.0, phys);
-                }
-            }),
+            None if held.is_some() => {
+                crate::iommu::map_region(pid.0, phys, len, aricode_abi::sysinfo::dma_site::CLIENT)
+                    .map(|added| {
+                        if added && !process::foreign_in_domain(phys) {
+                            // Unmapped meanwhile by another thread of the process.
+                            crate::iommu::unmap_region(pid.0, phys);
+                        }
+                    })
+            }
             None => Ok(()),
         };
         if let Err(e) = r {
@@ -1121,7 +1142,12 @@ fn dma_alloc(h: Handle, len: u64) -> Result<u64, Error> {
             Error::Limit
         })?;
         if let (Some(pid), ObjectKind::Dma(d)) = (process::current_pid(), &dma.kind) {
-            if let Err(e) = crate::iommu::map_region(pid.0, d.region.phys, d.region.len) {
+            if let Err(e) = crate::iommu::map_region(
+                pid.0,
+                d.region.phys,
+                d.region.len,
+                aricode_abi::sysinfo::dma_site::OWN,
+            ) {
                 warn!("dma_alloc: {e}");
                 return Err(Error::Limit);
             }
