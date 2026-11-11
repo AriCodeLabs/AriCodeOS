@@ -744,6 +744,16 @@ impl HidBootKeyboard {
         }
         n
     }
+
+    /// The keyboard is gone (unplugged, or its driver dropped it): the
+    /// release of every key and modifier still held, as an empty report
+    /// would give them, so that nothing stays pressed for the reader
+    /// (Linux's input core does the same when a device goes,
+    /// `input_dev_release_keys`). Returns how many events; none when
+    /// nothing was held.
+    pub fn release_all(&mut self, out: &mut [Event; MAX_REPORT_EVENTS]) -> usize {
+        self.feed(&[0; 8], out)
+    }
 }
 
 /// Boot HID mouse: 3 or 4 byte report (buttons, dx, dy, wheel).
@@ -774,6 +784,12 @@ impl HidBootMouse {
             wheel,
             out,
         )
+    }
+
+    /// The mouse is gone: the release of every button still held (and no
+    /// motion), as `HidBootKeyboard::release_all` does for keys.
+    pub fn release_all(&mut self, out: &mut [Event; MAX_REPORT_EVENTS]) -> usize {
+        self.feed(&[0; 4], out)
     }
 }
 
@@ -1576,6 +1592,53 @@ mod tests {
         let n = kbd.feed(&[0; 8], &mut out);
         assert_eq!(n, 7);
         assert!(out[..6].iter().all(|e| e.value == 0));
+    }
+
+    #[test]
+    fn released_keyboard_lets_go_of_everything_held() {
+        let mut kbd = HidBootKeyboard::new();
+        let mut out = [Event::default(); MAX_REPORT_EVENTS];
+        // Nothing held: nothing to release.
+        assert_eq!(kbd.release_all(&mut out), 0);
+        // Left Shift and 'a' held when the keyboard goes.
+        kbd.feed(&[0x02, 0, 0x04, 0, 0, 0, 0, 0], &mut out);
+        let n = kbd.release_all(&mut out);
+        assert_eq!(
+            &out[..n],
+            &[
+                key(KEY_LEFTSHIFT, 0),
+                key(hid_usage_to_key(0x04), 0),
+                Event {
+                    kind: EV_SYN,
+                    code: 0,
+                    value: 0
+                },
+            ]
+        );
+        // Released once: a second call has nothing left.
+        assert_eq!(kbd.release_all(&mut out), 0);
+    }
+
+    #[test]
+    fn released_mouse_lets_go_of_its_buttons_without_moving() {
+        let mut m = HidBootMouse::new();
+        let mut out = [Event::default(); MAX_REPORT_EVENTS];
+        assert_eq!(m.release_all(&mut out), 0);
+        m.feed(&[0x05, 3, 4], &mut out);
+        let n = m.release_all(&mut out);
+        assert_eq!(
+            &out[..n],
+            &[
+                key(BTN_LEFT, 0),
+                key(BTN_MIDDLE, 0),
+                Event {
+                    kind: EV_SYN,
+                    code: 0,
+                    value: 0
+                },
+            ]
+        );
+        assert_eq!(m.release_all(&mut out), 0);
     }
 
     #[test]

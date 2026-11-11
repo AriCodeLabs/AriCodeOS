@@ -10,6 +10,8 @@
 
 #![no_std]
 
+pub mod hotplug;
+
 /// Capability registers (from the BAR0 base).
 pub mod cap {
     pub const CAPLENGTH: u64 = 0x00;
@@ -59,6 +61,17 @@ pub mod op {
     pub const PORTSC_PRC: u32 = 1 << 21;
     pub const PORTSC_PLC: u32 = 1 << 22;
     pub const PORTSC_CEC: u32 = 1 << 23;
+    /// Cold Attach Status (USB3 ports only, RO): a device is attached but
+    /// the port could not take it to Enabled; only a Warm Port Reset
+    /// brings it in (xHCI 5.4.8).
+    pub const PORTSC_CAS: u32 = 1 << 24;
+    /// Warm Port Reset (USB3 ports only, RW1S; RsvdZ on USB2 ports).
+    pub const PORTSC_WPR: u32 = 1 << 31;
+    /// Port Link State values (PLS, xHCI 5.4.8, Table 5-27) the driver
+    /// acts on: SS.Inactive and Compliance Mode exist only on USB3 ports
+    /// and leave only with a Warm Port Reset (xHCI 4.19.1.2).
+    pub const PLS_INACTIVE: u8 = 6;
+    pub const PLS_COMPLIANCE: u8 = 10;
     /// RW1C change bits: written as 1 to clear them, never by accident.
     pub const PORTSC_CHANGE_BITS: u32 = 0x00FE_0000;
     /// The device behind the port disconnected, reconnected or was reset:
