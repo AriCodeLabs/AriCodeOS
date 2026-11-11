@@ -30,7 +30,9 @@ Heavy runs on it get a thermal watch, as on the host.
 - Keyboard: the built-in one (PS/2 via i8042) serves as the kernel console.
   USB keyboards and mice (boot HID) are handled by `usbd` on top of the xHCI
   and by `usb_ehci` on the EHCI ports (ADR 0031), and reach the shell
-  through the console bridge and the compositor with `gui`.
+  through the console bridge and the compositor with `gui`. Both drivers
+  take devices plugged in or out after boot (on the xHCI: root ports only,
+  ADR 0087).
 - Without a serial port, the screen is the diagnostic channel: the kernel
   writes its console to the GOP framebuffer unless `gui` is set.
 
@@ -271,6 +273,7 @@ system) or regenerate the image with `--cmdline`:
 | "usb-ehci: ... transfer to address A endpoint E (... speed) failed: ..." | A failed USB transfer on the EHCI with its qTD token (ADR 0028); it is also in `diag` as `ehci ...`. Boot with `strict` to stop at the first one with a dump of the controller |
 | "usb-ehci: USB storage unusable until it is plugged in again" | The Bulk-Only Reset Recovery failed after a transfer failure; replug the stick and note down the lines before |
 | "usb-input: port N: …" with an INQUIRY, TEST UNIT READY or READ CAPACITY error | The USB stick does not respond to the bulk-only protocol; note down the line |
+| A USB mouse or keyboard plugged in after boot does nothing | usbd enumerates devices plugged into the xHCI's root ports after boot (ADR 0087): look for `usb-input: port N status change` and `port N: device plugged in`. No such line: the port is on an EHCI (`usb-ehci:` lines) or behind an external hub (not supported on the xHCI). `enumeration failed: ...` says why; `all 4 device entries are in use` means four devices are already served. USB storage plugged in after boot is not served |
 | "AriInit: no ARI0 partition on the disk" | The USB stick does not carry the `cargo xtask usb-image` image (or something else was written over it) |
 | "process: the ELF does not fit in the user region" when launching a program | The binary was not linked into the user region (it lacks a `build.rs` with `aricode_build::user_program`); `cargo xtask build` now detects this before generating the image |
 | "rtl-net: no link (cable unplugged?)" | The PHY sees no carrier: the cable, or the firmware did not leave autonegotiation done (rtl-net does not program the PHY yet) |
