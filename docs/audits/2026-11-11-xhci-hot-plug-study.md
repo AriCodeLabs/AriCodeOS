@@ -67,7 +67,8 @@ Haiku (MIT) could be adopted, but nothing needed copying.
 | Linux `xhci_queue_ctrl_tx` | Sets ISP on an IN data stage, so a short descriptor reports how much arrived | Taken (`Trb::data_stage`); the driver reads only the bytes received, never what an earlier device left in the shared buffer |
 | Linux `xhci_free_dev` / `xhci_disable_slot` | Frees the virt device even when Disable Slot fails ("Unsuccessful disable slot") | Guarded already (incident 0017, audit 5 M1): memory becomes a spare only after Success or Slot Not Enabled, otherwise it is abandoned with a line |
 | Linux input core (`input_dev_release_keys`) | Releases the keys a vanishing device held | Taken: `release_all` at the moment the port change is seen, before the slot goes |
-| FreeBSD `uhub_reattach_port` | Clears C_CONNECTION, frees the old child first, waits the power-up delay, resets; if the connection changed during the reset it tries once more ("device vanished") | The order (old device out first) is ours too: a gone device is detached before its port is enumerated again. A connect change during the reset fails the enumeration and debounces the port again (`prepare_port` clears the change bits before the reset, so a CSC after it is new) |
+| FreeBSD `uhub_reattach_port` | Clears C_CONNECTION, frees the old child first, waits the power-up delay, resets; if the connection changed during the reset it tries once more ("device vanished") | The order (old device out first) is ours too: a gone device is detached before its port is enumerated again |
+| Linux `hub_port_wait_reset` / `hub_port_reset` | A reset is over when PR is clear and the port connected; a USB2 C_CONNECTION while still connected resets again (-EAGAIN, up to `PORT_RESET_TRIES` 5); after a SuperSpeed reset C_CONNECTION is ignored ("a USB 3.0 connection may bounce if multiple warm resets were issued") | Taken (`hotplug::after_reset`, `reset_port`): the change bits are cleared before each reset, a USB2 change during the reset or its recovery resets again up to `Policy::reset_tries`, a USB3 one is cleared with the others. A first version failed the enumeration on such a change and could lose the boot stick (it would have come back only as storage plugged in after boot); the follow-up audit caught it |
 | FreeBSD `xhci_device_uninit` | Disable Slot, free the device extension | Same order, with the completion checked |
 | Haiku `Hub::Explore` / `_DebouncePort` | Polls the ports; debounces with a stable time; 2 tries; disables the port on failure | We act on events instead of polling (Haiku's xHCI ignores Port Status Change Events and only traces them, so a change waits for the next explore round) |
 | Haiku `XHCI::CleanupDevice` / `_RemoveEndpointForPipe` | Stops endpoints, Disable Slot, deletes the memory without checking the completion | Endpoints stopped first, as here; completion checked (above) |
@@ -86,18 +87,28 @@ Other failure modes guarded:
   there); the keyboard and mouse counts it raised are lowered with it
   (`forget_inputs`, which also fixes the boot path).
 - A Disable Slot never overlaps another one (a second would replace the
-  first one's bookkeeping and abandon its memory): a detach and an
-  enumeration from the idle loop wait while one is outstanding
-  (`disable_outstanding`), and a slot waiting to be disabled is issued
-  only once no other is pending.
+  first one's bookkeeping and abandon its memory): a detach, an
+  enumeration and a storage re-enumeration from the idle loop wait while
+  one is outstanding (`disable_outstanding`); one asked from elsewhere (a
+  block request giving up the storage's endpoint, a late Enable Slot)
+  waits in line (`waiting_disables`). One without a completion in 5 s
+  (Linux `XHCI_CMD_DEFAULT_TIMEOUT`) is given up, its memory and buffers
+  kept for good, so hot-plug cannot stall behind a lost completion.
 - A device unplugged or replaced while it was being enumerated: every
   entry on a port that sees a connect change is flagged, and the HID
   enumeration checks `hotplug::still_attached` before it queues reports,
   failing (its slot released) when the device there is not the one it
-  addressed; the new one is debounced. A HID whose port has no connection
-  although no change was seen is taken as gone by its first failed report.
+  addressed; the port is debounced again (also after a port disabled under
+  it, which raises no connect change), at most `Policy::attempts` times in
+  a row (`PortBounces`), then left alone until it is seen empty. A HID
+  whose port has no connection although no change was seen is taken as
+  gone by its first failed report, which releases its keys at once.
+- A data stage reported as Success with a residual (Etron, ASMedia, VIA,
+  Renesas, as Linux notes) counts as short, unless a Short Packet came
+  first (Panther Point's spurious Success after one changes nothing).
 - A change whose event was lost leaves CSC set: the enumeration due on that
-  port clears it and debounces again instead of waiting forever.
+  port handles it as the event would (`port_change`: a served device is
+  gone, the storage's reconnect logic runs) and debounces again.
 - An Enable Slot that completes after its enumeration gave up hands out a
   slot nobody uses: it is disabled when the late completion arrives.
 
