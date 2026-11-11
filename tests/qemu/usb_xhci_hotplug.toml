@@ -156,6 +156,8 @@ serial_absent = [
     "KERNEL PANIC",
     "'usb_input' killed",
     "enumeration failed",
+    "the connection changed",
+    "usb attach fail",
     "slot memory abandoned",
     "stray transfer event",
     "usb hid err",

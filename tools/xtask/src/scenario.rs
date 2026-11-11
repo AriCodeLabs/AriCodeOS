@@ -332,11 +332,15 @@ impl HostInput {
                 && v.bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b) || (plus && b == b'+'))
         };
-        let buttons = [("click", &self.click), ("button_down", &self.button_down)];
-        for (what, v) in buttons {
+        let names = [
+            ("click", &self.click),
+            ("button_down", &self.button_down),
+            ("screendump", &self.screendump),
+        ];
+        for (what, v) in names {
             if let Some(v) = v.as_deref().filter(|v| !plain(v, false)) {
                 return Err(format!(
-                    "[host_input] {what} {v:?}: a QEMU button name (letters, digits, '_', '-')"
+                    "[host_input] {what} {v:?}: a plain name (letters, digits, '_', '-')"
                 ));
             }
         }
@@ -858,6 +862,15 @@ pub fn load_from(dir: &Path) -> Result<Vec<Scenario>> {
             // runs a hot-plug stage only while no input stage holds it.
             for h in &s.host_hotplug {
                 h.check().map_err(|e| format!("{}: {e}", path.display()))?;
+                // The only drive a stage can plug in is the spare one.
+                if let Some(d) = &h.drive {
+                    if d != "spare" || !s.usb_spare_disk {
+                        return Err(format!(
+                            "{}: [[host_hotplug]] drive {d:?}: only \"spare\", with usb_spare_disk = true",
+                            path.display()
+                        ));
+                    }
+                }
             }
             s.file = path;
             out.push(s);
@@ -1198,6 +1211,7 @@ id = "m1"
             "keys = [\"x}\"]",
             "hold_key = [\"a,\", 10]",
             "button_down = \"\"",
+            "screendump = \"../x\"",
         ] {
             assert!(input(bad).check_names().is_err(), "{bad}");
         }

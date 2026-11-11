@@ -8,10 +8,12 @@
 #  3. The second mouse is unplugged, and a second USB stick (a blank 1 MiB
 #     drive, `usb_spare_disk`) plugged in: refused, the stick stays the
 #     only one. (QEMU's `usb-bot` without a LUN does not attach at all.)
-#  4. The hot-plugged keyboard types `cat probe.txt` and `shutdown`: the
-#     stick still reads back what was written and flushes on shutdown.
-# Each stage waits for the line the previous one causes (incident 0059),
-# and a write must still complete after the last refusal (serial_order).
+#  4. The hot-plugged keyboard types `write after.txt x`, `cat probe.txt`
+#     and `shutdown`: the stick still takes a write after the refusals,
+#     reads back what was written and flushes on shutdown.
+# Each stage waits for the line the previous one causes (incident 0059);
+# the order check also needs writes of the `repeat` after the keyboard was
+# enumerated (I/O while devices come and go).
 name = "usb.xhci_hotplug_storage"
 description = "usbd: HID devices plugged in and out next to the boot USB stick while it serves writes; a second stick is refused"
 level = "release"
@@ -76,7 +78,11 @@ marker = "a storage device is already present; ignoring"
 wait_ms = 300
 key_delay_ms = 30
 echo_prompt = "ari> "
-keys = ["c", "a", "t", "spc", "p", "r", "o", "b", "e", "dot", "t", "x", "t", "ret", "s", "h", "u", "t", "d", "o", "w", "n", "ret"]
+keys = [
+    "w", "r", "i", "t", "e", "spc", "a", "f", "t", "e", "r", "dot", "t", "x", "t", "spc", "x", "ret",
+    "c", "a", "t", "spc", "p", "r", "o", "b", "e", "dot", "t", "x", "t", "ret",
+    "s", "h", "u", "t", "d", "o", "w", "n", "ret",
+]
 
 [expect]
 exit = 33
@@ -90,14 +96,17 @@ serial_contains = [
     "enumeration failed: a storage device is already present; ignoring; the port is left alone until it sees a new connection",
     "[host] hotplug: usb-storage added on xhci.0 port 6 as s2",
     "[host] QMP: 2 input events sent",
+    "write: 2 bytes to after.txt",
     "ARICODEOS_SHUTDOWN",
 ]
 serial_order = [
     "bytes to probe.txt",
     "usb-input: port 6: HID mouse (boot protocol",
+    "usb-input: port 7: HID keyboard (boot protocol",
+    "bytes to probe.txt",
     "usb-input: port 9: device not enumerated",
     "a storage device is already present; ignoring",
-    "bytes to probe.txt",
+    "write: 2 bytes to after.txt",
     "cat probe.txt",
     "block io during hot-plug",
     "ARICODEOS_SHUTDOWN",
@@ -118,5 +127,9 @@ serial_absent = [
     "usb cmd fail",
     "usb cmd pending",
     "usb cmd refused",
+    "usb attach fail",
+    "tried again with a port reset",
+    "changed during its enumeration",
+    "the connection changed",
     "[host] QMP: failed",
 ]
