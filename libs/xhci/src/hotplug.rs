@@ -11,6 +11,14 @@
 
 use crate::{op, speed};
 
+/// The window a port reset gets (every try of it), before the device's
+/// recovery time, which comes on top: a USB3 warm reset takes 80 to 120 ms
+/// plus link training, and Linux allows a reset 800 ms in all.
+pub const RESET_WINDOW_MS: u64 = 500;
+/// The longest reset recovery `Policy::parse` accepts (on top of the
+/// reset window, so it never eats into the reset).
+pub const MAX_RESET_RECOVERY_MS: u64 = 200;
+
 /// Every timing and count of the hot-plug path, in one place: the driver
 /// passes it in rather than fixing them (the owner's no-hardcoding rule).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,15 +31,18 @@ pub struct Policy {
     /// Linux waits 10 + 40 ("plus some extra", `hub_port_reset`) for the
     /// devices that need more, and so does this default.
     pub reset_recovery_ms: u64,
-    /// Enumeration attempts on one connection (Linux 4, Haiku 2); also
-    /// how many times in a row a device may leave or change during its
-    /// enumeration before its port is left alone (`PortBounces`).
+    /// Enumeration attempts on one connection (Linux 4, Haiku 2).
     pub attempts: u8,
     /// Pause before the next attempt: this times the attempts that failed.
     pub retry_ms: u64,
     /// Port resets of one attempt when a USB2 connection changes during the
     /// reset (Linux `PORT_RESET_TRIES` 5, `hub_port_wait_reset` -EAGAIN).
     pub reset_tries: u8,
+    /// How many enumerations in a row may end with the device changing or
+    /// bouncing at every reset before its port is left alone until it is
+    /// empty (`PortBounces`); at least 2, so one replug during an
+    /// enumeration never loses the port.
+    pub bounce_limit: u8,
 }
 
 impl Policy {
@@ -41,16 +52,18 @@ impl Policy {
         attempts: 3,
         retry_ms: 200,
         reset_tries: 5,
+        bounce_limit: 3,
     };
 
     /// The policy `text` asks for, from the defaults: a comma-separated
     /// list of `debounce:MS`, `recovery:MS`, `attempts:N`, `retry:MS`,
-    /// `resets:N` (the value of the boot key `usb.hotplug`). Each value is
-    /// bounded where the specifications or a working driver put it: the
-    /// debounce at least 100 ms (USB 2.0 7.1.7.3) and at most 2000 (Linux
-    /// gives up then), the reset recovery 10 ms (TRSTRCY) to 400 (it comes
-    /// out of a reset's 500 ms), 1 to 10 attempts and resets, a retry pause
-    /// up to 5000 ms. Anything else is refused with the reason.
+    /// `resets:N`, `bounces:N` (the value of the boot key `usb.hotplug`).
+    /// Each value is bounded where the specifications or a working driver
+    /// put it: the debounce at least 100 ms (USB 2.0 7.1.7.3) and at most
+    /// 2000 (Linux gives up then), the reset recovery 10 ms (TRSTRCY) to
+    /// `MAX_RESET_RECOVERY_MS`, 1 to 10 attempts and resets, 2 to 10
+    /// bounces, a retry pause up to 5000 ms. Anything else is refused with
+    /// the reason.
     pub fn parse(text: &str) -> Result<Self, &'static str> {
         let mut p = Self::DEFAULT;
         for item in text.split(',').filter(|i| !i.is_empty()) {
@@ -61,11 +74,19 @@ impl Policy {
             };
             match name {
                 "debounce" => p.debounce_ms = within(100, 2000, "debounce: 100 to 2000 ms")?,
-                "recovery" => p.reset_recovery_ms = within(10, 400, "recovery: 10 to 400 ms")?,
+                "recovery" => {
+                    p.reset_recovery_ms =
+                        within(10, MAX_RESET_RECOVERY_MS, "recovery: 10 to 200 ms")?
+                }
                 "attempts" => p.attempts = within(1, 10, "attempts: 1 to 10")? as u8,
                 "retry" => p.retry_ms = within(0, 5000, "retry: 0 to 5000 ms")?,
                 "resets" => p.reset_tries = within(1, 10, "resets: 1 to 10")? as u8,
-                _ => return Err("unknown item (debounce, recovery, attempts, retry, resets)"),
+                "bounces" => p.bounce_limit = within(2, 10, "bounces: 2 to 10")? as u8,
+                _ => {
+                    return Err(
+                        "unknown item (debounce, recovery, attempts, retry, resets, bounces)",
+                    )
+                }
             }
         }
         Ok(p)
@@ -143,18 +164,18 @@ pub enum AfterReset {
     Again,
 }
 
-/// `portsc` read after a reset the driver issued. A connect change on a
+/// `portsc` read after a reset the driver issued on a port that is a
+/// USB3 one (`usb3`, `PortProtocols`) or a USB2 one. A connect change on a
 /// USB3 port is not a reason to reset again: a USB3 connection may bounce
 /// across warm resets while the device connects fine (Linux ignores it
 /// likewise); the caller clears it with the other change bits.
-pub fn after_reset(portsc: u32) -> AfterReset {
+pub fn after_reset(portsc: u32, usb3: bool) -> AfterReset {
     if portsc & op::PORTSC_RESET != 0 || portsc & (op::PORTSC_CCS | op::PORTSC_CAS) == 0 {
         return AfterReset::Waiting;
     }
     if port_reset(portsc) == PortReset::Warm {
         return AfterReset::Again;
     }
-    let usb3 = op::port_speed(portsc) >= speed::SUPER;
     if portsc & op::PORTSC_CSC != 0 && !usb3 {
         return AfterReset::Again;
     }
@@ -162,6 +183,63 @@ pub fn after_reset(portsc: u32) -> AfterReset {
         return AfterReset::Waiting;
     }
     AfterReset::Ready
+}
+
+/// The USB major revision of each root port, from the xHCI Supported
+/// Protocol capabilities (xHCI 7.2): which ports are USB2 and which USB3
+/// is a property of the port, not of the speed a device negotiated (Linux
+/// keeps a root hub per protocol for the same reason).
+#[derive(Debug, Clone, Copy)]
+pub struct PortProtocols {
+    major: [u8; 256],
+}
+
+impl Default for PortProtocols {
+    fn default() -> Self {
+        Self { major: [0; 256] }
+    }
+}
+
+/// Extended capability ID of a Supported Protocol capability (xHCI 7.2).
+pub const CAP_SUPPORTED_PROTOCOL: u8 = 2;
+
+impl PortProtocols {
+    /// A Supported Protocol capability: its first dword (`dword0`: ID,
+    /// next pointer, minor and major revision) and its third (`dword2`:
+    /// Compatible Port Offset and Count). Ports past `max_ports` or a
+    /// capability of another ID are ignored (device-reported values are
+    /// bounded, ADR 0051). Returns whether it was taken.
+    pub fn add(&mut self, dword0: u32, dword2: u32, max_ports: u8) -> bool {
+        if dword0 & 0xFF != CAP_SUPPORTED_PROTOCOL as u32 {
+            return false;
+        }
+        let major = (dword0 >> 24) as u8;
+        let first = (dword2 & 0xFF) as usize;
+        let count = ((dword2 >> 8) & 0xFF) as usize;
+        if first == 0 || count == 0 {
+            return false;
+        }
+        let last = (first + count - 1).min(max_ports as usize);
+        for port in first..=last {
+            self.major[port] = major;
+        }
+        first <= last
+    }
+
+    /// The major revision (2 or 3) of `port`, if a capability named it.
+    pub fn major(&self, port: u8) -> Option<u8> {
+        Some(self.major[port as usize]).filter(|&m| m != 0)
+    }
+
+    /// Whether `port` is a USB3 port: by its capability, or, on a
+    /// controller without one (none seen so far), by the speed its device
+    /// negotiated (`portsc`), which only a USB3 port reports as SuperSpeed.
+    pub fn usb3(&self, port: u8, portsc: u32) -> bool {
+        match self.major(port) {
+            Some(m) => m >= 3,
+            None => op::port_speed(portsc) >= speed::SUPER,
+        }
+    }
 }
 
 /// How many times in a row a device left or changed while it was being
@@ -545,33 +623,72 @@ mod tests {
         let hs = 3u32 << 10;
         let ss = 4u32 << 10;
         let base = PORTSC_POWER | PORTSC_CCS;
-        assert_eq!(after_reset(base | PORTSC_RESET | hs), AfterReset::Waiting);
         assert_eq!(
-            after_reset(base | hs),
+            after_reset(base | PORTSC_RESET | hs, false),
+            AfterReset::Waiting
+        );
+        assert_eq!(
+            after_reset(base | hs, false),
             AfterReset::Waiting,
             "not enabled yet"
         );
         assert_eq!(
-            after_reset(PORTSC_POWER | hs),
+            after_reset(PORTSC_POWER | hs, false),
             AfterReset::Waiting,
             "connection not back yet"
         );
-        assert_eq!(after_reset(base | PORTSC_PED | hs), AfterReset::Ready);
+        assert_eq!(
+            after_reset(base | PORTSC_PED | hs, false),
+            AfterReset::Ready
+        );
         // USB2: a connect change during the reset, still connected: again.
         assert_eq!(
-            after_reset(base | PORTSC_PED | PORTSC_CSC | hs),
+            after_reset(base | PORTSC_PED | PORTSC_CSC | hs, false),
             AfterReset::Again
         );
         // USB3: the connection may bounce across a warm reset: ignored.
         assert_eq!(
-            after_reset(base | PORTSC_PED | PORTSC_CSC | ss),
+            after_reset(base | PORTSC_PED | PORTSC_CSC | ss, true),
             AfterReset::Ready
+        );
+        // A USB2 port where a device negotiated a USB2 speed: the port's
+        // protocol decides, not the speed.
+        assert_eq!(
+            after_reset(base | PORTSC_PED | PORTSC_CSC | hs, true),
+            AfterReset::Ready,
+            "a USB3 port with a bounce"
         );
         // A USB3 link still stuck where only a Warm Reset helps.
         assert_eq!(
-            after_reset(base | pls(op::PLS_INACTIVE) | ss),
+            after_reset(base | pls(op::PLS_INACTIVE) | ss, true),
             AfterReset::Again
         );
+    }
+
+    #[test]
+    fn port_protocols_come_from_the_supported_protocol_capabilities() {
+        let mut p = PortProtocols::default();
+        // USB 3.0 on ports 1-4, USB 2.0 on ports 5-12 (QEMU's layout).
+        assert!(p.add(0x0300_0002, 4 << 8 | 1, 12));
+        assert!(p.add(0x0200_0002, 8 << 8 | 5, 12));
+        assert_eq!(p.major(1), Some(3));
+        assert_eq!(p.major(4), Some(3));
+        assert_eq!(p.major(5), Some(2));
+        assert_eq!(p.major(12), Some(2));
+        assert_eq!(p.major(13), None);
+        let ss = 4u32 << 10;
+        assert!(p.usb3(2, 0));
+        assert!(!p.usb3(6, ss), "the port's protocol, not the speed");
+        // No capability for a port: the speed is the fallback.
+        assert!(p.usb3(200, ss) && !p.usb3(200, 3 << 10));
+        // Another capability, an empty range, ports past max_ports.
+        assert!(!p.add(0x0300_0001, 4 << 8 | 1, 12));
+        assert!(!p.add(0x0300_0002, 1, 12));
+        let mut q = PortProtocols::default();
+        assert!(q.add(0x0300_0002, 200 << 8 | 10, 12));
+        assert_eq!(q.major(12), Some(3));
+        assert_eq!(q.major(13), None);
+        assert!(!q.add(0x0300_0002, 1 << 8 | 13, 12));
     }
 
     #[test]
@@ -590,7 +707,8 @@ mod tests {
 
     #[test]
     fn the_policy_is_tuned_within_its_bounds() {
-        let p = Policy::parse("debounce:150,recovery:20,attempts:4,retry:0,resets:2").unwrap();
+        let p = Policy::parse("debounce:150,recovery:20,attempts:4,retry:0,resets:2,bounces:5")
+            .unwrap();
         assert_eq!(
             p,
             Policy {
@@ -598,7 +716,8 @@ mod tests {
                 reset_recovery_ms: 20,
                 attempts: 4,
                 retry_ms: 0,
-                reset_tries: 2
+                reset_tries: 2,
+                bounce_limit: 5
             }
         );
         assert_eq!(Policy::parse("").unwrap(), Policy::DEFAULT);
@@ -607,7 +726,9 @@ mod tests {
             "debounce:99",
             "debounce:2001",
             "recovery:9",
-            "recovery:401",
+            "recovery:201",
+            "bounces:1",
+            "bounces:11",
             "attempts:0",
             "attempts:11",
             "resets:0",

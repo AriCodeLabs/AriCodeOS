@@ -61,7 +61,8 @@ use aricode_usb_storage::{
     CswError, CswStatus, Next, Stage, CSW_TEXT_LEN,
 };
 use aricode_xhci::hotplug::{
-    self, AfterReset, PendingPort, PendingPorts, Policy, PortBounces, PortReset, Spares,
+    self, AfterReset, PendingPort, PendingPorts, Policy, PortBounces, PortProtocols, PortReset,
+    Spares, MAX_RESET_RECOVERY_MS, RESET_WINDOW_MS,
 };
 use aricode_xhci::{
     bulk_trbs, cap, completion, dci, endpoint_recovery, endpoint_status, ep_state, erst_entry, op,
@@ -147,10 +148,10 @@ const TRANSFER_WINDOW_MS: u64 = CBW_TIMEOUT_MS + SCSI_COMMAND_TIMEOUT_MS;
 /// commands of a failed transfer (31 + 3 = 34 s). Chain of waits: the
 /// block client waits `aricode_sys::block::REPLY_WAIT_MS` (90 s) > this
 /// budget (34 s) + the idle-loop maintenance of one iteration, the
-/// longest storage step (`REENUMERATE_STEP_MS`, 6 s) plus one HID
+/// longest storage step (`REENUMERATE_STEP_MS`, 6.2 s) plus one HID
 /// recovery step (`maintain_hid`, `MAINTENANCE_STEP_MS`, 3 s) plus one
 /// hot-plug step (`maintain_ports`: an attach, `ATTACH_STEP_MS`, or a
-/// detach, `MAINTENANCE_STEP_MS`, 3 s) + one queued request (34 s) = 80 s;
+/// detach, `MAINTENANCE_STEP_MS`, 3 s) + one queued request (34 s) = 80.2 s;
 /// the file client waits 120 s > 90 s. The chain assumes at most two
 /// concurrent block clients (one queued request).
 const REQUEST_BUDGET_MS: u64 = TRANSFER_WINDOW_MS + RECOVERY_RESERVE_MS;
@@ -191,11 +192,14 @@ const REQUESTS_PER_ROUND: usize = 8;
 /// Exit code when the end-of-round wait fails for a reason other than the
 /// service endpoints being gone: looping on it would spin (ADR 0044).
 const EXIT_WAIT_FAILED: u64 = 10;
-/// Hard bound of a re-enumeration step (the longest): a port reset (500,
-/// its reset recovery included) and the TEST UNIT READY wait (`REENUMERATE_READY_WAIT_MS`, 500) leave
-/// `MIN_COMMAND_WINDOW_MS` for the last SCSI command; the step is aborted
-/// and counted as a failed attempt when it passes.
-const REENUMERATE_STEP_MS: u64 = 6000;
+/// Hard bound of a re-enumeration step (the longest): a port reset
+/// (`RESET_WINDOW_MS`, 500) with the longest reset recovery the policy
+/// accepts on top (`MAX_RESET_RECOVERY_MS`, 200) and the TEST UNIT READY
+/// wait (`REENUMERATE_READY_WAIT_MS`, 500) leave `MIN_COMMAND_WINDOW_MS`
+/// for the last SCSI command; the step is aborted and counted as a failed
+/// attempt when it passes.
+const REENUMERATE_STEP_MS: u64 =
+    RESET_WINDOW_MS + MAX_RESET_RECOVERY_MS + REENUMERATE_READY_WAIT_MS + MIN_COMMAND_WINDOW_MS;
 /// Reset Recovery (BOT 5.3.4): GET_STATUS polling period after the class
 /// reset and the longest wait for the device to answer (Linux
 /// `usb-storage` waits 6 s unconditionally).
@@ -906,6 +910,8 @@ struct Controller {
     hotplug: Policy,
     /// Devices that changed during their enumeration, per port in a row.
     bounces: PortBounces,
+    /// Each root port's USB major revision (Supported Protocol, xHCI 7.2).
+    protocols: PortProtocols,
     /// The slot of a device a failed report found unplugged although no
     /// change was seen for its port (`ended_by_unplug`): `dispatch`
     /// releases its held keys and buttons once the event is handled.
@@ -1085,6 +1091,7 @@ impl Controller {
         runtime.w64(rt::ERSTBA, erst_phys);
         runtime.w32(rt::IMAN, rt::IMAN_ENABLE | rt::IMAN_PENDING);
         let ports_switched = intel_route_ports(&cfg);
+        let protocols = port_protocols(&base, bar_len, params.max_ports);
         op.w32(op::USBCMD, op::CMD_RUN | op::CMD_INTE);
         wait_bits(&op, op::USBSTS, op::STS_HALTED, false, &clock, 200)
             .ok_or(exit::START_TIMEOUT)?;
@@ -1126,6 +1133,7 @@ impl Controller {
             pending_ports: PendingPorts::default(),
             hotplug: Policy::DEFAULT,
             bounces: PortBounces::default(),
+            protocols,
             late_enable: None,
             unplug_noticed: None,
             booted: false,
@@ -1202,7 +1210,14 @@ impl Controller {
         self.ring_doorbell(0, 0);
         loop {
             while let Some(ev) = self.next_event() {
-                if ev.trb_type() == trb_type::COMMAND_COMPLETION && ev.parameter == phys {
+                // The completion of this command: its TRB, and the slot it
+                // names (Enable Slot names none), so that a late completion
+                // of an older command on the same TRB after the ring
+                // wrapped is never taken for this one.
+                if ev.trb_type() == trb_type::COMMAND_COMPLETION
+                    && ev.parameter == phys
+                    && (trb.slot_id() == 0 || ev.slot_id() == trb.slot_id())
+                {
                     return Issued::Done(ev.completion_code(), ev.slot_id());
                 }
                 if ev.trb_type() == trb_type::TRANSFER_EVENT
@@ -1342,7 +1357,7 @@ impl Controller {
                 }
                 if let Some((_, slot)) = self
                     .pending_disable
-                    .filter(|&(phys, _)| phys == ev.parameter)
+                    .filter(|&(phys, slot)| phys == ev.parameter && ev.slot_id() == slot)
                 {
                     self.pending_disable = None;
                     if ev.completion_code() != completion::SUCCESS {
@@ -1797,17 +1812,14 @@ impl Controller {
             // (`hotplug::port_reset`). Not started without time to see it
             // through (USB 2.0 7.1.7.5: the reset itself lasts at least
             // 10 ms).
-            let Some(reset_deadline) = step_deadline(self.clock.now(), deadline, 500) else {
+            let recovery = self.hotplug.reset_recovery_ms;
+            let Some(end) = step_deadline(self.clock.now(), deadline, RESET_WINDOW_MS + recovery)
+            else {
                 return Err("no time left to reset the port");
             };
-            self.reset_port(port, reset_deadline)?;
+            self.reset_port(port, end - recovery)?;
         }
-        // Clear the port change bits.
-        let sc = self.portsc(port);
-        self.write_portsc(
-            port,
-            (sc & op::PORTSC_POWER) | (sc & op::PORTSC_CHANGE_BITS),
-        );
+        self.clear_port_changes(port);
         let spd = op::port_speed(self.portsc(port));
         // Pending Port Status Change events (the reset's) are consumed now.
         while let Some(ev) = self.next_event() {
@@ -1816,24 +1828,37 @@ impl Controller {
         Ok(spd)
     }
 
-    /// Port reset of `port` by `reset_deadline`, its reset recovery
-    /// included. Each try clears the change bits seen so far, writes PR (or
-    /// WPR, `hotplug::port_reset`) and waits until `hotplug::after_reset`
-    /// says the reset is over: PR clear, the port enabled and connected.
-    /// The device then gets its recovery time (USB 2.0 7.1.7.5, `Policy`),
-    /// cut short only by the deadline. A USB2 connection that changed
-    /// during the reset or the recovery while a device is still there is
-    /// reset again, up to `Policy::reset_tries` (Linux
-    /// `hub_port_wait_reset`); a USB3 one may bounce across a warm reset
-    /// and is not (its change bit goes with the others). Fails when the
-    /// port is not enabled in time, or the connection changed at every
-    /// try; the boot and storage paths count such a failure like any other.
+    /// Port reset of `port`: every try within `reset_deadline`, the
+    /// device's recovery time on top (the caller leaves room for it, so it
+    /// is never cut short). Each try clears the change bits seen so far,
+    /// writes PR (or WPR, `hotplug::port_reset`) and waits until
+    /// `hotplug::after_reset` says the reset is over: PR clear, the port
+    /// enabled and connected. A USB2 connection that changed during the
+    /// reset while a device is still there is reset again (Linux
+    /// `hub_port_wait_reset`); a USB3 one may bounce across a warm reset and
+    /// is not. Once over, the change bits go (a USB3 bounce with them), the
+    /// device gets its recovery time (USB 2.0 7.1.7.5, `Policy`), and a
+    /// last look follows: a connect change, or the port not settled, during
+    /// the recovery is a bounce like one during the reset; a device gone
+    /// then has left. Tries are bounded by `Policy::reset_tries` and by the
+    /// deadline; when they run out the change bits are cleared, so no event
+    /// of the bounces queues the port again with fresh attempts or restarts
+    /// the storage's count, and it fails with `RESET_BOUNCED`.
     fn reset_port(&mut self, port: u8, reset_deadline: u64) -> Result<(), &'static str> {
         let recovery = self.hotplug.reset_recovery_ms;
-        // The recovery time comes out of the reset's 500 ms.
-        let enabled_by = reset_deadline.saturating_sub(recovery);
         let mut tries = 0u8;
         loop {
+            if tries >= self.hotplug.reset_tries
+                || (tries > 0 && self.clock.now() >= reset_deadline)
+            {
+                self.clear_port_changes(port);
+                return Err(RESET_BOUNCED);
+            }
+            if tries > 0 {
+                sys::print(b"usb-input: port ");
+                num(port as u64);
+                sys::print(b": the connection changed during the port reset; reset again\n");
+            }
             tries += 1;
             let sc = self.portsc(port);
             let keep = sc & op::PORTSC_POWER;
@@ -1848,41 +1873,49 @@ impl Controller {
                 }
             };
             self.write_portsc(port, keep | reset);
-            let mut state = AfterReset::Waiting;
-            let mut recovered = false;
-            while state != AfterReset::Again {
-                state = hotplug::after_reset(self.portsc(port));
-                match state {
-                    AfterReset::Waiting if self.clock.now() < enabled_by => {
+            let over = loop {
+                let sc = self.portsc(port);
+                match hotplug::after_reset(sc, self.protocols.usb3(port, sc)) {
+                    AfterReset::Waiting if self.clock.now() < reset_deadline => {
                         let _ = sys::irq_wait(IRQ, 5);
                     }
                     AfterReset::Waiting => {
-                        return Err(
-                            if self.portsc(port) & (op::PORTSC_CCS | op::PORTSC_CAS) == 0 {
-                                "the device left during the port reset"
-                            } else {
-                                "the port is not enabled after the reset"
-                            },
-                        );
+                        return Err(if sc & (op::PORTSC_CCS | op::PORTSC_CAS) == 0 {
+                            "the device left during the port reset"
+                        } else {
+                            "the port is not enabled after the reset"
+                        });
                     }
-                    AfterReset::Ready if recovered => return Ok(()),
-                    // Recovery, then a last look: a change during it is
-                    // a bounce like one during the reset.
-                    AfterReset::Ready => {
-                        let until = (self.clock.now() + recovery).min(reset_deadline);
-                        self.wait_until(until);
-                        recovered = true;
-                    }
-                    AfterReset::Again => {}
+                    AfterReset::Ready => break true,
+                    AfterReset::Again => break false,
                 }
+            };
+            if !over {
+                continue;
             }
-            if tries >= self.hotplug.reset_tries {
-                return Err(RESET_BOUNCED);
+            self.clear_port_changes(port);
+            let recovered = self.after(recovery);
+            self.wait_until(recovered);
+            let sc = self.portsc(port);
+            if sc & (op::PORTSC_CCS | op::PORTSC_CAS) == 0 {
+                self.clear_port_changes(port);
+                return Err("the device left during the reset recovery");
             }
-            sys::print(b"usb-input: port ");
-            num(port as u64);
-            sys::print(b": the connection changed during the port reset; reset again\n");
+            let settled = sc & op::PORTSC_CSC == 0
+                && hotplug::after_reset(sc, self.protocols.usb3(port, sc)) == AfterReset::Ready;
+            if settled {
+                return Ok(());
+            }
         }
+    }
+
+    /// Clears the change bits of `port` (RW1C), keeping its power.
+    fn clear_port_changes(&self, port: u8) {
+        let sc = self.portsc(port);
+        self.write_portsc(
+            port,
+            (sc & op::PORTSC_POWER) | (sc & op::PORTSC_CHANGE_BITS),
+        );
     }
 
     /// Enumerates a port with a device attached on a new slot: port reset,
@@ -3394,7 +3427,9 @@ impl Controller {
                 self.issue_disable_slot(slot, None, step);
                 return;
             }
-            if let Some((slot, mem)) = self.waiting_disables.iter_mut().find_map(|w| w.take()) {
+            // First in, first out: the line is kept packed at the front.
+            if let Some((slot, mem)) = self.waiting_disables[0].take() {
+                self.waiting_disables.rotate_left(1);
                 self.issue_disable_slot(slot, mem, step);
                 return;
             }
@@ -4297,7 +4332,7 @@ impl Controller {
         }
         // A device that kept changing during its enumeration: its port is
         // left alone until it is seen empty (`PortBounces`).
-        if self.bounces.exhausted(port, self.hotplug.attempts) {
+        if self.bounces.exhausted(port, self.hotplug.bounce_limit) {
             return;
         }
         if self.storage.as_ref().is_some_and(|st| st.port == port) {
@@ -4355,10 +4390,12 @@ impl Controller {
                 sys::print(b": enumeration failed: ");
                 sys::print(why.as_bytes());
                 let connected = self.portsc(port) & (op::PORTSC_CCS | op::PORTSC_CAS) != 0;
-                if why == CONNECTION_CHANGED {
+                // A device that changed during its enumeration, or bounced
+                // at every reset: counted per port (`PortBounces`).
+                if why == CONNECTION_CHANGED || why == RESET_BOUNCED {
                     if !connected {
                         sys::print(b"; the port is empty now\n");
-                    } else if self.bounces.note(port, self.hotplug.attempts) {
+                    } else if self.bounces.note(port, self.hotplug.bounce_limit) {
                         // Queued here too: a port disabled under the device
                         // (PEC) raised no connect change to queue it.
                         self.queue_port(port, self.clock.now());
@@ -4864,6 +4901,37 @@ fn ended_by_unplug(
     true
 }
 
+/// Each root port's USB major revision, from the Supported Protocol
+/// extended capabilities (xHCI 7.2), read only: walked like
+/// `bios_handoff` (each capability inside BAR 0, dword aligned, at most
+/// 32). Printed, so a report says which ports are USB3.
+fn port_protocols(base: &Mmio, bar_len: u64, max_ports: u8) -> PortProtocols {
+    let mut protocols = PortProtocols::default();
+    let mut off = ((base.r32(cap::HCCPARAMS1) >> 16) & 0xFFFF) as u64 * 4;
+    for _ in 0..32 {
+        if off < 0x20 || !off.is_multiple_of(4) || off + 12 > bar_len {
+            break;
+        }
+        let dword0 = base.r32(off);
+        if protocols.add(dword0, base.r32(off + 8), max_ports) {
+            let dword2 = base.r32(off + 8);
+            sys::print(b"usb-input: USB ");
+            num((dword0 >> 24) as u64);
+            sys::print(b" ports ");
+            num((dword2 & 0xFF) as u64);
+            sys::print(b" to ");
+            num(((dword2 & 0xFF) + ((dword2 >> 8) & 0xFF)).saturating_sub(1) as u64);
+            sys::print(b"\n");
+        }
+        let next = ((dword0 >> 8) & 0xFF) as u64 * 4;
+        if next == 0 {
+            break;
+        }
+        off += next;
+    }
+    protocols
+}
+
 /// Controller handoff from the firmware (xHCI 4.22.1, USB Legacy Support
 /// capability): the OS requests ownership, waits for the firmware to
 /// release its own and turns off its SMIs. Without the capability (QEMU)
@@ -5191,7 +5259,9 @@ fn hotplug_policy(value: Option<&str>) -> Policy {
             num(p.retry_ms);
             sys::print(b" ms, ");
             num(p.reset_tries as u64);
-            sys::print(b" resets\n");
+            sys::print(b" resets, ");
+            num(p.bounce_limit as u64);
+            sys::print(b" bounces\n");
             p
         }
         Err(why) => {
