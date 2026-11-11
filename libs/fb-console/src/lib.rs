@@ -289,7 +289,27 @@ impl<S: Surface> Console<S> {
     /// next [`redraw`](Self::redraw), which the caller may do in steps.
     pub fn reattach(&mut self, surface: S) {
         self.surface = Some(surface);
+        self.clear_margins();
         self.invalidate();
+    }
+
+    /// Paints the strips past the text grid in the background colour: the
+    /// right one narrower than a cell, and the bottom one shorter than a
+    /// row (8 pixel rows at 1080 lines), which no cell covers, so what a
+    /// borrower left there would stay (audit of incident 0065).
+    fn clear_margins(&mut self) {
+        let (text_w, text_h) = (self.cols * GLYPH_WIDTH, self.rows * GLYPH_HEIGHT);
+        let bg = self.bg;
+        let Some(s) = self.surface.as_mut() else {
+            return;
+        };
+        let (w, h) = (s.width(), s.height());
+        for y in 0..text_h.min(h) {
+            for x in text_w..w {
+                s.put(x, y, bg);
+            }
+        }
+        s.fill_rows(text_h, h.saturating_sub(text_h), bg);
     }
 
     /// Creates the console with a screen and clears it (host tests: the grid
@@ -858,6 +878,32 @@ mod tests {
         assert_eq!(glyph(0x81), glyph(b'?'), "codes that show nothing");
     }
 
+    /// Reattached on a screen that is not a whole number of cells (1366
+    /// wide, 1080 high): the strips past the grid, which no cell covers,
+    /// lose what the borrower painted there too.
+    #[test]
+    fn reattach_clears_the_margins_past_the_grid() {
+        let (w, h) = (8 * 10 + 6, 16 * 4 + 8);
+        let mut c = C::new(Mem::new(w, h));
+        let mut screen = c.detach().expect("attached");
+        let painted = Rgb(0xFF, 0x88, 0x00);
+        screen.fill_rows(0, h, painted);
+        c.reattach(screen);
+        assert!(c.redraw(usize::MAX));
+        let s = c.surface().unwrap();
+        for y in 0..h {
+            for x in 0..w {
+                assert_ne!(
+                    s.at(x, y),
+                    painted,
+                    "pixel ({x},{y}) kept the borrower's colour"
+                );
+            }
+        }
+        assert_eq!(s.at(w - 1, 0), C::DEFAULT_BG, "right strip");
+        assert_eq!(s.at(0, h - 1), C::DEFAULT_BG, "bottom strip");
+    }
+
     /// A detached console keeps its text and draws nothing; reattaching
     /// draws all of it again over what the borrower painted.
     #[test]
@@ -877,7 +923,7 @@ mod tests {
         c.reattach(screen);
         assert!(c.is_attached());
         assert!(c.needs_redraw(), "nothing is drawn until the redraw");
-        assert_eq!(c.surface().unwrap().at(639, 479), painted);
+        assert_eq!(c.surface().unwrap().at(320, 240), painted);
         assert!(c.redraw(usize::MAX));
         assert_screen_matches_cells(&c);
         let s = c.surface().unwrap();

@@ -49,6 +49,9 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// If `true`, the kernel terminates QEMU when done or on panic.
 /// Set once from the command line, before any possible panic.
 static QEMU_EXIT: AtomicBool = AtomicBool::new(false);
+/// `poweroff_ignored`: `shutdown` skips the S5 write, as firmware that
+/// ignores it does (incident 0065), so the path after it is tested.
+static POWEROFF_IGNORED: AtomicBool = AtomicBool::new(false);
 
 /// Entry point. See `boot_protocol::KernelEntry` for the contract.
 ///
@@ -80,6 +83,7 @@ pub unsafe extern "C" fn kernel_entry(boot_info: *const BootInfo) -> ! {
     // SAFETY: AriBoot copied the cmdline to kernel memory reachable through the physical map.
     let cmdline = CmdLine::new(unsafe { info.cmdline() });
     QEMU_EXIT.store(cmdline.has(keys::QEMU_EXIT), Ordering::Relaxed);
+    POWEROFF_IGNORED.store(cmdline.has(keys::POWEROFF_IGNORED), Ordering::Relaxed);
 
     framebuffer::set_info(info.framebuffer, info.video());
     // With `gui` the screen belongs to the user compositor: the kernel only
@@ -571,15 +575,66 @@ fn run_user_program(name: &str) {
     info!("user: '{name}' exited: {status:?}");
 }
 
+/// Turns of the spin loop `shutdown` waits for the other CPUs to halt
+/// (interrupts are off: no clock); well over a second on any machine.
+const HALT_WAIT_SPINS: u64 = 200_000_000;
+
 /// Orderly shutdown requested from user space (`system_power`): with
 /// `qemu_exit` it terminates QEMU successfully; otherwise it powers the
 /// machine off through ACPI S5 and, if the firmware does not cooperate,
-/// halts the CPU.
+/// halts.
+///
+/// Interrupts go off and the other CPUs are halted before the S5 write, as
+/// Linux's `native_machine_shutdown` stops them, so no process runs from
+/// here on (before, the halt left the scheduler running). Linux also moves
+/// to the boot CPU first (`migrate_to_reboot_cpu`), which this does not:
+/// incident 0065 lists it among the differences to study. If the power
+/// stays on, the console takes the screen back from whoever held it (the
+/// desktop) and shows the last line, which says whether the write was
+/// made at all.
 pub fn shutdown() -> ! {
     println!("ARICODEOS_SHUTDOWN");
     if !QEMU_EXIT.load(Ordering::Relaxed) {
-        arch::x86_64::power::acpi_poweroff();
-        println!("AriCodeOS: ACPI power-off had no effect; halting (it is safe to switch off)");
+        // SAFETY: interrupts off for good on this CPU: nothing is scheduled
+        // here again, and the halt below then never wakes.
+        unsafe { core::arch::asm!("cli", options(nomem, nostack)) };
+        arch::x86_64::smp::halt_others();
+        let all = arch::x86_64::smp::others_halted(HALT_WAIT_SPINS);
+        println!(
+            "AriCodeOS: {} for the power-off",
+            if all {
+                "the other CPUs are halted"
+            } else {
+                "not every other CPU halted in time"
+            }
+        );
+        use arch::x86_64::power::PowerOff;
+        let screen = framebuffer::current();
+        let off = "halting (it is safe to switch off)";
+        if POWEROFF_IGNORED.load(Ordering::Relaxed) {
+            console::last_words(
+                screen,
+                format_args!("AriCodeOS: poweroff_ignored: the S5 write was skipped; {off}"),
+            );
+        } else {
+            match arch::x86_64::power::acpi_poweroff() {
+                PowerOff::NoS5 => console::last_words(
+                    screen,
+                    format_args!("AriCodeOS: no ACPI power-off here (no FADT or \\_S5_); {off}"),
+                ),
+                PowerOff::NoPm1a(at) => console::last_words(
+                    screen,
+                    format_args!("AriCodeOS: no ACPI power-off here (PM1a control block {at:#x}); {off}"),
+                ),
+                PowerOff::Ignored { pm1a, pm1b, typ_a, typ_b, sci_en } => console::last_words(
+                    screen,
+                    format_args!(
+                        "AriCodeOS: ACPI power-off had no effect (S5 type {typ_a}/{typ_b} written to PM1a {pm1a:#x}, PM1b {pm1b:#x}, SCI_EN {}); {off}",
+                        sci_en as u8
+                    ),
+                ),
+            };
+        }
     }
     finish(qemu::ExitCode::Success)
 }

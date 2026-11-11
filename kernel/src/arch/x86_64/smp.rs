@@ -445,12 +445,35 @@ pub fn flushes_served() -> usize {
     FLUSHES_SERVED.load(Ordering::Relaxed)
 }
 
-/// Halts the other CPUs (panic). No waiting: the calling CPU may be in any
-/// state.
+/// Halts the other CPUs (panic, shutdown). No waiting: the calling CPU
+/// may be in any state; [`others_halted`] says how many have stopped.
 pub fn halt_others() {
     if cpu::online_count() > 1 {
         apic::broadcast_ipi(apic::HALT_VECTOR);
     }
+}
+
+/// CPUs that took the halt IPI and stopped for good.
+static HALTED: AtomicUsize = AtomicUsize::new(0);
+
+/// The halt IPI's handler: counts this CPU as stopped, then stops it.
+pub fn halt_on_ipi() -> ! {
+    HALTED.fetch_add(1, Ordering::AcqRel);
+    halt_forever()
+}
+
+/// Waits, at most `spins` turns of a spin loop (interrupts may be off, so
+/// no clock), until every other online CPU has taken the halt IPI. Whether
+/// they all did.
+pub fn others_halted(spins: u64) -> bool {
+    let others = cpu::online_count().saturating_sub(1);
+    for _ in 0..spins {
+        if HALTED.load(Ordering::Acquire) >= others {
+            return true;
+        }
+        core::hint::spin_loop();
+    }
+    HALTED.load(Ordering::Acquire) >= others
 }
 
 pub fn halt_forever() -> ! {

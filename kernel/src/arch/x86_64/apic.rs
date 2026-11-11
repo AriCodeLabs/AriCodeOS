@@ -222,7 +222,7 @@ pub fn handle_interrupt(vector: u8, from_user: bool) {
         }
         HALT_VECTOR => {
             eoi();
-            super::smp::halt_forever();
+            super::smp::halt_on_ipi();
         }
         crate::iommu::FAULT_VECTOR => {
             crate::iommu::on_fault_irq();

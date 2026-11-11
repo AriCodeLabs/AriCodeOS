@@ -150,6 +150,10 @@ pub mod keys {
     /// `boot_commit=HEX`: added by AriBoot with `boot_slot` for a
     /// development build, the commit it was built from (ADR 0045).
     pub const BOOT_COMMIT: &str = "boot_commit";
+    /// Tests only: `poweroff_ignored`, `shutdown` skips the ACPI S5 write,
+    /// as firmware that ignores it does, so what follows a power-off that
+    /// had no effect is tested (incident 0065).
+    pub const POWEROFF_IGNORED: &str = "poweroff_ignored";
     /// Tests only: `init_fail_late`, init fails after the services and before
     /// confirming.
     pub const INIT_FAIL_LATE: &str = "init_fail_late";
@@ -251,6 +255,7 @@ pub mod keys {
     pub const TEST_ONLY: &[&str] = &[
         QEMU_EXIT,
         TEST,
+        POWEROFF_IGNORED,
         INIT_FAIL_LATE,
         RESTART_STORM,
         SERVICE_HANG,
