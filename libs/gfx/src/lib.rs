@@ -399,6 +399,33 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    /// Copies `src` stretched to fill `to`, nearest pixel, clipping: a window shown
+    /// at another size than its program draws, full screen. Fixed point, so a row
+    /// costs no division per pixel.
+    pub fn blit_scaled(&mut self, src: &Canvas, to: &Rect) {
+        if to.w == src.width && to.h == src.height {
+            return self.blit(src, to.x, to.y);
+        }
+        let area = to.intersect(&self.clip);
+        if area.is_empty() || src.width == 0 || src.height == 0 {
+            return;
+        }
+        let step_x = ((src.width as u64) << 16) / to.w as u64;
+        let step_y = ((src.height as u64) << 16) / to.h as u64;
+        let first_x = (area.x - to.x) as u64 * step_x;
+        for y in area.y..area.bottom() {
+            let sy = (((y - to.y) as u64 * step_y) >> 16).min(src.height as u64 - 1) as usize;
+            let s = sy * src.stride as usize;
+            let row = &src.pixels[s..s + src.width as usize];
+            let d = y as usize * self.stride as usize + area.x as usize;
+            let mut fx = first_x;
+            for px in &mut self.pixels[d..d + area.w as usize] {
+                *px = row[((fx >> 16) as usize).min(row.len() - 1)];
+                fx += step_x;
+            }
+        }
+    }
+
     /// Text with the console 8x16 font; `None` as background leaves the
     /// pixel unchanged.
     pub fn text(&mut self, x: i32, y: i32, s: &str, fg: Color, bg: Option<Color>) {
@@ -686,6 +713,8 @@ pub const MAX_WINDOWS: usize = 8;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Theme {
     pub desktop: Color,
+    /// Beside a full-screen picture that does not fill the screen's proportions.
+    pub full_screen: Color,
     pub window: Color,
     pub title_active: Color,
     pub title_inactive: Color,
@@ -738,6 +767,7 @@ impl Theme {
     /// The light theme of ADR 0078.
     pub const LIGHT: Self = Self {
         desktop: rgb(0x8E, 0xA9, 0xC4),
+        full_screen: rgb(0, 0, 0),
         window: rgb(0xEC, 0xEC, 0xEC),
         title_active: rgb(0x26, 0x26, 0x26),
         title_inactive: rgb(0x80, 0x80, 0x80),
@@ -777,6 +807,7 @@ impl Theme {
     /// The dark theme of ADR 0078: the frame on #323232, over a darker desktop.
     pub const DARK: Self = Self {
         desktop: rgb(0x2A, 0x35, 0x41),
+        full_screen: rgb(0, 0, 0),
         window: rgb(0x32, 0x32, 0x32),
         title_active: rgb(0xE6, 0xE6, 0xE6),
         title_inactive: rgb(0x8C, 0x8C, 0x8C),
@@ -1151,6 +1182,8 @@ pub struct Desktop {
     status_len: u8,
     notice: [u8; STATUS_MAX],
     notice_len: u8,
+    /// The window shown full screen, over the bar and the dock.
+    full: Option<u32>,
     pub theme: Theme,
 }
 
@@ -1170,6 +1203,7 @@ impl Desktop {
             status_len: 0,
             notice: [0; STATUS_MAX],
             notice_len: 0,
+            full: None,
             theme: Theme::LIGHT,
         }
     }
@@ -1224,7 +1258,84 @@ impl Desktop {
         if self.focus == Some(id) {
             self.focus = None;
         }
+        if self.full == Some(id) {
+            self.full = None;
+        }
         true
+    }
+
+    /// The window shown full screen: it covers the bar and the dock, at the largest
+    /// size its proportions fit, and takes every point of the screen.
+    pub fn full_screen(&self) -> Option<&Window> {
+        self.get(self.full?).filter(|w| !w.hidden)
+    }
+
+    /// Shows `id` full screen, or no window with `None`.
+    pub fn set_full_screen(&mut self, id: Option<u32>) {
+        self.full = id.filter(|&id| self.get(id).is_some());
+    }
+
+    /// Where a full-screen window's content shows: as large as the screen holds at
+    /// the content's own proportions, centred; the screen itself once the program
+    /// has drawn at the screen's size.
+    pub fn full_rect(&self, w: &Window) -> Rect {
+        let (sw, sh) = (self.screen.w as u64, self.screen.h as u64);
+        let (cw, ch) = (w.content.w.max(1) as u64, w.content.h.max(1) as u64);
+        let (fw, fh) = if cw * sh >= ch * sw {
+            (sw, (ch * sw / cw).max(1))
+        } else {
+            ((cw * sh / ch).max(1), sh)
+        };
+        Rect::new(
+            ((sw - fw) / 2) as i32,
+            ((sh - fh) / 2) as i32,
+            fw as u32,
+            fh as u32,
+        )
+    }
+
+    /// Where part `part` of window `id`'s content shows on the screen, in whole
+    /// pixels that cover it: through its stretched place when it is full screen.
+    pub fn shown_part(&self, id: u32, part: &Rect) -> Option<Rect> {
+        let w = self.get(id)?;
+        if self.full_screen().is_some_and(|f| f.id == id) {
+            let at = self.full_rect(w);
+            let (cw, ch) = (w.content.w.max(1) as i64, w.content.h.max(1) as i64);
+            let lo = |p: i32, from: i32, shown: u32, real: i64| {
+                from + (p as i64 * shown as i64).div_euclid(real) as i32
+            };
+            let hi = |p: i32, from: i32, shown: u32, real: i64| {
+                from + (p as i64 * shown as i64 + real - 1).div_euclid(real) as i32
+            };
+            let (x0, y0) = (lo(part.x, at.x, at.w, cw), lo(part.y, at.y, at.h, ch));
+            let x1 = hi(part.x + part.w as i32, at.x, at.w, cw);
+            let y1 = hi(part.y + part.h as i32, at.y, at.h, ch);
+            let r = Rect::new(x0, y0, (x1 - x0).max(0) as u32, (y1 - y0).max(0) as u32);
+            return Some(r.intersect(&at));
+        }
+        Some(Rect::new(
+            w.content.x + part.x,
+            w.content.y + part.y,
+            part.w,
+            part.h,
+        ))
+    }
+
+    /// A point of the screen in the content of window `id`: through its stretched
+    /// place when it is full screen, so a program reads its own pixels' coordinates.
+    pub fn to_content(&self, id: u32, x: i32, y: i32) -> Option<(i32, i32)> {
+        let w = self.get(id)?;
+        if self.full_screen().is_some_and(|f| f.id == id) {
+            let at = self.full_rect(w);
+            let map = |p: i32, from: i32, shown: u32, real: u32| {
+                ((p - from) as i64 * real as i64).div_euclid(shown.max(1) as i64) as i32
+            };
+            return Some((
+                map(x, at.x, at.w, w.content.w),
+                map(y, at.y, at.h, w.content.h),
+            ));
+        }
+        Some((x - w.content.x, y - w.content.y))
     }
 
     /// Marks `id` as a window whose program does not answer, or not.
@@ -1266,6 +1377,18 @@ impl Desktop {
     pub fn hit(&self, x: i32, y: i32) -> Hit {
         if self.notice_len > 0 && self.notice_box().contains(x, y) {
             return Hit::Notice;
+        }
+        if let Some(w) = self.full_screen() {
+            if !self.full_rect(w).contains(x, y) {
+                // The bands beside a stretched picture: nothing there to press.
+                return Hit::Panel;
+            }
+            let (cx, cy) = self.to_content(w.id, x, y).unwrap_or((0, 0));
+            return Hit::Window {
+                id: w.id,
+                x: cx,
+                y: cy,
+            };
         }
         let (dock, places) = self.dock();
         if let Some((id, _)) = places.iter().flatten().find(|(_, p)| p.contains(x, y)) {
@@ -1626,6 +1749,8 @@ impl Desktop {
             status: self.status,
             notice: self.notice,
             notice_at: self.notice_box(),
+            screen: self.screen,
+            full: self.full_screen().map(|w| (w.id, self.full_rect(w))),
         }
     }
 
@@ -1665,6 +1790,15 @@ impl Desktop {
         let mut out = out.clipped(region);
         let clip = out.clip();
         if clip.is_empty() {
+            return;
+        }
+        if let Some(w) = self.full_screen() {
+            out.fill(self.theme.full_screen);
+            let mut shown = *w;
+            shown.content = self.full_rect(w);
+            draw_content(&shown, &mut out.clipped(&shown.content));
+            self.compose_notice(&mut out, labels);
+            out.cursor(self.cursor, self.pointer.0, self.pointer.1);
             return;
         }
         out.fill(self.theme.desktop);
@@ -1740,6 +1874,20 @@ impl Desktop {
         out.cursor(self.cursor, self.pointer.0, self.pointer.1);
     }
 
+    /// The notice, if one shows: over everything, full screen too.
+    fn compose_notice(&self, out: &mut Canvas, labels: &mut impl Labels) {
+        if self.notice_len == 0 {
+            return;
+        }
+        let t = &self.theme;
+        let place = self.notice_box();
+        out.rounded(&place, RADIUS, t.bar);
+        let text = core::str::from_utf8(&self.notice[..self.notice_len as usize]).unwrap_or("");
+        let mut inside = out.clipped(&place);
+        let middle = place.y + place.h as i32 / 2;
+        labels.draw(&mut inside, text, place.x + t.bar_margin, middle, t.bar_ink);
+    }
+
     /// The bar and the dock, over the windows.
     fn compose_panels(&self, out: &mut Canvas, labels: &mut impl Labels, clip: &Rect) {
         let t = &self.theme;
@@ -1757,14 +1905,7 @@ impl Desktop {
                 labels.draw(&mut inside, w.panel_name(), t.bar_margin, middle, t.bar_ink);
             }
         }
-        if self.notice_len > 0 {
-            let place = self.notice_box();
-            out.rounded(&place, RADIUS, t.bar);
-            let text = core::str::from_utf8(&self.notice[..self.notice_len as usize]).unwrap_or("");
-            let mut inside = out.clipped(&place);
-            let middle = place.y + place.h as i32 / 2;
-            labels.draw(&mut inside, text, place.x + t.bar_margin, middle, t.bar_ink);
-        }
+        self.compose_notice(out, labels);
         if let Some((id, bounds)) = self.dock_hint() {
             if let Some(w) = self.get(id).filter(|_| bounds.intersects(clip)) {
                 let pad = t.bar_margin;
@@ -1881,6 +2022,9 @@ pub struct Scene {
     status: [u8; STATUS_MAX],
     notice: [u8; STATUS_MAX],
     notice_at: Rect,
+    screen: Rect,
+    /// The full-screen window and where its content shows.
+    full: Option<(u32, Rect)>,
 }
 
 impl Scene {
@@ -1900,6 +2044,11 @@ impl Scene {
     /// changes are not part of a scene: the compositor adds the content
     /// rectangle of a window its client presented.
     pub fn damage(&self, newer: &Scene, damage: &mut Damage) {
+        // Into or out of full screen, or the picture's place changed: all of it.
+        if self.full != newer.full {
+            damage.add(&self.screen);
+            damage.add(&newer.screen);
+        }
         if (self.pointer, self.cursor) != (newer.pointer, newer.cursor) {
             damage.add(&self.cursor.rect(self.pointer.0, self.pointer.1));
             damage.add(&newer.cursor.rect(newer.pointer.0, newer.pointer.1));
@@ -2514,6 +2663,101 @@ mod tests {
         let bar = Theme::LIGHT.bar_h;
         assert_eq!(d.drag_bounds(), Rect::new(0, bar as i32, 800, 600 - bar));
         assert_eq!(Desktop::new(800, 10).drag_bounds().h, 0, "a screen all bar");
+    }
+
+    #[test]
+    fn full_screen_stretches_at_its_proportions_and_maps_points_back() {
+        let mut d = Desktop::new(1366, 768);
+        let a = d.create(960, 540, "game").unwrap();
+        let b = d.create(300, 200, "other").unwrap();
+        d.set_full_screen(Some(a));
+        let w = *d.full_screen().unwrap();
+        // 1366x768 is a little wider than 16:9: the height fills, a pixel's band
+        // at the right.
+        let at = d.full_rect(&w);
+        assert_eq!(at, Rect::new(0, 0, 1365, 768));
+        // Every point of the picture is the window's, in the program's own pixels,
+        // and nothing else takes one: not the other window, the bar or the dock.
+        assert_eq!(d.hit(0, 0), Hit::Window { id: a, x: 0, y: 0 });
+        assert_eq!(
+            d.hit(1364, 767),
+            Hit::Window {
+                id: a,
+                x: 959,
+                y: 539
+            }
+        );
+        assert_eq!(d.hit(1365, 384), Hit::Panel);
+        assert_eq!(d.to_content(a, 683, 384), Some((480, 270)));
+        let fb = d.get(b).unwrap().frame();
+        assert!(matches!(d.hit(fb.x + 20, fb.y + 40), Hit::Window { id, .. } if id == a));
+        // A part of the content covers its stretched pixels, within the picture.
+        assert_eq!(
+            d.shown_part(a, &Rect::new(0, 0, 960, 540)),
+            Some(Rect::new(0, 0, 1365, 768))
+        );
+        let one = d.shown_part(a, &Rect::new(480, 270, 1, 1)).unwrap();
+        assert!(one.contains(683, 384) && one.w <= 3 && one.h <= 3);
+        // A tall window: bands at the sides.
+        let mut tall = w;
+        tall.content = Rect::new(0, 0, 400, 800);
+        let side = d.full_rect(&tall);
+        assert_eq!((side.y, side.h, side.w), (0, 768, 384));
+        assert_eq!(side.x, (1366 - 384) / 2);
+        // At the screen's own size the picture is the screen.
+        d.resize(a, 1366, 768);
+        assert_eq!(d.full_rect(d.get(a).unwrap()), d.screen);
+        // Gone or hidden, the desktop is back.
+        d.set_hidden(a, true);
+        assert!(d.full_screen().is_none());
+        d.set_hidden(a, false);
+        assert!(d.full_screen().is_some());
+        d.remove(a);
+        assert!(d.full_screen().is_none());
+        d.set_full_screen(Some(a));
+        assert!(d.full_screen().is_none(), "no such window");
+    }
+
+    #[test]
+    fn full_screen_composes_the_picture_alone_and_damages_everything() {
+        let mut d = Desktop::new(80, 60);
+        let a = d.create(40, 20, "a").unwrap();
+        d.set_notice("");
+        let before = d.scene();
+        d.set_full_screen(Some(a));
+        let mut damage = Damage::new(d.screen);
+        before.damage(&d.scene(), &mut damage);
+        assert!(covers(&damage, &d.screen));
+        let mut buf = vec![0x123456u32; 80 * 60];
+        let mut out = canvas(&mut buf, 80, 60);
+        d.compose(&mut out, |w, c| {
+            // The content is asked for at its full-screen place.
+            assert_eq!(w.content, Rect::new(0, 10, 80, 40));
+            c.fill_rect(&w.content, rgb(0xFF, 0, 0));
+        });
+        assert_eq!(out.get(40, 5), Some(d.theme.full_screen), "a band");
+        assert_eq!(out.get(1, 30), Some(rgb(0xFF, 0, 0)));
+        assert_eq!(out.get(78, 48), Some(rgb(0xFF, 0, 0)));
+    }
+
+    #[test]
+    fn a_scaled_blit_fills_its_place_and_keeps_to_the_clip() {
+        let mut src_buf: Vec<u32> = (0..4 * 2).collect();
+        let src = canvas(&mut src_buf, 4, 2);
+        let mut buf = vec![99u32; 10 * 6];
+        let mut out = canvas(&mut buf, 10, 6);
+        out.blit_scaled(&src, &Rect::new(1, 1, 8, 4));
+        // Each source pixel becomes 2x2; nothing outside the place changes.
+        assert_eq!(out.get(1, 1), Some(0));
+        assert_eq!(out.get(2, 2), Some(0));
+        assert_eq!(out.get(3, 1), Some(1));
+        assert_eq!(out.get(8, 4), Some(7));
+        assert_eq!(out.get(0, 0), Some(99));
+        assert_eq!(out.get(9, 5), Some(99));
+        let mut clipped = out.clipped(&Rect::new(0, 0, 3, 3));
+        clipped.blit_scaled(&src, &Rect::new(0, 0, 10, 6));
+        assert_eq!(out.get(3, 3), Some(5), "outside the clip, as it was");
+        assert_eq!(out.get(0, 0), Some(0));
     }
 
     #[test]

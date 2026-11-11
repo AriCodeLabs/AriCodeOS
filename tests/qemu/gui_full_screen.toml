@@ -1,0 +1,83 @@
+# Full screen (the owner, 2026-11-11): F11 shows the focused window over the bar and
+# the dock, and so does the zoom circle of a window of a fixed size. Demo A is fixed
+# at 400x300, its frame at (40,40), so its content at (40,68) and its zoom circle at
+# (88,48). Full screen it is stretched at 4:3 to 1066x800 from x = 107, so the
+# pointer, at the centre of the 1280x800 screen, is its pixel (200,150). Demo D may
+# be resized: full screen its program is asked for 1280x800, and given 400x300 back.
+name = "gui.full_screen"
+description = "F11 and the zoom circle show a window full screen, stretched or resized, with clicks at its own pixels"
+level = "release"
+areas = ["gui"]
+cmdline = "qemu_exit gui shell gui_trace"
+install = ["examples/gui_demo"]
+stdin = ["run gui_demo 0", "run gui_demo 3", "shutdown"]
+timeout_secs = 120
+
+[host_input]
+marker = "gui_demo A: window presented"
+wait_ms = 300
+keys = ["f11"]
+
+[[host_input_then]]
+marker = "compositor: full screen on"
+wait_ms = 300
+screendump = "fixed"
+click = "left"
+
+[[host_input_then]]
+marker = "gui_demo A: click button 1 at (200,150)"
+keys = ["f11"]
+
+# Back on the desktop: the zoom circle of the fixed window takes it full screen too.
+[[host_input_then]]
+marker = "compositor: full screen off"
+wait_ms = 300
+mouse_rel = [-552, -352]
+click = "left"
+
+[[host_input_then]]
+marker = "compositor: full screen on"
+wait_ms = 300
+keys = ["a"]
+
+# Demo A ends full screen: its window goes, and full screen with it. Demo D, resizable:
+# asked for the whole screen, and back.
+[[host_input_then]]
+marker = "gui_demo D: window presented"
+wait_ms = 300
+keys = ["f11"]
+
+[[host_input_then]]
+marker = "compositor: window 2 is now 1280x800"
+wait_ms = 300
+screendump = "resized"
+keys = ["f11"]
+
+[[host_input_then]]
+marker = "compositor: window 2 is now 400x300"
+keys = ["q"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "compositor: notice: Full screen: F11 to leave",
+    "gui_demo A: click button 1 at (200,150)",
+    "gui_demo A: key 'a'",
+    "compositor: window 2 is now 1280x800",
+    "compositor: window 2 is now 400x300",
+    "gui_demo D: done",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_order = [
+    "compositor: full screen on",
+    "gui_demo A: click button 1 at (200,150)",
+    "compositor: full screen off",
+    "compositor: full screen on",
+    "gui_demo A: key 'a'",
+    "gui_demo A: window closed",
+    "compositor: full screen on",
+    "compositor: window 2 is now 1280x800",
+    "compositor: full screen off",
+    "compositor: window 2 is now 400x300",
+]
+serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW"]

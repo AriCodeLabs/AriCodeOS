@@ -57,6 +57,8 @@ const KEY_TAB: u16 = 15;
 const KEY_ESC: u16 = 1;
 const KEY_ENTER: u16 = 28;
 const KEY_F10: u16 = 68;
+/// Full screen, in or out: the desktop's, as Alt+Tab is.
+const KEY_F11: u16 = 87;
 const KEY_UP: u16 = 103;
 const KEY_LEFT: u16 = 105;
 const KEY_RIGHT: u16 = 106;
@@ -457,6 +459,8 @@ struct Compositor {
     notice_until: Option<u64>,
     /// A program asked for a copy of the screen, which is init's to ask: said once.
     said_capture: bool,
+    /// A resizable window shown full screen, and the place it goes back to.
+    full_back: Option<(u32, Rect)>,
     /// When the processor's heat is next looked at.
     heat_due_ms: u64,
     /// The processor's heat was said, and has not cooled since.
@@ -655,8 +659,7 @@ impl Compositor {
 
     /// A point of the screen in the content of window `id`.
     fn in_content(&self, id: u32, px: i32, py: i32) -> Option<(i32, i32)> {
-        let w = self.desktop.get(id)?;
-        Some((px - w.content.x, py - w.content.y))
+        self.desktop.to_content(id, px, py)
     }
 
     /// The window whose content is at a point of the screen: not its frame.
@@ -665,7 +668,10 @@ impl Compositor {
             Hit::Window { id, .. } => self
                 .desktop
                 .get(id)
-                .filter(|w| w.content.contains(px, py))
+                .filter(|w| {
+                    w.content.contains(px, py)
+                        || self.desktop.full_screen().is_some_and(|f| f.id == w.id)
+                })
                 .map(|w| w.id),
             _ => None,
         }
@@ -704,9 +710,6 @@ impl Compositor {
     /// once if the size stays; otherwise when its program answers with that size,
     /// so it is never shown cut.
     fn place(&mut self, id: u32, to: Rect, now_ms: u64) {
-        let Some(w) = self.desktop.get(id).copied() else {
-            return;
-        };
         // No size a program can be asked for is larger than the screen under the
         // bar, less the title bar, or than `MAX_SIDE`.
         let room = self.desktop.drag_bounds();
@@ -718,6 +721,14 @@ impl Compositor {
             to.w.clamp(1, max_w.max(1)),
             to.h.clamp(1, max_h.max(1)),
         );
+        self.place_exactly(id, to, now_ms);
+    }
+
+    /// [`place`](Self::place), at a size that may be the whole screen's: full screen.
+    fn place_exactly(&mut self, id: u32, to: Rect, now_ms: u64) {
+        let Some(w) = self.desktop.get(id).copied() else {
+            return;
+        };
         let Some(c) = self.content(id) else {
             return;
         };
@@ -825,8 +836,55 @@ impl Compositor {
                 let full = snap_content(aricode_gfx::Snap::Full, &work);
                 self.place(id, full, now_ms);
             }
-            None => {}
+            // A window of a fixed size cannot fill the work area: it goes full screen,
+            // stretched (the owner, 2026-11-11).
+            None => self.toggle_full_screen(id, now_ms),
         }
+    }
+
+    /// Shows `id` full screen, over the bar and the dock, or takes it back (F11, or
+    /// the zoom button of a window of a fixed size). A resizable window is asked for
+    /// the screen's size and given its own place back after; any other is stretched
+    /// at its proportions, and is until its program draws at the screen's size.
+    fn toggle_full_screen(&mut self, id: u32, now_ms: u64) {
+        let back = self.desktop.full_screen().map(|f| f.id);
+        self.leave_full_screen(now_ms);
+        if back == Some(id) {
+            return;
+        }
+        let Some(w) = self.desktop.get(id).copied() else {
+            return;
+        };
+        self.close_menu();
+        self.set_focus(id);
+        self.desktop.set_full_screen(Some(id));
+        if w.resizable {
+            self.full_back = Some((id, w.content));
+            let screen = self.desktop.screen;
+            let size = Rect::new(
+                w.content.x,
+                w.content.y,
+                screen.w.min(MAX_SIDE),
+                screen.h.min(MAX_SIDE),
+            );
+            self.place_exactly(id, size, now_ms);
+        }
+        self.pointer.moved = true;
+        self.show_notice("Full screen: F11 to leave", now_ms);
+        say(b"full screen on");
+    }
+
+    /// Back from full screen, if a window is: a resizable one to its place.
+    fn leave_full_screen(&mut self, now_ms: u64) {
+        if self.desktop.full_screen().is_none() && self.full_back.is_none() {
+            return;
+        }
+        self.desktop.set_full_screen(None);
+        if let Some((id, back)) = self.full_back.take() {
+            self.place_exactly(id, back, now_ms);
+        }
+        self.pointer.moved = true;
+        say(b"full screen off");
     }
 
     /// The pointer's picture: what a press would do where it is (ADR 0085).
@@ -964,6 +1022,10 @@ impl Compositor {
     }
 
     fn menu_press_on(&mut self, x: i32, y: i32) -> bool {
+        // Full screen there is no bar to press: its place is the picture's.
+        if self.desktop.full_screen().is_some() {
+            return false;
+        }
         match self.menu_under(x, y) {
             MenuHit::Title(menu) => {
                 let same = self.menu_open.is_some_and(|o| o.menu == menu);
@@ -1046,7 +1108,9 @@ impl Compositor {
             return false;
         }
         let Some(open) = self.menu_open else {
-            if ev.code == KEY_F10 && ev.value == 1 && self.focused_menus().is_some() {
+            // The bar is not shown full screen: F10 is the program's.
+            let shown = self.desktop.full_screen().is_none();
+            if ev.code == KEY_F10 && ev.value == 1 && shown && self.focused_menus().is_some() {
                 self.keys.keyboard.feed(ev);
                 self.set_menu(Some(MenuOpen {
                     menu: 0,
@@ -1568,10 +1632,22 @@ impl Compositor {
         if ev.kind != EV_KEY || !self.keys.repeat.follow(&ev, at) {
             return;
         }
-        // Alt+Tab is the desktop's: no window sees it.
+        // Alt+Tab is the desktop's: no window sees it. It leaves full screen first,
+        // or the window it brings would stay behind.
         if ev.code == KEY_TAB && ev.value == 1 && self.keys.keyboard.modifiers() & mods::ALT != 0 {
             self.keys.repeat.stop();
+            self.leave_full_screen(at);
             return self.cycle_windows();
+        }
+        // F11 too: full screen for the focused window, or back.
+        if ev.code == KEY_F11 {
+            if ev.value == 1 {
+                self.keys.repeat.stop();
+                if let Some(id) = self.desktop.focus {
+                    self.toggle_full_screen(id, at);
+                }
+            }
+            return;
         }
         if ev.code == KEY_LEFTALT && ev.value == 0 {
             self.switching = None;
@@ -2219,14 +2295,23 @@ impl Compositor {
     /// rectangles, at most once per `FRAME_MS` (changes that arrive sooner
     /// wait for the next frame and are merged into it).
     fn compose(&mut self, now_ms: u64) {
+        // A full-screen window keeps the focus: whatever takes it (a new window that
+        // opens in front, its own closing) ends full screen, so what has the keys shows.
+        if self
+            .desktop
+            .full_screen()
+            .is_some_and(|f| self.desktop.focus != Some(f.id))
+        {
+            self.leave_full_screen(now_ms);
+        }
         let scene = self.desktop.scene();
         self.shown.damage(&scene, &mut self.damage);
         self.shown = scene;
         for c in self.contents.iter_mut().flatten() {
             let Some(part) = c.dirty.take() else { continue };
             // A hidden window's pixels show when it does, through the scene.
-            if let Some(w) = self.desktop.get(c.id).filter(|w| !w.hidden) {
-                let at = Rect::new(w.content.x + part.x, w.content.y + part.y, part.w, part.h);
+            let shown = self.desktop.get(c.id).is_some_and(|w| !w.hidden);
+            if let Some(at) = self.desktop.shown_part(c.id, &part).filter(|_| shown) {
                 self.damage.add(&at);
             }
         }
@@ -2261,8 +2346,9 @@ impl Compositor {
                     // `SecondBuffer`, each checked to hold `width*height*4` bytes of
                     // the size it was given at; a resize drops the second.
                     let pixels = unsafe { core::slice::from_raw_parts_mut(c.virt as *mut u32, n) };
+                    // Full screen, `w.content` is where the picture is stretched to.
                     if let Some(src) = Canvas::new(pixels, c.width, c.height, c.width) {
-                        out.blit(&src, w.content.x, w.content.y);
+                        out.blit_scaled(&src, &w.content);
                     }
                 },
             );
@@ -2377,6 +2463,7 @@ fn main(inputs: u64) -> u64 {
         network_len: 0,
         notice_until: None,
         said_capture: false,
+        full_back: None,
         heat_due_ms: 0,
         heat_said: false,
         contents: (0..MAX_WINDOWS).map(|_| None).collect(),
