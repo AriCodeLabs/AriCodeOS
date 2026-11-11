@@ -575,17 +575,23 @@ fn run_user_program(name: &str) {
     info!("user: '{name}' exited: {status:?}");
 }
 
+/// Turns of the spin loop `shutdown` waits for the other CPUs to halt
+/// (interrupts are off: no clock); well over a second on any machine.
+const HALT_WAIT_SPINS: u64 = 200_000_000;
+
 /// Orderly shutdown requested from user space (`system_power`): with
 /// `qemu_exit` it terminates QEMU successfully; otherwise it powers the
 /// machine off through ACPI S5 and, if the firmware does not cooperate,
-/// halts the CPU.
+/// halts.
 ///
-/// Interrupts go off and the other CPUs are halted first, as Linux stops
-/// them before the S5 write (`native_machine_shutdown`), so no process
-/// runs from here on (before, the halt left the scheduler running). If
-/// the power stays on, the console takes the screen back from whoever held
-/// it (the desktop) and shows the last line: under a desktop it would
-/// otherwise go to serial only and leave a frozen picture (incident 0065).
+/// Interrupts go off and the other CPUs are halted before the S5 write, as
+/// Linux's `native_machine_shutdown` stops them, so no process runs from
+/// here on (before, the halt left the scheduler running). Linux also moves
+/// to the boot CPU first (`migrate_to_reboot_cpu`), which this does not:
+/// incident 0065 lists it among the differences to study. If the power
+/// stays on, the console takes the screen back from whoever held it (the
+/// desktop) and shows the last line, which says whether the write was
+/// made at all.
 pub fn shutdown() -> ! {
     println!("ARICODEOS_SHUTDOWN");
     if !QEMU_EXIT.load(Ordering::Relaxed) {
@@ -593,14 +599,42 @@ pub fn shutdown() -> ! {
         // here again, and the halt below then never wakes.
         unsafe { core::arch::asm!("cli", options(nomem, nostack)) };
         arch::x86_64::smp::halt_others();
+        let all = arch::x86_64::smp::others_halted(HALT_WAIT_SPINS);
+        println!(
+            "AriCodeOS: {} for the power-off",
+            if all {
+                "the other CPUs are halted"
+            } else {
+                "not every other CPU halted in time"
+            }
+        );
+        use arch::x86_64::power::PowerOff;
+        let screen = framebuffer::current();
+        let off = "halting (it is safe to switch off)";
         if POWEROFF_IGNORED.load(Ordering::Relaxed) {
-            println!("AriCodeOS: poweroff_ignored: the S5 write is skipped");
+            console::last_words(
+                screen,
+                format_args!("AriCodeOS: poweroff_ignored: the S5 write was skipped; {off}"),
+            );
         } else {
-            arch::x86_64::power::acpi_poweroff();
+            match arch::x86_64::power::acpi_poweroff() {
+                PowerOff::NoS5 => console::last_words(
+                    screen,
+                    format_args!("AriCodeOS: no ACPI power-off here (no FADT or \\_S5_); {off}"),
+                ),
+                PowerOff::NoPm1a(at) => console::last_words(
+                    screen,
+                    format_args!("AriCodeOS: no ACPI power-off here (PM1a control block {at:#x}); {off}"),
+                ),
+                PowerOff::Ignored { pm1a, pm1b, typ_a, typ_b, sci_en } => console::last_words(
+                    screen,
+                    format_args!(
+                        "AriCodeOS: ACPI power-off had no effect (S5 type {typ_a}/{typ_b} written to PM1a {pm1a:#x}, PM1b {pm1b:#x}, SCI_EN {}); {off}",
+                        sci_en as u8
+                    ),
+                ),
+            };
         }
-        console::take_screen_for_good();
-        println!("AriCodeOS: ACPI power-off had no effect; halting (it is safe to switch off)");
-        console::paint_all();
     }
     finish(qemu::ExitCode::Success)
 }

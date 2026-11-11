@@ -80,29 +80,66 @@ pub fn lend_framebuffer() -> Option<MmioSurface> {
     wait_fb().detach()
 }
 
-/// The machine is ending (a power-off the firmware ignored) and no process
-/// will run again, the other CPUs being halted: the console takes the
-/// screen back from its holders, if it had lent it, so its last lines are
-/// seen on the screen and not only on serial (incident 0065). The holders'
-/// mappings stay; nothing runs that could use them.
-pub fn take_screen_for_good() {
+/// The machine is ending (a power-off the firmware ignored), interrupts
+/// are off on this CPU and the other CPUs halted, so no process runs
+/// again: the console takes the screen back from its holders if it had
+/// lent it, or takes `screen` if it never had one (`gui` on the command
+/// line), and shows `last` on it, not only on serial (incident 0065). The
+/// holders' mappings stay; nothing runs that could use them. Whether the
+/// screen shows it.
+pub fn last_words(screen: boot_protocol::FramebufferInfo, last: core::fmt::Arguments) -> bool {
     let surface = {
         let mut lease = LEASE.lock();
         lease.lent.take().or_else(|| lease.returned.take())
     };
     HELD.store(false, Ordering::Release);
-    if let Some(surface) = surface {
-        wait_fb().reattach(surface);
-        log::info!("console: the screen is the console's again for the machine's last lines");
+    // Bounded: a CPU that panicked while holding the console is not halted
+    // by anyone (this one has interrupts off), and serial still works.
+    let Some(mut guard) = fb_guard_for(LAST_WORDS_SPINS) else {
+        write_serial(format_args!("{last}\n"));
+        return false;
+    };
+    let base =
+        |info: boot_protocol::FramebufferInfo| crate::memory::phys::phys_to_virt(info.address);
+    match surface {
+        Some(surface) => guard.reattach(surface),
+        None if !guard.is_attached() && screen.address != 0 => {
+            if let Some(surface) = MmioSurface::new(screen, base(screen)) {
+                guard.attach(surface);
+            }
+        }
+        None => {}
     }
-    paint_all();
+    let shown = guard.is_attached();
+    let _ = Serial.write_fmt(format_args!("{last}\n"));
+    guard.write_deferred(format_args!("{last}\n"));
+    // Whole, whatever the interrupt state: no tick is left to lose
+    // (incident 0031 is why every other path paints a row per hold).
+    guard.redraw(usize::MAX);
+    drop(guard);
+    write_serial(format_args!(
+        "console: {}\n",
+        if shown {
+            "the last lines are on the screen"
+        } else {
+            "no screen for the last lines"
+        }
+    ));
+    shown
 }
 
-/// Paints everything pending at once, whatever the interrupt state: for
-/// the end of the machine only, where no tick is left to lose (incident
-/// 0031 is why every other path paints a row per hold).
-pub fn paint_all() {
-    wait_fb().redraw(usize::MAX);
+/// Turns of the spin loop [`last_words`] waits for the console's lock.
+const LAST_WORDS_SPINS: u64 = 50_000_000;
+
+/// The console's lock within `spins` turns, whatever the interrupt state.
+fn fb_guard_for(spins: u64) -> Option<FbGuard> {
+    for _ in 0..spins {
+        if let Some(g) = FB.try_lock() {
+            return Some(g);
+        }
+        core::hint::spin_loop();
+    }
+    None
 }
 
 /// Takes the lent screen back and redraws the console's text on it (the

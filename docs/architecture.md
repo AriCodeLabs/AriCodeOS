@@ -1878,6 +1878,12 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
   the S5 sleep types; `power::acpi_poweroff` enables ACPI mode through
   `SMI_CMD` if needed and writes `SLP_TYP | SLP_EN`. `shutdown` uses it unless
   `qemu_exit` is set (scenario `power.acpi_shutdown`).
+- Since incident 0065 `shutdown` first turns interrupts off and halts the
+  other CPUs (counting them halted, `smp::others_halted`); if the power stays
+  on, `console::last_words` takes the screen back from the desktop (or takes
+  it, under `gui`) and shows a last line saying whether the S5 write was made
+  and with what values (`power::PowerOff`). `poweroff_ignored` (tests only)
+  skips the write (scenario `power.poweroff_ignored_desktop`).
 - `aricode-lineedit`: the shell's line editor (cursor movement, insert and
   delete anywhere, Home/End, Ctrl-A/E/U, history), redrawing with plain text
   and backspace only; the framebuffer console's backspace wraps to the

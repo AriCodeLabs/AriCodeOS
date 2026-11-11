@@ -1,9 +1,12 @@
 # Incident 0065: on the office Lenovo the firmware ignored the S5 write and
 # the desktop stayed frozen on screen, since the kernel's last line went to
 # serial only while the compositor held the screen. `poweroff_ignored`
-# skips the S5 write as that firmware did; the kernel must then halt every
-# CPU, take the screen back from the compositor and show its last lines. The
-# runner cuts the power on the last line: QEMU stays on, as that machine did.
+# skips the S5 write as that firmware did; the kernel must then halt the
+# other CPU (two here, so the halt is exercised), take the screen back from
+# the compositor and paint its last lines there. The runner cuts the power
+# once the console says the lines are on the screen: QEMU stays on, as that
+# machine did. (The pixels themselves are not compared: the console's
+# repaint after a reattach is host-tested in `aricode-fb-console`.)
 name = "power.poweroff_ignored_desktop"
 description = "a power-off the firmware ignores ends with the console's last lines on screen, not a frozen desktop"
 level = "release"
@@ -16,24 +19,42 @@ disk = "usb-image"
 install = ["desktop/launcher"]
 stick_profiles = ["desktop:launcher"]
 timeout_secs = 120
+cpus = 2
 
 [[boots]]
 cmdline = "shell poweroff_ignored"
 stdin = ["sleep 12000", "shutdown"]
-kill_on = "AriCodeOS: ACPI power-off had no effect; halting (it is safe to switch off)"
+kill_on = "console: the last lines are on the screen"
 [boots.expect]
 killed = true
 serial_contains = [
     "launcher: ready",
     "console: the screen is lent to process",
-    "AriCodeOS: poweroff_ignored: the S5 write is skipped",
-    "console: the screen is the console's again for the machine's last lines",
+    "AriCodeOS: the other CPUs are halted for the power-off",
+    "AriCodeOS: poweroff_ignored: the S5 write was skipped; halting (it is safe to switch off)",
+    "console: the last lines are on the screen",
 ]
 serial_order = [
     "AriCodeOS: shutting down",
     "ARICODEOS_SHUTDOWN",
-    "AriCodeOS: poweroff_ignored: the S5 write is skipped",
-    "console: the screen is the console's again for the machine's last lines",
-    "AriCodeOS: ACPI power-off had no effect; halting (it is safe to switch off)",
+    "AriCodeOS: the other CPUs are halted for the power-off",
+    "AriCodeOS: poweroff_ignored: the S5 write was skipped; halting (it is safe to switch off)",
+    "console: the last lines are on the screen",
 ]
-serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW"]
+serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "not every other CPU halted in time"]
+
+# With `gui` on the command line the console never had the screen: it takes
+# the screen as it stands for its last lines all the same.
+[[boots]]
+cmdline = "gui shell poweroff_ignored"
+stdin = ["sleep 6000", "shutdown"]
+kill_on = "console: the last lines are on the screen"
+[boots.expect]
+killed = true
+serial_order = [
+    "ARICODEOS_SHUTDOWN",
+    "AriCodeOS: the other CPUs are halted for the power-off",
+    "AriCodeOS: poweroff_ignored: the S5 write was skipped; halting (it is safe to switch off)",
+    "console: the last lines are on the screen",
+]
+serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "not every other CPU halted in time"]

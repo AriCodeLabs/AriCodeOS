@@ -29,22 +29,40 @@ pub fn reboot() -> ! {
     crate::halt_loop()
 }
 
+/// What [`acpi_poweroff`] did, for the line said when the machine is
+/// still running afterwards (incident 0065: a report must tell a write the
+/// firmware ignored from one never made).
+#[derive(Clone, Copy, Debug)]
+pub enum PowerOff {
+    /// No FADT, or no `\_S5_` package found in the DSDT or SSDTs.
+    NoS5,
+    /// The PM1a control block is missing or not an I/O port.
+    NoPm1a(u32),
+    /// The write was made and the machine is still on.
+    Ignored {
+        pm1a: u32,
+        pm1b: u32,
+        typ_a: u8,
+        typ_b: u8,
+        sci_en: bool,
+    },
+}
+
 /// ACPI power-off: switches the firmware to ACPI mode if needed and writes
 /// `SLP_TYPx | SLP_EN` to the PM1 control blocks (sleep state S5). Returns
-/// only if the machine is still running afterwards (no FADT or `\_S5_`, or
-/// firmware that ignores the request).
-pub fn acpi_poweroff() {
+/// only if the machine is still running afterwards, saying why.
+pub fn acpi_poweroff() -> PowerOff {
     let Some((fadt, (typ_a, typ_b))) = crate::acpi::with(|a| a.fadt.zip(a.s5)) else {
-        return;
+        return PowerOff::NoS5;
     };
     if fadt.pm1a_cnt == 0 || fadt.pm1a_cnt > u16::MAX as u32 {
-        return;
+        return PowerOff::NoPm1a(fadt.pm1a_cnt);
     }
     const SCI_EN: u16 = 1;
     const SLP_EN: u16 = 1 << 13;
     let pm1a = fadt.pm1a_cnt as u16;
     // SAFETY: ports declared by the firmware in the FADT for exactly this.
-    unsafe {
+    let sci_en = unsafe {
         if inw(pm1a) & SCI_EN == 0 && fadt.smi_cmd != 0 && fadt.acpi_enable != 0 {
             outb(fadt.smi_cmd as u16, fadt.acpi_enable);
             for _ in 0..3_000_000 {
@@ -54,6 +72,7 @@ pub fn acpi_poweroff() {
                 core::hint::spin_loop();
             }
         }
+        let sci_en = inw(pm1a) & SCI_EN != 0;
         if fadt.pm1b_cnt != 0 && fadt.pm1b_cnt <= u16::MAX as u32 {
             let pm1b = fadt.pm1b_cnt as u16;
             outw(
@@ -65,8 +84,16 @@ pub fn acpi_poweroff() {
             pm1a,
             (inw(pm1a) & !(7 << 10)) | ((typ_a as u16) << 10) | SLP_EN,
         );
-    }
+        sci_en
+    };
     for _ in 0..10_000_000 {
         core::hint::spin_loop();
+    }
+    PowerOff::Ignored {
+        pm1a: fadt.pm1a_cnt,
+        pm1b: fadt.pm1b_cnt,
+        typ_a,
+        typ_b,
+        sci_en,
     }
 }
