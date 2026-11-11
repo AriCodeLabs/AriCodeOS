@@ -5,7 +5,7 @@
 # client read's deadline (here the console bridge's 20 ms reads, so this
 # run does not time the 250 ms itself: `aricode_ehci::poll_wait` is
 # host-tested for that). Three seconds after the boot services completed,
-# the host plugs a USB keyboard into it over QMP (`[host_hotplug]`): the
+# the host plugs a USB keyboard into it over QMP (`[[host_hotplug]]`): the
 # driver must see the connection, debounce it, enumerate the keyboard and
 # serve it, as on a real machine where a keyboard is plugged into a port
 # nobody was using.
@@ -18,7 +18,7 @@ usb_legacy_controller = true
 timeout_secs = 90
 stdin = ["sleep 9000", "shutdown"]
 
-[host_hotplug]
+[[host_hotplug]]
 marker = "AriInit: boot services completed"
 delay_ms = 3000
 driver = "usb-kbd"
@@ -34,4 +34,6 @@ serial_contains = [
     "[host] hotplug: usb-kbd added on ehci.0 as hotkbd",
     "ARICODEOS_SHUTDOWN",
 ]
-serial_absent = ["KERNEL PANIC", "hotplug: usb-kbd on ehci.0 failed", "marker 'AriInit: boot services completed' never seen"]
+# A hot-plug stage that did not run or that QEMU refused fails every
+# scenario (`test.rs`, incident 0059).
+serial_absent = ["KERNEL PANIC"]

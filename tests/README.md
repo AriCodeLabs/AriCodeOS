@@ -96,6 +96,8 @@ selftest = true                 # default: init also runs its test clients (they
 timeout_secs = 30
 stdin = ["ls", "shutdown"]      # optional: lines the runner types on the serial console
 prompt = "ari> "                # each line is sent when the prompt appears once more (default "ari> ")
+stdin_after_input = true         # optional: the lines wait until every [host_input] stage is done
+                                 # (end with `shutdown` after the last stage, not after a fixed sleep)
 
 [host_tcp]                      # optional: TCP probe from the host into the guest (hostfwd 127.0.0.1:<port of the run> -> :7)
 marker = "TCP_LISTEN_READY"     # when seen on the serial, xtask connects and sends payload
@@ -120,6 +122,8 @@ usb_hid_only_input = true       # no virtio keyboard/mouse, so QMP input reaches
 usb_hid_msi = true              # that xHCI offers MSI only, no MSI-X (like 2012 Intel controllers)
 usb_hid_msi_and_msix = true     # that xHCI offers both (a refused MSI-X falls back to MSI, ADR 0051)
 usb_storage = true              # the test disk hangs off the xHCI as USB mass storage; there is no virtio-blk
+usb_xhci = true                 # an xHCI with nothing attached at boot and eight USB 2 ports (bus xhci.0), for [[host_hotplug]]
+usb_spare_disk = true           # a blank 1 MiB drive `spare` attached to nothing, for a [[host_hotplug]] stage with drive = "spare"
 host_https = true               # two host HTTPS servers (openssl s_server -www) on ports chosen per run, written {https_port} (cert from a
                                 # test CA installed as trusted_ca.der) and {https_untrusted_port} (self-signed) in stdin, kill_on and expect
 
@@ -160,19 +164,26 @@ packages = ["examples/hello_ext:2", "examples/hello_ext:3:corrupt"]  # pending p
 staged = ["examples/hello_ext:2:wrong-hash"]  # packages already staged for `run installer 2` (DIR:VERSION[:wrong-hash])
 staged_bad_path = true          # adds a staged line naming pkgs/evil.aripkg
 
-[host_hotplug]                  # optional: a device plugged in through QMP device_add
-marker = "AriInit: boot services completed"
+[[host_hotplug]]                # optional, repeatable: devices plugged in and out through QMP, one stage at a time
+marker = "AriInit: boot services completed"   # each stage looks for its marker only in what the guest printed after
+                                # the stage before it ran, so it runs only once the guest answered that one (incident 0059)
 delay_ms = 3000                 # after the marker (default 0): e.g. a driver gone idle first
-driver = "usb-kbd"              # QEMU device, bus and id: letters, digits, '.', '_' and '-' only
+action = "add"                  # add (default: device_add) or remove (device_del of `id`, which then names only the id)
+driver = "usb-kbd"              # add: QEMU device, bus, optional bus port and id: letters, digits, '.', '_' and '-' only
 bus = "ehci.0"
-id = "hotkbd"                   # result in "[host] hotplug: ..."; with [[boots]], on every boot (each is a new QEMU).
-                                # Not with [host_input]: QEMU's QMP socket serves one client at a time
+port = "2"
+drive = "spare"                 # add: the QEMU drive behind a storage device (optional; usb_spare_disk)
+id = "hotkbd"                   # result in "[host] hotplug: usb-kbd added on ehci.0 port 2 as hotkbd" / "hotkbd removed".
+                                # A stage that never ran ("[host] hotplug: marker '...' never seen; stage N not run") or that
+                                # QEMU refused ("[host] hotplug failed: ...") fails the scenario whatever it expects. A stage
+                                # waits while an input stage holds QEMU's single QMP connection. With [[boots]], on every boot.
 
 [host_input]                    # optional: input injected through QMP when marker is seen
 marker = "INPUT_READY"
 keys = ["h", "o", "l", "a", "ret"]   # QEMU qcode names, press and release on kbd0; "shift+dot" holds the modifiers while the key is pressed
 mouse_rel = [10, -5]            # relative movement on mouse0
 click = "left"                  # button pressed and released; result in "[host] QMP: ..."
+button_down = "left"            # a button pressed and left held when the stage ends (e.g. before an unplug)
 screendump = "name"             # a picture of the screen, build/scenarios/<scenario>/name.ppm, before anything of this stage is sent
 key_delay_ms = 30               # minimum pause after each key event (default 0)
 echo_prompt = "ari> "           # the guest prints this before each line and echoes typed characters: each line waits for it and each

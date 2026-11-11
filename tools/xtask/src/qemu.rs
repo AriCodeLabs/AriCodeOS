@@ -28,6 +28,11 @@ pub struct UsbOptions {
     /// The test disk hangs off the xHCI as USB storage (`usb-storage`)
     /// instead of virtio-blk (ADR 0023).
     pub storage: bool,
+    /// The xHCI even with nothing attached at boot, with eight USB 2 ports
+    /// (hot-plug).
+    pub xhci: bool,
+    /// A blank 1 MiB drive `spare` attached to no device (hot-plug).
+    pub spare_disk: bool,
     /// An EHCI with a USB keyboard and mouse (high speed) for the EHCI
     /// driver (ADR 0031).
     pub ehci_hid: bool,
@@ -155,6 +160,17 @@ fn base_command(
             "virtio-blk-pci,drive=disk0,disable-legacy=on,disable-modern=off,iommu_platform=on",
         ]);
     }
+    // A blank second disk attached to nothing: a hot-plug stage plugs it in
+    // as a second USB stick (`drive = "spare"`). A file that cannot be made
+    // makes QEMU refuse to start, which the run reports.
+    if usb.spare_disk {
+        let spare = disk.with_file_name("spare.img");
+        let _ = std::fs::File::create(&spare).and_then(|f| f.set_len(1 << 20));
+        q.args([
+            "-drive",
+            &format!("if=none,id=spare,format=raw,file={}", spare.display()),
+        ]);
+    }
     q.args([
         "-drive",
         &format!("if=pflash,format=raw,readonly=on,file={OVMF_CODE}"),
@@ -212,7 +228,7 @@ fn base_command(
             "virtio-mouse-pci,id=mouse0,disable-legacy=on,disable-modern=off,iommu_platform=on",
         ]);
     }
-    if usb.hid || usb.storage {
+    if usb.hid || usb.storage || usb.xhci {
         // xHCI (Phase 25, part two) with a USB HID keyboard and mouse and/or
         // the test disk as USB storage.
         let xhci = match (usb.hid_msi, usb.hid_msi_and_msix) {
@@ -220,7 +236,10 @@ fn base_command(
             (false, true) => "qemu-xhci,id=xhci,msi=on,msix=on",
             (false, false) => "qemu-xhci,id=xhci",
         };
-        q.args(["-device", xhci]);
+        // Hot-plug runs get eight USB 2 ports instead of four: room for a
+        // device beyond the driver's four (`MAX_DEVICES`).
+        let ports = if usb.xhci { ",p2=8" } else { "" };
+        q.args(["-device", &format!("{xhci}{ports}")]);
         if usb.hid {
             q.args(["-device", "usb-kbd,bus=xhci.0"]);
             q.args(["-device", "usb-mouse,bus=xhci.0"]);
@@ -250,24 +269,63 @@ fn base_command(
     q
 }
 
-/// QMP hot-plug: `delay` after `marker` appears in the serial output, the
-/// device `driver` is added on `bus` with `id` (`device_add`).
+/// What a QMP hot-plug stage does.
+pub enum HotplugAction<'a> {
+    /// `device_add` of `driver` on `bus`, at `port` if given.
+    Add {
+        driver: &'a str,
+        bus: &'a str,
+        port: Option<&'a str>,
+        drive: Option<&'a str>,
+    },
+    /// `device_del`.
+    Remove,
+}
+
+/// One QMP hot-plug stage: `delay` after `marker` appears in the serial
+/// output (after the stage before it ran), the device `id` is added or
+/// removed.
 pub struct Hotplug<'a> {
     pub marker: &'a str,
     pub delay: Duration,
-    pub driver: &'a str,
-    pub bus: &'a str,
+    pub action: HotplugAction<'a>,
     pub id: &'a str,
 }
 
-fn run_hotplug(path: &Path, driver: &str, bus: &str, id: &str) -> String {
+/// How a hot-plug stage that QEMU refused starts (`test.rs` fails every
+/// scenario that shows it).
+pub const HOTPLUG_FAILED: &str = "[host] hotplug failed: ";
+
+fn run_hotplug(path: &Path, stage: &Hotplug) -> String {
     // Names checked by the scenario loader: plain names, safe in JSON.
-    let command = format!(
-        r#"{{"execute":"device_add","arguments":{{"driver":"{driver}","bus":"{bus}","id":"{id}"}}}}"#
-    );
+    let id = stage.id;
+    let (command, done, failed) = match stage.action {
+        HotplugAction::Add {
+            driver,
+            bus,
+            port,
+            drive,
+        } => {
+            let at = port.map_or(String::new(), |p| format!(r#","port":"{p}""#))
+                + &drive.map_or(String::new(), |d| format!(r#","drive":"{d}""#));
+            let where_ = port.map_or(String::new(), |p| format!(" port {p}"));
+            (
+                format!(
+                    r#"{{"execute":"device_add","arguments":{{"driver":"{driver}","bus":"{bus}"{at},"id":"{id}"}}}}"#
+                ),
+                format!("{driver} added on {bus}{where_} as {id}"),
+                format!("adding {driver} on {bus} as {id}"),
+            )
+        }
+        HotplugAction::Remove => (
+            format!(r#"{{"execute":"device_del","arguments":{{"id":"{id}"}}}}"#),
+            format!("{id} removed"),
+            format!("removing {id}"),
+        ),
+    };
     match Qmp::connect(path).and_then(|mut q| q.execute(&command)) {
-        Ok(()) => format!("[host] hotplug: {driver} added on {bus} as {id}"),
-        Err(e) => format!("[host] hotplug: {driver} on {bus} failed: {e}"),
+        Ok(()) => format!("[host] hotplug: {done}"),
+        Err(e) => format!("{HOTPLUG_FAILED}{failed}: {e}"),
     }
 }
 
@@ -280,6 +338,8 @@ pub struct InputProbe<'a> {
     /// `count` moves of (dx, dy), one every `every_ms` (`HostInput`).
     pub mouse_steps: Option<(u32, i32, i32, u64)>,
     pub click: Option<&'a str>,
+    /// A button pressed and left held.
+    pub button_down: Option<&'a str>,
     /// The left button down, a move by (dx, dy), and up.
     pub drag: Option<(i32, i32)>,
     /// The left button down, `count` moves of (dx, dy) one every `every_ms`, and up.
@@ -364,6 +424,7 @@ struct Pointing {
     rel: Option<(i32, i32)>,
     steps: Option<(u32, i32, i32, u64)>,
     click: Option<String>,
+    button_down: Option<String>,
     drag: Option<(i32, i32)>,
     drag_steps: Option<(u32, i32, i32, u64)>,
     hold_key: Option<(String, u64)>,
@@ -438,6 +499,14 @@ fn run_input_probe(
                     )],
                 )?;
             }
+        }
+        if let Some(button) = &pointing.button_down {
+            step(
+                &mut qmp,
+                &[format!(
+                    r#"{{"type":"btn","data":{{"down":true,"button":"{button}"}}}}"#
+                )],
+            )?;
         }
         // A drag is one move 100 ms after the press, and the release 100 ms later;
         // a stroke is many, each as a mouse sends them.
@@ -1388,6 +1457,8 @@ pub struct Capture {
 pub struct Input<'a> {
     pub prompt: &'a str,
     pub lines: &'a [String],
+    /// The lines wait until every input stage is done.
+    pub after_input: bool,
 }
 
 fn count_occurrences(haystack: &[u8], needle: &[u8]) -> usize {
@@ -1409,7 +1480,9 @@ pub struct Headless<'a> {
     /// QMP input in stages: each one waits for its marker, after the
     /// stage before it is done.
     pub input_probe: Vec<InputProbe<'a>>,
-    pub hotplug: Option<Hotplug<'a>>,
+    /// QMP hot-plug in stages, each after its marker, once the stage before
+    /// it ran and while no input stage holds the QMP connection.
+    pub hotplug: Vec<Hotplug<'a>>,
     pub disk_variant: image::DiskVariant,
     pub disk_readonly: bool,
     /// Reuses the previous boot's test disk instead of building it again
@@ -1541,8 +1614,10 @@ pub fn run_headless(
     let mut input_results: Vec<String> = Vec::new();
     // Where in the capture the current input stage started.
     let mut stage_from = 0usize;
-    let mut hotplug_result: Option<String> = None;
-    // When the hot-plug marker was first seen.
+    let mut hotplug_results: Vec<String> = Vec::new();
+    // Where in the capture the current hot-plug stage looks for its marker,
+    // and when it saw it.
+    let mut hotplug_from = 0usize;
     let mut hotplug_seen: Option<Instant> = None;
     let mut ssh_result: Option<String> = None;
     let mut ssh_thread: Option<std::thread::JoinHandle<String>> = None;
@@ -1574,8 +1649,9 @@ pub fn run_headless(
                 break None;
             }
         }
-        let input_held =
-            options.flood.is_some() && !flood_ready.load(std::sync::atomic::Ordering::SeqCst);
+        let input_held = (options.flood.is_some()
+            && !flood_ready.load(std::sync::atomic::Ordering::SeqCst))
+            || (input.after_input && input_results.len() < input_probes.len());
         if sent < input.lines.len() && !input_held {
             let prompts =
                 count_occurrences(&captured.lock().expect("capture"), input.prompt.as_bytes());
@@ -1630,14 +1706,22 @@ pub fn run_headless(
                 }));
             }
         }
-        if let (Some(h), None) = (options.hotplug.as_ref(), &hotplug_result) {
-            if hotplug_seen.is_none()
-                && count_occurrences(&captured.lock().expect("capture"), h.marker.as_bytes()) > 0
-            {
-                hotplug_seen = Some(Instant::now());
+        if let Some(h) = options.hotplug.get(hotplug_results.len()) {
+            if hotplug_seen.is_none() {
+                let capture = captured.lock().expect("capture");
+                let from = hotplug_from.min(capture.len());
+                if count_occurrences(&capture[from..], h.marker.as_bytes()) > 0 {
+                    hotplug_seen = Some(Instant::now());
+                }
             }
-            if hotplug_seen.is_some_and(|t| t.elapsed() >= h.delay) {
-                hotplug_result = Some(run_hotplug(qmp.path(), h.driver, h.bus, h.id));
+            // QEMU's QMP socket serves one client: not while an input
+            // stage holds it.
+            if input_thread.is_none() && hotplug_seen.is_some_and(|t| t.elapsed() >= h.delay) {
+                // The next stage looks from here: what the guest prints in
+                // answer may come before `device_add` returns.
+                hotplug_from = captured.lock().expect("capture").len();
+                hotplug_results.push(run_hotplug(qmp.path(), h));
+                hotplug_seen = None;
             }
         }
         if let Some(p) = input_probes.get(input_results.len()) {
@@ -1657,6 +1741,7 @@ pub fn run_headless(
                     rel: p.mouse_rel,
                     steps: p.mouse_steps,
                     click: p.click.map(String::from),
+                    button_down: p.button_down.map(String::from),
                     drag: p.drag,
                     drag_steps: p.drag_steps,
                     hold_key: p.hold_key.map(|(k, ms)| (k.to_string(), ms)),
@@ -1717,29 +1802,30 @@ pub fn run_headless(
     drop(qmp);
     reader.join().map_err(|_| "serial reader")?;
     let mut bytes = captured.lock().expect("capture").clone();
-    let hotplug_result = hotplug_result.or_else(|| {
-        options.hotplug.as_ref().map(|h| {
-            if hotplug_seen.is_some() {
-                return format!(
-                    "[host] hotplug: marker '{}' seen, but QEMU ended before the delay; nothing added",
-                    h.marker
-                );
-            }
+    // Stages that did not run are said too.
+    let ran = hotplug_results.len();
+    for (k, h) in options.hotplug.iter().enumerate().skip(ran) {
+        let first = k == ran;
+        hotplug_results.push(if first && hotplug_seen.is_some() {
             format!(
-                "[host] hotplug: marker '{}' never seen; nothing added",
-                h.marker
+                "[host] hotplug: marker '{}' seen, but QEMU ended before the delay; stage {} not run",
+                h.marker,
+                k + 1
             )
-        })
-    });
+        } else {
+            format!(
+                "[host] hotplug: marker '{}' never seen; stage {} not run",
+                h.marker,
+                k + 1
+            )
+        });
+    }
     for line in [probe_result]
         .into_iter()
         .flatten()
         .chain(input_results)
-        .chain(
-            [ssh_result, flood_result, hotplug_result]
-                .into_iter()
-                .flatten(),
-        )
+        .chain([ssh_result, flood_result].into_iter().flatten())
+        .chain(hotplug_results)
     {
         bytes.extend_from_slice(format!("\n{line}\n").as_bytes());
     }

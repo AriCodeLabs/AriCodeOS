@@ -38,7 +38,7 @@ the evidence is recorded in `docs/hardware.md`.
 | Threads, preemptive scheduler, SMP (APs, IPIs, TLB shootdown, affinity) | validated in QEMU (1 and 4 CPUs) | `threads.*`, `scheduler.*`, `smp.*`, `--cpus 4` |
 | Ring 3 processes, syscalls, handles with rights, revocation, IPC with handle transfer | validated in QEMU | `user.*`, `capabilities.*`, `ipc.*` |
 | init as device manager and capability broker; per-manifest sandbox | validated in QEMU | `init.*`, `sandbox.*` |
-| Ring 3 drivers: virtio-blk, virtio-net, virtio-input, xHCI + USB HID | validated in QEMU | `drivers.*`, `virtio.*`, `storage.*`, `network.*`, `input.*`, `usb.*` |
+| Ring 3 drivers: virtio-blk, virtio-net, virtio-input, xHCI + USB HID (plugged in or out while running, ADR 0087) | validated in QEMU | `drivers.*`, `virtio.*`, `storage.*`, `network.*`, `input.*`, `usb.*` |
 | AriFS (files, private directories per app, CRC32, atomic replace with a journal, `flush`) | validated in QEMU and with power cuts injected on the host | `filesystem.*`; ADR 0014 fixes the contract under power cuts |
 | IPv4 networking: DHCP, ARP, ICMP, UDP, TCP, DNS, HTTP client | prototype, validated in QEMU | `network.*`; no TLS, no DHCP renewal |
 | `arish` shell over the serial console, a PS/2 keyboard or USB/virtio keyboards (console bridge) | validated in QEMU | `shell.*`, `console.*` |

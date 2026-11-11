@@ -1640,8 +1640,16 @@ services/usb-input             usbd: xHCI controller, enumeration, interrupt end
 - Events: the event ring is consumed using the cycle bit;
   `Transfer Event`s are matched to their TRB by physical address, the report
   is decoded (keyboard: modifier and usage differences; mouse:
-  buttons, dx/dy, wheel) and the TRB is requeued. `Port Status
-  Change` events only clear the change bits.
+  buttons, dx/dy, wheel) and the TRB is requeued.
+- Hot-plug (ADR 0087): `Port Status Change` events clear the change bits
+  and are classified by `aricode_xhci::hotplug::port_action`. A HID device
+  whose port saw a connect change (or was disabled under it) has its held
+  keys and buttons released at once and is detached by the idle loop (Stop
+  Endpoint, Disable Slot, its memory pooled for the next device); a new
+  connection is debounced (100 ms without a change) and enumerated from the
+  idle loop like at boot, retried with a port reset. A fifth device, an
+  unsupported one and storage plugged in after boot are refused on the
+  console; external hubs are not enumerated. Scenario `usb.xhci_hotplug`.
 - A single input device for the whole controller
   (`USB HID Keyboard+Mouse`); `input_client` and the compositor route by
   event type, not by device.

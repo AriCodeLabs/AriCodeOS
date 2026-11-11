@@ -38,7 +38,7 @@ hardware`, que se ha ejercitado en el portátil y la evidencia está en
 | Hilos, scheduler preemptivo, SMP (APs, IPI, TLB shootdown, afinidad) | validado en QEMU (1 y 4 CPUs) | `threads.*`, `scheduler.*`, `smp.*`, `--cpus 4` |
 | Procesos ring 3, syscalls, handles con derechos, revocación, IPC con transferencia | validado en QEMU | `user.*`, `capabilities.*`, `ipc.*` |
 | init como device manager y broker de capabilities; sandbox por manifiesto | validado en QEMU | `init.*`, `sandbox.*` |
-| Drivers en ring 3: virtio-blk, virtio-net, virtio-input, xHCI + USB HID | validado en QEMU | `drivers.*`, `virtio.*`, `storage.*`, `network.*`, `input.*`, `usb.*` |
+| Drivers en ring 3: virtio-blk, virtio-net, virtio-input, xHCI + USB HID (conectados o retirados en marcha, ADR 0087) | validado en QEMU | `drivers.*`, `virtio.*`, `storage.*`, `network.*`, `input.*`, `usb.*` |
 | AriFS (ficheros, directorios privados por app, CRC32, reemplazo atómico con journal, `flush`) | validado en QEMU y con cortes inyectados en host | `filesystem.*`; ADR 0014 fija el contrato ante cortes |
 | Red IPv4: DHCP, ARP, ICMP, UDP, TCP, DNS, cliente HTTP | prototipo, validado en QEMU | `network.*`; sin TLS ni renovación DHCP |
 | Shell `arish` por consola serie, teclado PS/2 o teclados USB/virtio (puente de consola) | validado en QEMU | `shell.*`, `console.*` |

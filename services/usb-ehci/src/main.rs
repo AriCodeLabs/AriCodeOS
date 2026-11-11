@@ -2358,18 +2358,18 @@ impl Ehci {
                 continue;
             }
             self.pipe_free(hid.pipe);
-            // An empty report releases every key and button still held, so
-            // nothing stays pressed after an unplug.
+            // Every key and button still held is released, so nothing
+            // stays pressed after an unplug.
             let mut out = [Event::default(); MAX_REPORT_EVENTS];
             let mut decoder = hid.decoder;
             let n = match &mut decoder {
                 Decoder::Keyboard(k) => {
                     self.keyboards -= 1;
-                    k.feed(&[0; 8], &mut out)
+                    k.release_all(&mut out)
                 }
                 Decoder::Mouse(m) => {
                     self.mice -= 1;
-                    m.feed(&[0; 4], &mut out)
+                    m.release_all(&mut out)
                 }
             };
             let now = self.now();
