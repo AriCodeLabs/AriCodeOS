@@ -116,13 +116,13 @@ unsafe impl GlobalAlloc for KernelHeap {
         if let Some(p) = first {
             return p.as_ptr();
         }
-        // Does not fit: grow enough for this request (with some slack) and
-        // retry with a fresh lock.
-        let need = (layout.size() as u64)
-            .saturating_add(layout.align() as u64)
-            .saturating_add(64)
-            .max(HEAP_CHUNK);
-        if grow(need).is_err() {
+        // Does not fit: grow by what the allocator needs to serve this
+        // request from fresh memory (its rounding included, incident 0066),
+        // at least a chunk, and retry with a fresh lock.
+        let Some(need) = aricode_heap::region_size_for(layout) else {
+            return core::ptr::null_mut();
+        };
+        if grow((need as u64).max(HEAP_CHUNK)).is_err() {
             return core::ptr::null_mut();
         }
         self.heap
@@ -133,7 +133,8 @@ unsafe impl GlobalAlloc for KernelHeap {
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         if let Some(p) = core::ptr::NonNull::new(ptr) {
-            self.heap.lock().deallocate(p, layout);
+            // SAFETY: `GlobalAlloc` contract: `ptr` came from `alloc`.
+            unsafe { self.heap.lock().deallocate(p, layout) };
         }
     }
 }
