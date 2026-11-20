@@ -107,9 +107,9 @@ fn unmap_pages(start: u64, len: u64) {
 }
 
 // SAFETY: every heap access takes its `IrqLock` for a single operation;
-// `dealloc` only receives pointers from `alloc` per the `GlobalAlloc`
-// contract. `grow` takes the lock on its own, so no guard can be alive when
-// calling it.
+// `dealloc` and `realloc` only receive pointers from `alloc` per the
+// `GlobalAlloc` contract. `grow` takes the lock on its own, so no guard can
+// be alive when calling it.
 unsafe impl GlobalAlloc for KernelHeap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let first = self.heap.lock().allocate(layout);
@@ -136,6 +136,32 @@ unsafe impl GlobalAlloc for KernelHeap {
             // SAFETY: `GlobalAlloc` contract: `ptr` came from `alloc`.
             unsafe { self.heap.lock().deallocate(p, layout) };
         }
+    }
+
+    /// In place when the block can shrink or grow into free space after it
+    /// (constant time under the lock); otherwise allocate, copy and free,
+    /// the copy with interrupts on.
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        let Some(p) = core::ptr::NonNull::new(ptr) else {
+            return core::ptr::null_mut();
+        };
+        // SAFETY: `GlobalAlloc` contract: `ptr` came from `alloc` and is live.
+        if unsafe { self.heap.lock().resize_in_place(p, new_size) } {
+            return ptr;
+        }
+        // SAFETY: the `GlobalAlloc` contract makes `new_size` with the old
+        // alignment a valid, non-zero-sized layout.
+        let new =
+            unsafe { self.alloc(Layout::from_size_align_unchecked(new_size, layout.align())) };
+        if !new.is_null() {
+            // SAFETY: two distinct live blocks, each at least as long as the
+            // bytes copied; the old one is freed once.
+            unsafe {
+                core::ptr::copy_nonoverlapping(ptr, new, layout.size().min(new_size));
+                self.dealloc(ptr, layout);
+            }
+        }
+        new
     }
 }
 

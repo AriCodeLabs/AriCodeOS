@@ -173,6 +173,33 @@ mod user_heap {
                 self.with(|h| unsafe { h.deallocate(p, layout) });
             }
         }
+        /// In place when the block can shrink or grow into free space after
+        /// it; otherwise allocate, copy and free (the default's way).
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            let Some(p) = NonNull::new(ptr) else {
+                return ptr::null_mut();
+            };
+            // SAFETY: `GlobalAlloc` contract: `ptr` came from `alloc` and is
+            // live.
+            if self.with(|h| unsafe { h.resize_in_place(p, new_size) }) {
+                return ptr;
+            }
+            // SAFETY: the `GlobalAlloc` contract makes `new_size` with the
+            // old alignment a valid layout.
+            let new_layout = unsafe { Layout::from_size_align_unchecked(new_size, layout.align()) };
+            // SAFETY: a valid, non-zero-sized layout (`new_size > 0` by
+            // the contract).
+            let new = unsafe { self.alloc(new_layout) };
+            if !new.is_null() {
+                // SAFETY: two distinct live blocks, each at least as long as
+                // the bytes copied; the old one is freed once.
+                unsafe {
+                    ptr::copy_nonoverlapping(ptr, new, layout.size().min(new_size));
+                    self.dealloc(ptr, layout);
+                }
+            }
+            new
+        }
     }
 }
 
