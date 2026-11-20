@@ -247,7 +247,7 @@ dev build 69 (develop a5b3978), 4 CPUs online, no IOMMU on this machine.
 | quiet idle (permille, all CPUs) | 998 | |
 
 - A raw round trip is about 8 µs, some 14 000 cycles at 1.8 GHz: two
-  threads exchange 220 000 to 237 000 messages a second, whatever the size
+  threads exchange 218 000 to 237 000 messages a second, whatever the size
   up to 256 bytes. That is the floor today, not a tuned figure: there is no
   IPC fast path yet (every message goes through the general queue, the
   scheduler and a wake-up of the receiving thread), and fast-path
