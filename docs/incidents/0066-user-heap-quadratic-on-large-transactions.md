@@ -41,6 +41,7 @@ holes, so an allocation costs O(blocks).
 - 2026-11-20: the three reports attached; mechanism confirmed (Confirmation); fix on
   `fix/user-heap-quadratic` (Fix), measured on the host (Measured after). Audit and the
   laptop's confirmation pending.
+- 2026-11-21: confirmed on the laptop (Confirmed on the laptop); audit closed (Audit).
 
 ## Study
 
@@ -734,11 +735,32 @@ Bulk load, µs per row, median of 3 (`heap-scratch/probe-fix`,
   is not the in-place `realloc` (13.34 without it) and not the region layout (13.19 over
   one region): `fix-exp-insert-*.log`. It is left open (below).
 
+## Confirmed on the laptop
+
+2026-11-21, the reference laptop (Core i3-3217U, dev build 68, system unchanged). The
+AriDB app was rebuilt from `feature/database` at `4307df1` (the v1 engine, which
+triggers the case) with `libs/heap` and `sdk/runtime` taken from this branch, packed as
+`aridb` version 2 (`cargo xtask app-pack db/os/aridb --version 2` in a scratch
+worktree), installed from a LAN app source that was removed afterwards, and run with
+`run aridb N`. Bulk insert in one transaction, in memory (no device), µs per row:
+
+| Rows | 5 000 | 10 000 | 25 000 | 50 000 |
+|---|---|---|---|---|
+| old list (app v1, 2026-11-20) | 27 | 56 | 202 | 444 |
+| TLSF (app v2) | 8.17 | 8.68 | 9.43 | 9.82 |
+
+The cost per row is flat: 45x faster at 50 000 rows. The other rows of the run (point
+SELECT 5.4-6.0 µs, range aggregate 532-542 µs, index lookup 184-232 µs) match v1's,
+and every check (counts, sums) passed. CPU 56 C before and after. Log:
+`~/aricode-scratch/heap-scratch/logs/confirm-laptop.log`.
+
+Separate observation, not this incident: the same bulk insert on the AriFS file costs
+139, 136, 248 and 268 µs per row at 5k, 10k, 25k and 50k rows. That is the device path
+(4 KiB file-service requests, zero-filled growth steps, the v1 engine's write volume),
+measured by the AriDB work in `db/docs/aricodeos.md`, not the heap.
+
 ## What remains open
 
-- **The laptop:** run the AriDB v1 app (`b97dc7d`, whose engine triggers the case) at
-  5k/10k/25k/50k rows on a build with the fix; the cost per row should stay flat as on
-  the host. The v2 app no longer triggers it (angle 3), so it cannot confirm the fix.
 - **Owner decision: the footprint under contiguous growth** (Audit, finding 1). With the
   current probe (first fit among `PROBES` = 3) TLSF maps a median 6.1% more than the old
   list on the fragmentation trace under the kernel's growth, and is level with it under
