@@ -225,3 +225,39 @@ both develop (f84e72f) and this branch, against 319 ns in the baseline of
 2026-10-31, within the tolerance; a quiet host decides whether it is the
 host or the system.
 
+## On real hardware (2026-11-20)
+
+The reference laptop: ASUS, Intel Core i3-3217U (Ivy Bridge, 2013; 2 cores,
+4 threads, 1.8 GHz, no turbo), 7 series chipset, booted from a USB stick;
+dev build 69 (develop a5b3978), 4 CPUs online, no IOMMU on this machine.
+`run bench` over SSH, three runs; the figures are the second and third
+(p50 / p95 / p99).
+
+| Measurement | Run 2 | Run 3 |
+|---|---|---|
+| syscall thread_get_tid (ns) | 262 / 262 / 407 | 260 / 262 / 373 |
+| ipc round trip 8 B (ns) | 8 576 / 10 898 / 11 447 | 7 721 / 10 909 / 11 501 |
+| ipc round trip 64 B (ns) | 8 774 / 11 163 / 11 857 | 7 737 / 10 929 / 11 565 |
+| ipc round trip 256 B (ns) | 7 846 / 11 247 / 12 378 | 8 284 / 11 726 / 12 260 |
+| ipc messages a second, 8 / 64 / 256 B | 229 096 / 224 372 / 229 925 | 236 676 / 234 054 / 218 200 |
+| ipc fsd list (µs) | 21 / 22 / 28 | 22 / 23 / 29 |
+| ipc net info (µs) | 17 / 19 / 29 | 19 / 20 / 32 |
+| read 4 KiB (µs) | 2 997 / 3 000 / 3 008 | |
+| replace 4 KiB (µs) | 16 327 / 16 995 / 17 939 | |
+| quiet idle (permille, all CPUs) | 998 | |
+
+- A raw round trip is about 8 µs, some 14 000 cycles at 1.8 GHz: two
+  threads exchange 218 000 to 237 000 messages a second, whatever the size
+  up to 256 bytes. That is the floor today, not a tuned figure: there is no
+  IPC fast path yet (every message goes through the general queue, the
+  scheduler and a wake-up of the receiving thread), and fast-path
+  microkernels are known to be far below it. Measured against the same
+  machine under another system before any comparison is claimed.
+- A request to a service in another process, with its reply endpoint and
+  the service's work, is 17 to 23 µs: one client gets some 45 000 to 55 000
+  answers a second from the file service or the network service.
+- Files are the USB stick's speed, not the system's: a 4 KiB read is one
+  USB mass-storage command (about 3 ms) and an atomic replace waits for the
+  stick's flash (about 16 ms).
+- The syscall entry and exit is 260 ns at p50.
+
