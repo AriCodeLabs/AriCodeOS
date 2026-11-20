@@ -45,7 +45,7 @@ libs/cmdline/        aricode-cmdline: `key` / `key=value` without alloc (no_std,
 libs/fb-console/     aricode-fb-console: text console on a 32 bpp framebuffer, Terminus 8x16 font (OFL), host tests
 libs/x86-cpu/        aricode-x86-cpu: GDT/TSS/IDT descriptors and exception table (no_std, host tests)
 libs/pmm/            aricode-pmm: bitmap frame allocator over external storage (no_std, host tests)
-libs/heap/           aricode-heap: first-fit heap with free list, coalescing and per-allocation header (no_std, host tests)
+libs/heap/           aricode-heap: TLSF heap (segregated lists, boundary tags, O(1) operations) for the kernel and programs (no_std, host tests)
 libs/sync/           aricode-sync: IrqLock/SpinLock with a pluggable interrupt policy, restored between spins; force_unlock (no_std, host tests)
 libs/fat/            aricode-fat: minimal FAT32 with long names to build and read the USB image's ESP (no_std + alloc, host tests)
 libs/xhci/           aricode-xhci: xHCI and USB: registers, TRBs, rings, contexts, ERST, SETUP and descriptors (no_std, host tests)
@@ -271,6 +271,12 @@ activates them; from then on the loader's identity map no longer exists:
 - `aricode-heap` stores a 16-byte header per allocation with the real
   block: `dealloc` does not depend on the `Layout` and large alignments do not
   waste memory. Free blocks are coalesced on release.
+- Since incident 0066 `aricode-heap` is a TLSF allocator (segregated free
+  lists in two levels, boundary tags, a bounded probe of the request's own
+  list before good fit): every operation is constant time, whatever the
+  number of blocks. The first-fit list it replaced walked its free list on
+  every allocation and free, quadratic for a program freeing many blocks
+  out of address order, and unbounded with interrupts off in the kernel.
 - `test=heap` exercises collections, growth beyond 4 MiB, controlled
   failure and absence of leaks.
 

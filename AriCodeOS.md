@@ -2065,7 +2065,9 @@ against known values.
 ### Implemented
 
 - `libs/heap`: first-fit with a sorted free list, neighbour coalescing and
-  a per-allocation header (bump -> linked-list from section 16);
+  a per-allocation header (bump -> linked-list from section 16); replaced
+  by a TLSF allocator in incident 0066, whose list walks made large frees
+  quadratic;
 - `kernel/memory/heap`: `#[global_allocator]` with a reserved 64 MiB virtual
   region growing in 1 MiB chunks with PMM frames;
 - `alloc` available in the kernel.

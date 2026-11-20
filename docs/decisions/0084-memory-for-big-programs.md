@@ -94,3 +94,20 @@ What changed in the design:
   memory objects.
 - **Large objects are freed in the background**, in batches, so no work proportional to an
   object's size runs with interrupts off.
+
+## Note: the heap's allocator (incident 0066)
+
+The growth above was right, but the allocator it fed was not: `aricode-heap` was a first-fit
+list that walked its free list on every free, so a program freeing tens of thousands of
+blocks out of address order (AriDB committing a large transaction) went quadratic: 188x
+slower than the host on the laptop. The heap is now TLSF (two-level segregated lists,
+boundary tags, a bounded probe), the same in the kernel, with every operation in constant
+time. Two consequences for this ADR's runtime:
+
+- It grows by `aricode_heap::region_size_for(layout)`, the region the allocator needs for
+  a request with its own rounding, instead of the request plus a fixed slack.
+- `realloc` resizes in place when it can (shrinking, or growing into a free block after
+  it) before allocating, copying and freeing.
+
+On the AriDB trace under this growth the heap maps 47.8 MiB in 34 regions, as before
+(47.4 MiB). The incident has the comparison with the veterans and the measurements.

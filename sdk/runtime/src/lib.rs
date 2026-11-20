@@ -41,21 +41,20 @@ pub extern "C" fn rust_eh_personality() -> ! {
 }
 
 /// User program heap: 256 KiB of static memory served by
-/// `aricode-heap` (the same allocator as the kernel) behind a spinlock. When
-/// it is full, it grows by memory objects (ADR 0084) of at least
-/// `GROW_MIN`, within the process's memory quota: a program allocates as it
-/// would anywhere.
+/// `aricode-heap` (the same allocator as the kernel, TLSF since incident
+/// 0066) behind a spinlock. When it is full, it grows by memory objects
+/// (ADR 0084) of at least `GROW_MIN`, within the process's memory quota: a
+/// program allocates as it would anywhere.
 mod user_heap {
     use aricode_heap::Heap;
     use aricode_sync::SpinLock;
     use core::alloc::{GlobalAlloc, Layout};
     use core::cell::UnsafeCell;
+    use core::ptr::{self, NonNull};
 
     const SIZE: usize = 256 * 1024;
     /// The least the heap grows by.
     const GROW_MIN: usize = 1024 * 1024;
-    /// Room for the allocator's header and alignment within a new region.
-    const GROW_SLACK: usize = 4096;
 
     #[repr(align(4096))]
     struct Arena(UnsafeCell<[u8; SIZE]>);
@@ -64,12 +63,12 @@ mod user_heap {
     static ARENA: Arena = Arena(UnsafeCell::new([0; SIZE]));
 
     struct UserHeap {
-        heap: SpinLock<Option<Heap>>,
+        heap: SpinLock<Heap>,
     }
 
     #[global_allocator]
     static HEAP: UserHeap = UserHeap {
-        heap: SpinLock::new(None),
+        heap: SpinLock::new(Heap::empty()),
     };
 
     impl UserHeap {
@@ -89,13 +88,48 @@ mod user_heap {
                     core::hint::spin_loop();
                 }
             };
-            let heap = guard.get_or_insert_with(|| {
-                let mut h = Heap::empty();
+            if guard.stats().total == 0 {
+                // First use: the static arena is the first region.
                 // SAFETY: static page-aligned region, exclusive to the heap.
-                unsafe { h.add_region(ARENA.0.get() as usize, SIZE) };
-                h
-            });
-            f(heap)
+                unsafe { guard.add_region(ARENA.0.get() as usize, SIZE) };
+            }
+            f(&mut guard)
+        }
+
+        /// Adds a memory object large enough for `layout` to the heap,
+        /// mapped for good (the mapping keeps it; its handle is not needed).
+        /// `false` when the quota or the address space has no room.
+        fn grow(h: &mut Heap, layout: Layout) -> bool {
+            // What the allocator needs to serve `layout` from a fresh region,
+            // its rounding included (incident 0066).
+            let Some(want) = aricode_heap::region_size_for(layout) else {
+                return false;
+            };
+            let want = want.next_multiple_of(4096);
+            // At least `GROW_MIN`; just what is needed if a small quota has
+            // no room for that.
+            let mut size = want.max(GROW_MIN);
+            let mem = match crate::sys::mem_create(size as u64) {
+                Ok(m) => m,
+                Err(_) if size > want => {
+                    size = want;
+                    match crate::sys::mem_create(size as u64) {
+                        Ok(m) => m,
+                        Err(_) => return false,
+                    }
+                }
+                Err(_) => return false,
+            };
+            let mapped = crate::sys::mmio_map(mem);
+            let _ = crate::sys::handle_close(mem);
+            let Ok(start) = mapped else {
+                return false;
+            };
+            // SAFETY: a mapping of `size` bytes this process made just now,
+            // page aligned, kept for the program's life, used by nothing
+            // else.
+            unsafe { h.add_region(start as usize, size) };
+            true
         }
     }
 
@@ -127,44 +161,44 @@ mod user_heap {
                 if let Some(p) = h.allocate(layout) {
                     return p.as_ptr();
                 }
-                // Full: a memory object as big as the request needs, mapped
-                // for good (the mapping keeps it; its handle is not needed).
-                let want = layout
-                    .size()
-                    .saturating_add(layout.align())
-                    .saturating_add(GROW_SLACK)
-                    .next_multiple_of(4096);
-                // At least `GROW_MIN`; just what is needed if a small quota
-                // has no room for that.
-                let mut size = want.max(GROW_MIN);
-                let mem = match crate::sys::mem_create(size as u64) {
-                    Ok(m) => m,
-                    Err(_) if size > want => {
-                        size = want;
-                        match crate::sys::mem_create(size as u64) {
-                            Ok(m) => m,
-                            Err(_) => return core::ptr::null_mut(),
-                        }
-                    }
-                    Err(_) => return core::ptr::null_mut(),
-                };
-                let mapped = crate::sys::mmio_map(mem);
-                let _ = crate::sys::handle_close(mem);
-                let Ok(start) = mapped else {
-                    return core::ptr::null_mut();
-                };
-                // SAFETY: a mapping of `size` bytes this process made just now,
-                // page aligned, kept for the program's life, used by nothing
-                // else.
-                unsafe { h.add_region(start as usize, size) };
-                h.allocate(layout)
-                    .map_or(core::ptr::null_mut(), |p| p.as_ptr())
+                if !UserHeap::grow(h, layout) {
+                    return ptr::null_mut();
+                }
+                h.allocate(layout).map_or(ptr::null_mut(), |p| p.as_ptr())
             })
         }
         unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-            if let Some(p) = core::ptr::NonNull::new(ptr) {
-                self.with(|h| h.deallocate(p, layout));
+            if let Some(p) = NonNull::new(ptr) {
+                // SAFETY: `GlobalAlloc` contract: `ptr` came from `alloc`.
+                self.with(|h| unsafe { h.deallocate(p, layout) });
             }
+        }
+        /// In place when the block can shrink or grow into free space after
+        /// it; otherwise allocate, copy and free (the default's way).
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            let Some(p) = NonNull::new(ptr) else {
+                return ptr::null_mut();
+            };
+            // SAFETY: `GlobalAlloc` contract: `ptr` came from `alloc` and is
+            // live.
+            if self.with(|h| unsafe { h.resize_in_place(p, new_size) }) {
+                return ptr;
+            }
+            // SAFETY: the `GlobalAlloc` contract makes `new_size` with the
+            // old alignment a valid layout.
+            let new_layout = unsafe { Layout::from_size_align_unchecked(new_size, layout.align()) };
+            // SAFETY: a valid, non-zero-sized layout (`new_size > 0` by
+            // the contract).
+            let new = unsafe { self.alloc(new_layout) };
+            if !new.is_null() {
+                // SAFETY: two distinct live blocks, each at least as long as
+                // the bytes copied; the old one is freed once.
+                unsafe {
+                    ptr::copy_nonoverlapping(ptr, new, layout.size().min(new_size));
+                    self.dealloc(ptr, layout);
+                }
+            }
+            new
         }
     }
 }
