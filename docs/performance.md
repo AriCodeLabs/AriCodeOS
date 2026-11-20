@@ -51,6 +51,7 @@ are checked by the idle-accounting controls (`scheduler.idle_accounting`,
 |---|---|---|
 | `syscall thread_get_tid` | entry and exit via `syscall`, no work | 10 000 |
 | `ipc fsd list` | full `rpc::call`: create reply endpoint, send, wait, receive, close; fsd waits on its main endpoint and every session at once (ADR 0020, ADR 0044) | 1 000 |
+| `ipc round trip N B` | raw IPC between two threads of `bench`: send N bytes (8, 64, 256 = `IPC_MAX_DATA`) on one endpoint, an echo thread receives and sends them back on another; no service work, the floor under every call above. The line after it gives the messages carried per second over the whole run (two a round trip) | 10 000 |
 | `replace 4 KiB` | atomic replace: journal, two `flush` to virtio-blk, copy and cleanup | 100 |
 | `read 4 KiB` | one read over IPC with a copy through the client's DMA buffer | 100 |
 | `ipc net info` | full `rpc::call` to netd's session for `NetClient::info`: no frame leaves the machine, so it measures how soon netd sees a request (ADR 0044) | 200 |
@@ -195,4 +196,32 @@ result with a whole-screen composition; 4 bytes per pixel.
   without the test-only key `gui_trace`.
 - These are pixels written, not frame rates: composition time, frame
   latency and the cost of a write to a real framebuffer were not measured.
+
+## Raw IPC (2026-11-20)
+
+`bench` measures messages between two threads with no service behind them
+(`ipc round trip N B` and `ipc messages N B: ... a second`). The threads
+share an address space, so a round trip pays two sends, two receives and
+the switches between the threads, not an address-space change: the
+cross-process figures are `ipc fsd list` and `ipc net info`, which add the
+reply endpoint and the service's own work.
+
+QEMU 10 TCG, 1 CPU, `perf.bench`, second run (reference host, not quiet:
+another job's benchmark ran meanwhile):
+
+| Size | p50 / p95 / p99 (ns) | Messages a second |
+|---|---|---|
+| 8 B | 17 384 / 18 830 / 21 942 | 110 751 |
+| 64 B | 17 174 / 17 553 / 19 179 | 114 648 |
+| 256 B | 19 239 / 19 518 / 21 952 | 102 748 |
+
+TCG emulates every instruction; these are for comparing builds, not for
+quoting as the system's speed. The baselines in `tests/perf/` do not hold
+these figures yet: they are recorded on a quiet host (`cargo xtask perf
+--update-baseline`).
+
+Seen on the way: `syscall thread_get_tid` measured about 600 ns at p50 on
+both develop (f84e72f) and this branch, against 319 ns in the baseline of
+2026-10-31, within the tolerance; a quiet host decides whether it is the
+host or the system.
 
