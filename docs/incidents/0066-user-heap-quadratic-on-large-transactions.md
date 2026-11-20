@@ -674,9 +674,36 @@ new one. Medians of 5 runs (3 for the fragmentation trace). Logs:
 | talc | 61.3 ms | 32.2 / 340 | 1.31x | 63.1 ms | 252.45 MiB |
 | system | 95.0 ms | 43.9 / 280 | — | 93.5 ms | — |
 
+The same trace under the kernel's growth (`kernel` mode: 1 MiB chunks, each starting
+where the last one ended, as `kernel/src/memory/heap.rs` grows up to `HEAP_MAX` = 64 MiB).
+Medians of 3 invocations of 3 runs each (added by the audit, below;
+`heap-scratch/logs/audit/frag-kernel-candidates-{1,2,3}.log`):
+
+| Allocator | Total | alloc mean / p99 (ns) | Mapped | Touched / peak live |
+|---|---|---|---|---|
+| aricode-heap (TLSF) | 48.9 ms | 25.4 / 120 | 211.80 MiB in 211 chunks | 1.17x |
+| aricode-heap-old | 4,187 ms | 2,662 / 10,490 | **203.32 MiB in 200 chunks** | 1.12x |
+| rlsf | 37.0 ms | 13.1 / 30 | 218.14 MiB in 207 chunks | 1.20x |
+| talc | 67.2 ms | 36.9 / 400 | 248.21 MiB in 240 chunks | 1.37x |
+| llff (contiguous) | 4,693 ms | 2,381 / 6,800 | 204.18 MiB in 204 chunks | 1.12x |
+| system | 95.9 ms | 45.2 / 290 | — | — |
+
 On this trace the probes cost TLSF its speed lead: about two more cache misses per
-allocation, so `rlsf` is 1.4x faster. In exchange TLSF has the smallest footprint of all
-the candidates, and it is still 2x faster than glibc.
+allocation, so `rlsf` is 1.4x faster in `single` mode; TLSF is still 2x faster than glibc.
+
+**Footprint: a trade-off, not a uniform win.** Under the programs' growth (`user`) TLSF
+maps the least of the candidates on this trace (214.00 MiB against 221.34 for the old
+list). **Under contiguous growth, and in one region, the old list is tighter:** TLSF maps
+211.80 MiB against 203.32 (+4.2%, 11 more chunks) in `kernel` mode and touches 213.58 MiB
+against 202.95 (+5.2%) in `single` mode. Address-ordered first fit is the policy the
+fragmentation literature finds tightest; it is also the O(n) walk this incident removed.
+Over seven seeds of the trace the `kernel`-mode gap is larger than the default seed shows
+(median +6.1%, from +1.4% to +8.9%), and the `user`-mode advantage is small (median
+−0.6%, from −3.3% to +2.1%). TLSF still maps less than `rlsf` (median 9.7% above the
+old list) and `talc` (23.1% above) under contiguous growth. The kernel-like trace itself
+fits in the first chunk for every allocator (0.20 MiB touched, TLSF 1.29x against 1.32x
+for the old list). A variant that removes most of the gap, at a speed cost, is measured
+in the Audit; the choice is the owner's (What remains open).
 
 **End to end: the incident's probe** (AriDB `b97dc7d` on the host, each allocator as the
 global allocator; the TLSF heap wrapped as `sdk/runtime` does it, with a 256 KiB arena,
@@ -712,8 +739,14 @@ Bulk load, µs per row, median of 3 (`heap-scratch/probe-fix`,
 - **The laptop:** run the AriDB v1 app (`b97dc7d`, whose engine triggers the case) at
   5k/10k/25k/50k rows on a build with the fix; the cost per row should stay flat as on
   the host. The v2 app no longer triggers it (angle 3), so it cannot confirm the fix.
-- **Audit** (failure protocol, step 6): kernel memory code changed, so an independent
-  audit before merging.
+- **Owner decision: the footprint under contiguous growth** (Audit, finding 1). With the
+  current probe (first fit among `PROBES` = 3) TLSF maps a median 6.1% more than the old
+  list on the fragmentation trace under the kernel's growth, and is level with it under
+  the programs' growth. Probing the lowest address among the 3 blocks brings the kernel
+  case to +0.7% and the programs' case to −3.8%, and costs 16% on the kernel-like trace
+  (21.4 → 24.8 ms) and 7-9% on the AriDB traces. Options: keep the current probe; take the
+  lowest-address probe for both heaps; or make the probe policy a parameter of `Heap`
+  like `PROBES`, chosen by each heap. Not picked silently.
 - **Heap figures in `diag`:** neither the kernel heap's `HeapStats` (now with
   `free_blocks`) nor the programs' reach `diag`/`sysinfo`. Exporting them is a separate
   change to the ABI and the shell.
@@ -727,3 +760,79 @@ Bulk load, µs per row, median of 3 (`heap-scratch/probe-fix`,
   words. Bounding the first level to the 48-bit address space would save about 4 KiB.
 - **Lock cost and threads:** one lock per operation remains (angle 2 advises a per-thread
   front end only once contention under ADR 0082 threads is measured).
+
+## Audit
+
+Failure protocol, step 6: an independent review agent checked the fix against this
+incident, reproducing its numbers with the implementer's harness
+(`heap-scratch/audit/`). One finding.
+
+### Finding 1 (low): a footprint regression under contiguous growth, not reported
+
+- **Finding.** On the fragmentation trace, with growth in contiguous 1 MiB chunks (the
+  kernel's model, `HEAP_MAX` 64 MiB), TLSF mapped 211.80 MiB in 211 chunks against the old
+  list's 203.32 in 200 (+4.2%); in one region it touched 213.58 MiB against 202.95
+  (+5.2%). The incident reported the trace only in `single` and `user` modes, and said
+  "TLSF has the smallest footprint of all the candidates", which holds in `user` mode
+  only. `DEFAULT_PROBES`' comment in `libs/heap` also said 1 to 8 measured the same,
+  which was true of the AriDB traces, not of the fragmentation trace.
+- **Reproduced.** Same figures, to the hundredth (`logs/audit/frag-kernel-candidates-*.log`,
+  three invocations of three runs, pinned to CPUs 10-11, load 2-4). `rlsf` maps 218.14 MiB,
+  `talc` 248.21, `llff` 204.18: only the address-ordered lists are tighter than TLSF here.
+- **How large, over more than one seed.** The trace generator takes a seed in the audit's
+  copy of the harness (`heap-scratch/bench-audit`, `frag:OPS:SEED`); seven seeds, footprint
+  only, which is deterministic per seed (`logs/audit/frag-seeds-footprint.log`). MiB
+  mapped:
+
+  | Seed | TLSF, `kernel` | Old, `kernel` | Low-address probe, `kernel` | TLSF, `user` | Old, `user` | Low-address probe, `user` |
+  |---|---|---|---|---|---|---|
+  | default | 211.80 | 203.32 | 201.23 | 214.00 | 221.34 | 207.78 |
+  | 1 | 215.07 | 212.18 | 213.62 | 222.77 | 228.70 | 219.09 |
+  | 2 | 218.07 | 202.49 | 210.52 | 224.65 | 220.07 | 212.08 |
+  | 3 | 227.88 | 209.32 | 209.70 | 229.96 | 231.38 | 224.10 |
+  | 4 | 220.14 | 211.25 | 212.17 | 228.22 | 226.60 | 220.40 |
+  | 5 | 225.32 | 206.92 | 211.38 | 230.10 | 229.75 | 220.03 |
+  | 6 | 228.39 | 215.33 | 219.50 | 226.31 | 230.38 | 221.73 |
+  | **Median against the old list** | **+6.1%** (+1.4 to +8.9) | — | **+0.7%** (−1.0 to +4.0) | −0.6% (−3.3 to +2.1) | — | **−3.8%** (−6.1 to −2.7) |
+
+  So the gap under contiguous growth is 1.4-8.9%, larger than the default seed's 4.2%.
+- **What could remove it, measured.** Three variants, each a scratch copy of the crate
+  outside the repository (`heap-scratch/heap-lowaddr`, `heap-lowbig`), replayed on every
+  trace twice (`run-audit-matrix.sh`, `logs/audit/m-*.log`, `m2-*.log`):
+  - **`PROBES` sweep, `kernel` mode** (`logs/audit/frag-kernel-probes-{1,2}.log`): 0 →
+    214.80, 1 → 211.89, 2 → 215.68, 3 → 211.80, 4 → 211.00, 8 → 211.03, 16 → 210.54 MiB.
+    No value closes the gap; the count of probes is not the cause.
+  - **Lowest-address probe**: of the `PROBES` blocks looked at, take the fitting one at
+    the lowest address instead of the first that fits (still bounded: it always reads the
+    `PROBES` links). This is the address-ordered first fit the old list had, applied to
+    three blocks. It closes most of the gap (table above: 201.23 MiB on the default seed,
+    tighter than the old list) and leaves the AriDB footprints unchanged (47.76 and 25.68
+    MiB). Cost, medians of the paired runs: kernel-like trace (`kernel`) 21.4 → 24.8 ms
+    (+16%; allocation mean 11.3 → 14.3 ns, p99 40 ns in both), AriDB v1 (`user`) 18.0 →
+    19.2 ms (+7%), AriDB v2 (`user`) 2.2 → 2.4 ms (+9%), fragmentation trace (`kernel`)
+    52.0 → 55.0 ms (+6%). With 8 or 16
+    probes it is slower and no tighter (207.55, 206.20 MiB).
+  - **Lowest-address probe only above the first level** (the exact-size lists below 512
+    bytes keep taking their head, where every block fits): as fast as the current code on
+    every trace (kernel-like 21.0 ms), but it keeps almost all of the gap (210.73 MiB in
+    `kernel` mode, 208.27 with 8 probes). The small blocks' placement is what fragments
+    the large holes, so the saving cannot be had without paying on small allocations.
+- **Resolution.**
+  - The trade-off is now stated plainly in Measured after, with the `kernel`-mode row for
+    TLSF, the old list, `rlsf`, `talc`, `llff` and glibc, and the seed spread; the claim of
+    "the smallest footprint" is limited to where it holds.
+  - `DEFAULT_PROBES`' comment in `libs/heap/src/lib.rs` now says what the sweeps show.
+  - **The allocator is not changed by the audit.** The variant trades the kernel's
+    allocation speed (the path that runs with interrupts off) for footprint, and the
+    kernel-like trace never leaves its first 1 MiB chunk (0.15 MiB peak live), so the gap
+    matters only if the kernel heap ever holds a large, fragmenting live set near its
+    64 MiB cap: about 4 MiB at the measured 6%. Whether that is acceptable, or the
+    lowest-address probe (or a per-heap probe policy) should be adopted, is the owner's
+    call, listed in What remains open.
+- **Checks after the audit's changes** (a comment in `libs/heap` and this file):
+  `cargo xtask check` and `cargo xtask test --level unit` pass; `cargo xtask test --all
+  --area memory,user,wasm`: 58 scenarios, 0 failed. Logs: `heap-scratch/logs/audit-xtask-*.log`.
+- **Scratch files** (outside the repository, under `~/aricode-scratch/heap-scratch/`):
+  harness `bench-audit/src/main.rs` (the fix's harness plus the `PROBES` and probe-policy
+  variants and the seed), variants `heap-lowaddr/` and `heap-lowbig/`, script
+  `run-audit-matrix.sh`, logs `logs/audit/`.

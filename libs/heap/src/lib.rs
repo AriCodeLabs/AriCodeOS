@@ -179,8 +179,10 @@ fn leading_gap(start: usize, align: usize) -> usize {
 }
 
 /// Blocks a heap probes by default (`Heap`'s `PROBES`): Zephyr's
-/// `CONFIG_SYS_HEAP_ALLOC_LOOPS` default; 1 to 8 measured the same on the
-/// incident's traces (the incident has the sweep).
+/// `CONFIG_SYS_HEAP_ALLOC_LOOPS` default. On the incident's AriDB traces 1
+/// to 8 map the same; on its fragmentation trace 3 mapped the least under
+/// the programs' growth and 0 to 16 stay within 3% under the kernel's (the
+/// incident has both sweeps).
 pub const DEFAULT_PROBES: usize = 3;
 
 /// The size of a fresh region that is sure to serve `layout`, for a heap
