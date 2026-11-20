@@ -22,6 +22,12 @@ use aricode_rt::sys::{self, abi, kind, permissions, time, Handle};
 
 const SYSCALLS: usize = 10_000;
 const IPC_CALLS: usize = 1_000;
+/// Round trips between two threads of this process, and their size: the
+/// smallest message, a typical request and the largest one (`IPC_MAX_DATA`).
+const RAW_ROUND_TRIPS: usize = 10_000;
+const RAW_SIZES: [usize; 3] = [8, 64, abi::IPC_MAX_DATA];
+/// How long a raw send or receive may wait before the measure gives up.
+const RAW_TIMEOUT_MS: u64 = 1_000;
 const FILE_OPS: usize = 100;
 const NET_CALLS: usize = 200;
 /// TCP transfers through the network service (ADR 0070), each timed.
@@ -253,6 +259,14 @@ fn main(_arg: u64) -> u64 {
         samples.push(rdtsc() - t0);
     }
     report(b"ipc fsd list", &mut samples, per_us, b"us");
+    // 2b. Raw IPC: messages between two threads of this process over two
+    // endpoints, with no service work, the floor under every call above.
+    for size in RAW_SIZES {
+        if raw_ipc(size, per_us).is_none() {
+            sys::print(b"bench: raw ipc failed\n");
+            return 11;
+        }
+    }
     // 3. Files: atomic replace and 4 KiB read.
     let fd = match fs.open("medidas").or_else(|_| fs.create("medidas")) {
         Ok(fd) => fd,
@@ -314,6 +328,66 @@ fn main(_arg: u64) -> u64 {
     }
     sys::print(b"bench: done\n");
     0
+}
+
+/// `RAW_ROUND_TRIPS` round trips of `size` bytes: this thread sends on one
+/// endpoint, an echo thread receives it and sends it back on another. Prints
+/// each round trip's latency and the messages carried per second over the
+/// whole run (two a round trip).
+fn raw_ipc(size: usize, per_us: u64) -> Option<()> {
+    let (to_echo_rx, to_echo) = sys::endpoint_create_pair().ok()?;
+    let (back_rx, back) = sys::endpoint_create_pair().ok()?;
+    let echo = aricode_rt::thread::spawn(move || {
+        let mut buf = [0u8; abi::IPC_MAX_DATA];
+        // Ends when the sender closes its side (`PeerClosed`).
+        while let Ok((n, _)) =
+            sys::ipc_receive(to_echo_rx, &mut buf, &mut [], abi::TIMEOUT_INFINITE)
+        {
+            if sys::ipc_send(back, &buf[..n], &[], RAW_TIMEOUT_MS).is_err() {
+                return 1;
+            }
+        }
+        0
+    })
+    .ok()?;
+    let message = alloc::vec![0xA5u8; size];
+    let mut buf = [0u8; abi::IPC_MAX_DATA];
+    let mut samples = Vec::with_capacity(RAW_ROUND_TRIPS);
+    let start = rdtsc();
+    for _ in 0..RAW_ROUND_TRIPS {
+        let t0 = rdtsc();
+        sys::ipc_send(to_echo, &message, &[], RAW_TIMEOUT_MS).ok()?;
+        let (n, _) = sys::ipc_receive(back_rx, &mut buf, &mut [], RAW_TIMEOUT_MS).ok()?;
+        if n != size {
+            return None;
+        }
+        samples.push(rdtsc() - t0);
+    }
+    let elapsed = rdtsc() - start;
+    let _ = sys::handle_close(to_echo);
+    if echo.join() != Ok(0) {
+        return None;
+    }
+    for h in [to_echo_rx, back_rx, back] {
+        let _ = sys::handle_close(h);
+    }
+    for s in samples.iter_mut() {
+        *s = *s * 1000 / per_us;
+    }
+    let mut name = Vec::new();
+    name.extend_from_slice(b"ipc round trip ");
+    let mut digits = [0u8; 20];
+    name.extend_from_slice(fmt_u64(size as u64, &mut digits));
+    name.extend_from_slice(b" B");
+    report(&name, &mut samples, 1, b"ns");
+    // Messages a second: two per round trip, over the whole loop.
+    let per_second = (2 * RAW_ROUND_TRIPS as u64) * per_us * 1_000_000 / elapsed.max(1);
+    sys::print(b"bench: ipc messages ");
+    num(size as u64);
+    sys::print(b" B: ");
+    num(per_second);
+    sys::print(b" a second (two threads)\n");
+    Some(())
 }
 
 /// Whether the host test HTTP server answers a connection.
