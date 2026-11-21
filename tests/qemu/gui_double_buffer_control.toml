@@ -2,6 +2,11 @@
 # buffer (`run gui_demo 5`) must show the colour painted after each present. Should
 # this stop failing the old way, say because the compositor's frame cadence changed,
 # gui.double_buffer would pass without testing anything: both go together.
+# It does not ask to see the first colour of a pair (0xfe0102): on one buffer the
+# program paints the second over it while the compositor makes its frame, so with
+# 4 CPUs that colour was caught 0, 2 and 3 times in 120 frames in three runs alone
+# (release 0.19 suite, red once). What this control is for is the colour painted
+# after presenting reaching the screen.
 name = "gui.double_buffer_control"
 description = "on one buffer, what a program paints after presenting reaches the screen"
 level = "release"
@@ -15,7 +20,6 @@ timeout_secs = 60
 exit = 33
 serial_contains = [
     "compositor: window 1 'Demo E' 200x120",
-    ") = 0xfe0102",
     ") = 0x00fe01",
     "gui_demo E: 120 frames presented",
     "ARICODEOS_SHUTDOWN",
