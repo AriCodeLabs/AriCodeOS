@@ -1,7 +1,7 @@
 # TLS server trust anchors extracted by tools/mozilla-roots.py from
-# https://github.com/nss-dev/nss/blob/2e636d07afa25f58502523caab0e2b0e9bd4e06c/lib/ckfw/builtins/certdata.txt
+# https://github.com/nss-dev/nss/blob/bf1a5ff1936567bb3c5589ff4723c23f15a82081/lib/ckfw/builtins/certdata.txt
 # (Mozilla NSS certdata.txt, Mozilla Public License 2.0).
-# 117 roots; left out for a server distrust-after date or Mozilla-applied
+# 112 roots; left out for a server distrust-after date or Mozilla-applied
 # name constraints (CCADB): TUBITAK Kamu SM SSL Kok Sertifikasi - Surum 1.
 # SHA-256 of the certificate, then its label.
 ebc5570c29018c4d67b1aa127baf12f703b4611ebc17b7dab5573894179b93fa  AC RAIZ FNMT-RCM
@@ -18,15 +18,12 @@ b2fae53e14ccd7ab9212064701ae279c1d8988facb775fa8a008914e663988a8  Atos TrustedRo
 57de0583efd2b26e0361da99da9df4648def7ee8441c3b728afa9bcde0f9b26a  Autoridad de Certificacion Firmaprofesional CIF A62634068
 f3896f88fe7c0a882766a7fa6ad2749fb57a7f3e98fb769c1fa7b09c2c44d5ae  BJCA Global Root CA1
 574df6931e278039667b720afdc1600fc27eb66dd3092979fb73856487212882  BJCA Global Root CA2
-9a114025197c5bb95d94e63d55cd43790847b646b23cdf11ada4a00eff15fb48  Buypass Class 2 Root CA
-edf7ebbca27a2a384d387b7d4010c666e2edb4843e4c29b4ae1d5b9332e6b24d  Buypass Class 3 Root CA
 e23d4a036d7b70e9f595b1422079d2b91edfbb1fb651a0633eaa8a9dc5f80703  CA Disig Root R2
 5cc3d78e4e1d5e45547a04e6873e64f90cf9536d1ccc2ef800f355c4c5fd70fd  CFCA EV ROOT
 1793927a0614549789adce2f8f34f7f0b66d0f3ae3a3b84d21ec15dbba4fadc7  COMODO ECC Certification Authority
 52f0e1c4e58ec629291b60317f074671b85d7ea80d5b07273463534b32b40234  COMODO RSA Certification Authority
 b4585f22e4ac756a4e8612a1361c5d9d031a93fd84febb778fa3068b0fc42dc2  Certainly Root E1
 77b82cd8644c4305f7acc5cb156b45675004033d51c60c6202a8e0c33467d3a0  Certainly Root R1
-d48d3d23eedb50a459e55197601c27774b9d7b18c94d5a059511a10250b93168  Certigna Root CA
 6b328085625318aa50d173c98d8bda09d57e27413d114cf787a0f5d06c030cf6  Certum EC-384 CA
 5c58468d55f58e497e743982d2b50010b6d165374acf83a7d4a32db768c4408e  Certum Trusted Network CA
 b676f2eddae8775cd36cb0f63cd1d4603961f49e6265ba013a2f0307b6d0b804  Certum Trusted Network CA 2
@@ -75,9 +72,7 @@ eec997c0c30f216f7e3b8b307d2bae42412d753fc8219dafd1520b2572850f49  OISTE Server R
 9ae36232a5189ffddb353dfd26520c015395d22777dac59db57b98c089a651e6  OISTE Server Root RSA G1
 6b9c08e86eb0f767cfad65cd98b62149e5494a67f5845e7bd1ed019f27b86bd6  OISTE WISeKey Global Root GB CA
 8560f91c3624daba9570b5fea0dbe36ff11a8323be9486854fb3f34a5571198d  OISTE WISeKey Global Root GC CA
-8a866fd1b276b57e578e921c65828a2bed58e9f2f288054134b7f1f4bfc9cc74  QuoVadis Root CA 1 G3
 8fe4fb0af93a4d0d67db0bebb23e37c71bf325dcbcdd240ea04daf58b47e1840  QuoVadis Root CA 2 G3
-88ef81de202eb018452e43f864725cea5fbd1fc2d9d205730709c5d8b8690f46  QuoVadis Root CA 3 G3
 6ab2ab75f51cb4f4f0156203fbf6f646232f514be059f62833308b82b4d72db1  SECOM TLS ECC Root CA 2024
 1435f225c5d252d7a21948cc3ce62aecfa88001e3dd72d1cc3555100eb372f93  SECOM TLS RSA Root CA 2024
 22a2c1f7bded704cc1e701b5f408c310880fe956b5de2a4a44f99c873a25a7c8  SSL.com EV Root Certification Authority ECC
