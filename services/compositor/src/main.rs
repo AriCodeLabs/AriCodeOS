@@ -1611,12 +1611,14 @@ impl Compositor {
         self.set_focus(id);
     }
 
-    /// After a window closed: the front one, if any, gets the focus, so
-    /// keys reach a window again (audit of ADR 0077, L5).
+    /// After a window closed or was minimized: the front one shown, if any,
+    /// gets the focus, so keys reach a window again (audit of ADR 0077, L5).
+    /// It keeps its place in the order: the window that went stays where it
+    /// was, next for Alt+Tab.
     fn refocus(&mut self) {
         if self.desktop.focus.is_none() {
             if let Some(front) = self.desktop.front() {
-                self.set_focus(front);
+                self.focus_on(front, false);
             }
         }
     }
@@ -1667,9 +1669,20 @@ impl Compositor {
     }
 
     fn set_focus(&mut self, id: u32) {
+        self.focus_on(id, true);
+    }
+
+    /// Gives `id` the focus, and brings it to the front when `raise`. A window
+    /// that takes the focus because another went (hidden or closed) keeps its
+    /// place: raising it would put it before the hidden one, so Alt+Tab's order
+    /// would follow which came first, the hiding or a new window (4 CPUs,
+    /// `usb.desktop_dock_compact`, release 0.19).
+    fn focus_on(&mut self, id: u32, raise: bool) {
         if self.desktop.focus == Some(id) {
             // It may be below a window that opened without taking the focus.
-            self.desktop.raise(id);
+            if raise {
+                self.desktop.raise(id);
+            }
             return;
         }
         // The key held was for the window that had the focus.
@@ -1680,7 +1693,11 @@ impl Compositor {
         if let Some(old) = self.desktop.focus {
             self.deliver(old, Event::Focus(false));
         }
-        self.desktop.raise(id);
+        if raise {
+            self.desktop.raise(id);
+        } else {
+            self.desktop.focus = Some(id);
+        }
         self.deliver(id, Event::Focus(true));
     }
 
