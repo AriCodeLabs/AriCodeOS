@@ -8,6 +8,15 @@ Code and documents were written with the help of AI coding assistants
 working under the author's direction; the design decisions and the
 responsibility for them are the author's.
 
+## Acknowledgements
+
+The author thanks the teams behind the AI technologies used to build
+AriCodeOS:
+
+- **Anthropic**, for Claude and Claude Code;
+- **OpenAI**, for Codex;
+- **Google**, for Antigravity.
+
 Contributions from other people are listed here as they are accepted.
 
 If you use this work, credit it as described in [NOTICE](NOTICE).

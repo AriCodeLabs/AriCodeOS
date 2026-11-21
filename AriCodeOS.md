@@ -4263,6 +4263,12 @@ name (ADR 0078), the first use of the reference laptop's GPU (ADR 0080,
   `TIME_FLOOR` is 2026-11-21.
 - **Not published as applications:** Pista and `bench3d` stay out of the
   public index; the desktop's five applications are version 6.
+- **Found by the release suite:** with 4 CPUs, Alt+Tab after the launcher
+  started an application went to the window behind the launcher three
+  times in four: the launcher hid before the new window came, and the
+  window that got the focus was raised past it. A window that gets the
+  focus because another went now keeps its place.
+- **Verified:** the full suite with 1 and with 4 CPUs.
 
 ---
 

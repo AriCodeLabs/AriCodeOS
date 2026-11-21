@@ -41,19 +41,19 @@ dependencies = [
 
 [[package]]
 name = "aricode-abi"
-version = "0.18.0"
+version = "0.19.0"
 
 [[package]]
 name = "aricode-build"
-version = "0.18.0"
+version = "0.19.0"
 
 [[package]]
 name = "aricode-cmdline"
-version = "0.18.0"
+version = "0.19.0"
 
 [[package]]
 name = "aricode-crypto"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -69,52 +69,52 @@ dependencies = [
 
 [[package]]
 name = "aricode-fb-console"
-version = "0.18.0"
+version = "0.19.0"
 
 [[package]]
 name = "aricode-gfx"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "aricode-fb-console",
 ]
 
 [[package]]
 name = "aricode-gpt"
-version = "0.18.0"
+version = "0.19.0"
 
 [[package]]
 name = "aricode-heap"
-version = "0.18.0"
+version = "0.19.0"
 
 [[package]]
 name = "aricode-http"
-version = "0.18.0"
+version = "0.19.0"
 
 [[package]]
 name = "aricode-net"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "aricode-crypto",
 ]
 
 [[package]]
 name = "aricode-pci"
-version = "0.18.0"
+version = "0.19.0"
 
 [[package]]
 name = "aricode-proto"
-version = "0.18.0"
+version = "0.19.0"
 
 [[package]]
 name = "aricode-render3d"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "libm",
 ]
 
 [[package]]
 name = "aricode-rt"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "aricode-heap",
  "aricode-sync",
@@ -123,11 +123,11 @@ dependencies = [
 
 [[package]]
 name = "aricode-sync"
-version = "0.18.0"
+version = "0.19.0"
 
 [[package]]
 name = "aricode-sys"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "aricode-abi",
  "aricode-gfx",
@@ -140,7 +140,7 @@ dependencies = [
 
 [[package]]
 name = "aricode-text"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "aricode-gfx",
  "skrifa",
@@ -149,7 +149,7 @@ dependencies = [
 
 [[package]]
 name = "aricode-virtio"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "aricode-pci",
 ]
