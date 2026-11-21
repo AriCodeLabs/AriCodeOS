@@ -4267,8 +4267,12 @@ name (ADR 0078), the first use of the reference laptop's GPU (ADR 0080,
   started an application went to the window behind the launcher three
   times in four: the launcher hid before the new window came, and the
   window that got the focus was raised past it. A window that gets the
-  focus because another went now keeps its place.
-- **Verified:** the full suite with 1 and with 4 CPUs.
+  focus because another went now keeps its place. The 4-CPU pass then
+  found a control test that depended on chance (`gui.double_buffer_control`
+  asked for a colour painted over while the compositor reads it); it now
+  asks only for what it controls.
+- **Verified:** the full suite with 1 CPU (290 of 290) and with 4 CPUs (289
+  of 290, the control above, then passing 5 of 5 corrected).
 
 ---
 
