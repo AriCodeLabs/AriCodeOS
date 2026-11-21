@@ -98,8 +98,23 @@ fn quiet() -> bool {
 
 /// Sends `b` to the session output in IPC-sized pieces.
 fn session_write(b: &[u8]) {
-    for chunk in b.chunks(abi::IPC_MAX_DATA) {
-        let _ = sys::ipc_send(SESSION_OUT, chunk, &[], 2000);
+    let _ = session_write_all(b);
+}
+
+/// [`session_write`], saying whether every piece went: sshd stops taking output
+/// while its client is slow, and a piece that waits past 2 s is lost.
+fn session_write_all(b: &[u8]) -> bool {
+    b.chunks(abi::IPC_MAX_DATA)
+        .all(|chunk| sys::ipc_send(SESSION_OUT, chunk, &[], 2000).is_ok())
+}
+
+/// [`print`] for output that must arrive whole or be known lost (`screenshot`).
+fn print_whole(b: &[u8]) -> bool {
+    if session() {
+        session_write_all(b)
+    } else {
+        sys::print(b);
+        true
     }
 }
 
@@ -268,7 +283,7 @@ fn trim(s: &[u8]) -> &[u8] {
 
 fn help() {
     print(
-        b"commands:\n  help      this help\n  ps        processes\n  mem       physical memory\n  ls        AriFS files\n  cat NAME  show a file\n  write NAME TEXT  save TEXT to the file (creates it or replaces it entirely)\n  devices   PCI functions\n  services  boot services (--detail: supervisor state)\n  uptime    time since boot\n  sleep MS  wait MS milliseconds (at most 60000)\n  cpus      online processors and idle time per CPU\n  diag [NAME]  full report (uptime, mem, cpus, entropy, ps, stacks, services, net, devices); with NAME saves it to AriFS\n  net       network configuration\n  ping IP   ICMP echo (4 attempts)\n  dns NAME  resolve a name\n  http URL  GET and show the body (http:// or https://)\n  run PROG  run an initrd program and wait\n\
+        b"commands:\n  help      this help\n  ps        processes\n  mem       physical memory\n  ls        AriFS files\n  cat NAME  show a file\n  write NAME TEXT  save TEXT to the file (creates it or replaces it entirely)\n  devices   PCI functions\n  services  boot services (--detail: supervisor state)\n  uptime    time since boot\n  sleep MS  wait MS milliseconds (at most 60000)\n  cpus      online processors and idle time per CPU\n  temp      the CPU's temperature\n  diag [NAME]  full report (uptime, mem, cpus, entropy, ps, stacks, services, net, devices); with NAME saves it to AriFS\n  acpidump NAME  save the firmware's DSDT, SSDTs and FADT to AriFS, for a device study\n  screenshot  the desktop's screen as a QOI image in base64, for an SSH client (the desktop says it was copied)\n  net       network configuration\n  ping IP   ICMP echo (4 attempts)\n  dns NAME  resolve a name\n  http URL  GET and show the body (http:// or https://)\n  run PROG  run an initrd program and wait\n\
   update [--channel stable|dev]  fetch and verify the signed index of every source of the channel (stable by default) and show what is new (installs nothing; ADR 0029, ADR 0045)\n  update add [--channel dev] URL|IP[:PORT]  register an update source (stable unless --channel dev)\n  update remove N|URL  unregister a source\n  update sources  list the sources\n  update profile add|remove NAME  follow a profile of the sources (upgrade installs its apps) or stop following it (its apps are deleted; ADR 0074)\n  update profiles  list the followed profiles\n  session [shell|desktop]  show or choose what the machine boots into: the text console, or the desktop of the desktop profile once installed (ADR 0074)\n  update apply [--allow-downgrade]  install the image in the UPDATE partition\n  update rollback  boot the system in the other slot next (no network; then `reboot`)\n  upgrade [--channel stable|dev] [--allow-downgrade]  install what the last `update` found (system into the inactive slot, then `reboot`; apps through the installer); only --channel moves the system to another channel\n  spawn PROG  launch it in the background (cannot be stopped)\n  repeat N CMD  repeat a command N times\n  reboot    reboot\n  shutdown  power off\n  exit      exit the shell\n",
     );
 }
@@ -374,6 +389,16 @@ fn mem() {
     print(b" MiB in use (");
     num(total);
     print(b" 4 KiB frames)\n");
+    // Promised to memory objects, not taken yet: free, but theirs (ADR 0084).
+    let mut promised = [0u8; 8];
+    if sys::system_info(SYSTEM, abi::sysinfo::MEMORY_PROMISED, &mut promised) == Ok(8) {
+        let frames = u64::from_le_bytes(promised);
+        if frames != 0 {
+            print(b"promised to memory objects: ");
+            num(frames * 4 / 1024);
+            print(b" MiB of the free\n");
+        }
+    }
 }
 
 fn uptime() {
@@ -392,6 +417,20 @@ fn uptime() {
     }
     num(frac);
     print(b" s\n");
+}
+
+/// The CPU's temperature (`sysinfo::TEMPERATURE`): `temp`, and in `diag`.
+fn temp() {
+    let mut b = [0u8; 8];
+    if sys::system_info(SYSTEM, abi::sysinfo::TEMPERATURE, &mut b) != Ok(8) {
+        print(b"temperature: not readable on this CPU\n");
+        return;
+    }
+    print(b"temperature: ");
+    num(u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as u64);
+    print(b" C, throttles at ");
+    num(u32::from_le_bytes([b[4], b[5], b[6], b[7]]) as u64);
+    print(b" C\n");
 }
 
 fn cpus() {
@@ -484,9 +523,11 @@ fn diag(fs: &mut FsClient, net_client: &NetClient, mask: u64, rest: &[u8]) {
     }
     print(b"=== AriCodeOS diagnostics ===\n");
     system();
+    machine();
     uptime();
     mem();
     cpus();
+    temp();
     entropy();
     ps();
     memory_usage();
@@ -496,7 +537,10 @@ fn diag(fs: &mut FsClient, net_client: &NetClient, mask: u64, rest: &[u8]) {
         net(net_client);
     }
     devices();
+    screen();
+    gpu();
     events();
+    dma();
     print(b"=== end of diagnostics ===\n");
     if name.is_empty() {
         return;
@@ -525,6 +569,229 @@ fn diag(fs: &mut FsClient, net_client: &NetClient, mask: u64, rest: &[u8]) {
 }
 
 /// Creates the file `name`, or replaces it entirely, with `data`.
+/// `acpidump NAME`: the firmware's DSDT, SSDTs and FADT, as the kernel copies
+/// them (`sysinfo::ACPI_AML`), saved to AriFS for a device study on the
+/// build host. Nothing else of the firmware's: no serial, no licence key.
+fn acpidump(fs: &mut FsClient, rest: &[u8]) {
+    let name = trim(rest);
+    let Ok(name) = core::str::from_utf8(name) else {
+        print(b"acpidump: invalid name\n");
+        return;
+    };
+    if name.is_empty() {
+        print(b"usage: acpidump NAME\n");
+        return;
+    }
+    let mut len = [0u8; 8];
+    if sys::system_info(SYSTEM, abi::sysinfo::ACPI_AML_LEN, &mut len).is_err() {
+        print(b"acpidump: the kernel does not offer the tables\n");
+        return;
+    }
+    let len = u64::from_le_bytes(len) as usize;
+    if len == 0 {
+        print(b"acpidump: no DSDT or SSDT found\n");
+        return;
+    }
+    let mut data = alloc::vec![0u8; len];
+    let n = match sys::system_info(SYSTEM, abi::sysinfo::ACPI_AML, &mut data) {
+        Ok(n) => n,
+        Err(_) => {
+            print(b"acpidump: could not read the tables\n");
+            return;
+        }
+    };
+    let data = &data[..n.min(data.len())];
+    match save_file(fs, name, data) {
+        Ok(n) => {
+            print(b"acpidump: ");
+            num(n as u64);
+            print(b" bytes to ");
+            print(name.as_bytes());
+            // Which tables: each header's signature, walking the lengths.
+            print(b" (");
+            let mut at = 0;
+            while let Some(head) = data.get(at..at + 8) {
+                let len = u32::from_le_bytes([head[4], head[5], head[6], head[7]]) as usize;
+                if len < 36 {
+                    break;
+                }
+                if at > 0 {
+                    print(b" ");
+                }
+                print(&head[..4]);
+                at += len;
+            }
+            print(b")\n");
+        }
+        Err(()) => print(b"acpidump: could not save the tables\n"),
+    }
+}
+
+/// `screenshot`: the desktop's screen, as last composed, as a QOI image in
+/// Base64 between two marker lines, for the owner over SSH (the recipe is in
+/// `docs/hardware.md`); the last line gives its length and SHA-256, and output
+/// the session lost ends it with no end marker. Init asks the compositor for it,
+/// for a shell only, and says so; the desktop shows that the screen was copied.
+/// The image is encoded as it is printed: nothing the size of the screen but its
+/// copy.
+fn screenshot() {
+    use aricode_rt::sys::launch::{self, LaunchError, Status};
+    let mut b = [0u8; abi::sysinfo::Framebuffer::LEN];
+    let Some(info) = sys::system_info(SYSTEM, abi::sysinfo::FRAMEBUFFER, &mut b)
+        .ok()
+        .and_then(|n| abi::sysinfo::Framebuffer::decode(&b[..n]))
+    else {
+        print(b"screenshot: no screen\n");
+        return;
+    };
+    let (w, h) = (info.width, info.height);
+    if w == 0 || h == 0 {
+        print(b"screenshot: no screen\n");
+        return;
+    }
+    let len = (u64::from(w) * u64::from(h) * 4).next_multiple_of(4096);
+    let Some((dma, virt)) = sys::dma_alloc(HW, len)
+        .ok()
+        .and_then(|dma| sys::mmio_map(dma).ok().map(|virt| (dma, virt)))
+    else {
+        print(b"screenshot: no memory for a copy of the screen\n");
+        return;
+    };
+    let release = || {
+        let _ = sys::mmio_unmap(virt);
+        let _ = sys::handle_close(dma);
+    };
+    // The compositor maps the copy it gets: it needs READ and WRITE.
+    let given = sys::handle_duplicate(
+        dma,
+        abi::rights::READ | abi::rights::WRITE | abi::rights::TRANSFER,
+    );
+    let size = match given
+        .map_err(LaunchError::Ipc)
+        .and_then(|g| launch::screen(BROKER, g))
+    {
+        Ok(size) if size == (w, h) => size,
+        Ok(_) => {
+            print(b"screenshot: the screen changed size\n");
+            return release();
+        }
+        Err(LaunchError::Status(Status::NotFound)) => {
+            print(b"screenshot: no desktop runs\n");
+            return release();
+        }
+        Err(LaunchError::Status(Status::Limit)) => {
+            print(b"screenshot: one copy every 2 s at most; try again\n");
+            return release();
+        }
+        Err(_) => {
+            print(b"screenshot: the screen could not be copied\n");
+            return release();
+        }
+    };
+    print(b"screenshot: ");
+    num(u64::from(size.0));
+    print(b"x");
+    num(u64::from(size.1));
+    print(b", QOI in Base64 follows\n-----BEGIN QOI-----\n");
+    // SAFETY: our own DMA buffer of at least w*h*4 bytes, mapped RW; the
+    // compositor wrote it and holds it no more.
+    let pixels = unsafe { core::slice::from_raw_parts(virt as *const u32, (w * h) as usize) };
+    let mut out = Base64Lines::new();
+    let mut encoder = aricode_qoi::Encoder::new(w, h, |bytes: &[u8]| out.put(bytes));
+    for &px in pixels {
+        encoder.push(px);
+    }
+    encoder.finish();
+    match out.finish() {
+        Some((total, digest)) => {
+            print(b"-----END QOI-----\nscreenshot: ");
+            num(total);
+            print(b" bytes, SHA-256 ");
+            let mut hex = [0u8; 64];
+            for (i, byte) in digest.iter().enumerate() {
+                const DIGITS: &[u8; 16] = b"0123456789abcdef";
+                hex[2 * i] = DIGITS[(byte >> 4) as usize];
+                hex[2 * i + 1] = DIGITS[(byte & 0xF) as usize];
+            }
+            print(&hex);
+            print(b"\n");
+        }
+        None => print(
+            b"\nscreenshot: the session did not take all the output; the image is incomplete\n",
+        ),
+    }
+    release();
+}
+
+/// Bytes printed as Base64 lines of 76 characters, several lines a print, and
+/// their SHA-256. Once a print is lost, nothing more is printed.
+struct Base64Lines {
+    line: [u8; 57],
+    held: usize,
+    text: [u8; 77 * 52],
+    text_len: usize,
+    total: u64,
+    hash: aricode_crypto::sha256::Sha256,
+    lost: bool,
+}
+
+impl Base64Lines {
+    fn new() -> Self {
+        Self {
+            line: [0; 57],
+            held: 0,
+            text: [0; 77 * 52],
+            text_len: 0,
+            total: 0,
+            hash: aricode_crypto::sha256::Sha256::new(),
+            lost: false,
+        }
+    }
+
+    fn put(&mut self, bytes: &[u8]) {
+        if self.lost {
+            return;
+        }
+        self.hash.update(bytes);
+        for &byte in bytes {
+            self.line[self.held] = byte;
+            self.held += 1;
+            if self.held == self.line.len() {
+                self.end_line();
+            }
+        }
+        self.total += bytes.len() as u64;
+    }
+
+    fn end_line(&mut self) {
+        if self.text_len + 77 > self.text.len() {
+            self.flush();
+        }
+        let encoded = aricode_ssh::base64::encode(&self.line[..self.held], true);
+        self.text[self.text_len..self.text_len + encoded.len()].copy_from_slice(&encoded);
+        self.text[self.text_len + encoded.len()] = b'\n';
+        self.text_len += encoded.len() + 1;
+        self.held = 0;
+    }
+
+    fn flush(&mut self) {
+        if !self.lost && !print_whole(&self.text[..self.text_len]) {
+            self.lost = true;
+        }
+        self.text_len = 0;
+    }
+
+    /// Prints what is held; the bytes put in all and their SHA-256, or `None` if
+    /// some of the output was lost.
+    fn finish(mut self) -> Option<(u64, [u8; 32])> {
+        if self.held > 0 {
+            self.end_line();
+        }
+        self.flush();
+        (!self.lost).then(|| (self.total, self.hash.finish()))
+    }
+}
+
 fn save_file(fs: &mut FsClient, name: &str, data: &[u8]) -> Result<usize, ()> {
     update_index::client::save(fs, name, data).map_err(|_| ())
 }
@@ -581,8 +848,15 @@ fn events() {
                 print(e.name_str().as_bytes());
             }
             EventKind::DmaFault => {
-                print(b"DMA fault from device ");
-                hex(e.code, 4);
+                let (source, write, _, address) = abi::sysinfo::dma_fault_parts(e.code);
+                print(b"DMA fault from ");
+                hex((source >> 8) as u64, 2);
+                print(b":");
+                hex((source >> 3 & 0x1F) as u64, 2);
+                print(b".");
+                num((source & 7) as u64);
+                print(if write { b", write at " } else { b", read at " });
+                hex(address, 8);
                 print(b": ");
                 print(e.name_str().as_bytes());
             }
@@ -605,6 +879,211 @@ fn events() {
             EventKind::None => print(b"?"),
         }
         print(b"\n");
+    }
+}
+
+/// `n` bytes as KiB when whole, bytes otherwise.
+fn size(n: u64) {
+    num(if n.is_multiple_of(1024) { n / 1024 } else { n });
+    print(if n.is_multiple_of(1024) {
+        b" KiB"
+    } else {
+        b" bytes"
+    });
+}
+
+/// Milliseconds since boot as seconds with three decimals.
+fn at_ms(ms: u64) {
+    num(ms / 1000);
+    print(b".");
+    let frac = ms % 1000;
+    if frac < 100 {
+        print(b"0");
+    }
+    if frac < 10 {
+        print(b"0");
+    }
+    num(frac);
+    print(b" s");
+}
+
+fn bdf(source: u16) {
+    hex((source >> 8) as u64, 2);
+    print(b":");
+    hex((source >> 3 & 0x1F) as u64, 2);
+    print(b".");
+    num((source & 7) as u64);
+}
+
+/// One region of a fault site: what it holds, where, how big and when
+/// it was mapped (and unmapped).
+fn site_region(r: &abi::sysinfo::SiteRegion) {
+    print(abi::sysinfo::dma_site::tag_name(r.tag).as_bytes());
+    print(b" 0x");
+    hex(r.start, 8);
+    print(b", ");
+    size(r.len);
+    print(b", mapped at ");
+    at_ms(r.mapped_ms as u64);
+    if r.unmapped_ms != 0 {
+        print(b", unmapped at ");
+        at_ms(r.unmapped_ms as u64);
+    }
+}
+
+/// The IOMMU, its reserved regions (DMAR RMRR) and where the page of each
+/// DMA fault the kernel kept lay (incident 0064): which region of its
+/// device's domain held it or lies nearest, whether it was ever mapped
+/// and when it was unmapped, what the firmware's memory map and the
+/// allocator say of it.
+fn dma() {
+    use abi::sysinfo::{dma_site, DmaFaultSite, ReservedRegion};
+    let mut b = [0u8; 24];
+    if sys::system_info(SYSTEM, abi::sysinfo::IOMMU, &mut b) != Ok(24) {
+        return;
+    }
+    let word = |i: usize| u64::from_le_bytes(b[8 * i..8 * i + 8].try_into().unwrap_or([0; 8]));
+    if word(0) == 0 {
+        print(b"iommu   none: DMA is not translated\n");
+        return;
+    }
+    print(b"iommu   ");
+    num(word(0));
+    print(b" unit(s), ");
+    num(word(1));
+    print(b" process domain(s), ");
+    num(word(2));
+    print(b" DMA fault(s)\n");
+    let mut buf = [0u8; ReservedRegion::LEN * 16];
+    let n = sys::system_info(SYSTEM, abi::sysinfo::IOMMU_RESERVED, &mut buf).unwrap_or(0);
+    if n == 0 {
+        print(b"rmrr    none\n");
+    }
+    for (i, chunk) in buf[..n]
+        .as_chunks::<{ ReservedRegion::LEN }>()
+        .0
+        .iter()
+        .enumerate()
+    {
+        let Some(r) = ReservedRegion::decode(chunk) else {
+            continue;
+        };
+        print(b"rmrr    ");
+        num(i as u64 + 1);
+        print(b": 0x");
+        hex(r.base, 8);
+        print(b"-0x");
+        hex(r.limit, 8);
+        print(b" for");
+        for s in r
+            .scopes
+            .iter()
+            .take((r.devices as usize).min(ReservedRegion::SCOPES))
+        {
+            print(b" ");
+            bdf(*s);
+        }
+        if r.devices as usize > ReservedRegion::SCOPES {
+            print(b" and ");
+            num(r.devices as u64 - ReservedRegion::SCOPES as u64);
+            print(b" more");
+        }
+        if r.bridged > 0 {
+            print(b" (");
+            num(r.bridged as u64);
+            print(b" behind a bridge)");
+        }
+        print(b"\n");
+    }
+    let mut buf = [0u8; DmaFaultSite::LEN * abi::sysinfo::DMA_FAULT_SITES_KEPT];
+    let n = sys::system_info(SYSTEM, abi::sysinfo::DMA_FAULT_SITES, &mut buf).unwrap_or(0);
+    for (i, chunk) in buf[..n]
+        .as_chunks::<{ DmaFaultSite::LEN }>()
+        .0
+        .iter()
+        .enumerate()
+    {
+        let Some(f) = DmaFaultSite::decode(chunk) else {
+            continue;
+        };
+        print(b"dma fault ");
+        num(i as u64 + 1);
+        print(b" [");
+        at_ms(f.at_us / 1000);
+        print(b"] ");
+        bdf(f.source);
+        print(if f.write {
+            b" write at 0x"
+        } else {
+            b" read at 0x"
+        });
+        hex(f.address, 8);
+        match f.owner {
+            0 => print(b", no domain"),
+            dma_site::FIRMWARE_DOMAIN => print(b", firmware identity domain"),
+            pid => {
+                print(b", domain of process ");
+                num(pid as u64);
+            }
+        }
+        print(b": ");
+        print(match f.relation {
+            dma_site::IN_REGION => b"in a region still mapped".as_slice(),
+            dma_site::IN_UNMAPPED => b"in a region unmapped before",
+            dma_site::OUTSIDE => b"in no region the domain has or had",
+            _ => b"the domain has no regions",
+        });
+        print(b"\n");
+        if f.region.present() {
+            print(b"  in    ");
+            site_region(&f.region);
+            print(b"; page at +0x");
+            let off = f.address.saturating_sub(f.region.start);
+            hex(off, (64 - off.leading_zeros() as usize).div_ceil(4).max(1));
+            print(b"\n");
+        }
+        if f.below.present() {
+            print(b"  below ");
+            site_region(&f.below);
+            print(b"; the page starts ");
+            size(f.address.saturating_sub(f.below.start + f.below.len));
+            print(b" past its end\n");
+        }
+        if f.above.present() {
+            print(b"  above ");
+            site_region(&f.above);
+            print(b"; the page ends ");
+            size(f.above.start.saturating_sub(f.address + 4096));
+            print(b" before it\n");
+        }
+        print(b"  page  ");
+        print(dma_site::memory_name(f.memory).as_bytes());
+        if f.memory & dma_site::MEM_APPROXIMATE != 0 {
+            print(b" (some map entries were not kept)");
+        }
+        print(b"; frame ");
+        print(dma_site::frame_name(f.frame).as_bytes());
+        print(b" at the fault; ");
+        match f.rmrr {
+            0 => print(b"in no RMRR"),
+            r => {
+                print(b"in RMRR ");
+                num(r as u64);
+            }
+        }
+        match f.other_owner {
+            0 => print(b"; no other domain maps it"),
+            dma_site::FIRMWARE_DOMAIN => print(b"; a firmware identity domain maps it"),
+            pid => {
+                print(b"; mapped by process ");
+                num(pid as u64);
+            }
+        }
+        print(b"\n  domain ");
+        num(f.regions as u64);
+        print(b" region(s) mapped, ");
+        num(f.unmapped_total as u64);
+        print(b" unmapped since it was made\n");
     }
 }
 
@@ -724,6 +1203,164 @@ fn devices() {
     }
     num(n);
     print(b" PCI function(s)\n");
+}
+
+/// The screen and how the loader chose its mode (`sysinfo::DISPLAY`, ADR
+/// 0078 stage 0): `screen  1366x768, the panel's own (EDID)`, then the
+/// modes the firmware offered, `*` the screen's, `-` one the system cannot
+/// draw on.
+fn screen() {
+    use abi::sysinfo::{Display, DisplaySource, Framebuffer};
+    let mut fb = [0u8; Framebuffer::LEN];
+    let mut d = [0u8; Display::LEN];
+    let (Ok(_), Ok(_)) = (
+        sys::system_info(SYSTEM, abi::sysinfo::FRAMEBUFFER, &mut fb),
+        sys::system_info(SYSTEM, abi::sysinfo::DISPLAY, &mut d),
+    ) else {
+        print(b"screen  none\n");
+        return;
+    };
+    let (Some(fb), Some(d)) = (Framebuffer::decode(&fb), Display::decode(&d)) else {
+        return;
+    };
+    let size = |(w, h): (u32, u32)| {
+        num(w as u64);
+        print(b"x");
+        num(h as u64);
+    };
+    print(b"screen  ");
+    size((fb.width, fb.height));
+    print(match d.source {
+        DisplaySource::Requested => b", asked for with video=".as_slice(),
+        DisplaySource::Edid => b", the panel's own (EDID)",
+        DisplaySource::Firmware => b", the firmware's mode",
+        DisplaySource::SetFailed => b", the firmware's mode: setting a better one failed",
+        DisplaySource::NotListed => b", the firmware's mode, missing from its own list",
+        DisplaySource::OnRunningPipe => b", the panel's own, set on the running pipe",
+        DisplaySource::Kept => b", the firmware's mode, kept by video=firmware",
+        DisplaySource::Unknown => b", the loader did not say how",
+    });
+    if d.preferred.0 != 0 {
+        print(b"; the panel prefers ");
+        size(d.preferred);
+    } else if !matches!(
+        d.source,
+        DisplaySource::Unknown | DisplaySource::OnRunningPipe | DisplaySource::Kept
+    ) {
+        print(b"; no usable EDID from the firmware");
+    }
+    if let Some(why) = abi::sysinfo::display_refusal(d.native_refused) {
+        print(b"; not its own size: ");
+        print(why.as_bytes());
+    }
+    if d.bad_request {
+        print(b"; video= is not WxH");
+    }
+    // After a failed set or an unlisted mode, nothing was looked up.
+    if d.requested.0 != 0 && matches!(d.source, DisplaySource::Edid | DisplaySource::Firmware) {
+        print(b"; video=");
+        size(d.requested);
+        print(b" is not offered");
+    }
+    print(b"\n");
+    if d.listed == 0 {
+        return;
+    }
+    print(b"modes  ");
+    for m in &d.modes[..d.listed as usize] {
+        print(b" ");
+        size((m.width as u32, m.height as u32));
+        if m.chosen {
+            print(b"*");
+        }
+        if !m.usable {
+            print(b"-");
+        }
+    }
+    if d.offered > d.listed as u32 {
+        print(b" (the first ");
+        num(d.listed as u64);
+        print(b" of ");
+        num(d.offered as u64);
+        print(b")");
+    }
+    print(b"\n");
+}
+
+/// Which machine this is (`sysinfo::MACHINE`): its make and model from
+/// SMBIOS and the device identifiers in its ACPI tables, so a report from
+/// an unknown machine names its devices (a touchpad on I2C).
+fn machine() {
+    let mut b = [0u8; 4096];
+    if let Ok(n) = sys::system_info(SYSTEM, abi::sysinfo::MACHINE, &mut b) {
+        print(&b[..n.min(b.len())]);
+    }
+}
+
+/// The GPU's engine (`sysinfo::GPU`, ADR 0083): `gpu     blitter ready, 350
+/// MHz (350 to 1050), 12 batches, 0 resets`, or why it was left alone.
+/// Nothing on a machine without one.
+fn gpu() {
+    use abi::sysinfo::{GpuReport, GPU_OFF, GPU_READY, GPU_REFUSED};
+    let mut b = [0u8; GpuReport::LEN];
+    let Some(r) = sys::system_info(SYSTEM, abi::sysinfo::GPU, &mut b)
+        .ok()
+        .and_then(|_| GpuReport::decode(&b))
+    else {
+        return;
+    };
+    match r.state {
+        GPU_READY => {
+            print(b"gpu     blitter ready, ");
+            num(r.mhz as u64);
+            print(b" MHz (");
+            num(r.mhz_lowest as u64);
+            print(b" to ");
+            num(r.mhz_highest as u64);
+            print(b"), ");
+            num(r.requests);
+            print(b" batches, ");
+            num(r.resets);
+            print(b" resets");
+            match r.render {
+                1 => {
+                    print(b"; render ring ready (");
+                    num(r.render_us as u64);
+                    print(b" us), ");
+                    num(r.threads as u64);
+                    print(b" EU threads");
+                    if r.cleared_threads != 0 {
+                        print(b", last residue clear ");
+                        num(r.cleared_threads as u64);
+                        print(b" in ");
+                        num(r.clear_us as u64);
+                        print(b" us");
+                    }
+                }
+                2 => print(b"; render ring left off"),
+                _ => {}
+            }
+            if r.client != 0 {
+                print(b"; client pid ");
+                num(r.client as u64);
+                print(b", ");
+                num(r.mapped_kib as u64);
+                print(b" KiB mapped");
+            }
+            print(b"\n");
+        }
+        GPU_REFUSED => {
+            print(b"gpu     left as the firmware set it: ");
+            print(
+                abi::sysinfo::gpu_refusal(r.refusal)
+                    .unwrap_or("unknown reason")
+                    .as_bytes(),
+            );
+            print(b"\n");
+        }
+        GPU_OFF => print(b"gpu     left as the firmware set it (gpu=off)\n"),
+        _ => {}
+    }
 }
 
 fn print_ip(ip: [u8; 4]) {
@@ -1967,7 +2604,10 @@ fn execute(
         b"uptime" => uptime(),
         b"sleep" => sleep(rest),
         b"cpus" => cpus(),
+        b"temp" => temp(),
         b"diag" => diag(fs, net_client, mask, rest),
+        b"acpidump" => acpidump(fs, rest),
+        b"screenshot" => screenshot(),
         // Without a network service the shell's net handle is a
         // placeholder that reaches nobody (init, `spawn_shell`).
         b"net" | b"ping" | b"dns" | b"http" if mask & SERVICE_NET == 0 => {

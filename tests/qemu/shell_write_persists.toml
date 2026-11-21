@@ -3,7 +3,7 @@
 # boots; the replace is atomic and durable (ADR 0014).
 name = "shell.write_persists"
 description = "arish: write creates or replaces a file and its content survives a reboot"
-level = "full"
+level = "release"
 areas = ["shell", "filesystem", "storage"]
 timeout_secs = 60
 

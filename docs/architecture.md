@@ -45,7 +45,7 @@ libs/cmdline/        aricode-cmdline: `key` / `key=value` without alloc (no_std,
 libs/fb-console/     aricode-fb-console: text console on a 32 bpp framebuffer, Terminus 8x16 font (OFL), host tests
 libs/x86-cpu/        aricode-x86-cpu: GDT/TSS/IDT descriptors and exception table (no_std, host tests)
 libs/pmm/            aricode-pmm: bitmap frame allocator over external storage (no_std, host tests)
-libs/heap/           aricode-heap: first-fit heap with free list, coalescing and per-allocation header (no_std, host tests)
+libs/heap/           aricode-heap: TLSF heap (segregated lists, boundary tags, O(1) operations) for the kernel and programs (no_std, host tests)
 libs/sync/           aricode-sync: IrqLock/SpinLock with a pluggable interrupt policy, restored between spins; force_unlock (no_std, host tests)
 libs/fat/            aricode-fat: minimal FAT32 with long names to build and read the USB image's ESP (no_std + alloc, host tests)
 libs/xhci/           aricode-xhci: xHCI and USB: registers, TRBs, rings, contexts, ERST, SETUP and descriptors (no_std, host tests)
@@ -271,6 +271,12 @@ activates them; from then on the loader's identity map no longer exists:
 - `aricode-heap` stores a 16-byte header per allocation with the real
   block: `dealloc` does not depend on the `Layout` and large alignments do not
   waste memory. Free blocks are coalesced on release.
+- Since incident 0066 `aricode-heap` is a TLSF allocator (segregated free
+  lists in two levels, boundary tags, a bounded probe of the request's own
+  list before good fit): every operation is constant time, whatever the
+  number of blocks. The first-fit list it replaced walked its free list on
+  every allocation and free, quadratic for a program freeing many blocks
+  out of address order, and unbounded with interrupts off in the kernel.
 - `test=heap` exercises collections, growth beyond 4 MiB, controlled
   failure and absence of leaks.
 
@@ -651,6 +657,12 @@ latter briefly to add the region.
 - A process is inserted into the table before its thread is queued
   (`prepare_for_process` + `start_thread`): with `log=trace` the slow output
   let the thread run before its process existed.
+
+## Display (ADR 0078, 0079)
+
+- `framebuffer::use_panel_size` maps BAR 0 of Intel's integrated graphics
+  uncached at `0xFFFF_D700_0000_0000` (kernel only), once during boot, and gives
+  the screen the panel's own size where the firmware did not offer it.
 
 ## PCIe (Phase 17)
 
@@ -1281,9 +1293,9 @@ latter briefly to add the region.
   `CONSOLE_FIRST` flag (the first handle becomes a session console, ADR
   0047); the process stores the quota
   (`dma_quota`, `dma_used`) and `dma_alloc` charges the size rounded up to a
-  page, returning `Limit` when it is exceeded. The quota is cumulative: what was
-  reserved is not returned on free (DMA buffers live as long as the
-  process); an allocation that fails after the charge gives it back
+  page, returning `Limit` when it is exceeded. The quota bounds live buffers: a buffer's
+  charge goes back with its frames, whoever held it last (ADR 0078, stage 0),
+  and an allocation that fails after the charge gives it back
   (incident 0047). The DMA a process keeps mapped (its own buffers and those of
   clients) is also bounded by the quota: `mmio_map` beyond it returns
   `Limit` (ADR 0038).
@@ -1352,7 +1364,7 @@ latter briefly to add the region.
   fsd on `home/`, the owner's folder, granted only to an installed, signed
   `editor` or `files`; no application named `home` gets a private
   directory, which would be that folder. `desktop/editor` edits up to
-  64 KiB of text there (`aricode_gfx::widgets::TextArea`) and saves with
+  64 KiB of plain text there, on the toolkit (`libs/ui`), and saves with
   an atomic replace; `desktop/files` lists, creates, renames (never over
   an existing name: fsd's rename would replace it) and deletes, asking for
   a second Delete.
@@ -1599,10 +1611,28 @@ kernel/src/iommu.rs            units, per-process domains, attach/map_region/unm
   decodes them (`bus:dev.fn`, read/write, address, reason), clears
   and counts them; `system_info(IOMMU)` returns units, domains and
   faults.
+- Fault sites (incident 0064): each domain region carries what it holds
+  (own `dma_alloc` buffer, client buffer, RMRR, framebuffer) and when it
+  was mapped, and each domain remembers the last regions it unmapped (8
+  own, 16 others). For the first faults of the boot (`DMA_FAULT_SITES_KEPT`,
+  8; at most two per device and one per page, so another device cannot
+  use up the slots) the handler keeps a `DmaFaultSite`: the page against
+  its device's domain (in a live region, in one unmapped before and when,
+  or between the nearest regions below and above), the firmware's memory
+  map kind (`pmm::memory_kind`, from an exact copy of the map kept past
+  boot, `aricode_pmm::KindMap`), the frame's state in the allocator, the
+  RMRR and any other domain that maps it (`aricode_iommu::site`).
+  `sysinfo::DMA_FAULT_SITES` publishes them whole only to a `MANAGE`
+  holder; the device's own driver (`mine`) gets its regions, not the other
+  owner or the frame state; anyone else neither; `sysinfo::IOMMU_RESERVED` lists
+  the RMRRs with their devices. `diag` prints both; the xHCI driver names
+  the page against its arena's log of structures.
 - QEMU: `-device intel-iommu,aw-bits=48` before the devices and
   `iommu_platform=on` on each virtio device; the transport accepts
   `VIRTIO_F_ACCESS_PLATFORM` whenever it is offered. Lock order:
-  `PROCESSES -> IOMMU -> PMM`; never the reverse.
+  `PROCESSES -> IOMMU -> PMM`; never the reverse. The fault handler also
+  takes `SITES` and the kept memory map (`pmm::MAP`) under `IOMMU`; both
+  are leaves (`fault_sites` copies `SITES` out before building its vector).
 - Tests: `test=iommu` (`dma_rogue`) and `iommu.enabled`; with
   `--cpus 4` the whole suite runs translated under SMP.
 
@@ -1619,11 +1649,18 @@ services/usb-input             usbd: xHCI controller, enumeration, interrupt end
   checks CAPLENGTH/HCIVERSION (the capability registers are read as
   32-bit words: QEMU does not handle 16-bit accesses) and, if it is not an
   xHCI, exits with 0 without fuss.
-- Memory: one 64 KiB DMA buffer split with a linear allocator
-  (DCBAA, scratchpads, 16-TRB command ring, 32-TRB event
-  ring, ERST, device contexts and input context, 16-TRB transfer
-  rings and reports). With the IOMMU enabled, that buffer
-  is all the controller can touch.
+- Memory: one DMA buffer of 128 KiB plus a page per scratchpad, split
+  with a linear allocator (DCBAA, scratchpads, 16-TRB command ring,
+  32-TRB event ring, ERST, device contexts and input context, 16-TRB
+  transfer rings and reports). Each structure is placed so that none of
+  up to 4 KiB spans a page boundary and none of up to 64 KiB spans a
+  64 KiB boundary (xHCI 1.2 chapter 6, Table 6-1; `aricode_xhci::arena`),
+  and logged with its label so a DMA fault's page can be named
+  (incident 0064). The driver refuses a controller whose PAGESIZE has no
+  4 KiB pages. With the IOMMU enabled, that buffer, the client buffers of
+  the requests in flight and the controller's RMRRs, if the firmware
+  declares any (mapped into the driver's domain when it takes the
+  device), are all the controller can touch.
 - Enumeration per port with a connected device: port reset if it is
   not enabled, `Enable Slot`, `Address Device` with EP0 at the speed's default
   packet size, device `GET_DESCRIPTOR`
@@ -1634,8 +1671,16 @@ services/usb-input             usbd: xHCI controller, enumeration, interrupt end
 - Events: the event ring is consumed using the cycle bit;
   `Transfer Event`s are matched to their TRB by physical address, the report
   is decoded (keyboard: modifier and usage differences; mouse:
-  buttons, dx/dy, wheel) and the TRB is requeued. `Port Status
-  Change` events only clear the change bits.
+  buttons, dx/dy, wheel) and the TRB is requeued.
+- Hot-plug (ADR 0087): `Port Status Change` events clear the change bits
+  and are classified by `aricode_xhci::hotplug::port_action`. A HID device
+  whose port saw a connect change (or was disabled under it) has its held
+  keys and buttons released at once and is detached by the idle loop (Stop
+  Endpoint, Disable Slot, its memory pooled for the next device); a new
+  connection is debounced (100 ms without a change) and enumerated from the
+  idle loop like at boot, retried with a port reset. A fifth device, an
+  unsupported one and storage plugged in after boot are refused on the
+  console; external hubs are not enumerated. Scenario `usb.xhci_hotplug`.
 - A single input device for the whole controller
   (`USB HID Keyboard+Mouse`); `input_client` and the compositor route by
   event type, not by device.
@@ -1872,6 +1917,29 @@ sdk/proto::status              per-service status (protocol 7) on the broker end
   the S5 sleep types; `power::acpi_poweroff` enables ACPI mode through
   `SMI_CMD` if needed and writes `SLP_TYP | SLP_EN`. `shutdown` uses it unless
   `qemu_exit` is set (scenario `power.acpi_shutdown`).
+- Since incident 0065 `shutdown` first turns interrupts off and halts the
+  other CPUs (counting them halted, `smp::others_halted`); if the power stays
+  on, `console::last_words` takes the screen back from the desktop (or takes
+  it, under `gui`) and shows a last line saying whether the S5 write was made
+  and with what values (`power::PowerOff`). `poweroff_ignored` (tests only)
+  skips the write (scenario `power.poweroff_ignored_desktop`).
+- Since the follow-up study (`docs/audits/2026-11-11-acpi-power-off-study.md`)
+  the power-off follows Linux/ACPICA and FreeBSD: the calling thread moves to
+  the boot CPU first (`scheduler::move_current_to`, `poweroff.cpu`), then
+  interrupts off and the other CPUs halted, then
+  `aricode_acpi::sleep::enter_s5` on the FADT `aricode_acpi::fadt` parses
+  (legacy and `X_` blocks, HW-reduced flag, sleep control/status registers):
+  `ACPI_ENABLE` if needed, `WAK_STS` cleared, GPEs disabled, all status
+  cleared, `SLP_TYP` then `SLP_TYP | SLP_EN` (PM1a before PM1b), a second
+  write after `poweroff.wait_ms`. Port I/O only; an unusable `X_` form
+  falls back to a valid 32-bit port, a broken PM1b is skipped, PM1 blocks
+  use ACPI's default widths, as ACPICA does; a refusal writes nothing and is
+  named in the last line. The move to the boot CPU first checks that CPU's
+  tick advances (`Cpu::ticks`), so a wedged CPU leaves the power-off where it
+  was called instead of hanging it. `acpidump` saves the FADT with the AML. `poweroff_ignored` now skips only the `SLP_EN`
+  writes; `poweroff_from=N` (tests only) starts the call on CPU N (scenario
+  `power.acpi_shutdown_from_ap`). `diag` prints the FADT's facts and the
+  registers' state in `power` lines (`power::report`).
 - `aricode-lineedit`: the shell's line editor (cursor movement, insert and
   delete anywhere, Home/End, Ctrl-A/E/U, history), redrawing with plain text
   and backspace only; the framebuffer console's backspace wraps to the

@@ -119,6 +119,92 @@ impl Layout {
     }
 }
 
+/// The bits of [`Keyboard::modifiers`].
+pub mod mods {
+    pub const SHIFT: u8 = 1;
+    pub const CTRL: u8 = 2;
+    pub const ALT: u8 = 4;
+    pub const ALTGR: u8 = 8;
+    pub const CAPS: u8 = 16;
+}
+
+/// How long a key is held before it repeats, and how often then (the values
+/// of the Linux console and X11's defaults are of this order; ADR 0078).
+pub const REPEAT_DELAY_MS: u64 = 500;
+pub const REPEAT_EVERY_MS: u64 = 33;
+
+/// Software key repeat (ADR 0078, stage 0). A USB keyboard sends a key once,
+/// however long it is held; a PS/2 one repeats by itself, at its own rate. So
+/// the system ignores the device's repeats and makes its own, the same for all:
+/// the last key pressed repeats while it is held.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct KeyRepeat {
+    held: Option<u16>,
+    next_ms: u64,
+}
+
+impl KeyRepeat {
+    pub const fn new() -> Self {
+        Self {
+            held: None,
+            next_ms: 0,
+        }
+    }
+
+    /// Follows a key event at `now_ms`; `false` if it is a device's repeat, to
+    /// be dropped.
+    pub fn follow(&mut self, ev: &Event, now_ms: u64) -> bool {
+        if ev.kind != EV_KEY {
+            return true;
+        }
+        if ev.value == 0 {
+            if self.held == Some(ev.code) {
+                self.held = None;
+            }
+            return true;
+        }
+        if ev.value != 1 || self.held == Some(ev.code) {
+            return false;
+        }
+        if repeats(ev.code) {
+            self.held = Some(ev.code);
+            self.next_ms = now_ms + REPEAT_DELAY_MS;
+        }
+        true
+    }
+
+    /// The key to repeat now, if one is due.
+    pub fn due(&mut self, now_ms: u64) -> Option<u16> {
+        let code = self.held.filter(|_| now_ms >= self.next_ms)?;
+        self.next_ms = now_ms + REPEAT_EVERY_MS;
+        Some(code)
+    }
+
+    /// When the next repeat is due.
+    pub fn next_due(&self) -> Option<u64> {
+        self.held.map(|_| self.next_ms)
+    }
+
+    /// Stops repeating: the focus moved, or a device's releases were lost.
+    pub fn stop(&mut self) {
+        self.held = None;
+    }
+}
+
+/// Whether holding this key repeats it: not a modifier, a toggle or a button.
+const fn repeats(code: u16) -> bool {
+    !matches!(
+        code,
+        KEY_LEFTSHIFT
+            | KEY_RIGHTSHIFT
+            | KEY_LEFTCTRL
+            | KEY_RIGHTCTRL
+            | KEY_LEFTALT
+            | KEY_RIGHTALT
+            | KEY_CAPSLOCK
+    ) && code < BTN_LEFT
+}
+
 /// Keyboard: tracks shift, Ctrl and `AltGr` and translates key presses
 /// according to the layout into UTF-8 (ADR 0076). Ctrl with a letter gives
 /// its control character (`0x01` for Ctrl+A), as a terminal sends it; with
@@ -130,6 +216,7 @@ pub struct Keyboard {
     shift: bool,
     caps: bool,
     altgr: bool,
+    alt: bool,
     /// Bits: left Ctrl, right Ctrl.
     ctrl: u8,
     layout: Layout,
@@ -153,10 +240,37 @@ impl Keyboard {
             shift: false,
             caps: false,
             altgr: false,
+            alt: false,
             ctrl: 0,
             layout,
             dead: None,
         }
+    }
+
+    /// A dead key waits for the next key: holding it must not repeat.
+    pub const fn dead_pending(&self) -> bool {
+        self.dead.is_some()
+    }
+
+    /// The [`mods`] held now.
+    pub const fn modifiers(&self) -> u8 {
+        let mut m = 0;
+        if self.shift {
+            m |= mods::SHIFT;
+        }
+        if self.ctrl != 0 {
+            m |= mods::CTRL;
+        }
+        if self.alt {
+            m |= mods::ALT;
+        }
+        if self.altgr {
+            m |= mods::ALTGR;
+        }
+        if self.caps {
+            m |= mods::CAPS;
+        }
+        m
     }
 
     pub fn set_layout(&mut self, layout: Layout) {
@@ -169,6 +283,7 @@ impl Keyboard {
     pub fn release_modifiers(&mut self) {
         self.shift = false;
         self.altgr = false;
+        self.alt = false;
         self.ctrl = 0;
         self.dead = None;
     }
@@ -196,6 +311,10 @@ impl Keyboard {
             }
             KEY_RIGHTALT => {
                 self.altgr = ev.value != 0;
+                return KeyBytes::NONE;
+            }
+            KEY_LEFTALT => {
+                self.alt = ev.value != 0;
                 return KeyBytes::NONE;
             }
             KEY_LEFTCTRL | KEY_RIGHTCTRL => {
@@ -625,6 +744,16 @@ impl HidBootKeyboard {
         }
         n
     }
+
+    /// The keyboard is gone (unplugged, or its driver dropped it): the
+    /// release of every key and modifier still held, as an empty report
+    /// would give them, so that nothing stays pressed for the reader
+    /// (Linux's input core does the same when a device goes,
+    /// `input_dev_release_keys`). Returns how many events; none when
+    /// nothing was held.
+    pub fn release_all(&mut self, out: &mut [Event; MAX_REPORT_EVENTS]) -> usize {
+        self.feed(&[0; 8], out)
+    }
 }
 
 /// Boot HID mouse: 3 or 4 byte report (buttons, dx, dy, wheel).
@@ -655,6 +784,12 @@ impl HidBootMouse {
             wheel,
             out,
         )
+    }
+
+    /// The mouse is gone: the release of every button still held (and no
+    /// motion), as `HidBootKeyboard::release_all` does for keys.
+    pub fn release_all(&mut self, out: &mut [Event; MAX_REPORT_EVENTS]) -> usize {
+        self.feed(&[0; 4], out)
     }
 }
 
@@ -781,6 +916,11 @@ pub struct KeysDown {
 impl KeysDown {
     pub const fn new() -> Self {
         Self { bits: [0; 4] }
+    }
+
+    /// Whether a key is held (key codes from 256 up are not tracked).
+    pub fn is_down(&self, code: u16) -> bool {
+        code < 256 && self.bits[code as usize / 64] & (1u64 << (code % 64)) != 0
     }
 
     /// Follows one event (key codes from 256 up are not tracked).
@@ -940,6 +1080,12 @@ impl EscapeChord {
         Self { held: 0 }
     }
 
+    /// Forgets what is held: a device's releases were lost, and a plain
+    /// Backspace must not end the desktop.
+    pub fn reset(&mut self) {
+        self.held = 0;
+    }
+
     /// Follows one event; `true` on the Backspace press made with a Ctrl
     /// and an Alt held.
     pub fn feed(&mut self, ev: Event) -> bool {
@@ -1010,6 +1156,84 @@ mod tests {
         assert_eq!(k.feed(key(KEY_LEFT, 1)).as_slice(), b"\x1b[D");
         assert_eq!(k.feed(key(KEY_DELETE, 1)).as_slice(), b"\x1b[3~");
         assert!(k.feed(key(KEY_UP, 2)).is_empty());
+    }
+
+    #[test]
+    fn the_last_key_held_repeats_after_a_delay() {
+        let mut r = KeyRepeat::new();
+        assert!(r.follow(&key(30, 1), 1000));
+        assert_eq!(r.next_due(), Some(1000 + REPEAT_DELAY_MS));
+        assert_eq!(r.due(1000 + REPEAT_DELAY_MS - 1), None);
+        assert_eq!(r.due(1000 + REPEAT_DELAY_MS), Some(30));
+        assert_eq!(r.due(1000 + REPEAT_DELAY_MS), None, "one at a time");
+        assert_eq!(r.due(1000 + REPEAT_DELAY_MS + REPEAT_EVERY_MS), Some(30));
+        // Another key takes over; the first one's release changes nothing.
+        assert!(r.follow(&key(31, 1), 3000));
+        assert!(r.follow(&key(30, 0), 3001));
+        assert_eq!(r.due(3000 + REPEAT_DELAY_MS), Some(31));
+        assert!(r.follow(&key(31, 0), 4000));
+        assert_eq!(r.next_due(), None);
+    }
+
+    #[test]
+    fn a_devices_own_repeats_are_dropped() {
+        let mut r = KeyRepeat::new();
+        assert!(r.follow(&key(30, 1), 0));
+        assert!(!r.follow(&key(30, 2), 100), "a repeat as such");
+        assert!(!r.follow(&key(30, 1), 200), "PS/2: the press again");
+        assert_eq!(r.next_due(), Some(REPEAT_DELAY_MS), "and the delay stands");
+    }
+
+    #[test]
+    fn modifiers_and_buttons_do_not_repeat() {
+        let mut r = KeyRepeat::new();
+        for code in [KEY_LEFTSHIFT, KEY_RIGHTALT, KEY_CAPSLOCK, BTN_LEFT] {
+            assert!(r.follow(&key(code, 1), 0));
+            assert_eq!(r.next_due(), None, "{code}");
+        }
+        // Text keeps repeating under Shift, and stops when asked.
+        assert!(r.follow(&key(30, 1), 0));
+        assert!(r.follow(&key(KEY_LEFTSHIFT, 0), 10));
+        assert!(r.next_due().is_some());
+        r.stop();
+        assert_eq!(r.due(u64::MAX), None);
+    }
+
+    #[test]
+    fn keys_down_says_what_is_held() {
+        let mut k = KeysDown::new();
+        assert!(!k.is_down(30));
+        k.follow(&key(30, 1));
+        assert!(k.is_down(30));
+        k.follow(&key(30, 0));
+        assert!(!k.is_down(30));
+        assert!(!k.is_down(BTN_LEFT), "not tracked");
+    }
+
+    #[test]
+    fn the_chord_forgets_what_a_lost_release_left_held() {
+        let mut c = EscapeChord::new();
+        c.feed(key(KEY_LEFTCTRL, 1));
+        c.feed(key(KEY_LEFTALT, 1));
+        c.reset();
+        assert!(!c.feed(key(KEY_BACKSPACE, 1)));
+    }
+
+    #[test]
+    fn the_keyboard_reports_its_modifiers() {
+        let mut k = Keyboard::new();
+        assert_eq!(k.modifiers(), 0);
+        k.feed(key(KEY_LEFTSHIFT, 1));
+        k.feed(key(KEY_RIGHTCTRL, 1));
+        k.feed(key(KEY_LEFTALT, 1));
+        k.feed(key(KEY_RIGHTALT, 1));
+        k.feed(key(KEY_CAPSLOCK, 1));
+        assert_eq!(
+            k.modifiers(),
+            mods::SHIFT | mods::CTRL | mods::ALT | mods::ALTGR | mods::CAPS
+        );
+        k.release_modifiers();
+        assert_eq!(k.modifiers(), mods::CAPS, "a toggle, not a held key");
     }
 
     #[test]
@@ -1368,6 +1592,53 @@ mod tests {
         let n = kbd.feed(&[0; 8], &mut out);
         assert_eq!(n, 7);
         assert!(out[..6].iter().all(|e| e.value == 0));
+    }
+
+    #[test]
+    fn released_keyboard_lets_go_of_everything_held() {
+        let mut kbd = HidBootKeyboard::new();
+        let mut out = [Event::default(); MAX_REPORT_EVENTS];
+        // Nothing held: nothing to release.
+        assert_eq!(kbd.release_all(&mut out), 0);
+        // Left Shift and 'a' held when the keyboard goes.
+        kbd.feed(&[0x02, 0, 0x04, 0, 0, 0, 0, 0], &mut out);
+        let n = kbd.release_all(&mut out);
+        assert_eq!(
+            &out[..n],
+            &[
+                key(KEY_LEFTSHIFT, 0),
+                key(hid_usage_to_key(0x04), 0),
+                Event {
+                    kind: EV_SYN,
+                    code: 0,
+                    value: 0
+                },
+            ]
+        );
+        // Released once: a second call has nothing left.
+        assert_eq!(kbd.release_all(&mut out), 0);
+    }
+
+    #[test]
+    fn released_mouse_lets_go_of_its_buttons_without_moving() {
+        let mut m = HidBootMouse::new();
+        let mut out = [Event::default(); MAX_REPORT_EVENTS];
+        assert_eq!(m.release_all(&mut out), 0);
+        m.feed(&[0x05, 3, 4], &mut out);
+        let n = m.release_all(&mut out);
+        assert_eq!(
+            &out[..n],
+            &[
+                key(BTN_LEFT, 0),
+                key(BTN_MIDDLE, 0),
+                Event {
+                    kind: EV_SYN,
+                    code: 0,
+                    value: 0
+                },
+            ]
+        );
+        assert_eq!(m.release_all(&mut out), 0);
     }
 
     #[test]

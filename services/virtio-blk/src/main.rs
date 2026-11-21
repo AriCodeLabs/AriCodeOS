@@ -492,12 +492,15 @@ fn main(mask: u64) -> u64 {
         }
     };
     let mut args = [0u8; sys::CMDLINE_MAX];
-    let line = sys::cmdline(extra_handle(mask, 0), &mut args);
-    if line.is_err() {
+    // Init grants SYSTEM only for `strict` or `blk_fault`: without them there is nothing
+    // to read, and that is the usual boot, not a fault.
+    let line = (mask & sys::abi::driver_arg::WITH_SYSTEM != 0)
+        .then(|| sys::cmdline(extra_handle(mask, 0), &mut args));
+    if matches!(line, Some(Err(_))) {
         say(b"cannot read the command line (too long or not text): boot flags ignored");
         record("blk cmdline unreadable", sys::CMDLINE_MAX as u64);
     }
-    if let Ok(text) = line {
+    if let Some(Ok(text)) = line {
         let c = aricode_cmdline::CmdLine::new(text);
         dev.fault_lba = c
             .get(aricode_cmdline::keys::BLK_FAULT)

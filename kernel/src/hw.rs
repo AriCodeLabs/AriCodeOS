@@ -384,12 +384,23 @@ fn msi_enable(cfg_virt: u64, cap: u8, on: bool) {
     }
 }
 
-/// MMIO region of a device (physical, uncached) or a DMA buffer (contiguous
-/// RAM, cached).
+/// How the CPU may cache a mapped region.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Caching {
+    /// Ordinary memory: DMA buffers.
+    WriteBack,
+    /// Device registers: every access reaches the device, in order.
+    Uncached,
+    /// A framebuffer: writes are combined into bursts, never read back
+    /// from a cache (ADR 0078, stage 0; `arch::pat`).
+    WriteCombining,
+}
+
+/// MMIO region of a device (physical) or a DMA buffer (contiguous RAM).
 pub struct Region {
     pub phys: u64,
     pub len: u64,
-    pub cacheable: bool,
+    pub caching: Caching,
     /// PCI function it belongs to (`bus << 8 | dev << 3 | fn`): mapping it
     /// assigns the device to the process's IOMMU domain (Phase 33).
     pub source_id: Option<u16>,
@@ -398,10 +409,33 @@ pub struct Region {
     pub claim: Option<crate::pci::ClaimToken>,
 }
 
+/// What a DMA buffer costs its allocator's quota: given back when the buffer's
+/// frames are, wherever that happens and without a lock, since the last
+/// reference may go with locks held or after the process has gone.
+pub struct DmaCharge {
+    used: alloc::sync::Arc<core::sync::atomic::AtomicU64>,
+    bytes: u64,
+}
+
+impl DmaCharge {
+    pub fn new(used: alloc::sync::Arc<core::sync::atomic::AtomicU64>, bytes: u64) -> Self {
+        Self { used, bytes }
+    }
+}
+
+impl Drop for DmaCharge {
+    fn drop(&mut self) {
+        self.used
+            .fetch_sub(self.bytes, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// DMA buffer: contiguous frames that go back to the PMM when the object is dropped.
 pub struct DmaBuffer {
     pub region: Region,
     frames: usize,
+    /// Dropped after `drop` returned the frames. `None`: a kernel allocation.
+    _charge: Option<DmaCharge>,
 }
 
 impl Drop for DmaBuffer {
@@ -424,10 +458,12 @@ static VECTORS: IrqLock<Vectors> = IrqLock::new(Vectors {
 /// good, deliberately; each one was reported when it got here.
 static QUARANTINE: IrqLock<alloc::vec::Vec<ObjectRef>> = IrqLock::new(alloc::vec::Vec::new());
 
-/// Keeps `dma` (a DMA buffer) alive forever. Returns its size.
+/// Keeps `dma` (a DMA buffer or a memory object a device may still reach)
+/// alive forever. Returns its size.
 pub fn quarantine(dma: ObjectRef) -> u64 {
     let len = match &dma.kind {
         ObjectKind::Dma(d) => d.region.len,
+        ObjectKind::Mem(m) => m.len(),
         _ => return 0,
     };
     QUARANTINE.lock().push(dma);
@@ -468,14 +504,22 @@ pub fn handle_device_irq(vector: u8) {
     }
 }
 
-/// Allocates a physically contiguous DMA buffer.
-pub fn dma_alloc(len: u64) -> Result<ObjectRef, &'static str> {
+/// Allocates a physically contiguous DMA buffer, which holds `charge` for as
+/// long as its frames live.
+pub fn dma_alloc(len: u64, charge: Option<DmaCharge>) -> Result<ObjectRef, &'static str> {
     if len == 0 || len > aricode_abi::DMA_MAX_LEN {
         return Err("hw: invalid DMA size");
     }
     let frames = len.div_ceil(FRAME_SIZE) as usize;
-    let first =
-        pmm::with(|p| p.allocate_contiguous(frames, 1)).ok_or("hw: no contiguous memory")?;
+    // Frames promised to memory objects are theirs (ADR 0084).
+    let first = pmm::with(|p| {
+        if p.stats().free_frames < promised() + frames + crate::user::process::KERNEL_RESERVE_FRAMES
+        {
+            return None;
+        }
+        p.allocate_contiguous(frames, 1)
+    })
+    .ok_or("hw: no contiguous memory")?;
     // Zero it: a driver must not see another driver's data.
     // SAFETY: freshly allocated frames, reachable through the physical map.
     unsafe {
@@ -489,11 +533,12 @@ pub fn dma_alloc(len: u64) -> Result<ObjectRef, &'static str> {
         region: Region {
             phys: first.addr(),
             len: frames as u64 * FRAME_SIZE,
-            cacheable: true,
+            caching: Caching::WriteBack,
             source_id: None,
             claim: None,
         },
         frames,
+        _charge: charge,
     })))
 }
 
@@ -553,7 +598,7 @@ pub fn usb_hid_selftest() {
 
 /// Test bench (`test=drivers`): PIT IRQ0, DMA and the framebuffer as MMIO,
 /// all serviced by user drivers.
-pub fn selftest(info: &boot_protocol::BootInfo) {
+pub fn selftest() {
     use crate::arch::x86_64::pit;
     use crate::user::{process, programs};
     use alloc::vec;
@@ -605,13 +650,13 @@ pub fn selftest(info: &boot_protocol::BootInfo) {
     // The screen is the driver's until the check: the kernel console would
     // repaint pixel (0,0) on its next scroll, which any log line (the
     // driver's exit) can cause once the screen is full of boot lines.
-    let fb = info.framebuffer;
+    let fb = crate::framebuffer::current();
     let lent = crate::console::lend_framebuffer();
     if fb.address != 0 {
         let region = KernelObject::new(ObjectKind::Mmio(Region {
             phys: fb.address,
             len: fb.size,
-            cacheable: false,
+            caching: Caching::WriteCombining,
             source_id: None,
             claim: None,
         }));
@@ -646,4 +691,224 @@ pub fn selftest(info: &boot_protocol::BootInfo) {
     log::info!(
         "drivers selftest ok (IRQ0 serviced in ring 3, {fired} pending at close, DMA allocated and mapped, framebuffer painted from ring 3)"
     );
+}
+
+/// Frames promised to memory objects and not taken yet (ADR 0084): changed
+/// only under the PMM's lock, so a promise and the frames it counts on are
+/// decided together.
+static PROMISED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Frames promised to memory objects and not yet taken. Allocations for
+/// programs leave them alone.
+pub fn promised() -> usize {
+    PROMISED.load(Ordering::Relaxed)
+}
+
+/// Frames a promise always leaves free beyond the kernel's reserve, for the
+/// kernel's own growth (its heap, kernel stacks, IOMMU tables), which does
+/// not count promises (audit of ADR 0084, H1): 16 MiB, or 1/64 of the
+/// machine if more.
+fn kernel_headroom() -> usize {
+    (pmm::stats().usable_frames / 64).max(4096)
+}
+
+/// Page entries one table frame holds.
+const ENTRIES: usize = (FRAME_SIZE / 4) as usize;
+/// Frame numbers are kept in 32 bits: frames from 16 TiB up are refused.
+const FRAME_LIMIT: u64 = 1 << 44;
+/// Objects of more pages than this are freed by the `reclaim` thread, in
+/// batches, never all at once where interrupts are off (audit M1).
+const INLINE_FREE_PAGES: usize = 2048;
+/// Frames freed per hold of the PMM's lock.
+const FREE_BATCH: usize = 512;
+
+struct MemPages {
+    /// Frames holding the page table: entry `i` is the frame number of
+    /// page `i`, 0 while not taken. Outside the kernel heap (audit H2).
+    tables: alloc::vec::Vec<u64>,
+    /// Pages taken so far.
+    backed: usize,
+}
+
+impl MemPages {
+    fn entry(&mut self, index: usize) -> &mut u32 {
+        let table = crate::memory::phys::phys_to_virt(self.tables[index / ENTRIES]) as *mut u32;
+        // SAFETY: a table frame of this object, reachable through the physical
+        // map, `ENTRIES` entries long; `&mut self` gives exclusivity.
+        unsafe { &mut *table.add(index % ENTRIES) }
+    }
+}
+
+/// A memory object (ADR 0084): pages that need not be contiguous, each taken
+/// from the PMM and zeroed when first touched, out of frames promised when
+/// the object was made. Its frames go back when the last handle or mapping
+/// of it does (ADR 0038). Not for devices: it has no physical address.
+pub struct MemObject {
+    inner: IrqLock<MemPages>,
+    pages: usize,
+    /// Dropped after `drop` handed the frames back.
+    _charge: Option<DmaCharge>,
+}
+
+impl MemObject {
+    pub fn len(&self) -> u64 {
+        self.pages as u64 * FRAME_SIZE
+    }
+
+    /// The frame of page `index`, taken and zeroed now if it was not yet.
+    /// `None` past the end, or if no frame could be had (only if a promise
+    /// was broken).
+    pub fn page(&self, index: usize) -> Option<u64> {
+        if index >= self.pages {
+            return None;
+        }
+        let mut inner = self.inner.lock();
+        let slot = *inner.entry(index);
+        if slot != 0 {
+            return Some(slot as u64 * FRAME_SIZE);
+        }
+        let frame = pmm::with(|p| {
+            let f = p.allocate()?;
+            if f.addr() >= FRAME_LIMIT {
+                p.free(f).expect("frame just taken");
+                return None;
+            }
+            PROMISED.fetch_sub(1, Ordering::Relaxed);
+            Some(f)
+        })?;
+        // SAFETY: a frame just taken, reachable through the physical map.
+        unsafe {
+            core::ptr::write_bytes(
+                crate::memory::phys::phys_to_virt(frame.addr()) as *mut u8,
+                0,
+                FRAME_SIZE as usize,
+            )
+        };
+        *inner.entry(index) = (frame.addr() / FRAME_SIZE) as u32;
+        inner.backed += 1;
+        Some(frame.addr())
+    }
+}
+
+impl Drop for MemObject {
+    fn drop(&mut self) {
+        let inner = core::mem::replace(
+            self.inner.get_mut(),
+            MemPages {
+                tables: alloc::vec::Vec::new(),
+                backed: 0,
+            },
+        );
+        // The promise of the pages never taken goes back at once.
+        let unbacked = self.pages - inner.backed;
+        pmm::with(|_| PROMISED.fetch_sub(unbacked, Ordering::Relaxed));
+        if self.pages <= INLINE_FREE_PAGES {
+            free_pages(inner, self.pages);
+        } else {
+            RECLAIM.lock().push((inner, self.pages));
+        }
+    }
+}
+
+/// Every frame of `inner`'s `pages` pages, then its tables, back to the PMM,
+/// `FREE_BATCH` at a time.
+fn free_pages(mut inner: MemPages, pages: usize) {
+    let mut batch = [0u64; FREE_BATCH];
+    let mut n = 0;
+    let flush = |batch: &[u64]| {
+        pmm::with(|p| {
+            for &f in batch {
+                p.free(Frame::from_addr(f)).expect("memory object frame");
+            }
+        })
+    };
+    for i in 0..pages {
+        let e = *inner.entry(i);
+        if e != 0 {
+            batch[n] = e as u64 * FRAME_SIZE;
+            n += 1;
+            if n == FREE_BATCH {
+                flush(&batch);
+                n = 0;
+            }
+        }
+    }
+    flush(&batch[..n]);
+    for chunk in inner.tables.chunks(FREE_BATCH) {
+        flush(chunk);
+    }
+}
+
+/// Large objects waiting for the `reclaim` thread.
+static RECLAIM: IrqLock<alloc::vec::Vec<(MemPages, usize)>> = IrqLock::new(alloc::vec::Vec::new());
+
+/// Starts the thread that frees large memory objects (audit M1).
+pub fn start_reclaim() {
+    if let Err(e) = crate::task::scheduler::spawn("reclaim", reclaim_thread, 0) {
+        warn!("hw: no reclaim thread ({e}): large memory objects are freed where they are dropped");
+    }
+}
+
+extern "C" fn reclaim_thread(_arg: usize) {
+    loop {
+        crate::task::scheduler::sleep_ms(10);
+        loop {
+            let next = RECLAIM.lock().pop();
+            let Some((inner, pages)) = next else {
+                break;
+            };
+            free_pages(inner, pages);
+        }
+    }
+}
+
+/// Makes a memory object of `len` bytes (whole pages): its page table is
+/// taken now, its pages promised out of the free frames beyond `reserve`
+/// and the kernel's headroom; no page is taken yet.
+pub fn mem_alloc(
+    len: u64,
+    reserve: usize,
+    charge: Option<DmaCharge>,
+) -> Result<ObjectRef, &'static str> {
+    if len == 0 || !len.is_multiple_of(FRAME_SIZE) {
+        return Err("hw: invalid memory object size");
+    }
+    let pages = usize::try_from(len / FRAME_SIZE).map_err(|_| "hw: memory object too large")?;
+    let table_frames = pages.div_ceil(ENTRIES);
+    let headroom = reserve + kernel_headroom();
+    let mut tables = alloc::vec::Vec::new();
+    tables
+        .try_reserve_exact(table_frames)
+        .map_err(|_| "hw: no kernel memory")?;
+    let taken = pmm::with(|p| {
+        let promised = PROMISED.load(Ordering::Relaxed);
+        let need = promised
+            .saturating_add(pages)
+            .saturating_add(table_frames)
+            .saturating_add(headroom);
+        if p.stats().free_frames < need {
+            return Err("hw: the memory cannot be promised");
+        }
+        for _ in 0..table_frames {
+            tables.push(p.allocate().expect("counted above").addr());
+        }
+        PROMISED.store(promised + pages, Ordering::Relaxed);
+        Ok(())
+    });
+    taken?;
+    for &t in &tables {
+        // SAFETY: table frames just taken, reachable through the physical map.
+        unsafe {
+            core::ptr::write_bytes(
+                crate::memory::phys::phys_to_virt(t) as *mut u8,
+                0,
+                FRAME_SIZE as usize,
+            )
+        };
+    }
+    Ok(KernelObject::new(ObjectKind::Mem(MemObject {
+        inner: IrqLock::new(MemPages { tables, backed: 0 }),
+        pages,
+        _charge: charge,
+    })))
 }

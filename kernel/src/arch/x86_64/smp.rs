@@ -306,6 +306,7 @@ extern "C" fn ap_entry(idx: usize) -> ! {
     gdt::init_for(cpu);
     idt::load();
     syscall::init();
+    super::pat::init();
     cpu::activate(cpu);
     // CR0/CR4 came from the BSP; XCR0 is per CPU (ADR 0065).
     super::fpu::init_cpu();
@@ -319,11 +320,15 @@ extern "C" fn ap_entry(idx: usize) -> ! {
 
 // --- Service IPIs ---------------------------------------------------------
 
-/// Page to invalidate (0 = whole TLB) and CPUs yet to acknowledge.
+/// Page to invalidate (0 = whole TLB, [`RELOAD_CR3`] = this address space's
+/// entries) and CPUs yet to acknowledge.
 static FLUSH_ADDR: AtomicU64 = AtomicU64::new(0);
 static FLUSH_PENDING: AtomicUsize = AtomicUsize::new(0);
 static FLUSH_SENDER: SpinLock<()> = SpinLock::new(());
 static FLUSHES_SERVED: AtomicUsize = AtomicUsize::new(0);
+/// `FLUSH_ADDR` for "reload CR3": drops the non-global entries, those of the user
+/// half. No page address is 1.
+const RELOAD_CR3: u64 = 1;
 
 fn invlpg(virt: u64) {
     // SAFETY: invalidation of a TLB entry; no memory effects.
@@ -331,7 +336,7 @@ fn invlpg(virt: u64) {
 }
 
 /// Flushes this CPU's whole TLB, global entries included.
-fn flush_all_local() {
+pub(super) fn flush_all_local() {
     const PGE: u64 = 1 << 7;
     let cr4 = read_cr(4);
     // SAFETY: toggling PGE (or reloading CR3) only invalidates the TLB.
@@ -370,10 +375,65 @@ pub fn flush_others(virt: Option<u64>) {
     }
 }
 
+/// The LAPIC ids of the other online CPUs running address space `cr3`, after
+/// this one has changed its tables (ADR 0082). From the CPU that changed them,
+/// with interrupts disabled, so that it is still the CPU it excludes.
+pub fn others_running(cr3: u64) -> ([u32; MAX_CPUS], usize) {
+    // The tables' change before looking at who runs them: a CPU missed here sets
+    // its address space after this read, so it loads the changed tables.
+    core::sync::atomic::fence(Ordering::SeqCst);
+    let me = cpu::id() as usize;
+    let mut ids = [0u32; MAX_CPUS];
+    let mut n = 0;
+    for c in cpu::online().filter(|c| c.index() != me && c.cr3() == cr3) {
+        ids[n] = c.lapic_id();
+        n += 1;
+    }
+    (ids, n)
+}
+
+/// Invalidates the user pages `[virt, virt+len)` on the CPUs `lapic_ids` (from
+/// [`others_running`]) and waits for them: one page by its address, more by
+/// reloading their address space. A CPU that has moved to another one since
+/// invalidates in vain. Interrupts enabled and no locks held, as `flush_others`.
+pub fn flush_user_range_on(lapic_ids: &[u32], virt: u64, len: u64) {
+    if lapic_ids.is_empty() {
+        return;
+    }
+    assert!(
+        crate::sync::interrupts_enabled(),
+        "smp: user tlb shootdown with interrupts disabled"
+    );
+    let _sender = FLUSH_SENDER.lock();
+    let one_page = len <= PAGE_SIZE && virt != 0 && virt != RELOAD_CR3;
+    FLUSH_ADDR.store(if one_page { virt } else { RELOAD_CR3 }, Ordering::Relaxed);
+    FLUSH_PENDING.store(lapic_ids.len(), Ordering::SeqCst);
+    for &id in lapic_ids {
+        apic::send_ipi(id, apic::TLB_FLUSH_VECTOR);
+    }
+    let mut spins = 0u64;
+    while FLUSH_PENDING.load(Ordering::Acquire) != 0 {
+        spins += 1;
+        assert!(spins < 1 << 30, "smp: user tlb shootdown not answered");
+        core::hint::spin_loop();
+    }
+    USER_SHOOTDOWNS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// User-range shootdowns that reached another CPU (`test=thread_unmap`).
+static USER_SHOOTDOWNS: AtomicUsize = AtomicUsize::new(0);
+pub fn user_shootdowns() -> usize {
+    USER_SHOOTDOWNS.load(Ordering::Relaxed)
+}
+
 /// `TLB_FLUSH_VECTOR` handler on the receiving CPU.
 pub fn on_tlb_flush_ipi() {
     match FLUSH_ADDR.load(Ordering::Relaxed) {
         0 => flush_all_local(),
+        // SAFETY: reloading CR3 with its own value only drops non-global entries.
+        RELOAD_CR3 => unsafe {
+            asm!("mov cr3, {}", in(reg) read_cr(3), options(nostack));
+        },
         v => invlpg(v),
     }
     FLUSHES_SERVED.fetch_add(1, Ordering::Relaxed);
@@ -385,12 +445,35 @@ pub fn flushes_served() -> usize {
     FLUSHES_SERVED.load(Ordering::Relaxed)
 }
 
-/// Halts the other CPUs (panic). No waiting: the calling CPU may be in any
-/// state.
+/// Halts the other CPUs (panic, shutdown). No waiting: the calling CPU
+/// may be in any state; [`others_halted`] says how many have stopped.
 pub fn halt_others() {
     if cpu::online_count() > 1 {
         apic::broadcast_ipi(apic::HALT_VECTOR);
     }
+}
+
+/// CPUs that took the halt IPI and stopped for good.
+static HALTED: AtomicUsize = AtomicUsize::new(0);
+
+/// The halt IPI's handler: counts this CPU as stopped, then stops it.
+pub fn halt_on_ipi() -> ! {
+    HALTED.fetch_add(1, Ordering::AcqRel);
+    halt_forever()
+}
+
+/// Waits, at most `spins` turns of a spin loop (interrupts may be off, so
+/// no clock), until every other online CPU has taken the halt IPI. Whether
+/// they all did.
+pub fn others_halted(spins: u64) -> bool {
+    let others = cpu::online_count().saturating_sub(1);
+    for _ in 0..spins {
+        if HALTED.load(Ordering::Acquire) >= others {
+            return true;
+        }
+        core::hint::spin_loop();
+    }
+    HALTED.load(Ordering::Acquire) >= others
 }
 
 pub fn halt_forever() -> ! {

@@ -1,0 +1,35 @@
+# The owner's report from a machine: on a stick that boots into the desktop the shell is
+# in the Terminal, so `diag NAME` must work from there. The launcher opens the terminal,
+# `diag x` saves the report on the stick, and the console's shell reads it back.
+name = "usb.desktop_diag"
+description = "diag NAME from the desktop's terminal saves the report on the stick"
+level = "release"
+areas = ["usb", "apps", "gui", "shell"]
+cmdline = "qemu_exit shell"
+selftest = false
+disk = "usb-image"
+install = ["desktop/launcher", "desktop/terminal"]
+stick_profiles = ["desktop:launcher,terminal"]
+stdin = ["sleep 14000", "cat x", "shutdown"]
+timeout_secs = 120
+
+[host_input]
+marker = "launcher: ready"
+keys = ["ret"]
+
+[[host_input_then]]
+marker = "terminal: shell started"
+wait_ms = 500
+keys = ["d", "i", "a", "g", "spc", "x", "ret"]
+key_delay_ms = 100
+
+[expect]
+exit = 33
+serial_contains = [
+    "terminal: shell started",
+    "ari> cat x",
+    "=== AriCodeOS diagnostics ===",
+    "=== end of diagnostics ===",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW"]

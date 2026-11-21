@@ -251,8 +251,33 @@ fn render(list: &[Shipped], shipped: &BTreeMap<(String, String), Vec<&str>>) -> 
 }
 
 /// `cargo xtask notices`: writes `build/THIRD-PARTY-NOTICES.txt`.
+/// The fonts shipped in the images, and their licence files in the repository.
+const FONTS: [(&str, &str); 3] = [
+    ("Terminus Font", "libs/fb-console/FONT-LICENSE-OFL.txt"),
+    ("Inter 4.1", "libs/text/fonts/Inter-LICENSE-OFL.txt"),
+    (
+        "JetBrains Mono 2.304",
+        "libs/text/fonts/JetBrainsMono-LICENSE-OFL.txt",
+    ),
+];
+
+/// The fonts' section of the notices. A missing licence file is an error.
+fn fonts() -> Result<String> {
+    let mut out = String::from("\nFonts\n=====\n");
+    for (name, path) in FONTS {
+        let file = crate::root().join(path);
+        let licence =
+            std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+        out.push_str(&format!(
+            "\n{name}\n{}\n\n{licence}\n",
+            "-".repeat(name.len())
+        ));
+    }
+    Ok(out)
+}
+
 pub fn write() -> Result<PathBuf> {
-    let text = generate()?;
+    let text = generate()? + &fonts()?;
     let path = crate::build_dir().join(FILE);
     std::fs::create_dir_all(crate::build_dir()).map_err(|e| e.to_string())?;
     std::fs::write(&path, &text).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -262,6 +287,15 @@ pub fn write() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_fonts_licences_are_in_the_notices() {
+        let text = fonts().unwrap();
+        for name in ["Terminus Font", "Inter 4.1", "JetBrains Mono 2.304"] {
+            assert!(text.contains(name), "{name}");
+        }
+        assert!(text.matches("SIL OPEN FONT LICENSE").count() >= 3);
+    }
 
     #[test]
     fn procedural_macros_and_duplicates_are_left_out() {

@@ -65,17 +65,29 @@ pub const DEFAULT_BUDGET: Budget = Budget {
 /// and tracking incident). Every offender found when the check was
 /// extended was fixed instead (incident 0018); what is left is code of
 /// another project that keeps its working data on the stack.
-pub const EXCEPTIONS: &[(&str, Budget, &str)] = &[(
-    "sshd",
-    Budget {
-        path: 38 * 1024,
-        frame: 23 * 1024,
-    },
-    "ML-KEM-768 encryption in ml-kem 0.3.3 keeps its matrix on the stack \
+pub const EXCEPTIONS: &[(&str, Budget, &str)] = &[
+    (
+        "compositor",
+        Budget {
+            path: 48 * 1024,
+            frame: 17 * 1024,
+        },
+        "read-fonts 0.46 keeps the autohinter's 16 KB scratch on the stack (its \
+     with_scratch_dyn), with no way to give it the heap; only while rendering \
+     a glyph not yet cached (ADR 0078, stage 1; incident 0060)",
+    ),
+    (
+        "sshd",
+        Budget {
+            path: 38 * 1024,
+            frame: 23 * 1024,
+        },
+        "ML-KEM-768 encryption in ml-kem 0.3.3 keeps its matrix on the stack \
      (23.5 KB frame in release, 37.1 KB path in dev with the frame that \
      isolates it for the scrub; libcrux-ml-kem uses as much); only during a \
      key exchange (ADR 0068, incident 0055)",
-)];
+    ),
+];
 
 /// Budget of the initrd program `bin`.
 pub fn budget(bin: &str) -> Budget {

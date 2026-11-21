@@ -16,7 +16,7 @@ Design decisions are recorded as ADRs in
 [docs/decisions/](docs/decisions/) and the branch flow (git flow) in
 [docs/WORKFLOW.md](docs/WORKFLOW.md).
 
-**Status:** 0.18.0 (2026-11-05). All 35 roadmap phases (0 to 34) are
+**Status:** 0.19.0 (2026-11-21). All 35 roadmap phases (0 to 34) are
 implemented and tested in QEMU, as are stages 1 to 4 of the post-roadmap
 sequence (observable recovery, a useful session, limits and updates,
 external applications) and the part of stage 5 that needs no hardware
@@ -38,7 +38,7 @@ the evidence is recorded in `docs/hardware.md`.
 | Threads, preemptive scheduler, SMP (APs, IPIs, TLB shootdown, affinity) | validated in QEMU (1 and 4 CPUs) | `threads.*`, `scheduler.*`, `smp.*`, `--cpus 4` |
 | Ring 3 processes, syscalls, handles with rights, revocation, IPC with handle transfer | validated in QEMU | `user.*`, `capabilities.*`, `ipc.*` |
 | init as device manager and capability broker; per-manifest sandbox | validated in QEMU | `init.*`, `sandbox.*` |
-| Ring 3 drivers: virtio-blk, virtio-net, virtio-input, xHCI + USB HID | validated in QEMU | `drivers.*`, `virtio.*`, `storage.*`, `network.*`, `input.*`, `usb.*` |
+| Ring 3 drivers: virtio-blk, virtio-net, virtio-input, xHCI + USB HID (plugged in or out while running, ADR 0087) | validated in QEMU | `drivers.*`, `virtio.*`, `storage.*`, `network.*`, `input.*`, `usb.*` |
 | AriFS (files, private directories per app, CRC32, atomic replace with a journal, `flush`) | validated in QEMU and with power cuts injected on the host | `filesystem.*`; ADR 0014 fixes the contract under power cuts |
 | IPv4 networking: DHCP, ARP, ICMP, UDP, TCP, DNS, HTTP client | prototype, validated in QEMU | `network.*`; no TLS, no DHCP renewal |
 | `arish` shell over the serial console, a PS/2 keyboard or USB/virtio keyboards (console bridge) | validated in QEMU | `shell.*`, `console.*` |
@@ -115,8 +115,8 @@ with one on the host or in another container (ADR 0040).
 `tools/docker/ci/Dockerfile` adds to that image a script that keeps its
 own clone of the public repository in a named volume (never your
 checkout), and on each new commit of a branch (default `develop`) runs
-`cargo xtask check`, `cargo xtask test --all` and `--all --cpus 4`, then
-writes a dated report (pass/fail per scenario, the logs of the failed ones)
+`cargo xtask check`, `cargo xtask test --level release` and `--level release
+--cpus 4` (the slow scenarios included), then writes a dated report (pass/fail per scenario, the logs of the failed ones)
 to a mounted directory. It fetches over https and holds no credentials.
 
 ```bash
@@ -138,10 +138,10 @@ another branch and `--jobs N` overrides the concurrency. The suites run one
 after another, at nice 10, and `--cpus`, `--memory` and `--cpu-shares` keep
 the container from taking the machine: the runner sizes its jobs from them
 (10 CPUs give 10 jobs, 6 for the `--cpus 4` pass), so development goes on
-beside it. Its two test passes run holding the suite lock (taken before
-the first, released after the second): a suite started meanwhile on the
-host or in another container waits for them, and the CI waits for it, so
-nobody has to stop the container by hand. A failure in its report is an
+beside it. Each of its two test passes runs holding the suite lock, and steps
+aside for a suite started meanwhile on the host or in another container: that
+suite waits only for the scenarios already running, the pass comes back to the
+rest when it ends, and nobody has to stop the container by hand. A failure in its report is an
 incident (`docs/WORKFLOW.md`).
 
 To try the system without building it, `tools/docker/try/Dockerfile` packs
@@ -150,7 +150,7 @@ shell on your terminal (quit with Ctrl-A X):
 
 ```bash
 cargo xtask usb-image
-docker build -t aricodeos -f tools/docker/try/Dockerfile --build-arg VERSION=0.18.0 .
+docker build -t aricodeos -f tools/docker/try/Dockerfile --build-arg VERSION=0.19.0 .
 docker run --rm -it aricodeos
 ```
 

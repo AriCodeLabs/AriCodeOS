@@ -1,0 +1,11 @@
+[package]
+name = "aricode-display"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Display mode choice: a panel's preferred resolution from its EDID, and the GOP mode to boot with (no_std)"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]

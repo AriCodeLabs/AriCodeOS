@@ -18,9 +18,11 @@
 //!                                             --channel dev: the development channel's key, e.g. ~/.config/aricodeos/dev-signing-key)
 //! cargo xtask test  [options]                 test levels (see tests/README.md)
 //! cargo xtask fs-cat DISK [NAME]             reads a file from ARI0 (or lists it) in an image or dump
-//!     --level unit|smoke|full                 default: unit + smoke
-//!     --all                                   unit + full (required before main)
+//!     --level unit|smoke|full|release         default: unit + smoke; release (the slow
+//!                                             scenarios too) is required before main
+//!     --all                                   unit + full: every quick scenario
 //!     --area boot[,memory,...]                only QEMU scenarios from those areas
+//!     --only NAME[,NAME...]                   just these scenarios, whatever their level
 //!     --cpus N                                N processors for scenarios that do not declare cpus
 //!     --jobs N                                N QEMU scenarios at a time (default: CPUs / 2, CPUs / 4 with
 //!                                             --cpus > 1, capped by memory; 1 = one after another)
@@ -138,6 +140,7 @@ fn spec(cmd: &str) -> Option<Spec> {
                 ("--level", Opt::Value),
                 ("--all", Opt::Flag),
                 ("--area", Opt::Value),
+                ("--only", Opt::Value),
                 CPUS,
                 ("--jobs", Opt::Value),
                 ("--list", Opt::Flag),
@@ -530,11 +533,11 @@ mod tests {
 
     #[test]
     fn unknown_options_are_refused() {
-        let e = parse("test", &["--all", "--only", "update.x"])
+        let e = parse("test", &["--all", "--nonsense", "update.x"])
             .err()
             .unwrap();
         assert!(
-            e.starts_with("unknown option '--only' (options: --debug --level"),
+            e.starts_with("unknown option '--nonsense' (options: --debug --level"),
             "{e}"
         );
         assert!(parse("check", &["--debug"]).is_err());

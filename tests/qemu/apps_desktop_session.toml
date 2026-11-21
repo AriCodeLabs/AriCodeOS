@@ -9,7 +9,7 @@
 # and a damaged session file boots into it too.
 name = "apps.desktop_session"
 description = "desktop session: started only when followed and installed, ended by its launcher, the console given back"
-level = "full"
+level = "release"
 areas = ["apps", "gui", "init", "shell"]
 install = ["examples/hello_ext", "examples/gui_demo", "examples/test_launcher"]
 timeout_secs = 240

@@ -16,7 +16,7 @@ use super::pmm;
 use crate::sync::IrqLock;
 use aricode_pmm::{Frame, FRAME_SIZE};
 use aricode_x86_paging::{
-    FrameAlloc, MapError, Mapper, OffsetMap, GLOBAL, HUGE_2M, NO_EXECUTE, PAGE_SIZE, WRITABLE,
+    FrameAlloc, MapError, Mapper, OffsetMap, GLOBAL, NO_EXECUTE, PAGE_SIZE, WRITABLE,
 };
 use boot_protocol::{BootInfo, MemoryRegionKind, KERNEL_VIRT_BASE};
 use log::{debug, info};
@@ -38,6 +38,28 @@ impl FrameAlloc for PmmFrames {
 }
 
 pub type KernelMapper = Mapper<PmmFrames, OffsetMap>;
+
+/// Frames for a process's page tables: never the kernel's reserve nor
+/// frames promised to memory objects (ADR 0084, audit H1), so a program's
+/// mappings cannot take what was promised to another.
+pub struct UserFrames;
+
+impl FrameAlloc for UserFrames {
+    fn alloc_frame(&mut self) -> Option<u64> {
+        pmm::with(|p| {
+            let floor = crate::user::process::KERNEL_RESERVE_FRAMES + crate::hw::promised();
+            if p.stats().free_frames <= floor {
+                return None;
+            }
+            p.allocate()
+        })
+        .map(Frame::addr)
+    }
+}
+
+/// Above this many pages a local flush reloads CR3 instead of invalidating
+/// page by page (audit of ADR 0084, M1), as the other CPUs already do.
+const INVLPG_MAX: u64 = 64;
 
 static VMM: IrqLock<Option<KernelMapper>> = IrqLock::new(None);
 
@@ -68,22 +90,17 @@ pub fn init(info: &BootInfo) -> u64 {
         .expect("vmm: no frames for the higher half");
 
     // Linear physical map.
-    m.map_range_2m(offset, 0, limit, WRITABLE | NO_EXECUTE | GLOBAL)
-        .expect("vmm: physical map");
+    // The framebuffer has the memory type of the compositor's mapping: the
+    // SDM forbids aliasing write-combining with a cacheable type.
     let fb = &info.framebuffer;
-    if fb.address != 0 {
-        let start = (fb.address & !(HUGE_2M - 1)).max(limit);
-        let end = (fb.address + fb.size).next_multiple_of(HUGE_2M);
-        if start < end {
-            m.map_range_2m(
-                offset + start,
-                start,
-                end - start,
-                WRITABLE | NO_EXECUTE | GLOBAL,
-            )
-            .expect("vmm: framebuffer");
-        }
-    }
+    m.map_linear(
+        offset,
+        limit,
+        WRITABLE | NO_EXECUTE | GLOBAL,
+        (fb.address, if fb.address != 0 { fb.size } else { 0 }),
+        crate::arch::x86_64::pat::write_combining_flags(),
+    )
+    .expect("vmm: physical map");
 
     // Kernel image per section (W^X).
     // SAFETY: symbols defined by kernel.ld; only their address is taken.
@@ -195,18 +212,35 @@ pub fn flush_page(virt: u64) {
 }
 
 /// Invalidates the user pages `[virt, virt+len)` of the current address
-/// space on this CPU, before the frames they pointed at may be reused
-/// (ADR 0038). Enough for a process's own pages because a process has one
-/// thread, which is running here: every other CPU that ran it has since
-/// loaded another CR3 (the scheduler switches to a thread of another
-/// address space, or to the kernel's, whenever it leaves this one), and a
-/// CR3 load drops the non-global entries. When processes get more than
-/// one thread this must become a shootdown to the CPUs running them.
-pub fn flush_own_user_range(virt: u64, len: u64) {
-    for page in (virt..virt + len).step_by(PAGE_SIZE as usize) {
-        // SAFETY: invalidation of a TLB entry; no memory effects.
-        unsafe { core::arch::asm!("invlpg [{}]", in(reg) page, options(nostack, preserves_flags)) };
-    }
+/// space, before the frames they pointed at may be reused (ADR 0038): on this
+/// CPU and on every other running the same address space, which another
+/// thread of the process may be doing (ADR 0082). A CPU that ran it and left
+/// has loaded another CR3 since, which dropped the non-global entries. The page
+/// tables must already be changed; interrupts enabled and no locks held.
+pub fn flush_user_range(virt: u64, len: u64) {
+    use crate::arch::x86_64::smp;
+    // This CPU and the list of the others from one and the same CPU.
+    let (ids, n) = crate::sync::without_interrupts(|| {
+        let cr3: u64;
+        // SAFETY: read of CR3.
+        unsafe { core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack)) };
+        if len / PAGE_SIZE > INVLPG_MAX {
+            // SAFETY: writing back the same CR3 drops every non-global entry
+            // of this address space; the kernel's are global.
+            unsafe {
+                core::arch::asm!("mov cr3, {}", in(reg) cr3, options(nostack, preserves_flags))
+            };
+        } else {
+            for page in (virt..virt + len).step_by(PAGE_SIZE as usize) {
+                // SAFETY: invalidation of a TLB entry; no memory effects.
+                unsafe {
+                    core::arch::asm!("invlpg [{}]", in(reg) page, options(nostack, preserves_flags))
+                };
+            }
+        }
+        smp::others_running(cr3)
+    });
+    smp::flush_user_range_on(&ids[..n], virt, len);
 }
 
 /// `true` if `addr` falls in the kernel stack guard page.

@@ -31,6 +31,38 @@ pub const ACCESSED: u64 = 1 << 5;
 pub const HUGE: u64 = 1 << 7;
 pub const GLOBAL: u64 = 1 << 8;
 pub const NO_EXECUTE: u64 = 1 << 63;
+
+/// The page attribute table the kernel programs on every CPU (ADR 0078,
+/// stage 0): the power-on table with entry 1, reached by a 4 KiB page with
+/// only `WRITE_THROUGH` set, made write-combining (for the framebuffer).
+/// No page used entry 1 before: write-through was always paired with
+/// `CACHE_DISABLE` (entry 3, uncached). Memory types from the Intel SDM,
+/// vol. 3, "PAT memory types".
+pub mod pat {
+    pub const UC: u64 = 0x00;
+    pub const WC: u64 = 0x01;
+    pub const WT: u64 = 0x04;
+    pub const WB: u64 = 0x06;
+    pub const UC_MINUS: u64 = 0x07;
+
+    /// Entries 0 to 7.
+    pub const TABLE: [u64; 8] = [WB, WC, UC_MINUS, UC, WB, WT, UC_MINUS, UC];
+
+    /// The value of `IA32_PAT` for `TABLE`.
+    pub const VALUE: u64 = {
+        let mut v = 0;
+        let mut i = 0;
+        while i < 8 {
+            v |= TABLE[i] << (8 * i);
+            i += 1;
+        }
+        v
+    };
+
+    /// The leaf flags that select write-combining.
+    pub const WRITE_COMBINING: u64 = super::WRITE_THROUGH;
+}
+
 const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
 /// Flags a caller may request for a leaf. Everything else is discarded.
@@ -268,6 +300,49 @@ impl<A: FrameAlloc, M: PhysMap> Mapper<A, M> {
         Ok(())
     }
 
+    /// Maps physical `[0, limit)` at `base` with 2 MiB pages, and `range`
+    /// (`start`, `len`) with `flags | range_flags` even past `limit`. A 2 MiB
+    /// window only partly in `range` uses 4 KiB pages, so what shares it keeps
+    /// `flags`, and no page has two memory types. `range_flags` must mean the
+    /// same on both page sizes (the PAT bit is not among them).
+    pub fn map_linear(
+        &mut self,
+        base: u64,
+        limit: u64,
+        flags: u64,
+        range: (u64, u64),
+        range_flags: u64,
+    ) -> Result<(), MapError> {
+        let (start, len) = range;
+        if len == 0 {
+            return self.map_range_2m(base, 0, limit, flags);
+        }
+        let end = start.checked_add(len).ok_or(MapError::Unaligned)?;
+        let window_start = start & !(HUGE_2M - 1);
+        let window_end = end.next_multiple_of(HUGE_2M);
+        self.map_range_2m(base, 0, window_start.min(limit), flags)?;
+        let mut window = window_start;
+        while window < window_end {
+            if window >= start && window + HUGE_2M <= end {
+                self.map_2m(base + window, window, flags | range_flags)?;
+            } else {
+                for page in (window..window + HUGE_2M).step_by(PAGE_SIZE as usize) {
+                    let in_range = page + PAGE_SIZE > start && page < end;
+                    if in_range {
+                        self.map_4k(base + page, page, flags | range_flags)?;
+                    } else if page < limit {
+                        self.map_4k(base + page, page, flags)?;
+                    }
+                }
+            }
+            window += HUGE_2M;
+        }
+        if window_end < limit {
+            self.map_range_2m(base + window_end, window_end, limit - window_end, flags)?;
+        }
+        Ok(())
+    }
+
     /// Maps `[virt, virt+len)` -> `[phys, phys+len)` with 4 KiB pages.
     pub fn map_range_4k(
         &mut self,
@@ -320,6 +395,67 @@ impl<A: FrameAlloc, M: PhysMap> Mapper<A, M> {
         Ok(phys)
     }
 
+    /// Creates the intermediate tables of every 4 KiB page of
+    /// `[virt, virt + len)` without mapping any page, so later `map_4k`s in
+    /// the range allocate nothing (ADR 0084: a memory object's pages are
+    /// mapped at fault time, where no table may be needed). At most
+    /// [`tables_for`] frames are taken.
+    pub fn prepare_4k(&mut self, virt: u64, len: u64, user: bool) -> Result<(), MapError> {
+        if !virt.is_multiple_of(PAGE_SIZE) || !len.is_multiple_of(PAGE_SIZE) {
+            return Err(MapError::Unaligned);
+        }
+        let end = virt.checked_add(len).ok_or(MapError::Unaligned)?;
+        let mut at = virt & !(HUGE_2M - 1);
+        while at < end {
+            let pdpt = self
+                .next_level(self.root, index(at, 39), true, user)?
+                .expect("create");
+            let pd = self
+                .next_level(pdpt, index(at, 30), true, user)?
+                .expect("create");
+            self.next_level(pd, index(at, 21), true, user)?;
+            at += HUGE_2M;
+        }
+        Ok(())
+    }
+
+    /// Clears every present 4 KiB leaf of `[virt, virt + len)`, calling
+    /// `cleared(page)` for each, without walking tables that are absent; the
+    /// tables stay. Neither frees frames nor invalidates the TLB.
+    pub fn unmap_present_4k(&mut self, virt: u64, len: u64, mut cleared: impl FnMut(u64)) {
+        let end = virt.saturating_add(len);
+        let mut at = virt & !(PAGE_SIZE - 1);
+        while at < end {
+            let next_2m = (at & !(HUGE_2M - 1)) + HUGE_2M;
+            let pt = self
+                .next_level(self.root, index(at, 39), false, false)
+                .ok()
+                .flatten()
+                .and_then(|pdpt| {
+                    self.next_level(pdpt, index(at, 30), false, false)
+                        .ok()
+                        .flatten()
+                })
+                .and_then(|pd| {
+                    self.next_level(pd, index(at, 21), false, false)
+                        .ok()
+                        .flatten()
+                });
+            let Some(pt) = pt else {
+                at = next_2m;
+                continue;
+            };
+            while at < end.min(next_2m) {
+                let slot = &mut self.table_mut(pt)[index(at, 12)];
+                if *slot & PRESENT != 0 {
+                    *slot = 0;
+                    cleared(at);
+                }
+                at += PAGE_SIZE;
+            }
+        }
+    }
+
     /// Physical address and flags of the leaf covering `virt` (4 KiB or 2 MiB).
     pub fn translate(&self, virt: u64) -> Option<(u64, u64)> {
         let mut table = self.root;
@@ -347,6 +483,13 @@ impl<A: FrameAlloc, M: PhysMap> Mapper<A, M> {
             pte & !ADDR_MASK,
         ))
     }
+}
+
+/// The most table frames [`Mapper::prepare_4k`] can take for `len` bytes
+/// at any address: a page table per 2 MiB, a directory per 1 GiB, a PDPT per
+/// 512 GiB, each counted once more for a range that straddles a boundary.
+pub const fn tables_for(len: u64) -> u64 {
+    len / HUGE_2M + 2 + len / (1 << 30) + 2 + len / (1 << 39) + 2
 }
 
 /// PML4 entries that belong to the kernel (upper half).
@@ -581,6 +724,51 @@ mod tests {
         }
     }
 
+    #[test]
+    fn prepared_ranges_map_without_new_tables_and_unmap_only_what_is_present() {
+        let base = 0x10_0000_0000u64 - HUGE_2M / 2; // straddles a 2 MiB boundary
+        let len = 3 * HUGE_2M;
+        let mut m = mapper(64);
+        m.prepare_4k(base, len, true).unwrap();
+        let used = m.allocator().live.len();
+        assert!(
+            used as u64 - 1 <= tables_for(len),
+            "root plus at most tables_for"
+        );
+        // Every page maps now with no frame taken for tables.
+        let phys = m.allocator().alloc_frame().unwrap();
+        let after = m.allocator().live.len();
+        for page in [base, base + HUGE_2M, base + len - PAGE_SIZE] {
+            m.map_4k(page, phys, USER | WRITABLE).unwrap();
+        }
+        assert_eq!(
+            m.allocator().live.len(),
+            after,
+            "no table allocated at map time"
+        );
+        let mut cleared = Vec::new();
+        m.unmap_present_4k(base, len, |p| cleared.push(p));
+        assert_eq!(cleared, [base, base + HUGE_2M, base + len - PAGE_SIZE]);
+        assert!(m.translate(base).is_none() && m.translate(base + HUGE_2M).is_none());
+        // Absent tables are skipped, and an unprepared range clears nothing.
+        let mut none = 0;
+        m.unmap_present_4k(0x20_0000_0000, 1 << 30, |_| none += 1);
+        assert_eq!(none, 0);
+        assert_eq!(
+            m.prepare_4k(base + 1, PAGE_SIZE, true),
+            Err(MapError::Unaligned)
+        );
+    }
+
+    #[test]
+    fn preparing_fails_cleanly_without_frames() {
+        let mut m = mapper(2);
+        assert_eq!(
+            m.prepare_4k(0x40_0000, 4 * HUGE_2M, true),
+            Err(MapError::OutOfFrames)
+        );
+    }
+
     fn mapper(frames: usize) -> Mapper<HostFrames, IdentityMap> {
         Mapper::new(HostFrames::new(frames), IdentityMap).unwrap()
     }
@@ -756,5 +944,87 @@ mod tests {
         // Identity + 4 GiB physical map, 16-page kernel: 1 + 2*(1+4) + 2 + 1 + 8
         assert_eq!(pool_size_for(4 << 30, 2, 16), 22);
         assert!(pool_size_for(1 << 40, 1, 16) >= 1024 + 4);
+    }
+
+    #[test]
+    fn map_linear_gives_the_range_its_own_flags() {
+        const MIB: u64 = 1 << 20;
+        let base = 0xFFFF_8000_0000_0000;
+        let limit = 16 * MIB;
+        // Not aligned to anything: from 5 MiB + 1 byte, 3 MiB long.
+        let (start, len) = (5 * MIB + 1, 3 * MIB);
+        let mut m = mapper(32);
+        m.map_linear(base, limit, WRITABLE, (start, len), WRITE_THROUGH)
+            .unwrap();
+        let has_range_flags = |m: &Mapper<_, _>, phys: u64| {
+            let (to, flags) = m.translate(base + phys).unwrap();
+            assert_eq!(to, phys);
+            flags & WRITE_THROUGH != 0
+        };
+        // Around the range, in its windows: other pages keep the plain flags.
+        assert!(!has_range_flags(&m, 4 * MIB), "window start");
+        assert!(!has_range_flags(&m, 5 * MIB - PAGE_SIZE), "the page before");
+        assert!(
+            has_range_flags(&m, 5 * MIB),
+            "the page holding its first byte"
+        );
+        assert!(
+            has_range_flags(&m, 8 * MIB),
+            "the page holding its last byte"
+        );
+        assert!(!has_range_flags(&m, 8 * MIB + PAGE_SIZE), "the page after");
+        // Outside its windows.
+        assert!(!has_range_flags(&m, 0));
+        assert!(!has_range_flags(&m, 15 * MIB));
+        assert_eq!(m.translate(base + limit), None);
+    }
+
+    #[test]
+    fn map_linear_keeps_huge_pages_inside_the_range() {
+        const MIB: u64 = 1 << 20;
+        let base = 0xFFFF_8000_0000_0000;
+        // 64 MiB, aligned: PML4, PDPT and one directory, no page table.
+        let mut m = mapper(3);
+        m.map_linear(base, 0, WRITABLE, (1024 * MIB, 64 * MIB), WRITE_THROUGH)
+            .unwrap();
+        let (to, flags) = m.translate(base + 1024 * MIB + 3 * MIB).unwrap();
+        assert_eq!(to, 1024 * MIB + 3 * MIB);
+        assert_ne!(flags & WRITE_THROUGH, 0);
+    }
+
+    #[test]
+    fn map_linear_reaches_a_range_past_the_limit() {
+        const MIB: u64 = 1 << 20;
+        let base = 0xFFFF_8000_0000_0000;
+        let mut m = mapper(32);
+        m.map_linear(base, 4 * MIB, WRITABLE, (64 * MIB, MIB), WRITE_THROUGH)
+            .unwrap();
+        assert_eq!(m.translate(base + 2 * MIB).map(|t| t.0), Some(2 * MIB));
+        assert_eq!(m.translate(base + 8 * MIB), None, "nothing in between");
+        assert_eq!(m.translate(base + 65 * MIB), None, "nor past the range");
+        let (to, flags) = m.translate(base + 64 * MIB).unwrap();
+        assert_eq!(to, 64 * MIB);
+        assert_ne!(flags & WRITE_THROUGH, 0);
+        // No range: the plain map.
+        let mut m = mapper(32);
+        m.map_linear(base, 4 * MIB, WRITABLE, (0, 0), WRITE_THROUGH)
+            .unwrap();
+        assert_eq!(m.translate(base + 2 * MIB).map(|t| t.0), Some(2 * MIB));
+    }
+
+    #[test]
+    fn pat_changes_only_entry_1_to_write_combining() {
+        // The power-on value (SDM: 0007040600070406h).
+        let power_on: u64 = 0x0007_0406_0007_0406;
+        assert_eq!(pat::VALUE & 0xFF00, pat::WC << 8);
+        assert_eq!(pat::VALUE & !0xFF00, power_on & !0xFF00);
+        // Entry index: PAT bit 7 (clear), PCD bit 4, PWT bit 3.
+        let index = |flags: u64| ((flags >> 3) & 1) | ((flags >> 4) & 1) << 1;
+        assert_eq!(pat::TABLE[index(pat::WRITE_COMBINING) as usize], pat::WC);
+        assert_eq!(
+            pat::TABLE[index(CACHE_DISABLE | WRITE_THROUGH) as usize],
+            pat::UC
+        );
+        assert_eq!(pat::TABLE[index(0) as usize], pat::WB);
     }
 }

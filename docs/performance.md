@@ -51,6 +51,7 @@ are checked by the idle-accounting controls (`scheduler.idle_accounting`,
 |---|---|---|
 | `syscall thread_get_tid` | entry and exit via `syscall`, no work | 10 000 |
 | `ipc fsd list` | full `rpc::call`: create reply endpoint, send, wait, receive, close; fsd waits on its main endpoint and every session at once (ADR 0020, ADR 0044) | 1 000 |
+| `ipc round trip N B` | raw IPC between two threads of `bench`: send N bytes (8, 64, 256 = `IPC_MAX_DATA`) on one endpoint, an echo thread receives and sends them back on another; no service work, the floor under every call above. The line after it gives the messages carried per second over the whole run (two a round trip) | 10 000 |
 | `replace 4 KiB` | atomic replace: journal, two `flush` to virtio-blk, copy and cleanup | 100 |
 | `read 4 KiB` | one read over IPC with a copy through the client's DMA buffer | 100 |
 | `ipc net info` | full `rpc::call` to netd's session for `NetClient::info`: no frame leaves the machine, so it measures how soon netd sees a request (ADR 0044) | 200 |
@@ -195,4 +196,68 @@ result with a whole-screen composition; 4 bytes per pixel.
   without the test-only key `gui_trace`.
 - These are pixels written, not frame rates: composition time, frame
   latency and the cost of a write to a real framebuffer were not measured.
+
+## Raw IPC (2026-11-20)
+
+`bench` measures messages between two threads with no service behind them
+(`ipc round trip N B` and `ipc messages N B: ... a second`). The threads
+share an address space, so a round trip pays two sends, two receives and
+the switches between the threads, not an address-space change: the
+cross-process figures are `ipc fsd list` and `ipc net info`, which add the
+reply endpoint and the service's own work.
+
+QEMU 10 TCG, 1 CPU, `perf.bench`, second run (reference host, not quiet:
+another job's benchmark ran meanwhile):
+
+| Size | p50 / p95 / p99 (ns) | Messages a second |
+|---|---|---|
+| 8 B | 17 384 / 18 830 / 21 942 | 110 751 |
+| 64 B | 17 174 / 17 553 / 19 179 | 114 648 |
+| 256 B | 19 239 / 19 518 / 21 952 | 102 748 |
+
+TCG emulates every instruction; these are for comparing builds, not for
+quoting as the system's speed. The baselines in `tests/perf/` do not hold
+these figures yet: they are recorded on a quiet host (`cargo xtask perf
+--update-baseline`).
+
+Seen on the way: `syscall thread_get_tid` measured about 600 ns at p50 on
+both develop (f84e72f) and this branch, against 319 ns in the baseline of
+2026-10-31, within the tolerance; a quiet host decides whether it is the
+host or the system.
+
+## On real hardware (2026-11-20)
+
+The reference laptop: ASUS, Intel Core i3-3217U (Ivy Bridge, 2013; 2 cores,
+4 threads, 1.8 GHz, no turbo), 7 series chipset, booted from a USB stick;
+dev build 69 (develop a5b3978), 4 CPUs online, no IOMMU on this machine.
+`run bench` over SSH, three runs; the figures are the second and third
+(p50 / p95 / p99).
+
+| Measurement | Run 2 | Run 3 |
+|---|---|---|
+| syscall thread_get_tid (ns) | 262 / 262 / 407 | 260 / 262 / 373 |
+| ipc round trip 8 B (ns) | 8 576 / 10 898 / 11 447 | 7 721 / 10 909 / 11 501 |
+| ipc round trip 64 B (ns) | 8 774 / 11 163 / 11 857 | 7 737 / 10 929 / 11 565 |
+| ipc round trip 256 B (ns) | 7 846 / 11 247 / 12 378 | 8 284 / 11 726 / 12 260 |
+| ipc messages a second, 8 / 64 / 256 B | 229 096 / 224 372 / 229 925 | 236 676 / 234 054 / 218 200 |
+| ipc fsd list (µs) | 21 / 22 / 28 | 22 / 23 / 29 |
+| ipc net info (µs) | 17 / 19 / 29 | 19 / 20 / 32 |
+| read 4 KiB (µs) | 2 997 / 3 000 / 3 008 | |
+| replace 4 KiB (µs) | 16 327 / 16 995 / 17 939 | |
+| quiet idle (permille, all CPUs) | 998 | |
+
+- A raw round trip is about 8 µs, some 14 000 cycles at 1.8 GHz: two
+  threads exchange 218 000 to 237 000 messages a second, whatever the size
+  up to 256 bytes. That is the floor today, not a tuned figure: there is no
+  IPC fast path yet (every message goes through the general queue, the
+  scheduler and a wake-up of the receiving thread), and fast-path
+  microkernels are known to be far below it. Measured against the same
+  machine under another system before any comparison is claimed.
+- A request to a service in another process, with its reply endpoint and
+  the service's work, is 17 to 23 µs: one client gets some 45 000 to 55 000
+  answers a second from the file service or the network service.
+- Files are the USB stick's speed, not the system's: a 4 KiB read is one
+  USB mass-storage command (about 3 ms) and an atomic replace waits for the
+  stick's flash (about 16 ms).
+- The syscall entry and exit is 260 ns at p50.
 

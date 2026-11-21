@@ -306,6 +306,49 @@ pub fn init(lie: Lie) {
     *ECAM.lock() = Some(ecam);
 }
 
+/// What `framebuffer::use_panel_size` needs of Intel's integrated graphics.
+pub struct IntelDisplay {
+    pub device: u16,
+    /// BAR 0 and the aperture (BAR 2), address and size, as `check_devices`
+    /// measured and passed them; `None` if one was refused or memory decoding
+    /// is off.
+    pub bars: Option<((u64, u64), (u64, u64))>,
+    /// Configuration registers MGGC0 (0x50: the stolen memory's and the
+    /// GTT's sizes) and BDSM (0x5C: the stolen memory's base), PRM Vol 3
+    /// Part 2.
+    pub mggc0: u32,
+    pub bdsm: u32,
+}
+
+/// The display controller at 00:02.0, where Intel's integrated graphics
+/// always is.
+pub fn intel_display() -> Option<IntelDisplay> {
+    const VENDOR_INTEL: u16 = 0x8086;
+    let ecam_guard = ECAM.lock();
+    let ecam = ecam_guard.as_ref()?;
+    let devs = DEVICES.lock();
+    let d = devs
+        .iter()
+        .find(|d| d.address.bus == 0 && d.address.device == 2 && d.address.function == 0)?;
+    if d.header.vendor != VENDOR_INTEL || d.header.class != 0x03 || d.header.subclass != 0 {
+        return None;
+    }
+    let bar = |index| {
+        d.memory_bars
+            .iter()
+            .find(|b| b.index == index)
+            .map(|b| (b.address, b.size))
+    };
+    Some(IntelDisplay {
+        device: d.header.device,
+        bars: (read_u16(ecam, d.address, 0x04) & COMMAND_MEMORY != 0)
+            .then(|| Some((bar(0)?, bar(2)?)))
+            .flatten(),
+        mggc0: read_u32(ecam, d.address, 0x50),
+        bdsm: read_u32(ecam, d.address, 0x5C),
+    })
+}
+
 pub fn count() -> usize {
     DEVICES.lock().len()
 }
@@ -334,6 +377,18 @@ pub fn find(vendor: u16, device: u16) -> Option<usize> {
         .lock()
         .iter()
         .position(|d| d.header.vendor == vendor && d.header.device == device && !d.is_claimed())
+}
+
+/// Vendor and device ID of the function at `bus:device.function`, if it
+/// was enumerated (claimed or not).
+pub fn id_at(bus: u8, device: u8, function: u8) -> Option<(u16, u16)> {
+    DEVICES
+        .lock()
+        .iter()
+        .find(|d| {
+            d.address.bus == bus && d.address.device == device && d.address.function == function
+        })
+        .map(|d| (d.header.vendor, d.header.device))
 }
 
 /// Packed information (`aricode_abi::pci_info`) for function `index`.
@@ -574,6 +629,9 @@ fn claim_locked(index: usize, ecam: &Ecam, d: &mut PciDevice) -> Result<Claimed,
     if d.is_claimed() {
         return Err("pci: already claimed");
     }
+    if crate::gpu::holds(d.address.bus, d.address.device, d.address.function) {
+        return Err("pci: the kernel drives this device (ADR 0083)");
+    }
     let reclaimed = d.claimed.is_some();
     let addr = d.address;
 
@@ -613,7 +671,13 @@ fn claim_locked(index: usize, ecam: &Ecam, d: &mut PciDevice) -> Result<Claimed,
             KernelObject::new(ObjectKind::Mmio(crate::hw::Region {
                 phys: b.address,
                 len: b.size,
-                cacheable: false,
+                // The BAR holding the framebuffer has the screen's memory
+                // type, as every other mapping of it (ADR 0078, stage 0).
+                caching: if crate::framebuffer::overlaps(b.address, b.size) {
+                    crate::hw::Caching::WriteCombining
+                } else {
+                    crate::hw::Caching::Uncached
+                },
                 source_id,
                 claim: None,
             })),
@@ -715,7 +779,7 @@ fn claim_locked(index: usize, ecam: &Ecam, d: &mut PciDevice) -> Result<Claimed,
     let cfg = KernelObject::new(ObjectKind::Mmio(crate::hw::Region {
         phys: cfg_phys,
         len: 4096,
-        cacheable: false,
+        caching: crate::hw::Caching::Uncached,
         source_id,
         claim: Some(ClaimToken {
             index,

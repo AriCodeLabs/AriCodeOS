@@ -1,0 +1,19 @@
+# ADR 0082: a kill from outside ends a process whose threads all wait for ever,
+# three on a futex and the main one in thread_join; the wait for it returns and
+# no futex wait is left behind.
+name = "user.thread_kill"
+description = "a kill wakes and ends every waiting thread of a process"
+level = "full"
+areas = ["user", "smp"]
+cpus = 2
+cmdline = "qemu_exit test=thread_kill"
+timeout_secs = 60
+
+[expect]
+exit = 33
+serial_contains = [
+    "thread_waiters: four threads wait for ever",
+    "thread_kill selftest: four waiting threads ended by one kill, no wait left: OK",
+    "ARICODEOS_KERNEL_READY",
+]
+serial_absent = ["KERNEL PANIC", "went on"]

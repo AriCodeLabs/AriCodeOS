@@ -2358,18 +2358,18 @@ impl Ehci {
                 continue;
             }
             self.pipe_free(hid.pipe);
-            // An empty report releases every key and button still held, so
-            // nothing stays pressed after an unplug.
+            // Every key and button still held is released, so nothing
+            // stays pressed after an unplug.
             let mut out = [Event::default(); MAX_REPORT_EVENTS];
             let mut decoder = hid.decoder;
             let n = match &mut decoder {
                 Decoder::Keyboard(k) => {
                     self.keyboards -= 1;
-                    k.feed(&[0; 8], &mut out)
+                    k.release_all(&mut out)
                 }
                 Decoder::Mouse(m) => {
                     self.mice -= 1;
-                    m.feed(&[0; 4], &mut out)
+                    m.release_all(&mut out)
                 }
             };
             let now = self.now();
@@ -3131,16 +3131,18 @@ impl Ehci {
             Ok(_) => true,
             Err(ScsiFail::Failed) => {
                 let sense = self.sense();
-                if let Some(sense) = sense {
-                    record_sense(&sense);
-                }
                 if sense.is_some_and(|s| s.command_unsupported()) {
+                    // Named after the command (incident 0064).
+                    record(fault::SYNC_UNSUPPORTED, scsi::Sense::ILLEGAL_REQUEST as u64);
                     if let Some(st) = self.storage.as_mut() {
                         st.sync_cache = false;
                     }
                     say(b"the device does not support SYNCHRONIZE CACHE; flush is a no-op");
                     true
                 } else {
+                    if let Some(sense) = sense {
+                        record_sense(&sense);
+                    }
                     self.report_error(b"SYNCHRONIZE CACHE", 0, sense);
                     false
                 }

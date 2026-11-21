@@ -25,6 +25,9 @@ pub fn kind_name(handle: Handle) -> Option<&'static str> {
         kind::HARDWARE => "hardware",
         kind::PCI_ROOT => "pci root",
         kind::SYSTEM => "system",
+        kind::PS2 => "ps2",
+        kind::GPU => "gpu",
+        kind::MEM => "memory",
         _ => "unknown",
     })
 }

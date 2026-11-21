@@ -57,6 +57,14 @@ pub struct Cpu {
     online: AtomicBool,
     idle_running: AtomicBool,
     idle_tid: AtomicU32,
+    /// The address space this CPU runs or is about to load (ADR 0082): written
+    /// before the CR3 load, so a CPU that unmaps a process's memory and then reads
+    /// it either sees this CPU among those to invalidate, or this CPU loads the
+    /// tables after the change.
+    cr3: AtomicU64,
+    /// Timer ticks this CPU has taken: another CPU sees it alive when this
+    /// advances (the power-off's move to the boot CPU).
+    ticks: AtomicU64,
     tables: PerCpuCell<Tables>,
     /// TSC cycles with the idle thread running (`sysinfo::IDLE`, incident
     /// 0020): written by this CPU in `set_current`, read by any CPU.
@@ -90,6 +98,8 @@ impl Cpu {
             online: AtomicBool::new(false),
             idle_running: AtomicBool::new(false),
             idle_tid: AtomicU32::new(u32::MAX),
+            cr3: AtomicU64::new(0),
+            ticks: AtomicU64::new(0),
             tables: PerCpuCell::new(Tables::new()),
             idle: IrqLock::new(IdleClock::new()),
         }
@@ -157,11 +167,27 @@ impl Cpu {
     /// quantum starts again at `quantum` even if no switch follows
     /// (`aricode_sched::quantum_tick`, incident 0023). Only from this CPU
     /// with IF = 0 (the timer handler), so load and store do not race.
+    /// Counts a timer tick on this CPU (owning CPU only, from its tick).
+    pub fn count_tick(&self) {
+        self.ticks.fetch_add(1, Ordering::Relaxed);
+    }
+    /// Timer ticks this CPU has taken; any CPU may read it.
+    pub fn ticks(&self) -> u64 {
+        self.ticks.load(Ordering::Relaxed)
+    }
     pub fn quantum_tick(&self, quantum: u32) -> bool {
         let left = self.quantum_left.load(Ordering::Relaxed);
         let (left, expired) = aricode_sched::quantum_tick(left, quantum);
         self.quantum_left.store(left, Ordering::Relaxed);
         expired
+    }
+    /// The address space about to be loaded here (owning CPU only, before the load).
+    pub fn set_cr3(&self, cr3: u64) {
+        self.cr3.store(cr3, Ordering::SeqCst);
+    }
+    /// The address space this CPU runs or is about to load.
+    pub fn cr3(&self) -> u64 {
+        self.cr3.load(Ordering::SeqCst)
     }
     /// Kernel stack of the current thread for `syscall` (owning CPU only).
     pub fn set_kernel_rsp(&self, top: u64) {

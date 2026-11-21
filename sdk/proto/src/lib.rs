@@ -1124,13 +1124,67 @@ pub mod window {
     pub const MAX_TITLE: usize = 24;
     /// Maximum window size (pixels per side).
     pub const MAX_SIDE: u32 = 4096;
+    /// Rectangles a `Present` can name.
+    pub const MAX_DAMAGE: usize = 5;
+    /// The most the clipboard holds, in bytes.
+    pub const MAX_CLIPBOARD: usize = 64 * 1024;
+
+    /// What a window asks for beyond the events every window gets, in
+    /// [`Request::events`] of `Create` (ADR 0078, stage 0). The wire format
+    /// grew compatibly: a program built before these sends zero there and gets
+    /// exactly the events it knows.
+    pub mod wants {
+        /// `Motion`, `Release`, `Enter`, `Leave` and `Wheel`.
+        pub const POINTER: u32 = 1;
+        /// `KeyCode`, for each key, beside the `Key` bytes.
+        pub const KEY_CODES: u32 = 2;
+        /// The owner may resize it: `Configure`, answered with `Resize`. Without
+        /// this a window keeps the size its program gave it.
+        pub const RESIZE: u32 = 4;
+        /// `Appearance`, when the owner chooses light or dark.
+        pub const APPEARANCE: u32 = 8;
+    }
+
+    /// The modifiers in `Event::KeyCode`. The numbers are those of
+    /// `aricode_input::mods`.
+    pub mod mods {
+        pub const SHIFT: u8 = 1;
+        pub const CTRL: u8 = 2;
+        pub const ALT: u8 = 4;
+        pub const ALTGR: u8 = 8;
+        pub const CAPS: u8 = 16;
+    }
+
+    /// The part of a window's content that changed.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct DamageRect {
+        pub x: u16,
+        pub y: u16,
+        pub width: u16,
+        pub height: u16,
+    }
+
+    /// What happened to a key.
+    #[repr(u8)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum KeyState {
+        Released = 0,
+        Pressed = 1,
+        /// Held: the compositor's own repeat.
+        Repeated = 2,
+    }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Op {
         /// Creates a `w`x`h` window with `title`; handles `[reply, buffer]`
         /// (the buffer has `w*h*4` bytes in `0x00RRGGBB`); `value` = id.
         Create = 1,
-        /// The buffer content changed: recompose.
+        /// The buffer content changed: recompose. `width` 0 keeps the buffer shown;
+        /// 1 shows the window's first buffer (that of `Create` or `Resize`) and 2 its
+        /// [`SecondBuffer`](Op::SecondBuffer), with the whole window redrawn, and
+        /// the other is its program's to draw on: the compositor never reads a
+        /// buffer while it is not the one shown. `Reply::value` is the one shown,
+        /// 0 or 1, so a program that lost an answer finds its step again.
         Present = 2,
         /// Waits up to `timeout_ms` for a window event.
         Poll = 3,
@@ -1146,7 +1200,52 @@ pub mod window {
         /// id) has exited; its endpoint and windows close now, whoever else
         /// still holds its send side (ADR 0052).
         Detach = 6,
+        /// The window's content becomes `width`x`height`, in a new buffer;
+        /// handles `[reply, buffer]`, as `Create`. The old buffer is released.
+        Resize = 7,
+        /// The owner's clipboard becomes the `width` bytes of UTF-8 at the start of
+        /// the buffer; handles `[reply, buffer]`. Only the focused window.
+        ClipboardSet = 8,
+        /// The clipboard's text goes to the start of the buffer, of [`MAX_CLIPBOARD`]
+        /// bytes, and `Reply::value` says how many; handles `[reply, buffer]`. Only
+        /// the focused window, once for each Ctrl+V the owner pressed in it.
+        ClipboardGet = 9,
+        /// Main endpoint only (init): the desktop becomes dark (`width` 1) or light
+        /// (`width` 0).
+        Appearance = 10,
+        /// Main endpoint only (init): the owner's clock is `width` minutes from UTC, a
+        /// signed value.
+        Timezone = 11,
+        /// Menu `width` of this window gets an item `title`, which tells its program
+        /// `height` when chosen; a `height` of 0 names the menu. Menus come in order.
+        MenuAdd = 12,
+        /// Main endpoint only (init): the bar shows `title` for the network.
+        Network = 13,
+        /// A second buffer for the window, of its size; handles `[reply, buffer]`,
+        /// as `Create`. Its program draws on the one not shown and presents naming
+        /// it, so no frame shows half drawn (incident 0063, ADR 0081). Once per
+        /// window; `Invalid` for a window that shares its buffer with another and
+        /// for a buffer a window already holds. A resize drops it: the program
+        /// gives a new one after.
+        SecondBuffer = 14,
+        /// Main endpoint only (init, for the owner's shell): the screen as last
+        /// composed goes to the buffer, `0x00RRGGBB` rows without padding;
+        /// handles `[reply, buffer]`, a DMA buffer of at least width x height x 4
+        /// bytes. `Reply::value` is the width, and the height in its high 32
+        /// bits. The desktop says that it was taken.
+        Capture = 15,
+        /// The launcher's only (the session init made for the package `launcher`,
+        /// which alone holds `launch`): the dock offers application `width`, from 0
+        /// to [`MAX_DOCK_APPS`], named `title` (its package's name); an empty title
+        /// ends the list there. Choosing it sends [`Event::Launch`] to this window.
+        DockApp = 16,
+        /// The window goes to the dock, as its minimize circle does: the launcher
+        /// once it has given its applications to the dock, and once one opened.
+        Minimize = 17,
     }
+
+    /// Applications the dock offers at most.
+    pub const MAX_DOCK_APPS: usize = 12;
 
     /// Request (64 bytes).
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1158,6 +1257,11 @@ pub mod window {
         pub timeout_ms: u32,
         pub title: [u8; MAX_TITLE],
         pub title_len: u8,
+        /// `Create`: the [`wants`] of the window.
+        pub events: u32,
+        /// `Present`: what changed; none means the whole content.
+        pub damage: [DamageRect; MAX_DAMAGE],
+        pub damage_len: u8,
     }
 
     impl Request {
@@ -1172,6 +1276,14 @@ pub mod window {
                 timeout_ms: 0,
                 title: [0; MAX_TITLE],
                 title_len: 0,
+                events: 0,
+                damage: [DamageRect {
+                    x: 0,
+                    y: 0,
+                    width: 0,
+                    height: 0,
+                }; MAX_DAMAGE],
+                damage_len: 0,
             }
         }
 
@@ -1194,12 +1306,29 @@ pub mod window {
             b[0] = PROTOCOL;
             b[1] = VERSION;
             b[2] = self.op as u8;
-            b[3] = self.title_len;
             b[4..8].copy_from_slice(&self.window.to_le_bytes());
             b[8..12].copy_from_slice(&self.width.to_le_bytes());
             b[12..16].copy_from_slice(&self.height.to_le_bytes());
             b[16..20].copy_from_slice(&self.timeout_ms.to_le_bytes());
-            b[24..48].copy_from_slice(&self.title);
+            b[20..24].copy_from_slice(&self.events.to_le_bytes());
+            if self.op == Op::Present {
+                // The title's place, and the rest of the message: a `Present`
+                // has no title.
+                let n = (self.damage_len as usize).min(MAX_DAMAGE);
+                b[3] = n as u8;
+                for (r, c) in self.damage[..n]
+                    .iter()
+                    .zip(b[24..64].as_chunks_mut::<8>().0)
+                {
+                    c[0..2].copy_from_slice(&r.x.to_le_bytes());
+                    c[2..4].copy_from_slice(&r.y.to_le_bytes());
+                    c[4..6].copy_from_slice(&r.width.to_le_bytes());
+                    c[6..8].copy_from_slice(&r.height.to_le_bytes());
+                }
+            } else {
+                b[3] = self.title_len;
+                b[24..48].copy_from_slice(&self.title);
+            }
             b
         }
 
@@ -1214,19 +1343,41 @@ pub mod window {
                 4 => Op::Close,
                 5 => Op::Attach,
                 6 => Op::Detach,
+                7 => Op::Resize,
+                8 => Op::ClipboardSet,
+                9 => Op::ClipboardGet,
+                10 => Op::Appearance,
+                11 => Op::Timezone,
+                12 => Op::MenuAdd,
+                13 => Op::Network,
+                14 => Op::SecondBuffer,
+                15 => Op::Capture,
+                16 => Op::DockApp,
+                17 => Op::Minimize,
                 _ => return None,
             };
-            let mut title = [0u8; MAX_TITLE];
-            title.copy_from_slice(&b[24..48]);
-            Some(Self {
-                op,
-                window: u32::from_le_bytes(b[4..8].try_into().ok()?),
-                width: u32::from_le_bytes(b[8..12].try_into().ok()?),
-                height: u32::from_le_bytes(b[12..16].try_into().ok()?),
-                timeout_ms: u32::from_le_bytes(b[16..20].try_into().ok()?),
-                title,
-                title_len: b[3].min(MAX_TITLE as u8),
-            })
+            let mut req = Self::new(op);
+            req.window = u32::from_le_bytes(b[4..8].try_into().ok()?);
+            req.width = u32::from_le_bytes(b[8..12].try_into().ok()?);
+            req.height = u32::from_le_bytes(b[12..16].try_into().ok()?);
+            req.timeout_ms = u32::from_le_bytes(b[16..20].try_into().ok()?);
+            req.events = u32::from_le_bytes(b[20..24].try_into().ok()?);
+            if op == Op::Present {
+                let n = (b[3] as usize).min(MAX_DAMAGE);
+                req.damage_len = n as u8;
+                for (r, c) in req.damage[..n].iter_mut().zip(b[24..64].as_chunks::<8>().0) {
+                    *r = DamageRect {
+                        x: u16::from_le_bytes([c[0], c[1]]),
+                        y: u16::from_le_bytes([c[2], c[3]]),
+                        width: u16::from_le_bytes([c[4], c[5]]),
+                        height: u16::from_le_bytes([c[6], c[7]]),
+                    };
+                }
+            } else {
+                req.title.copy_from_slice(&b[24..48]);
+                req.title_len = b[3].min(MAX_TITLE as u8);
+            }
+            Some(req)
         }
     }
 
@@ -1239,6 +1390,8 @@ pub mod window {
         BadHandles = 3,
         BadWindow = 4,
         Timeout = 5,
+        /// Not while it lacks the focus, or the owner's press.
+        Denied = 6,
     }
 
     /// Event delivered to a window. More kinds may come: a program matches
@@ -1256,6 +1409,38 @@ pub mod window {
         /// or asks first (unsaved changes). One that never takes this
         /// event has its window closed for it at the next click (ADR 0077).
         Close,
+        /// [`wants::POINTER`]: the pointer moved over the window, or anywhere
+        /// while a button pressed on it is held. Coordinates in the content.
+        Motion { x: i32, y: i32, buttons: u8 },
+        /// [`wants::POINTER`]: a button pressed on this window was released,
+        /// wherever the pointer is now.
+        Release { x: i32, y: i32, button: u8 },
+        /// [`wants::POINTER`]: the pointer came over the content.
+        Enter { x: i32, y: i32 },
+        /// [`wants::POINTER`]: the pointer left the content.
+        Leave,
+        /// [`wants::POINTER`]: the wheel, over the content; positive away from
+        /// the user.
+        Wheel { x: i32, y: i32, delta: i32 },
+        /// [`wants::KEY_CODES`]: a key (evdev code) of the focused window, with
+        /// the [`mods`] held after it.
+        KeyCode {
+            code: u16,
+            state: KeyState,
+            mods: u8,
+        },
+        /// [`wants::RESIZE`]: the owner wants the content at this size. The
+        /// program paints a buffer of it and answers with `Op::Resize`; the
+        /// window changes when it does, so a busy program keeps its picture
+        /// whole. While the owner drags, only the latest counts.
+        Configure { width: u32, height: u32 },
+        /// [`wants::APPEARANCE`]: the owner chose light or dark for the desktop.
+        Appearance { dark: bool },
+        /// The owner chose an item of this window's menus, by the number it was given.
+        Menu { id: u32 },
+        /// The launcher's window: the owner chose application `index` of those it
+        /// gave the dock ([`Op::DockApp`]).
+        Launch { index: u32 },
     }
 
     /// Reply (32 bytes): status, value and optional event.
@@ -1314,6 +1499,53 @@ pub mod window {
                     b[16] = f as u8;
                 }
                 Some(Event::Close) => b[3] = 4,
+                Some(Event::Motion { x, y, buttons }) => {
+                    b[3] = 5;
+                    b[16..20].copy_from_slice(&x.to_le_bytes());
+                    b[20..24].copy_from_slice(&y.to_le_bytes());
+                    b[24] = buttons;
+                }
+                Some(Event::Release { x, y, button }) => {
+                    b[3] = 6;
+                    b[16..20].copy_from_slice(&x.to_le_bytes());
+                    b[20..24].copy_from_slice(&y.to_le_bytes());
+                    b[24] = button;
+                }
+                Some(Event::Enter { x, y }) => {
+                    b[3] = 7;
+                    b[16..20].copy_from_slice(&x.to_le_bytes());
+                    b[20..24].copy_from_slice(&y.to_le_bytes());
+                }
+                Some(Event::Leave) => b[3] = 8,
+                Some(Event::Wheel { x, y, delta }) => {
+                    b[3] = 9;
+                    b[16..20].copy_from_slice(&x.to_le_bytes());
+                    b[20..24].copy_from_slice(&y.to_le_bytes());
+                    b[24..28].copy_from_slice(&delta.to_le_bytes());
+                }
+                Some(Event::KeyCode { code, state, mods }) => {
+                    b[3] = 10;
+                    b[16..18].copy_from_slice(&code.to_le_bytes());
+                    b[18] = state as u8;
+                    b[19] = mods;
+                }
+                Some(Event::Configure { width, height }) => {
+                    b[3] = 11;
+                    b[16..20].copy_from_slice(&width.to_le_bytes());
+                    b[20..24].copy_from_slice(&height.to_le_bytes());
+                }
+                Some(Event::Appearance { dark }) => {
+                    b[3] = 12;
+                    b[16] = dark as u8;
+                }
+                Some(Event::Menu { id }) => {
+                    b[3] = 13;
+                    b[16..20].copy_from_slice(&id.to_le_bytes());
+                }
+                Some(Event::Launch { index }) => {
+                    b[3] = 14;
+                    b[16..20].copy_from_slice(&index.to_le_bytes());
+                }
             }
             b
         }
@@ -1329,6 +1561,7 @@ pub mod window {
                 3 => Status::BadHandles,
                 4 => Status::BadWindow,
                 5 => Status::Timeout,
+                6 => Status::Denied,
                 _ => return None,
             };
             let event = match b[3] {
@@ -1341,6 +1574,47 @@ pub mod window {
                 }),
                 3 => Some(Event::Focus(b[16] != 0)),
                 4 => Some(Event::Close),
+                5 => Some(Event::Motion {
+                    x: i32::from_le_bytes(b[16..20].try_into().ok()?),
+                    y: i32::from_le_bytes(b[20..24].try_into().ok()?),
+                    buttons: b[24],
+                }),
+                6 => Some(Event::Release {
+                    x: i32::from_le_bytes(b[16..20].try_into().ok()?),
+                    y: i32::from_le_bytes(b[20..24].try_into().ok()?),
+                    button: b[24],
+                }),
+                7 => Some(Event::Enter {
+                    x: i32::from_le_bytes(b[16..20].try_into().ok()?),
+                    y: i32::from_le_bytes(b[20..24].try_into().ok()?),
+                }),
+                8 => Some(Event::Leave),
+                9 => Some(Event::Wheel {
+                    x: i32::from_le_bytes(b[16..20].try_into().ok()?),
+                    y: i32::from_le_bytes(b[20..24].try_into().ok()?),
+                    delta: i32::from_le_bytes(b[24..28].try_into().ok()?),
+                }),
+                10 => Some(Event::KeyCode {
+                    code: u16::from_le_bytes([b[16], b[17]]),
+                    state: match b[18] {
+                        0 => KeyState::Released,
+                        1 => KeyState::Pressed,
+                        2 => KeyState::Repeated,
+                        _ => return None,
+                    },
+                    mods: b[19],
+                }),
+                12 => Some(Event::Appearance { dark: b[16] != 0 }),
+                13 => Some(Event::Menu {
+                    id: u32::from_le_bytes(b[16..20].try_into().ok()?),
+                }),
+                14 => Some(Event::Launch {
+                    index: u32::from_le_bytes(b[16..20].try_into().ok()?),
+                }),
+                11 => Some(Event::Configure {
+                    width: u32::from_le_bytes(b[16..20].try_into().ok()?),
+                    height: u32::from_le_bytes(b[20..24].try_into().ok()?),
+                }),
                 _ => return None,
             };
             Some(Self {
@@ -1382,6 +1656,13 @@ pub mod launch {
         /// offer (ADR 0074 phase C); the reply is an [`Entry`]. The name is
         /// empty.
         pub const LIST: u8 = 4;
+        /// The owner's shell asks for a copy of the screen (the window
+        /// protocol's `Capture`): a second handle follows the reply endpoint,
+        /// the DMA buffer it goes to, which the compositor checks holds the
+        /// screen. Only on the shells' endpoints, never the launcher's; the
+        /// reply's `value` is the width, and the height in its high 32 bits. The
+        /// name is empty and `arg` 0.
+        pub const SCREEN: u8 = 8;
 
         /// `None` if the name does not fit.
         pub fn new(name: &str, arg: u64) -> Option<Self> {
@@ -1406,6 +1687,20 @@ pub mod launch {
                 name_len: 0,
                 flags: Self::LIST,
             }
+        }
+
+        /// The request for a copy of the screen (`SCREEN`).
+        pub fn screen() -> Self {
+            Self {
+                arg: 0,
+                name: [0; MAX_NAME],
+                name_len: 0,
+                flags: Self::SCREEN,
+            }
+        }
+
+        pub fn is_screen(&self) -> bool {
+            self.flags & Self::SCREEN != 0
         }
 
         pub fn is_list(&self) -> bool {
@@ -1613,6 +1908,12 @@ pub mod settings {
         /// Chooses what the machine boots into from the next boot:
         /// `value` 0 the text console, 1 the desktop.
         SetSession = 2,
+        /// Chooses how the desktop looks, at once and from then on: `value` 0
+        /// light, 1 dark.
+        SetAppearance = 3,
+        /// The clock's distance from UTC: `value` hours plus 12, so 0 is UTC-12 and 26
+        /// is UTC+14.
+        SetTimezone = 4,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1623,6 +1924,10 @@ pub mod settings {
         UpdateSource = 2,
         /// The network address.
         Address = 3,
+        /// How the desktop looks: `light` or `dark`.
+        Appearance = 4,
+        /// The clock's zone: `UTC+1`.
+        Timezone = 5,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1655,12 +1960,16 @@ pub mod settings {
             let op = match b[2] {
                 1 => Op::Get,
                 2 => Op::SetSession,
+                3 => Op::SetAppearance,
+                4 => Op::SetTimezone,
                 _ => return None,
             };
             let item = match b[3] {
                 1 => Item::Session,
                 2 => Item::UpdateSource,
                 3 => Item::Address,
+                4 => Item::Appearance,
+                5 => Item::Timezone,
                 _ => return None,
             };
             Some(Self {
@@ -1758,7 +2067,7 @@ mod tests {
             value: 1,
         };
         assert_eq!(Request::decode(&req.encode()), Some(req));
-        assert_eq!(Request::decode(&[9, 1, 3, 1, 0, 0, 0, 0]), None);
+        assert_eq!(Request::decode(&[9, 1, 5, 1, 0, 0, 0, 0]), None);
         assert_eq!(Request::decode(&[9, 1, 1, 7, 0, 0, 0, 0]), None);
         let r = Reply::new(Status::Ok, b"session: desktop");
         let d = Reply::decode(&r.encode()).unwrap();
@@ -1794,6 +2103,9 @@ mod tests {
         let req = Request::decode(&Request::list(3).encode()).unwrap();
         assert!(req.is_list() && !req.is_detached() && req.arg == 3);
         assert_eq!(req.name_str(), "");
+        let screen = Request::decode(&Request::screen().encode()).unwrap();
+        assert!(screen.is_screen() && !screen.is_list() && screen.arg == 0);
+        assert_eq!(screen.flags, Request::SCREEN);
         let e = Entry::decode(&Entry::named("editor").unwrap().encode()).unwrap();
         assert_eq!((e.status, e.name_str()), (Status::Ok, "editor"));
         let end = Entry::decode(&Entry::status(Status::NotFound).encode()).unwrap();
@@ -1840,11 +2152,33 @@ mod tests {
         let d = Request::decode(&r.encode()).unwrap();
         assert_eq!(d, r);
         assert_eq!(d.title_str(), "Demo A");
-        for op in [Op::Attach, Op::Detach] {
+        for op in [
+            Op::Attach,
+            Op::Detach,
+            Op::Capture,
+            Op::DockApp,
+            Op::Minimize,
+        ] {
             let mut s = Request::new(op);
             s.window = 0x0102_0003;
             assert_eq!(Request::decode(&s.encode()), Some(s));
         }
+        // A second buffer, and a present that swaps to it: `width` survives beside
+        // the damage rectangles that take the title's place.
+        let mut second = Request::new(Op::SecondBuffer);
+        second.window = 4;
+        assert_eq!(Request::decode(&second.encode()), Some(second));
+        let mut swap = Request::new(Op::Present);
+        swap.window = 4;
+        swap.width = 2;
+        swap.damage[0] = DamageRect {
+            x: 1,
+            y: 2,
+            width: 30,
+            height: 40,
+        };
+        swap.damage_len = 1;
+        assert_eq!(Request::decode(&swap.encode()), Some(swap));
         assert!(Request::new(Op::Create)
             .with_title(&"t".repeat(25))
             .is_none());
@@ -2370,6 +2704,99 @@ pub mod status {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn window_requests_grew_compatibly() {
+            use crate::window::*;
+            // What a program built before these fields sends decodes as asking for
+            // nothing new, and a `Create` keeps its title.
+            let old = Request::new(Op::Create).with_title("Editor").unwrap();
+            let back = Request::decode(&old.encode()).unwrap();
+            assert_eq!(back.events, 0);
+            assert_eq!(back.title_str(), "Editor");
+            let mut req = old;
+            req.events = wants::POINTER | wants::KEY_CODES;
+            let back = Request::decode(&req.encode()).unwrap();
+            assert_eq!(back.events, wants::POINTER | wants::KEY_CODES);
+            assert_eq!(back.title_str(), "Editor");
+            // A `Present` has no title: the whole list of damage fits.
+            let mut req = Request::new(Op::Present);
+            let last = DamageRect {
+                x: 1,
+                y: 2,
+                width: 3,
+                height: 4,
+            };
+            req.damage[MAX_DAMAGE - 1] = last;
+            req.damage_len = MAX_DAMAGE as u8;
+            assert_eq!(Request::decode(&req.encode()).unwrap(), req);
+            // A count past the list is cut, never trusted.
+            let mut b = req.encode();
+            b[3] = 200;
+            assert_eq!(Request::decode(&b).unwrap().damage_len as usize, MAX_DAMAGE);
+            assert_eq!(
+                Request::decode(&Request::new(Op::Resize).encode())
+                    .unwrap()
+                    .op,
+                Op::Resize
+            );
+        }
+
+        #[test]
+        fn window_events_round_trip() {
+            use crate::window::*;
+            for event in [
+                Event::Key(b'a'),
+                Event::Click {
+                    x: -1,
+                    y: 2,
+                    button: 3,
+                },
+                Event::Focus(true),
+                Event::Close,
+                Event::Motion {
+                    x: -5,
+                    y: 600,
+                    buttons: 5,
+                },
+                Event::Release {
+                    x: 7,
+                    y: -8,
+                    button: 2,
+                },
+                Event::Enter { x: 1, y: 2 },
+                Event::Leave,
+                Event::Configure {
+                    width: 800,
+                    height: 600,
+                },
+                Event::Appearance { dark: true },
+                Event::Appearance { dark: false },
+                Event::Menu { id: 0xFFFF_0003 },
+                Event::Launch { index: 11 },
+                Event::Wheel {
+                    x: 1,
+                    y: 2,
+                    delta: -3,
+                },
+                Event::KeyCode {
+                    code: 0x1FF,
+                    state: KeyState::Repeated,
+                    mods: mods::SHIFT | mods::CTRL,
+                },
+            ] {
+                let reply = Reply::event(event);
+                assert_eq!(Reply::decode(&reply.encode()), Some(reply), "{event:?}");
+            }
+            let mut b = Reply::event(Event::KeyCode {
+                code: 1,
+                state: KeyState::Pressed,
+                mods: 0,
+            })
+            .encode();
+            b[18] = 9;
+            assert_eq!(Reply::decode(&b), None, "an unknown key state");
+        }
 
         #[test]
         fn status_round_trip() {

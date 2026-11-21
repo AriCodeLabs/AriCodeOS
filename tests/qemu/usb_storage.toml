@@ -5,7 +5,7 @@
 # on AriFS flush).
 name = "usb.storage"
 description = "USB stick as block service: fsd and shell on top of usbd, durable write"
-level = "full"
+level = "release"
 areas = ["usb", "storage", "filesystem", "init", "shell"]
 usb_storage = true
 timeout_secs = 90

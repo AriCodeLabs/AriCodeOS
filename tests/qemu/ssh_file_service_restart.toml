@@ -7,7 +7,7 @@
 # relaunched sshd (the runner retries while it starts listening).
 name = "ssh.file_service_restart"
 description = "fsd crashes while sshd holds its sessions: sshd exits, init relaunches it with new ones, SSH works again"
-level = "full"
+level = "release"
 areas = ["ssh", "filesystem", "init", "services"]
 cmdline = "qemu_exit shell fsd_fault"
 timeout_secs = 200

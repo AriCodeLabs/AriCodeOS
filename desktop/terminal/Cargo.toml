@@ -20,6 +20,7 @@ bench = false
 aricode-rt = { path = "../../sdk/runtime" }
 aricode-proto = { path = "../../sdk/proto" }
 aricode-gfx = { path = "../../libs/gfx" }
+aricode-text = { path = "../../libs/text" }
 aricode-fb-console = { path = "../../libs/fb-console" }
 aricode-sync = { path = "../../libs/sync" }
 

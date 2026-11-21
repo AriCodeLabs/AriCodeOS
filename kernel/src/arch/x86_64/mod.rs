@@ -10,12 +10,15 @@ pub mod idt;
 pub mod interrupts;
 pub mod ioapic;
 pub mod msr;
+pub mod pat;
 pub mod pic;
 pub mod pit;
 pub mod port;
 pub mod power;
 pub mod smp;
 pub mod syscall;
+pub mod thermal;
+pub mod usercopy;
 pub mod usermode;
 
 /// Installs the BSP's per-CPU tables (GDT + TSS with an IST stack for #DF),
@@ -28,6 +31,7 @@ pub fn init() {
     gdt::init_for(bsp);
     idt::init();
     syscall::init();
+    pat::init();
     crate::cpu::activate(bsp);
     // Before the heap: the log line formats without allocating.
     let fpu = fpu::init_bsp();

@@ -2065,7 +2065,9 @@ against known values.
 ### Implemented
 
 - `libs/heap`: first-fit with a sorted free list, neighbour coalescing and
-  a per-allocation header (bump -> linked-list from section 16);
+  a per-allocation header (bump -> linked-list from section 16); replaced
+  by a TLSF allocator in incident 0066, whose list walks made large frees
+  quadratic;
 - `kernel/memory/heap`: `#[global_allocator]` with a reserved 64 MiB virtual
   region growing in 1 MiB chunks with PMM frames;
 - `alloc` available in the kernel.
@@ -4208,6 +4210,69 @@ residuals said in ADR 0074, 0075 and 0077:
 Next, chosen by the owner on 2026-11-05: a desktop worth the name, with a
 toolkit of our own and a macOS-like style (typography, window style, space
 used to the pixel), after a study of the veterans (ADR 0078 to come).
+
+## 94.19 AriCodeOS 0.19
+
+**Status: completed (2026-11-21), tag `v0.19.0`.** A desktop worth the
+name (ADR 0078), the first use of the reference laptop's GPU (ADR 0080,
+0083, 0086), and what the office laptop taught.
+
+- **The desktop** (ADR 0078, stages 0 to 3, and ADR 0079, 0081, 0085):
+  - its own toolkit, with Inter and JetBrains Mono, menus, modal dialogs,
+    a clipboard, a dark appearance, notices, a bar with a clock and a dock
+    that offers the applications;
+  - windows with two buffers (no half-drawn frames, incident 0063),
+    resized by their edges and corners, and full screen (F11, or the zoom
+    circle of a fixed-size window);
+  - the panel's own size when the firmware does not offer it;
+  - the owner's remote screen: `screenshot` from the console, an SSH
+    session or the Terminal gives the screen as a QOI image, at most once
+    every 2 s, and the screen says so.
+- **One path to the hardware** (ADR 0080):
+  - threads in a process (ADR 0082) and memory for big programs (ADR 0084);
+  - a software 3D renderer (`render3d`) drawing in bands on every
+    processor, measured by `bench3d`;
+  - on the HD 4000: the GPU's engine in the kernel with its clock and a
+    heat brake (ADR 0083), and compute on its EUs with a residue clear
+    between clients (ADR 0086). Other GPUs are left as the firmware set
+    them.
+- **USB plug and play on the xHCI** (ADR 0087): a keyboard or mouse plugged
+  in or out while the system runs works without a reboot, keys and buttons
+  are released when a device goes, and the boot stick is never put at
+  risk by it.
+- **Found on the office laptop** (a Tiger Lake Lenovo) and handled:
+  - the power stayed on (incident 0065): the power-off now runs as Linux
+    and FreeBSD run it (on the boot CPU, GPEs disabled, two writes, the
+    FADT's extended blocks), and if the power still stays on the screen
+    says why; to be confirmed on that machine;
+  - a DMA fault from its xHCI (incident 0064): the controller's structures
+    keep to the xHCI's page and 64 KiB rules, and `diag` places any DMA
+    fault against the driver's memory; the cause waits for the next run;
+  - `diag` names the machine and its ACPI devices, and `acpidump` saves the
+    DSDT, SSDTs and FADT (never MSDM or SLIC, nor serial numbers).
+- **Performance on real hardware:** `bench` measures raw IPC; on the
+  reference laptop (Core i3-3217U) two threads exchange 218 000 to 237 000
+  messages a second, and a request to a service is 17 to 23 µs
+  (`docs/performance.md`).
+- **The program heap** is TLSF in the kernel and in programs (incident
+  0066): large allocations no longer turn quadratic.
+- **Incidents 0059 to 0066** are closed or carry their next step.
+- **Certificates:** Mozilla's roots regenerated from NSS master are 112
+  (Buypass Class 2 and 3, Certigna and QuoVadis 1 G3 and 3 G3 left
+  Mozilla's store); the public suffix extract is the list of 2026-11-19.
+  `TIME_FLOOR` is 2026-11-21.
+- **Not published as applications:** Pista and `bench3d` stay out of the
+  public index; the desktop's five applications are version 6.
+- **Found by the release suite:** with 4 CPUs, Alt+Tab after the launcher
+  started an application went to the window behind the launcher three
+  times in four: the launcher hid before the new window came, and the
+  window that got the focus was raised past it. A window that gets the
+  focus because another went now keeps its place. The 4-CPU pass then
+  found a control test that depended on chance (`gui.double_buffer_control`
+  asked for a colour painted over while the compositor reads it); it now
+  asks only for what it controls.
+- **Verified:** the full suite with 1 CPU (290 of 290) and with 4 CPUs (289
+  of 290, the control above, then passing 5 of 5 corrected).
 
 ---
 

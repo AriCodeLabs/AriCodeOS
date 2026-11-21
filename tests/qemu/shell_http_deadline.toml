@@ -6,7 +6,7 @@
 # interim-response limit refuses it before the deadline.
 name = "shell.http_deadline"
 description = "http: interim responses forever end at the budget, a flood of them at the count limit (incident 0009)"
-level = "full"
+level = "release"
 areas = ["shell", "network"]
 cmdline = "qemu_exit shell"
 timeout_secs = 150

@@ -99,6 +99,39 @@ pub mod keys {
     /// console's PS/2 one, the USB and virtio ones through the console
     /// bridge, and all of them in the compositor's windows.
     pub const KBD: &str = "kbd";
+    /// `video=WxH`: the screen mode AriBoot sets, when the firmware offers
+    /// it; otherwise the panel's preferred one (EDID), otherwise the
+    /// firmware's (ADR 0078, stage 0). `video=firmware` keeps the firmware's
+    /// mode and touches nothing: the way back on the rare machine where the
+    /// panel's size goes wrong (ADR 0079).
+    pub const VIDEO: &str = "video";
+    /// `gpu=off`: the kernel leaves the GPU's engine as the firmware set it
+    /// and programs get no GPU (ADR 0083): the way back if taking it goes
+    /// wrong on some machine.
+    pub const GPU: &str = "gpu";
+    /// `gpu.mhz=N`: the GPU's clock to ask for, within its limits; by default
+    /// its lowest (ADR 0083).
+    pub const GPU_MHZ: &str = "gpu.mhz";
+    /// `gpu.hang_ms=N`: how long a batch may run without the engine moving
+    /// before it is reset; 2000 by default (ADR 0083).
+    pub const GPU_HANG_MS: &str = "gpu.hang_ms";
+    /// `gpu.max_mhz=N`: the most a program may ask the GPU's clock to be;
+    /// by default its highest (ADR 0083).
+    pub const GPU_MAX_MHZ: &str = "gpu.max_mhz";
+    /// `gpu.hot_c=N`: the CPU package temperature, 50 to 100, at which the
+    /// GPU drops to its lowest clock until 5 degrees below; 85 by default
+    /// (ADR 0083).
+    pub const GPU_HOT_C: &str = "gpu.hot_c";
+    /// `mem.app_max_pct=N`: the share of the machine's usable memory, 1 to
+    /// 100, one application may hold at most, whatever its manifest asks; 50
+    /// by default (ADR 0084, the owner's choice).
+    pub const MEM_APP_MAX_PCT: &str = "mem.app_max_pct";
+    /// `mem.service_max_mib=N`: what one of the system's own services, which
+    /// have no quota, may hold in memory objects; 64 by default (ADR 0084).
+    pub const MEM_SERVICE_MAX_MIB: &str = "mem.service_max_mib";
+    /// `thermal_off=DEGREES`: the CPU temperature at which the kernel's watch powers
+    /// the machine off; `0` never does. By default 3 degrees below the CPU's limit.
+    pub const THERMAL_OFF: &str = "thermal_off";
     /// `ps2=console`: the PS/2 keyboard and touchpad serve only the kernel
     /// console; while a process holds the screen their keys are withheld
     /// instead of going to the desktop (ADR 0075).
@@ -117,6 +150,23 @@ pub mod keys {
     /// `boot_commit=HEX`: added by AriBoot with `boot_slot` for a
     /// development build, the commit it was built from (ADR 0045).
     pub const BOOT_COMMIT: &str = "boot_commit";
+    /// `poweroff.cpu=N`: the processor the power-off runs on; 0, the boot
+    /// CPU, by default, as Linux and FreeBSD do (incident 0065). A CPU not
+    /// online means the boot CPU.
+    pub const POWEROFF_CPU: &str = "poweroff.cpu";
+    /// `poweroff.wait_ms=N`: how long the machine is given to go off after
+    /// each of the two S5 writes before the kernel says it did not; 3000 by
+    /// default, 500 to 60000 (ACPICA waits 10000). Other values are refused
+    /// and logged.
+    pub const POWEROFF_WAIT_MS: &str = "poweroff.wait_ms";
+    /// Tests only: `poweroff_from=N`, `shutdown` first moves the calling
+    /// thread to CPU N, so a power-off called on another processor than
+    /// the boot CPU is exercised (incident 0065).
+    pub const POWEROFF_FROM: &str = "poweroff_from";
+    /// Tests only: `poweroff_ignored`, `shutdown` runs the ACPI S5 sequence
+    /// but skips its `SLP_EN` writes, as firmware that ignores them does, so
+    /// what follows a power-off that had no effect is tested (incident 0065).
+    pub const POWEROFF_IGNORED: &str = "poweroff_ignored";
     /// Tests only: `init_fail_late`, init fails after the services and before
     /// confirming.
     pub const INIT_FAIL_LATE: &str = "init_fail_late";
@@ -148,6 +198,12 @@ pub mod keys {
     /// between two reads of a client would (the installer's copy check,
     /// ADR 0072).
     pub const FSD_MUTATE: &str = "fsd_mutate";
+    /// `usb.hotplug=debounce:MS,recovery:MS,attempts:N,retry:MS,resets:N,bounces:N`
+    /// (any of them): usbd's hot-plug timings and counts instead of its
+    /// defaults (100, 50, 3, 200, 5, 3), each within the bounds of
+    /// `aricode_xhci::hotplug::Policy::parse` (ADR 0087). A value it
+    /// refuses is said on the console and the defaults stay.
+    pub const USB_HOTPLUG: &str = "usb.hotplug";
     /// `smp=off`: do not start the application processors (real hardware).
     pub const SMP: &str = "smp";
     /// `iommu=off`: do not enable DMA translation (real hardware).
@@ -187,6 +243,10 @@ pub mod keys {
     /// 0017) or `hid` (a HID report is treated as a
     /// transaction error: the interrupt endpoint is stopped and recovered
     /// from the idle loop, its report TRBs queued again).
+    /// `usb_fault=dma` alone makes the xHCI driver, once its boot
+    /// enumeration is over, read a device descriptor into the page right
+    /// past its DMA arena: the IOMMU blocks the write and the driver must
+    /// name the page from the kernel's report (incident 0064).
     /// The EHCI driver (ADR 0031) understands `N` and `idle` with `cbw`
     /// (followed by a real Reset Recovery), `csw`, `short-csw` and
     /// `short-data`.
@@ -208,6 +268,9 @@ pub mod keys {
     /// with one pixel sample per window, which the GUI scenarios check.
     /// Without it a frame prints nothing: the serial port busy-waits.
     pub const GUI_TRACE: &str = "gui_trace";
+    /// Tests only: `gui_notice`, the compositor shows a notice as it starts, as it does
+    /// for what cannot be provoked in a test (a hot processor).
+    pub const GUI_NOTICE: &str = "gui_notice";
 
     /// Every key documented "Tests only": they exit QEMU, inject failures or
     /// run test programs. `cargo xtask usb-image` refuses them (a unit test
@@ -215,6 +278,8 @@ pub mod keys {
     pub const TEST_ONLY: &[&str] = &[
         QEMU_EXIT,
         TEST,
+        POWEROFF_FROM,
+        POWEROFF_IGNORED,
         INIT_FAIL_LATE,
         RESTART_STORM,
         SERVICE_HANG,
@@ -228,6 +293,7 @@ pub mod keys {
         BLK_FAULT,
         PCI_FAULT,
         GUI_TRACE,
+        GUI_NOTICE,
     ];
 
     /// Keys AriBoot adds itself; `cargo xtask usb-image` refuses them too.

@@ -22,10 +22,29 @@ pub struct Pid(pub u32);
 /// Minimum base of user code (ELFs are linked at 0x40_0000) and stack.
 pub const USER_CODE_BASE: u64 = 0x40_0000;
 
-/// `true` if `addr` falls in the guard page below the user stack.
+/// `true` if `addr` falls in the guard page below the user stack, the main
+/// one or a thread's (ADR 0082).
 pub fn in_user_stack_guard(addr: u64) -> bool {
     let bottom = USER_STACK_TOP - USER_STACK_SIZE;
-    (bottom - PAGE_SIZE..bottom).contains(&addr)
+    if (bottom - PAGE_SIZE..bottom).contains(&addr) {
+        return true;
+    }
+    (THREAD_STACKS..THREAD_STACKS_END).contains(&addr)
+        && (addr - THREAD_STACKS) % THREAD_STACK_SLOT < PAGE_SIZE
+}
+
+/// The region of the threads' stacks (ADR 0082): slot `n` (1 and up) is a guard
+/// page and a stack of `USER_STACK_SIZE` above it, backed on first touch. Below
+/// the MMIO region, above any image (images end below the main stack).
+const THREAD_STACKS: u64 = 0x0800_0000;
+const THREAD_STACK_SLOT: u64 = USER_STACK_SIZE + PAGE_SIZE;
+const THREAD_STACKS_END: u64 = THREAD_STACKS + 255 * THREAD_STACK_SLOT;
+const _: () = assert!(THREAD_STACKS >= USER_STACK_TOP && THREAD_STACKS_END <= USER_MMIO_BASE);
+
+/// The bottom and top of thread stack slot `slot` (1 and up).
+fn thread_stack(slot: u32) -> (u64, u64) {
+    let guard = THREAD_STACKS + (slot as u64 - 1) * THREAD_STACK_SLOT;
+    (guard + PAGE_SIZE, guard + THREAD_STACK_SLOT)
 }
 pub const USER_STACK_TOP: u64 = 0x80_0000;
 pub const USER_STACK_SIZE: u64 = 64 * 1024;
@@ -56,13 +75,16 @@ pub struct Process {
     /// alive, ADR 0038); bounded by `dma_quota` when there is one.
     dma_mapped: u64,
     /// `None` once the address space has been freed.
-    mapper: Option<Mapper<vmm::PmmFrames, OffsetMap>>,
+    mapper: Option<Mapper<vmm::UserFrames, OffsetMap>>,
     pub entry: u64,
     pub status: Option<ExitStatus>,
-    /// Limit of DMA memory (bytes) the process can allocate in total;
+    /// Limit of DMA memory (bytes) the process's live buffers can take;
     /// 0 = no limit. Set by its creator (`spawn_limits`).
     pub dma_quota: u64,
-    pub dma_used: u64,
+    /// Bytes of the buffers it allocated whose frames are still in use, by
+    /// whoever holds them now (ADR 0078, stage 0): each buffer gives its
+    /// share back with its frames.
+    dma_used: alloc::sync::Arc<core::sync::atomic::AtomicU64>,
     /// Console output waiting for a complete line (Phase 32): with several
     /// CPUs, two processes printing a line in several pieces would
     /// interleave; the kernel emits each line whole.
@@ -71,8 +93,20 @@ pub struct Process {
     /// DMA domain: only then can `wait` remove the process (audit 3eb4965,
     /// finding 1: with several CPUs the thread state is not enough).
     reaped: bool,
-    /// Main thread, to wake it if it has to be killed.
-    main_tid: aricode_sched::Tid,
+    /// Its threads, the main one first, each until it is joined or the process
+    /// goes (ADR 0082).
+    threads: Vec<UserThread>,
+    /// Its threads the scheduler has not reaped yet: the address space, the
+    /// handles and the DMA domain go with the last one, never before.
+    unreaped: usize,
+    /// The first end of the process is under way (`finish` runs once): any later
+    /// end only ends its own thread.
+    ending: bool,
+    /// Wakes whoever waits to join one of its threads.
+    joins: alloc::sync::Arc<crate::task::wait::WaitQueue>,
+    /// Threads it may have at once, the main one and those not joined counted
+    /// (`spawn_limits::threads`).
+    threads_max: usize,
     /// Pending termination and why (`process_kill`, the kernel): the thread
     /// terminates on returning to ring 0 or on waking from a wait (audit
     /// 6ee19fb, finding 4).
@@ -99,15 +133,22 @@ pub struct Process {
 /// frames a process's first touch fails instead, so the kernel's own
 /// allocations (its heap, page tables, the kill path itself) still find
 /// memory. 1 MiB.
-const KERNEL_RESERVE_FRAMES: usize = 256;
+pub const KERNEL_RESERVE_FRAMES: usize = 256;
+
+/// Foreign mappings (MMIO, DMA, memory objects) a process may hold at once:
+/// each costs the kernel memory no quota pays for (audit of ADR 0084, H2).
+const MAX_FOREIGN: usize = 512;
 
 /// What [`back_on_demand`] did with a page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OnDemand {
     /// The page was reserved and is now backed by a zeroed frame.
     Backed,
-    /// Not a reserved page (or already backed): a real fault.
+    /// Not a reserved page: a real fault.
     NotReserved,
+    /// Reserved and already backed: another thread of the process touched it
+    /// first (ADR 0082), so the access runs again.
+    Present,
     /// Reserved, but no frame was left.
     OutOfMemory,
 }
@@ -120,13 +161,13 @@ fn back_page(p: &mut Process, page: u64) -> OnDemand {
         .iter()
         .find(|(s, e, _)| (*s..*e).contains(&page))
     else {
-        return OnDemand::NotReserved;
+        return back_memory_page(p, page);
     };
     let Some(m) = p.mapper.as_mut() else {
         return OnDemand::NotReserved;
     };
     if m.translate(page).is_some() {
-        return OnDemand::NotReserved;
+        return OnDemand::Present;
     }
     let Some(frame) = user_frame() else {
         return OnDemand::OutOfMemory;
@@ -144,6 +185,37 @@ fn back_page(p: &mut Process, page: u64) -> OnDemand {
         return OnDemand::OutOfMemory;
     }
     p.on_demand_backed += 1;
+    OnDemand::Backed
+}
+
+/// Backs `page` of `p` if a mapping of a memory object covers it (ADR 0084):
+/// the object's own frame for that page, taken now if no one touched it yet,
+/// so every mapping of the object sees the same memory.
+fn back_memory_page(p: &mut Process, page: u64) -> OnDemand {
+    let Some(frame) = p.foreign.iter().find_map(|f| {
+        let mem = f.mem.as_ref()?;
+        if !(f.virt..f.virt + f.span).contains(&page) {
+            return None;
+        }
+        let crate::object::ObjectKind::Mem(m) = &mem.kind else {
+            return None;
+        };
+        Some(m.page(((page - f.virt) / PAGE_SIZE) as usize))
+    }) else {
+        return OnDemand::NotReserved;
+    };
+    let Some(m) = p.mapper.as_mut() else {
+        return OnDemand::NotReserved;
+    };
+    if m.translate(page).is_some() {
+        return OnDemand::Present;
+    }
+    let Some(frame) = frame else {
+        return OnDemand::OutOfMemory;
+    };
+    if m.map_4k(page, frame, USER | WRITABLE | NO_EXECUTE).is_err() {
+        return OnDemand::OutOfMemory;
+    }
     OnDemand::Backed
 }
 
@@ -179,6 +251,11 @@ struct Foreign {
     phys: u64,
     span: u64,
     dma: Option<crate::object::ObjectRef>,
+    /// A memory object (ADR 0084): no physical range, its pages mapped as
+    /// they are touched (`phys` is 0, and nothing that matches by physical
+    /// address looks at this entry).
+    mem: Option<crate::object::ObjectRef>,
+    caching: crate::hw::Caching,
     /// Mapping it put the buffer in the process's IOMMU domain: unmapping
     /// takes it out again (audit 2026-10-25 C, L11).
     in_domain: bool,
@@ -192,7 +269,7 @@ pub const KILLED_BY_REQUEST: &str = "stopped at another process's request";
 /// wakes its thread so it sees it. `false` if the process does not exist or
 /// has already finished.
 pub fn request_kill(pid: Pid, why: &'static str) -> bool {
-    let tid = {
+    let tids = {
         let mut procs = PROCESSES.lock();
         let Some(p) = procs.get_mut(&pid) else {
             return false;
@@ -201,11 +278,18 @@ pub fn request_kill(pid: Pid, why: &'static str) -> bool {
             return true;
         }
         p.kill_requested = Some(why);
-        p.main_tid
+        p.live_tids()
     };
-    let _ = scheduler::wake(tid);
+    // Every thread, in whatever wait it is (ADR 0082): each stops at its next
+    // entry to the kernel or tick.
+    for tid in tids {
+        let _ = scheduler::wake(tid);
+    }
     true
 }
+
+/// Why the other threads of a process that has ended stop.
+const PROCESS_ENDED: &str = "its process ended";
 
 /// The current thread's process has a pending termination.
 pub fn current_kill_requested() -> bool {
@@ -215,11 +299,39 @@ pub fn current_kill_requested() -> bool {
 /// Why the current thread's process is to terminate, if it is.
 pub fn current_kill_reason() -> Option<&'static str> {
     let pid = current_pid()?;
-    PROCESSES
-        .lock()
-        .get(&pid)
-        .filter(|p| p.status.is_none())
-        .and_then(|p| p.kill_requested)
+    let procs = PROCESSES.lock();
+    let p = procs.get(&pid)?;
+    // A process that is ending takes its other threads with it (ADR 0082), from
+    // the moment its end begins: a thread that went on would redo what the end
+    // undoes (audit M1). The thread running the end never asks.
+    if p.ending || p.status.is_some() {
+        Some(PROCESS_ENDED)
+    } else {
+        p.kill_requested
+    }
+}
+
+/// One thread of a process (ADR 0082).
+struct UserThread {
+    tid: aricode_sched::Tid,
+    /// Its stack: 0 is the main stack, `n` the `n`th of the thread stack region.
+    slot: u32,
+    /// Where it starts in ring 3, and its argument.
+    start: (u64, u64),
+    /// What it ended with, once it has: kept until it is joined.
+    ended: Option<u64>,
+}
+
+impl Process {
+    /// Its threads that have not ended; not a place still being made, whose
+    /// thread does not exist yet (audit L1).
+    fn live_tids(&self) -> Vec<aricode_sched::Tid> {
+        self.threads
+            .iter()
+            .filter(|t| t.ended.is_none() && t.tid.0 != 0)
+            .map(|t| t.tid)
+            .collect()
+    }
 }
 
 /// Size from which an incomplete line is emitted as is.
@@ -241,7 +353,15 @@ pub fn spawn_with_handles_and_arg(
     arg: u64,
     dma_quota: u64,
 ) -> Result<Pid, &'static str> {
-    spawn_with_caps(name, elf_bytes, None, grants(extra), arg, dma_quota)
+    let threads = aricode_abi::spawn_limits::DEFAULT_THREADS;
+    spawn_with_caps(
+        name,
+        elf_bytes,
+        None,
+        grants(extra),
+        arg,
+        (dma_quota, threads),
+    )
 }
 
 /// Like `spawn_with_handles_and_arg` with capabilities that already exist
@@ -254,9 +374,16 @@ pub fn spawn_with_caps(
     session_console: Option<Cap>,
     extra: Vec<(Cap, aricode_handles::Rights)>,
     arg: u64,
-    dma_quota: u64,
+    (dma_quota, threads_max): (u64, usize),
 ) -> Result<Pid, &'static str> {
-    spawn_full(name, elf_bytes, session_console, extra, arg, dma_quota)
+    spawn_full(
+        name,
+        elf_bytes,
+        session_console,
+        extra,
+        arg,
+        (dma_quota, threads_max),
+    )
 }
 
 /// Capabilities for objects the kernel grants to a new process.
@@ -279,7 +406,8 @@ pub fn spawn_with_handles(
     elf_bytes: &[u8],
     extra: Vec<(crate::object::ObjectRef, aricode_handles::Rights)>,
 ) -> Result<Pid, &'static str> {
-    spawn_full(name, elf_bytes, None, grants(extra), 0, 0)
+    let threads = aricode_abi::spawn_limits::DEFAULT_THREADS;
+    spawn_full(name, elf_bytes, None, grants(extra), 0, (0, threads))
 }
 
 fn spawn_full(
@@ -288,7 +416,7 @@ fn spawn_full(
     session_console: Option<Cap>,
     extra: Vec<(Cap, aricode_handles::Rights)>,
     arg: u64,
-    dma_quota: u64,
+    (dma_quota, threads_max): (u64, usize),
 ) -> Result<Pid, &'static str> {
     let elf = aricode_elf::Elf::parse(elf_bytes).map_err(|_| "process: invalid ELF")?;
     let (lo, hi) = elf.virt_range();
@@ -302,7 +430,7 @@ fn spawn_full(
         p
     };
     let mut m =
-        Mapper::new(vmm::PmmFrames, OffsetMap(phys::offset())).map_err(|_| "process: pml4")?;
+        Mapper::new(vmm::UserFrames, OffsetMap(phys::offset())).map_err(|_| "process: pml4")?;
     let kernel_root = vmm::with(|k| k.root_phys());
     // SAFETY: the kernel PML4 is valid and reachable through the physical map.
     unsafe { m.share_kernel_half(kernel_root) };
@@ -356,10 +484,19 @@ fn spawn_full(
             entry: elf.entry,
             status: None,
             dma_quota,
-            dma_used: 0,
+            dma_used: alloc::sync::Arc::new(core::sync::atomic::AtomicU64::new(0)),
             console_line: Vec::new(),
             reaped: false,
-            main_tid: tid,
+            threads: alloc::vec![UserThread {
+                tid,
+                slot: 0,
+                start: (elf.entry, arg),
+                ended: None,
+            }],
+            unreaped: 1,
+            ending: false,
+            joins: alloc::sync::Arc::new(crate::task::wait::WaitQueue::new()),
+            threads_max,
             kill_requested: None,
             on_demand,
             on_demand_backed: 0,
@@ -389,7 +526,7 @@ fn spawn_full(
 /// error the caller frees the address space; a frame taken but not mapped
 /// goes back here.
 fn map_image(
-    m: &mut Mapper<vmm::PmmFrames, OffsetMap>,
+    m: &mut Mapper<vmm::UserFrames, OffsetMap>,
     elf: &aricode_elf::Elf,
 ) -> Result<Vec<(u64, u64, u64)>, &'static str> {
     let mut on_demand = Vec::new();
@@ -462,7 +599,8 @@ fn map_image(
 /// `KERNEL_RESERVE_FRAMES` (ADR 0049): those stay for the kernel.
 fn user_frame() -> Option<Frame> {
     pmm::with(|f| {
-        if f.stats().free_frames <= KERNEL_RESERVE_FRAMES {
+        // Frames promised to memory objects are theirs (ADR 0084).
+        if f.stats().free_frames <= KERNEL_RESERVE_FRAMES + crate::hw::promised() {
             None
         } else {
             f.allocate()
@@ -477,7 +615,7 @@ fn free_frame(frame: Frame) {
 /// Frees a process address space: every frame of its user half (pages
 /// and page tables) and its root; the kernel half is shared, never freed.
 /// Returns how many frames went back.
-fn free_address_space(mut m: Mapper<vmm::PmmFrames, OffsetMap>) -> usize {
+fn free_address_space(mut m: Mapper<vmm::UserFrames, OffsetMap>) -> usize {
     let mut frames = Vec::new();
     m.free_user_half(|f| frames.push(f));
     frames.push(m.into_root_frame());
@@ -506,6 +644,159 @@ extern "C" fn user_thread_entry(pid: usize) {
     // SAFETY: code and stack mapped USER in `spawn`; the kernel stack was set
     // by the scheduler when switching to this thread.
     unsafe { usermode::enter(entry, USER_STACK_TOP - 8, arg) }
+}
+
+/// First code of a thread made by `thread_create` (ADR 0082), in ring 0 with its
+/// process's address space active: `packed` is the process and the stack slot.
+extern "C" fn user_thread_start(packed: usize) {
+    let (pid, slot) = (Pid(packed as u32), (packed >> 32) as u32);
+    let start = PROCESSES.lock().get(&pid).and_then(|p| {
+        p.threads
+            .iter()
+            .find(|t| t.slot == slot && t.ended.is_none())
+            .map(|t| t.start)
+    });
+    // A process that ended before this thread first ran takes it along.
+    if let Some(why) = current_kill_reason() {
+        kill_current(why)
+    }
+    let Some((entry, arg)) = start else {
+        kill_current(PROCESS_ENDED)
+    };
+    let (_, top) = thread_stack(slot);
+    // As the main thread: entered as if called, the word below the top zero.
+    // SAFETY: the stack slot is reserved in this address space and backed on
+    // first touch; the entry is the program's to choose, and a bad one faults
+    // in ring 3, which ends the process, never the kernel.
+    unsafe { usermode::enter(entry, top - 8, arg) }
+}
+
+/// `thread_create(entry, arg)` (ADR 0082): a thread of the current process on a
+/// stack slot of its own, within its limit.
+pub fn create_thread(entry: u64, arg: u64) -> Result<u64, aricode_abi::Error> {
+    use aricode_abi::Error;
+    let pid = current_pid().ok_or(Error::Invalid)?;
+    // The slot is taken first, with a placeholder, so two threads creating at once
+    // never share one; the thread is made outside the lock (it allocates).
+    let (slot, cr3, name) = {
+        let mut procs = PROCESSES.lock();
+        let p = procs.get_mut(&pid).ok_or(Error::Invalid)?;
+        if p.ending || p.status.is_some() {
+            return Err(Error::Invalid);
+        }
+        // Threads joined but not yet reaped still hold a kernel stack (audit L3).
+        if p.threads.len().max(p.unreaped) >= p.threads_max {
+            return Err(Error::Limit);
+        }
+        let cr3 = p.mapper.as_ref().ok_or(Error::Invalid)?.root_phys();
+        let slot = (1..=255u32)
+            .find(|n| !p.threads.iter().any(|t| t.slot == *n))
+            .ok_or(Error::Limit)?;
+        let (bottom, top) = thread_stack(slot);
+        let flags = USER | WRITABLE | NO_EXECUTE;
+        if !p.on_demand.iter().any(|(s, _, _)| *s == bottom) {
+            p.on_demand.push((bottom, top, flags));
+        }
+        p.threads.push(UserThread {
+            tid: aricode_sched::Tid(0),
+            slot,
+            start: (entry, arg),
+            ended: None,
+        });
+        (slot, cr3, p.name.clone())
+    };
+    let packed = pid.0 as usize | (slot as usize) << 32;
+    let made = scheduler::prepare_for_process(&name, user_thread_start, packed, pid.0, cr3);
+    let mut procs = PROCESSES.lock();
+    let Some(p) = procs.get_mut(&pid) else {
+        return Err(Error::Invalid);
+    };
+    let thread = match made {
+        Ok(t) if !p.ending && p.status.is_none() => t,
+        other => {
+            p.threads.retain(|t| t.slot != slot);
+            drop(procs);
+            drop(other);
+            return Err(Error::Limit);
+        }
+    };
+    let tid = thread.tid;
+    if let Some(t) = p.threads.iter_mut().find(|t| t.slot == slot) {
+        t.tid = tid;
+    }
+    p.unreaped += 1;
+    drop(procs);
+    scheduler::start_thread(thread);
+    Ok(tid.0 as u64)
+}
+
+/// `thread_exit(value)`: the main thread ends the process; another ends alone,
+/// leaving `value` for whoever joins it.
+pub fn exit_thread(value: u64) -> ! {
+    let pid = current_pid().expect("exit from a user thread");
+    let me = scheduler::current_tid();
+    let joins = {
+        let mut procs = PROCESSES.lock();
+        let p = procs.get_mut(&pid).expect("process in the table");
+        match p.threads.iter_mut().find(|t| t.tid == me) {
+            Some(t) if t.slot != 0 => {
+                t.ended = Some(value);
+                Some(p.joins.clone())
+            }
+            _ => None,
+        }
+    };
+    match joins {
+        Some(joins) => {
+            joins.wake_all();
+            scheduler::exit()
+        }
+        None => exit_current(value),
+    }
+}
+
+/// `thread_join(tid, timeout_ms)`: waits for thread `tid` of the current process
+/// to end, forgets it and gives its value.
+pub fn join_thread(tid: u64, deadline: Option<u64>) -> Result<u64, aricode_abi::Error> {
+    use aricode_abi::Error;
+    let pid = current_pid().ok_or(Error::Invalid)?;
+    let me = scheduler::current_tid();
+    let tid = aricode_sched::Tid(u32::try_from(tid).map_err(|_| Error::NotFound)?);
+    let joins = {
+        let procs = PROCESSES.lock();
+        let p = procs.get(&pid).ok_or(Error::Invalid)?;
+        let t = p.threads.iter().find(|t| t.tid == tid && tid.0 != 0);
+        match t {
+            None => return Err(Error::NotFound),
+            Some(t) if t.slot == 0 || tid == me => return Err(Error::Invalid),
+            Some(_) => p.joins.clone(),
+        }
+    };
+    loop {
+        {
+            let mut procs = PROCESSES.lock();
+            let p = procs.get_mut(&pid).ok_or(Error::Invalid)?;
+            let Some(i) = p.threads.iter().position(|t| t.tid == tid) else {
+                // Another thread joined it meanwhile.
+                return Err(Error::NotFound);
+            };
+            if let Some(value) = p.threads[i].ended {
+                p.threads.remove(i);
+                return Ok(value);
+            }
+        }
+        let ended = || {
+            PROCESSES.lock().get(&pid).is_none_or(|p| {
+                p.threads
+                    .iter()
+                    .find(|t| t.tid == tid)
+                    .is_none_or(|t| t.ended.is_some())
+            })
+        };
+        if joins.wait_until_deadline(ended, deadline) {
+            return Err(Error::Timeout);
+        }
+    }
 }
 
 /// Process of the current thread, if it is a user thread.
@@ -558,16 +849,34 @@ pub fn console_flush(pid: Pid) {
     }
 }
 
+/// The process's end: runs once, for its first end (ADR 0082). A thread that ends
+/// after it, as each of its other threads does when it sees the end, only ends.
+/// The process stays in the table until its last thread is reaped, so it is
+/// always there for a thread of it.
 fn finish(pid: Pid, status: ExitStatus) -> ! {
+    let first = {
+        let mut procs = PROCESSES.lock();
+        let p = procs.get_mut(&pid).expect("process in the table");
+        !core::mem::replace(&mut p.ending, true)
+    };
+    if !first {
+        scheduler::exit()
+    }
     console_flush(pid);
     // Before anyone can see the exit: a successor must not read first.
     crate::console_input::process_gone(pid.0);
-    let (name, waiters) = {
+    let (name, waiters, others) = {
         let mut procs = PROCESSES.lock();
         let p = procs.get_mut(&pid).expect("process in the table");
         p.status = Some(status);
-        (p.name.clone(), p.exit_wait.clone())
+        (p.name.clone(), p.exit_wait.clone(), p.live_tids())
     };
+    // Its other threads see the end at their next entry to the kernel or tick,
+    // and wake from any wait to see it.
+    let me = scheduler::current_tid();
+    for tid in others.into_iter().filter(|t| *t != me) {
+        let _ = scheduler::wake(tid);
+    }
     waiters.wake_all();
     match status {
         ExitStatus::Exited(code) => {
@@ -604,15 +913,34 @@ pub fn kill_current(why: &'static str) -> ! {
     finish(pid, ExitStatus::Killed(why))
 }
 
+/// A thread of `pid` was reaped: with its last one, the process's address space,
+/// handles and DMA domain go (ADR 0082). From the scheduler, always on another
+/// thread and with another CR3.
+pub fn thread_reaped(pid: u32) {
+    let last = PROCESSES.lock().get_mut(&Pid(pid)).is_some_and(|p| {
+        p.unreaped = p.unreaped.saturating_sub(1);
+        p.unreaped == 0
+    });
+    if last {
+        release_address_space(pid);
+    }
+}
+
 /// Frees the address space and DMA domain of a finished process and marks
-/// it reaped, waking whoever waits for it. Called by the scheduler when
-/// reaping its thread, always from another thread and with another CR3.
+/// it reaped, waking whoever waits for it: once its last thread was reaped.
 ///
 /// Order (incident 0004): the devices this process drove stop bus
 /// mastering first; only then do its mappings, its DMA domain and its
 /// capabilities go, freeing memory a device could otherwise still write;
 /// a device left unclaimed is reset last.
 pub fn release_address_space(pid: u32) {
+    // Again, now that no thread of the process can run: one that was inside a
+    // call when the end began may have claimed the console or the PS/2 stream
+    // after `finish` let them go (ADR 0082, audit M1).
+    crate::console_input::process_gone(pid);
+    // Its GPU mappings keep its buffers alive until the engine lets go of
+    // them, at the next GPU call (ADR 0083).
+    crate::gpu::process_gone(pid);
     // The capabilities are taken out now, before anything is freed, so the
     // devices they claim can be stopped first; they are dropped below.
     let handles = PROCESSES
@@ -638,17 +966,15 @@ pub fn release_address_space(pid: u32) {
         // reference was this mapping is freed when the entry is dropped,
         // once the page tables no longer point at it.
         for f in &foreign {
-            for page in (f.virt..f.virt + f.span).step_by(PAGE_SIZE as usize) {
-                let _ = m.unmap_4k(page);
-            }
+            unmap_entry(&mut m, f);
         }
         let n = free_address_space(m);
         log::debug!("user: address space of process {pid} freed ({n} frames)");
         // A screen it held goes back to the console once its pages are
         // gone (ADR 0074 phase B).
-        let screen = foreign
-            .iter()
-            .any(|f| f.dma.is_none() && crate::framebuffer::overlaps(f.phys, f.span));
+        let screen = foreign.iter().any(|f| {
+            f.dma.is_none() && f.mem.is_none() && crate::framebuffer::overlaps(f.phys, f.span)
+        });
         if let Some(lent) = screen
             .then(|| crate::console::screen_release(pid, None))
             .flatten()
@@ -901,6 +1227,64 @@ const DMA_HOLDER_UNMAP: u64 = 0x0A3A_9000_0000_0038;
 /// return once the mapping goes, whether the server is reaped or unmaps
 /// the buffer itself. With a quota, the DMA a process keeps mapped is
 /// bounded by it.
+/// Self-test `test=thread_unmap` (ADR 0082): a page a process unmaps while
+/// another of its threads writes it on another CPU faults that thread, which
+/// ends the process; no CPU keeps writing freed memory. Repeated until one run
+/// needed the shootdown to reach another CPU, so the test cannot pass without it.
+pub fn thread_unmap_selftest() {
+    use crate::arch::x86_64::smp;
+    use aricode_handles::Rights;
+    let code = crate::user::programs::by_name("thread_unmap").expect("thread_unmap in the initrd");
+    for run in 1..=10 {
+        let before = smp::user_shootdowns();
+        let dma = crate::hw::dma_alloc(PAGE_SIZE, None).expect("DMA buffer");
+        let grant = alloc::vec![(dma.clone(), Rights::READ.union(Rights::WRITE))];
+        let pid = spawn_with_handles_and_arg("thread_unmap", code, grant, 0, 0).expect("spawn");
+        drop(dma);
+        let status = wait(pid);
+        assert_eq!(
+            status,
+            ExitStatus::Killed("#PF write"),
+            "thread_unmap selftest: run {run} ended {status:?}, not by the writer's fault"
+        );
+        if smp::user_shootdowns() > before {
+            info!("thread_unmap selftest: run {run} unmapped a page another CPU was writing; the writer faulted: OK");
+            return;
+        }
+    }
+    panic!("thread_unmap selftest: in 10 runs the writer never ran on another CPU at the unmap");
+}
+
+/// Self-test `test=thread_kill` (ADR 0082): a process whose threads all wait for
+/// ever, three on a futex and the main one to join one of them, is ended by a
+/// kill from outside; the wait for it returns, and no futex wait is left.
+pub fn thread_kill_selftest() {
+    let code =
+        crate::user::programs::by_name("thread_waiters").expect("thread_waiters in the initrd");
+    let pid = spawn("thread_waiters", code).expect("spawn");
+    // Time for its threads to start waiting.
+    scheduler::sleep_ms(300);
+    assert!(
+        request_kill(pid, KILLED_BY_REQUEST),
+        "thread_kill: the process should be alive"
+    );
+    let status = wait_until(
+        pid,
+        Some(crate::time::ticks() + 5_000 / crate::time::MS_PER_TICK),
+    );
+    assert_eq!(
+        status,
+        Some(ExitStatus::Killed(KILLED_BY_REQUEST)),
+        "thread_kill: the process did not end within 5 s of its kill"
+    );
+    assert_eq!(
+        crate::user::futex::words_waited_on(),
+        0,
+        "thread_kill: a killed thread left its futex wait behind"
+    );
+    info!("thread_kill selftest: four waiting threads ended by one kill, no wait left: OK");
+}
+
 pub fn dma_lifetime_selftest() {
     const LEN: u64 = 16 * 1024;
     let frames_free = |phys: u64| {
@@ -969,7 +1353,7 @@ pub fn dma_lifetime_selftest() {
     assert_eq!(wait(pid), ExitStatus::Killed(KILLED_BY_REQUEST));
 
     // 3. A process with a 4 KiB quota cannot keep a 16 KiB buffer mapped.
-    let dma = crate::hw::dma_alloc(LEN).expect("DMA buffer");
+    let dma = crate::hw::dma_alloc(LEN, None).expect("DMA buffer");
     let pid = spawn_with_handles_and_arg(
         "dma_holder",
         crate::user::programs::by_name("dma_holder").expect("dma_holder in the initrd"),
@@ -1010,12 +1394,45 @@ pub fn dma_lifetime_selftest() {
         scheduler::sleep_ms(10);
         waited_ms += 10;
     }
-    let used = PROCESSES.lock().get(&pid).map(|p| p.dma_used);
     assert_eq!(
-        (wait(pid), used),
-        (ExitStatus::Exited(0), Some(PAGE_SIZE)),
-        "dma lifetime: failed allocations must give their quota charge back (exit status, DMA charged)"
+        wait(pid),
+        ExitStatus::Exited(0),
+        "dma lifetime: the quota must bound live buffers, and failed allocations and freed buffers give their charge back"
     );
+    // 5. The charge stays while another process holds the buffer, whoever made
+    //    it, and goes back with the frames when that process goes.
+    use core::sync::atomic::{AtomicU64, Ordering};
+    let used = alloc::sync::Arc::new(AtomicU64::new(LEN));
+    let charge = crate::hw::DmaCharge::new(used.clone(), LEN);
+    let dma = crate::hw::dma_alloc(LEN, Some(charge)).expect("DMA buffer");
+    let pid = spawn_with_handles_and_arg(
+        "dma_holder",
+        crate::user::programs::by_name("dma_holder").expect("dma_holder in the initrd"),
+        alloc::vec![(
+            dma,
+            aricode_handles::Rights::READ.union(aricode_handles::Rights::WRITE)
+        )],
+        0,
+        0,
+    )
+    .expect("dma_holder");
+    scheduler::sleep_ms(50);
+    assert_eq!(
+        used.load(Ordering::Relaxed),
+        LEN,
+        "dma lifetime: a held buffer stays charged"
+    );
+    assert!(request_kill(pid, KILLED_BY_REQUEST));
+    assert_eq!(wait(pid), ExitStatus::Killed(KILLED_BY_REQUEST));
+    let mut waited_ms = 0;
+    while used.load(Ordering::Relaxed) != 0 {
+        assert!(
+            waited_ms < 10_000,
+            "dma lifetime: the charge must go back with the last holder"
+        );
+        scheduler::sleep_ms(10);
+        waited_ms += 10;
+    }
     info!(
         "dma lifetime selftest ok ({} frames kept by a mapping after the last handle, freed on reap and on mmio_unmap; mapping beyond the quota refused; failed allocations refunded)",
         LEN / PAGE_SIZE
@@ -1030,7 +1447,7 @@ fn dma_holder_with_mapping(len: u64, arg: u64) -> (Pid, u64) {
     use crate::object::ObjectKind;
     use aricode_handles::Rights;
 
-    let dma = crate::hw::dma_alloc(len).expect("DMA buffer");
+    let dma = crate::hw::dma_alloc(len, None).expect("DMA buffer");
     let phys = match &dma.kind {
         ObjectKind::Dma(d) => d.region.phys,
         _ => unreachable!(),
@@ -1089,34 +1506,23 @@ fn exited(pid: Pid) -> bool {
         .is_none_or(|p| p.status.is_some())
 }
 
-/// Charges `len` bytes of DMA to the current process's quota; `false` if it
-/// would exceed it. The quota is cumulative: a buffer the process got stays
-/// charged after it is freed; an allocation that fails is refunded
-/// (`refund_dma`).
-pub fn charge_dma(len: u64) -> bool {
-    let Some(pid) = current_pid() else {
-        return true;
-    };
+/// Charges `len` bytes of DMA to the current process's quota; `Err` if its
+/// live buffers would exceed it. The charge goes back when it is dropped: with
+/// the buffer's frames once a buffer holds it, and at once if the allocation
+/// fails (incident 0047).
+pub fn charge_dma(len: u64) -> Result<crate::hw::DmaCharge, ()> {
+    use core::sync::atomic::Ordering;
+    let pid = current_pid().ok_or(())?;
     let mut procs = PROCESSES.lock();
-    let Some(p) = procs.get_mut(&pid) else {
-        return true;
-    };
-    if p.dma_quota != 0 && p.dma_used.saturating_add(len) > p.dma_quota {
-        return false;
-    }
-    p.dma_used += len;
-    true
-}
-
-/// Gives back a `charge_dma` of `len` bytes whose allocation failed after
-/// it was charged (incident 0047).
-pub fn refund_dma(len: u64) {
-    let Some(pid) = current_pid() else {
-        return;
-    };
-    if let Some(p) = PROCESSES.lock().get_mut(&pid) {
-        p.dma_used = p.dma_used.saturating_sub(len);
-    }
+    let p = procs.get_mut(&pid).ok_or(())?;
+    let quota = p.dma_quota;
+    p.dma_used
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+            let new = used.saturating_add(len);
+            (quota == 0 || new <= quota).then_some(new)
+        })
+        .map_err(|_| ())?;
+    Ok(crate::hw::DmaCharge::new(p.dma_used.clone(), len))
 }
 
 /// Snapshot of the process table for `system_info`.
@@ -1147,7 +1553,7 @@ pub fn snapshot() -> Vec<aricode_abi::sysinfo::ProcessEntry> {
 /// The stack probes compilers emit for large frames touch every page they
 /// pass, so a deep call is seen even if it wrote little.
 /// The scan is `aricode_x86_paging::stack_touched`, tested on the host.
-fn stack_touched(m: &Mapper<vmm::PmmFrames, OffsetMap>) -> u64 {
+fn stack_touched(m: &Mapper<vmm::UserFrames, OffsetMap>) -> u64 {
     aricode_x86_paging::stack_touched(USER_STACK_TOP - USER_STACK_SIZE, USER_STACK_TOP, |page| {
         m.translate(page).map(|(_, flags)| flags)
     })
@@ -1244,21 +1650,36 @@ pub fn check_user_writable(ptr: u64, len: u64) -> Result<(), aricode_abi::Error>
     check_user_range(ptr, len, true)
 }
 
+/// Checks that `[ptr, ptr+len)` of the current process can be read, backing its
+/// reserved zero-fill pages: a futex's word (ADR 0082).
+pub fn check_user_readable(ptr: u64, len: u64) -> Result<(), aricode_abi::Error> {
+    check_user_range(ptr, len, false)
+}
+
 /// Copies `[ptr, ptr+len)` from the current process's address space,
 /// checking that each page is mapped USER. The process space is the active one.
 pub fn copy_from_user(ptr: u64, len: u64) -> Result<Vec<u8>, aricode_abi::Error> {
     check_user_range(ptr, len, false)?;
-    // SAFETY: range validated page by page in the active address space.
-    let bytes = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
-    Ok(bytes.to_vec())
+    let mut bytes = alloc::vec![0u8; len as usize];
+    // SAFETY: `bytes` holds `len`; the range was checked as the process's own, and
+    // should another thread unmap it meanwhile the copy fails (ADR 0082).
+    if !unsafe {
+        crate::arch::x86_64::usercopy::copy(bytes.as_mut_ptr(), ptr as *const u8, bytes.len())
+    } {
+        return Err(aricode_abi::Error::Fault);
+    }
+    Ok(bytes)
 }
 
 /// Writes `bytes` to `[ptr, ptr+len)` of the current process, checking that
 /// each page is mapped USER and WRITABLE.
 pub fn copy_to_user(ptr: u64, bytes: &[u8]) -> Result<(), aricode_abi::Error> {
     check_user_range(ptr, bytes.len() as u64, true)?;
-    // SAFETY: range validated as writable in the active address space.
-    unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr as *mut u8, bytes.len()) };
+    // SAFETY: as in `copy_from_user`, the other way.
+    if !unsafe { crate::arch::x86_64::usercopy::copy(ptr as *mut u8, bytes.as_ptr(), bytes.len()) }
+    {
+        return Err(aricode_abi::Error::Fault);
+    }
     Ok(())
 }
 
@@ -1285,7 +1706,7 @@ pub struct Mapped {
 pub fn map_foreign(
     phys: u64,
     len: u64,
-    cacheable: bool,
+    caching: crate::hw::Caching,
     dma: Option<crate::object::ObjectRef>,
 ) -> Result<Mapped, aricode_abi::Error> {
     use aricode_x86_paging::{CACHE_DISABLE, WRITE_THROUGH};
@@ -1299,7 +1720,15 @@ pub fn map_foreign(
     // every request) reuses the existing mapping instead of leaking one. A
     // mapped DMA buffer cannot be freed, so the same physical range is
     // still the same buffer.
-    if let Some(f) = p.foreign.iter().find(|f| f.phys == start && f.span == span) {
+    if let Some(f) = p
+        .foreign
+        .iter()
+        .find(|f| f.mem.is_none() && f.phys == start && f.span == span)
+    {
+        // Two memory types on one range would be an alias the SDM forbids.
+        if f.caching != caching {
+            return Err(aricode_abi::Error::Invalid);
+        }
         return Ok(Mapped {
             virt: f.virt + offset,
             created: false,
@@ -1313,13 +1742,18 @@ pub fn map_foreign(
         record_event(aricode_abi::sysinfo::EventKind::DmaQuota, span, "mmio_map");
         return Err(aricode_abi::Error::Limit);
     }
+    if p.foreign.len() >= MAX_FOREIGN || p.foreign.try_reserve(1).is_err() {
+        return Err(aricode_abi::Error::Limit);
+    }
     // The MMIO/DMA area is above the user stack (8 MiB) and reaches the
     // end of user space.
     let virt = p.mmio_ranges.alloc(span).ok_or(aricode_abi::Error::Limit)?;
     let mut flags = USER | WRITABLE | NO_EXECUTE;
-    if !cacheable {
-        flags |= CACHE_DISABLE | WRITE_THROUGH;
-    }
+    flags |= match caching {
+        crate::hw::Caching::WriteBack => 0,
+        crate::hw::Caching::Uncached => CACHE_DISABLE | WRITE_THROUGH,
+        crate::hw::Caching::WriteCombining => crate::arch::x86_64::pat::write_combining_flags(),
+    };
     let Some(m) = p.mapper.as_mut() else {
         p.mmio_ranges.free(virt, span);
         return Err(aricode_abi::Error::Fault);
@@ -1346,6 +1780,8 @@ pub fn map_foreign(
         phys: start,
         span,
         dma,
+        mem: None,
+        caching,
         in_domain: lingered,
     });
     Ok(Mapped {
@@ -1353,6 +1789,130 @@ pub fn map_foreign(
         created: true,
         screen,
     })
+}
+
+/// Clears the page table entries of foreign mapping `f`: a memory object's
+/// only where present, without walking the rest of a range that may be huge
+/// (audit M1); an MMIO or DMA mapping's, all of them mapped at once.
+fn unmap_entry(m: &mut Mapper<vmm::UserFrames, OffsetMap>, f: &Foreign) {
+    if f.mem.is_some() {
+        m.unmap_present_4k(f.virt, f.span, |_| {});
+    } else {
+        for page in (f.virt..f.virt + f.span).step_by(PAGE_SIZE as usize) {
+            let _ = m.unmap_4k(page);
+        }
+    }
+}
+
+/// Maps memory object `mem` into the current process (ADR 0084): an address
+/// range only; each page is mapped when first touched (`back_memory_page`).
+/// Mapping the same object again returns the mapping it has.
+pub fn map_memory(mem: crate::object::ObjectRef) -> Result<Mapped, aricode_abi::Error> {
+    let span = match &mem.kind {
+        crate::object::ObjectKind::Mem(m) => m.len(),
+        _ => return Err(aricode_abi::Error::Invalid),
+    };
+    let pid = current_pid().ok_or(aricode_abi::Error::Fault)?;
+    let mut procs = PROCESSES.lock();
+    let p = procs.get_mut(&pid).ok_or(aricode_abi::Error::Fault)?;
+    if let Some(f) = p.foreign.iter().find(|f| {
+        f.mem
+            .as_ref()
+            .is_some_and(|o| alloc::sync::Arc::ptr_eq(o, &mem))
+    }) {
+        return Ok(Mapped {
+            virt: f.virt,
+            created: false,
+            screen: false,
+        });
+    }
+    if p.foreign.len() >= MAX_FOREIGN || p.foreign.try_reserve(1).is_err() {
+        return Err(aricode_abi::Error::Limit);
+    }
+    // What a process keeps mapped stays on its account, whoever made it
+    // (ADR 0038; audit of ADR 0084, M2).
+    if p.dma_quota != 0 && p.dma_mapped.saturating_add(span) > p.dma_quota {
+        drop(procs);
+        record_event(aricode_abi::sysinfo::EventKind::DmaQuota, span, "mmio_map");
+        return Err(aricode_abi::Error::Limit);
+    }
+    let virt = p.mmio_ranges.alloc(span).ok_or(aricode_abi::Error::Limit)?;
+    // Its page tables now, so a first touch needs only the promised page
+    // (audit H1).
+    let prepared = p
+        .mapper
+        .as_mut()
+        .map(|m| m.prepare_4k(virt, span, true).is_ok());
+    if prepared != Some(true) {
+        p.mmio_ranges.free(virt, span);
+        return Err(aricode_abi::Error::Limit);
+    }
+    p.dma_mapped += span;
+    p.foreign.push(Foreign {
+        virt,
+        phys: 0,
+        span,
+        dma: None,
+        mem: Some(mem),
+        caching: crate::hw::Caching::WriteBack,
+        in_domain: false,
+    });
+    Ok(Mapped {
+        virt,
+        created: true,
+        screen: false,
+    })
+}
+
+/// The share of the machine's usable memory one process may hold
+/// (`mem.app_max_pct`, ADR 0084: half by default, the owner's choice).
+static APP_MAX_PCT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(50);
+
+/// Sets the share of usable memory one process may hold, 1 to 100.
+pub fn set_app_max_pct(pct: u64) {
+    APP_MAX_PCT.store(pct.clamp(1, 100), core::sync::atomic::Ordering::Relaxed);
+}
+
+/// What a process without a quota (the system's own services) may hold in
+/// memory objects, in MiB (`mem.service_max_mib`, audit of ADR 0084, H3):
+/// their runtime heap grows by them, and a service must not be able to take
+/// the machine.
+static SERVICE_MAX_MIB: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(64);
+
+pub fn set_service_max_mib(mib: u64) {
+    SERVICE_MAX_MIB.store(mib.max(1), core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Charges `len` bytes of memory objects to the current process: within its
+/// quota, or for a process without one, within the services' share.
+pub fn charge_memory(len: u64) -> Result<crate::hw::DmaCharge, ()> {
+    use core::sync::atomic::Ordering;
+    let pid = current_pid().ok_or(())?;
+    let mut procs = PROCESSES.lock();
+    let p = procs.get_mut(&pid).ok_or(())?;
+    let quota = match p.dma_quota {
+        0 => SERVICE_MAX_MIB
+            .load(Ordering::Relaxed)
+            .saturating_mul(1024 * 1024),
+        q => q,
+    };
+    p.dma_used
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+            let new = used.saturating_add(len);
+            (new <= quota).then_some(new)
+        })
+        .map_err(|_| ())?;
+    Ok(crate::hw::DmaCharge::new(p.dma_used.clone(), len))
+}
+
+/// The memory quota a process asked for, as granted: at most its share of
+/// the machine. 0 (no quota, for the system's own services) stays 0.
+pub fn grantable_quota(asked: u64) -> u64 {
+    if asked == 0 {
+        return 0;
+    }
+    let usable = pmm::stats().usable_frames as u64 * PAGE_SIZE;
+    asked.min(usable / 100 * APP_MAX_PCT.load(core::sync::atomic::Ordering::Relaxed))
 }
 
 /// Records an event the current process caused, within its rate
@@ -1476,15 +2036,14 @@ pub fn unmap_foreign(virt: u64) -> Result<(), aricode_abi::Error> {
             .ok_or(aricode_abi::Error::Invalid)?;
         let m = p.mapper.as_mut().ok_or(aricode_abi::Error::Fault)?;
         let f = p.foreign.swap_remove(i);
-        for page in (f.virt..f.virt + f.span).step_by(PAGE_SIZE as usize) {
-            let _ = m.unmap_4k(page);
-        }
-        let screen_back = if f.dma.is_none() && crate::framebuffer::overlaps(f.phys, f.span) {
-            crate::console::screen_release(pid.0, Some(f.virt))
-        } else {
-            None
-        };
-        if f.dma.is_some() {
+        unmap_entry(m, &f);
+        let screen_back =
+            if f.dma.is_none() && f.mem.is_none() && crate::framebuffer::overlaps(f.phys, f.span) {
+                crate::console::screen_release(pid.0, Some(f.virt))
+            } else {
+                None
+            };
+        if f.dma.is_some() || f.mem.is_some() {
             p.dma_mapped -= f.span;
         }
         // Its devices stop reaching a client buffer with the mapping, not
@@ -1504,7 +2063,7 @@ pub fn unmap_foreign(virt: u64) -> Result<(), aricode_abi::Error> {
         };
         (f, release, screen_back)
     };
-    vmm::flush_own_user_range(f.virt, f.span);
+    vmm::flush_user_range(f.virt, f.span);
     if let Some(lent) = screen_back {
         crate::console::screen_returned_said(pid.0, lent);
     }

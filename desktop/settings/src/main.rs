@@ -7,34 +7,30 @@
 //! rest is asked of init over the `settings` endpoint, which reads and
 //! writes for it (the owner's choice: never a file in its hands) and logs
 //! a change in the install history. Enter, or a click on the chosen row,
-//! applies it.
+//! applies it. Built on the toolkit (ADR 0078, stage 2).
 //!
 //! Handles, in the broker's order: `SYSTEM` (read), its compositor session
 //! and the settings endpoint (both endpoints), and `HARDWARE`.
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
 use aricode_cmdline::{keys, CmdLine};
-use aricode_gfx::widgets::{self, Button, Key, KeyDecoder, List, PAD, ROW_H};
-use aricode_gfx::Rect;
 use aricode_proto::settings::{Item, Op, Reply, Request, Status};
-use aricode_rt::sys::window::{Event, Window};
+use aricode_rt::sys::window::{wants, Event, Window};
 use aricode_rt::sys::{self, abi, kind, permissions, rpc, Handle};
+use aricode_ui::{Action, Align, Fill, Id, Space, Stack, Style, Theme, Tone, Ui};
 
 const W: u32 = 720;
 const H: u32 = 400;
-const LINE: i32 = widgets::LINE_H as i32 + 4;
-/// The lines of facts at the top: system, keyboard, network, updates,
-/// session, driver keys; each gets two rows, so a long one (a reason the
-/// desktop will not start) wraps instead of being clipped (audit of the
-/// settings, M1).
+/// The lines of facts: system, keyboard, network, updates, session, driver keys.
 const FACTS: usize = 6;
-const COLS: usize = (W as usize - 2 * PAD as usize) / 8;
-const CHOICE_Y: i32 = PAD + (2 * FACTS as i32 + 2) * LINE;
-const CHOICE: Rect = Rect::new(PAD, CHOICE_Y, 240, 2 * ROW_H);
-const REFRESH: Button = Button::at(PAD + 256, CHOICE_Y, "Refresh");
-const STATUS_Y: i32 = CHOICE_Y + 2 * ROW_H as i32 + PAD;
 const CHOICES: [&str; 2] = ["Text console", "Desktop"];
+const LOOKS: [&str; 2] = ["Light", "Dark"];
 
 fn say(parts: &[&[u8]]) {
     sys::print(b"settings: ");
@@ -44,49 +40,40 @@ fn say(parts: &[&[u8]]) {
     sys::print(b"\n");
 }
 
-/// One line of text the window shows.
-#[derive(Clone, Copy)]
-struct Line {
-    buf: [u8; 128],
-    len: usize,
+/// A zone's name, as init says it: `UTC`, `UTC+1`, `UTC-5`.
+fn zone_name(hours: i32) -> String {
+    if hours == 0 {
+        String::from("UTC")
+    } else {
+        format!("UTC{hours:+}")
+    }
 }
 
-impl Line {
-    const fn new() -> Self {
-        Self {
-            buf: [0; 128],
-            len: 0,
-        }
+/// The parts of a line, as text.
+fn line(parts: &[&[u8]]) -> String {
+    let mut text = Vec::new();
+    for p in parts {
+        text.extend_from_slice(p);
     }
-
-    fn set(&mut self, parts: &[&[u8]]) {
-        self.len = 0;
-        for p in parts {
-            let take = p.len().min(self.buf.len() - self.len);
-            self.buf[self.len..self.len + take].copy_from_slice(&p[..take]);
-            self.len += take;
-        }
-    }
-
-    fn text(&self) -> &str {
-        widgets::utf8_prefix(&self.buf[..self.len])
-    }
+    String::from_utf8_lossy(&text).into_owned()
 }
 
 struct Settings {
     system: Handle,
     settings: Handle,
-    facts: [Line; FACTS],
-    status: Line,
-    error: bool,
-    choice: List,
+    ui: Ui,
+    facts: [Id; FACTS],
+    status: Id,
+    choice: Id,
+    look: Id,
+    zone: Id,
+    refresh: Id,
 }
 
 impl Settings {
     /// Asks init for `item` (or a change); the reply's text, or why there
     /// is none.
-    fn ask(&self, op: Op, item: Item, value: u8) -> (bool, Line) {
-        let mut line = Line::new();
+    fn ask(&self, op: Op, item: Item, value: u8) -> (bool, String) {
         let req = Request { op, item, value };
         let mut msg = [0u8; Reply::LEN];
         // Init's own file requests may take long: a change it made late is
@@ -95,23 +82,22 @@ impl Settings {
             .ok()
             .and_then(|n| Reply::decode(&msg[..n]))
         {
-            Some(r) => {
-                line.set(&[r.text()]);
-                (r.status == Status::Ok, line)
-            }
-            None if op == Op::SetSession => {
-                line.set(&[b"init did not answer: whether it changed is unknown; Refresh"]);
-                (false, line)
-            }
-            None => {
-                line.set(&[b"init did not answer"]);
-                (false, line)
-            }
+            Some(r) => (r.status == Status::Ok, line(&[r.text()])),
+            None if op == Op::SetSession => (
+                false,
+                String::from("init did not answer: whether it changed is unknown; Refresh"),
+            ),
+            None => (false, String::from("init did not answer")),
         }
     }
 
     fn info(&self, kind: u64, out: &mut [u8]) -> Option<usize> {
         sys::system_info(self.system, kind, out).ok()
+    }
+
+    fn fact(&mut self, i: usize, parts: &[&[u8]]) {
+        self.ui.set_text(self.facts[i], &line(parts));
+        say(parts);
     }
 
     /// Reads every fact again.
@@ -131,19 +117,22 @@ impl Settings {
             (Some(_), Some(_), Some(_)) => {
                 let frames = u64::from_le_bytes(mem[..8].try_into().unwrap_or([0; 8]));
                 let free = u64::from_le_bytes(mem[8..].try_into().unwrap_or([0; 8]));
-                self.facts[0].set(&[
-                    b"System: ",
-                    aricode_rt::fmt_u64(free * 4 / 1024, &mut b),
-                    b" of ",
-                    aricode_rt::fmt_u64(frames * 4 / 1024, &mut c),
-                    b" MiB free, ",
-                    aricode_rt::fmt_u64(u64::from_le_bytes(cpus), &mut d),
-                    b" processor(s), up ",
-                    aricode_rt::fmt_u64(u64::from_le_bytes(up) / 1000, &mut [0u8; 20]),
-                    b" s",
-                ]);
+                self.fact(
+                    0,
+                    &[
+                        b"System: ",
+                        aricode_rt::fmt_u64(free * 4 / 1024, &mut b),
+                        b" of ",
+                        aricode_rt::fmt_u64(frames * 4 / 1024, &mut c),
+                        b" MiB free, ",
+                        aricode_rt::fmt_u64(u64::from_le_bytes(cpus), &mut d),
+                        b" processor(s), up ",
+                        aricode_rt::fmt_u64(u64::from_le_bytes(up) / 1000, &mut [0u8; 20]),
+                        b" s",
+                    ],
+                );
             }
-            _ => self.facts[0].set(&[b"System: the kernel does not say"]),
+            _ => self.fact(0, &[b"System: the kernel does not say"]),
         }
         let mut args = [0u8; sys::CMDLINE_MAX];
         let layout = sys::cmdline(self.system, &mut args)
@@ -159,97 +148,140 @@ impl Settings {
         let mut kbd = [0u8; 8];
         let n = layout.len();
         kbd[..n].copy_from_slice(layout.as_bytes());
-        self.facts[1].set(&[
-            b"Keyboard: ",
-            &kbd[..n],
-            b" (kbd= on the boot command line)",
-        ]);
+        self.fact(
+            1,
+            &[
+                b"Keyboard: ",
+                &kbd[..n],
+                b" (kbd= on the boot command line)",
+            ],
+        );
         let (_, address) = self.ask(Op::Get, Item::Address, 0);
-        self.facts[2].set(&[b"Network: ", address.text().as_bytes()]);
+        self.fact(2, &[b"Network: ", address.as_bytes()]);
         let (_, sources) = self.ask(Op::Get, Item::UpdateSource, 0);
-        self.facts[3].set(&[b"Updates: ", sources.text().as_bytes()]);
+        self.fact(3, &[b"Updates: ", sources.as_bytes()]);
         let (known, session) = self.ask(Op::Get, Item::Session, 0);
-        self.facts[4].set(&[b"Boots into: ", session.text().as_bytes()]);
+        self.fact(4, &[b"Boots into: ", session.as_bytes()]);
         // Nothing is chosen for the owner when the session is not known:
         // the next Enter would write a guess (audit of the settings, L4).
-        if known {
-            self.choice
-                .select(if session.text().starts_with("desktop") {
-                    1
-                } else {
-                    0
-                });
-        } else {
-            self.choice.selected = None;
-        }
-        self.facts[5].set(&[b"Driver keys: none (signed driver packages are not built yet)"]);
-        for f in &self.facts {
-            say(&[f.text().as_bytes()]);
-        }
+        let chosen = known.then_some(if session.starts_with("desktop") { 1 } else { 0 });
+        self.ui.select(self.choice, chosen);
+        self.fact(
+            5,
+            &[b"Driver keys: none (signed driver packages are not built yet)"],
+        );
+        let (known, look) = self.ask(Op::Get, Item::Appearance, 0);
+        let chosen = known.then_some(if look == "dark" { 1 } else { 0 });
+        self.ui.select(self.look, chosen);
+        let (known, zone) = self.ask(Op::Get, Item::Timezone, 0);
+        let row = (-12..=14).find(|&h| zone_name(h) == zone);
+        let chosen = row.filter(|_| known).map(|h| (h + 12) as usize);
+        self.ui.select(self.zone, chosen);
     }
 
     /// Chooses the selected session from the next boot.
     fn apply(&mut self) {
-        let Some(choice) = self.choice.selected else {
+        let Some(choice) = self.ui.selected(self.choice) else {
             return;
         };
         let (ok, text) = self.ask(Op::SetSession, Item::Session, choice as u8);
-        self.status.set(&[text.text().as_bytes()]);
-        self.error = !ok;
+        self.ui.set_text(self.status, &text);
+        let tone = if ok { Tone::Secondary } else { Tone::Error };
+        self.ui.set_tone(self.status, tone);
         say(&[
             b"chose ",
             CHOICES[choice].as_bytes(),
             b": ",
-            text.text().as_bytes(),
+            text.as_bytes(),
         ]);
         if ok {
             let (_, session) = self.ask(Op::Get, Item::Session, 0);
-            self.facts[4].set(&[b"Boots into: ", session.text().as_bytes()]);
+            self.ui
+                .set_text(self.facts[4], &line(&[b"Boots into: ", session.as_bytes()]));
         }
     }
 
-    fn draw(&self, win: &mut Window) {
-        let mut c = win.canvas();
-        c.fill(widgets::BG);
-        c.text(PAD, PAD, "Settings", widgets::FG, None);
-        for (i, f) in self.facts.iter().enumerate() {
-            let y = PAD + (2 * i as i32 + 1) * LINE + 4;
-            let (first, rest) = wrap(f.text(), COLS);
-            c.text(PAD, y, first, widgets::FG, None);
-            c.text(
-                PAD + 16,
-                y + LINE,
-                wrap(rest, COLS - 2).0,
-                widgets::FG,
-                None,
-            );
+    /// Chooses how the desktop looks: init keeps it and tells the compositor, which
+    /// tells every window, this one included.
+    fn apply_look(&mut self, look: usize) {
+        let (ok, text) = self.ask(Op::SetAppearance, Item::Appearance, look as u8);
+        self.ui.set_text(self.status, &text);
+        let tone = if ok { Tone::Secondary } else { Tone::Error };
+        self.ui.set_tone(self.status, tone);
+        say(&[b"appearance: ", text.as_bytes()]);
+    }
+
+    /// Chooses the clock's zone: init keeps it and tells the compositor.
+    fn apply_zone(&mut self, row: usize) {
+        let (ok, text) = self.ask(Op::SetTimezone, Item::Timezone, row as u8);
+        self.ui.set_text(self.status, &text);
+        let tone = if ok { Tone::Secondary } else { Tone::Error };
+        self.ui.set_tone(self.status, tone);
+        say(&[b"clock: ", text.as_bytes()]);
+    }
+
+    fn show(&mut self, win: &mut Window) {
+        let frame = self.ui.paint(&mut win.canvas());
+        if !frame.is_empty() {
+            let _ = win.present_rects(frame.rects());
         }
-        c.text(
-            PAD,
-            CHOICE_Y - LINE,
-            "Boot into (Enter applies):",
-            widgets::MUTED,
-            None,
-        );
-        self.choice.draw(&mut c, |i| CHOICES[i]);
-        REFRESH.draw(&mut c, false);
-        let color = if self.error {
-            widgets::ERROR
-        } else {
-            widgets::MUTED
-        };
-        c.text(PAD, STATUS_Y, self.status.text(), color, None);
     }
 }
 
-/// `text` split where a row of `cols` characters ends, at the last space
-/// before it: the row and the rest (a character is a cell, ADR 0076).
-fn wrap(text: &str, cols: usize) -> (&str, &str) {
-    let Some((end, _)) = text.char_indices().nth(cols) else {
-        return (text, "");
-    };
-    let cut = text[..end].rfind(' ').filter(|&i| i > 0).unwrap_or(end);
-    (&text[..cut], text[cut..].trim_start())
+/// The window's widgets.
+fn build(system: Handle, settings: Handle, dark: bool) -> Settings {
+    let mut ui = Ui::new(Theme::of(dark), W, H);
+    let facts: [Id; FACTS] = core::array::from_fn(|_| ui.paragraph("", Style::Body, Tone::Primary));
+    let card = ui.stack(
+        Stack::column().pad(Space::Control).card(Fill::Content),
+        &facts,
+    );
+    let view = ui.scroll(card);
+    ui.set_flex(view, 1);
+    let heading = ui.label(
+        "Boot into (Enter applies):",
+        Style::Callout,
+        Tone::Secondary,
+    );
+    let choice = ui.list();
+    ui.set_rows(choice, CHOICES);
+    ui.set_min(choice, 200, 0);
+    let refresh = ui.button("Refresh");
+    let spacer = ui.spacer();
+    let boot = ui.stack(Stack::column(), &[heading, choice]);
+    let look_heading = ui.label("Appearance:", Style::Callout, Tone::Secondary);
+    let look = ui.list();
+    ui.set_rows(look, LOOKS);
+    ui.set_min(look, 160, 0);
+    let appearance = ui.stack(Stack::column(), &[look_heading, look]);
+    let zone_heading = ui.label("Clock:", Style::Callout, Tone::Secondary);
+    let zone = ui.list();
+    let names: [String; 27] = core::array::from_fn(|i| zone_name(i as i32 - 12));
+    ui.set_rows(zone, names.iter().map(String::as_str));
+    ui.set_min(zone, 110, 0);
+    let clock = ui.stack(Stack::column(), &[zone_heading, zone]);
+    let row = ui.stack(
+        Stack::row().align(Align::Start).gap(Space::Group),
+        &[boot, appearance, clock, refresh, spacer],
+    );
+    let status = ui.paragraph("", Style::Callout, Tone::Secondary);
+    let root = ui.stack(
+        Stack::column().pad(Space::Margin).fill(Fill::Window),
+        &[view, row, status],
+    );
+    ui.set_root(root);
+    ui.focus(choice);
+    Settings {
+        system,
+        settings,
+        ui,
+        facts,
+        status,
+        choice,
+        look,
+        zone,
+        refresh,
+    }
 }
 
 fn main(_arg: u64) -> u64 {
@@ -271,26 +303,18 @@ fn main(_arg: u64) -> u64 {
         say(&[b"started without a window, the settings endpoint, SYSTEM or HARDWARE"]);
         return 1;
     };
-    let Ok(mut win) = Window::create(session, hw, W, H, "Settings") else {
+    let wanted = wants::POINTER | wants::KEY_CODES | wants::RESIZE | wants::APPEARANCE;
+    let Ok(mut win) = Window::create_wanting(session, hw, W, H, "Settings", wanted) else {
         say(&[b"could not create its window"]);
         return 2;
     };
-    let mut s = Settings {
-        system,
-        settings,
-        facts: [Line::new(); FACTS],
-        status: Line::new(),
-        error: false,
-        choice: List::new(CHOICE),
-    };
-    s.choice.set_count(CHOICES.len());
+    let mut s = build(system, settings, win.starts_dark());
     s.refresh();
-    s.draw(&mut win);
-    if win.present().is_err() {
+    let frame = s.ui.paint(&mut win.canvas());
+    if frame.is_empty() || win.present().is_err() {
         return 3;
     }
     say(&[b"ready"]);
-    let mut keys = KeyDecoder::new();
     loop {
         let event = match win.poll(1000) {
             Ok(Some(e)) => e,
@@ -299,26 +323,6 @@ fn main(_arg: u64) -> u64 {
             Err(_) => return 4,
         };
         match event {
-            Event::Key(b) => {
-                for key in keys.feed(b).into_iter().flatten() {
-                    if key == Key::Enter {
-                        s.apply();
-                    } else {
-                        s.choice.key(key);
-                    }
-                }
-            }
-            Event::Click { x, y, .. } => {
-                if let Some(row) = s.choice.hit(x, y) {
-                    if s.choice.selected == Some(row) {
-                        s.apply();
-                    } else {
-                        s.choice.select(row);
-                    }
-                } else if REFRESH.contains(x, y) {
-                    s.refresh();
-                }
-            }
             // Every change is applied when chosen: it closes at once (ADR
             // 0077).
             Event::Close => {
@@ -326,10 +330,35 @@ fn main(_arg: u64) -> u64 {
                 let _ = win.close();
                 return 0;
             }
-            _ => {}
+            Event::Configure { width, height } => {
+                let answer = s.ui.configure(width, height, |ui| {
+                    win.resize(hw, width, height, |c| ui.paint_all(c))
+                });
+                let mut b = [0u8; 20];
+                let mut c = [0u8; 20];
+                say(&[
+                    if answer.is_ok() {
+                        b"window "
+                    } else {
+                        b"could not take "
+                    },
+                    aricode_rt::fmt_u64(width as u64, &mut b),
+                    b"x",
+                    aricode_rt::fmt_u64(height as u64, &mut c),
+                ]);
+            }
+            event => s.ui.handle(event),
         }
-        s.draw(&mut win);
-        let _ = win.present();
+        while let Some(action) = s.ui.next_action() {
+            match action {
+                Action::Activated(id, _) if id == s.choice => s.apply(),
+                Action::Activated(id, look) if id == s.look => s.apply_look(look),
+                Action::Activated(id, row) if id == s.zone => s.apply_zone(row),
+                Action::Pressed(id) if id == s.refresh => s.refresh(),
+                _ => {}
+            }
+        }
+        s.show(&mut win);
     }
 }
 

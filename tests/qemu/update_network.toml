@@ -8,7 +8,7 @@
 # `reboot`, AriBoot boots B, init confirms it and `update` says up to date.
 name = "update.network"
 description = "update + upgrade: verified index, signed image into the inactive slot, reboot into it"
-level = "full"
+level = "release"
 areas = ["update", "network", "shell", "boot"]
 disk = "update-empty"
 timeout_secs = 180

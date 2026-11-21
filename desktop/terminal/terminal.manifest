@@ -1,5 +1,7 @@
 # The desktop's terminal (ADR 0074): a window, and the endpoint where init
-# grants it session shells, each the owner's own.
+# grants it session shells, each the owner's own. A resize holds two buffers
+# for a moment, so a window near the size of the screen needs all of the
+# quota.
 name = terminal
 caps = window, terminal
-memory = 1M
+memory = 8M

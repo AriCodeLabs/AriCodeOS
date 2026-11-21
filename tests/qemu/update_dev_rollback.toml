@@ -7,7 +7,7 @@
 # the rollback.
 name = "update.dev_rollback"
 description = "update rollback from a dev build: the other slot's verified system is scheduled without the network"
-level = "full"
+level = "release"
 areas = ["update", "shell", "boot"]
 disk = "update-empty"
 timeout_secs = 300

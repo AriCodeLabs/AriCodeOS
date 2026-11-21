@@ -1,0 +1,45 @@
+# Incident 0064: a DMA fault from the xHCI on the office laptop said only
+# the page. `usb_fault=dma` makes the driver, once its boot enumeration is
+# over, read a device descriptor into the page right past its DMA arena,
+# which its domain does not map: the IOMMU blocks the write; the kernel
+# keeps where the page lay (past the end of the process's own buffer, in no
+# RMRR; whether another domain maps that frame depends on the allocation
+# order, so it is not checked) and `diag` prints it; the driver names it against
+# its arena's log (0 bytes past the end, the last structure placed). The
+# storage keeps working after the endpoint 0 recovery.
+name = "usb.dma_fault_site"
+description = "a DMA fault from the xHCI is located: kernel site in diag, driver names the arena structure"
+level = "release"
+areas = ["usb", "iommu", "diag", "drivers"]
+usb_storage = true
+cmdline = "qemu_exit shell usb_fault=dma"
+timeout_secs = 90
+stdin = ["sleep 1500", "write probe.txt after the fault", "diag", "shutdown"]
+
+[expect]
+exit = 33
+serial_contains = [
+    "usb-input: injected fault: a descriptor read into 0x",
+    ", the page past the DMA arena",
+    "iommu: DMA fault from 00:",
+    "(write at 0x",
+    "usb-input: DMA fault, write at 0x",
+    " handed out): 0 bytes past the arena's end; last structure ",
+    "AriInit: file service ok",
+    "write: 16 bytes to probe.txt",
+    "iommu   1 unit(s), ",
+    "rmrr    none",
+    "dma fault 1 [",
+    " write at 0x",
+    ", domain of process ",
+    ": in no region the domain has or had",
+    "  below own DMA buffer 0x",
+    "; the page starts 0 KiB past its end",
+    "; frame ",
+    " at the fault; in no RMRR",
+    " region(s) mapped, ",
+    "usb dma past arena (code 0)",
+    "=== end of diagnostics ===",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_absent = ["KERNEL PANIC", "xHCI initialization failed", "write: error"]

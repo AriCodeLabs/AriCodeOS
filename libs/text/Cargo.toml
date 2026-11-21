@@ -1,0 +1,19 @@
+[package]
+name = "aricode-text"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Text on a canvas: fonts through skrifa, with light hinting, our own coverage and a glyph cache (no_std)"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+skrifa = { version = "=0.49.0", default-features = false, features = ["libm"] }
+aricode-gfx = { path = "../gfx" }
+ttf-parser = { version = "=0.25.1", default-features = false, features = ["opentype-layout", "no-std-float"] }
+
+[dev-dependencies]
+# The references host tests compare our spacing and coverage with; never shipped.
+harfrust = "=0.5.0"
+zeno = { version = "=0.3.3", default-features = false, features = ["eval", "libm"] }

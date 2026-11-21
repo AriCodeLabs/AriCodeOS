@@ -3,7 +3,8 @@
 # gui_demo with its own manifest, and the broker refuses the rest, each
 # refusal said: hello_ext, which opens no window (phase C), a system
 # program from the initrd, the launcher itself, a launch waited for, one
-# with a console and a list request with another flag. Its
+# with a console, a list request with another flag and a copy of the
+# screen, which only the owner's shells get. Its
 # apps have a pool of their own (ADR 0074 phase C): six at once, then
 # `Limit`, though it was started from the shell.
 name = "apps.launch"
@@ -31,6 +32,8 @@ serial_contains = [
     "AriInit: refused, the launcher asked to start hello_ext other than in the background without a console",
     "launcher: hello_ext waited for: invalid",
     "launcher: hello_ext with a console: invalid",
+    "AriInit: refused, the launcher asked for a copy of the screen",
+    "launcher: a copy of the screen: denied",
     "AriInit: the launcher asks to start gui_demo",
     "launcher: gui_demo: started",
     "gui_demo A: window presented",

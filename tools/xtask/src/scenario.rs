@@ -13,8 +13,12 @@ pub enum Level {
     Unit,
     /// Unit + the nominal QEMU boot. Default level and minimum for `develop`.
     Smoke,
-    /// Every QEMU scenario, including induced failures. Required for `main`.
+    /// The QEMU scenarios that are quick, including induced failures: what a
+    /// branch runs by area, and `--all`.
     Full,
+    /// Also the slow ones (15 s or more): they prove nothing a change usually
+    /// touches, and wait for a version. Required for `main`.
+    Release,
 }
 
 impl std::str::FromStr for Level {
@@ -24,7 +28,8 @@ impl std::str::FromStr for Level {
             "unit" => Ok(Self::Unit),
             "smoke" => Ok(Self::Smoke),
             "full" => Ok(Self::Full),
-            other => Err(format!("unknown level '{other}' (unit|smoke|full)")),
+            "release" => Ok(Self::Release),
+            other => Err(format!("unknown level '{other}' (unit|smoke|full|release)")),
         }
     }
 }
@@ -184,35 +189,82 @@ fn default_dev_commit() -> String {
     String::from("0123abc")
 }
 
-/// `[host_hotplug]`: QEMU `device_add` of `driver` on `bus` with `id`, once
-/// `marker` was seen and `delay_ms` more passed (letting the guest settle
-/// first, e.g. a driver into its idle polling).
+/// What a `[[host_hotplug]]` stage does over QMP.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HotplugAction {
+    /// `device_add` of `driver` on `bus` (at `port` if given) as `id`: a
+    /// device plugged in.
+    #[default]
+    Add,
+    /// `device_del` of `id`: the device unplugged.
+    Remove,
+}
+
+/// `[[host_hotplug]]`: one stage of plugging devices in and out over QMP,
+/// run once `marker` was seen and `delay_ms` more passed (letting the guest
+/// settle first, e.g. a driver into its idle polling). Each stage looks for
+/// its marker only in what the guest printed after the stage before it ran,
+/// so a stage runs only once the guest answered the one before it.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostHotplug {
     pub marker: String,
     #[serde(default)]
     pub delay_ms: u64,
-    pub driver: String,
-    pub bus: String,
+    #[serde(default)]
+    pub action: HotplugAction,
+    /// QEMU device and bus (`add` only).
+    pub driver: Option<String>,
+    pub bus: Option<String>,
+    /// The bus port (`add` only, optional): QEMU's USB port number.
+    pub port: Option<String>,
+    /// The QEMU drive behind it (`add` only, optional): `spare` with
+    /// `usb_spare_disk`.
+    pub drive: Option<String>,
     pub id: String,
 }
 
 impl HostHotplug {
-    /// The names go into hand-written QMP JSON: plain names only.
+    /// The names go into hand-written QMP JSON: plain names only; `add`
+    /// names its driver and bus, `remove` only the id.
     fn check(&self) -> Result {
-        for (what, v) in [
-            ("driver", &self.driver),
-            ("bus", &self.bus),
-            ("id", &self.id),
-        ] {
+        let mut names = vec![("id", Some(&self.id))];
+        match self.action {
+            HotplugAction::Add => {
+                if self.driver.is_none() || self.bus.is_none() {
+                    return Err(String::from(
+                        "[[host_hotplug]] action \"add\" needs driver and bus",
+                    ));
+                }
+                names.extend([
+                    ("driver", self.driver.as_ref()),
+                    ("bus", self.bus.as_ref()),
+                    ("port", self.port.as_ref()),
+                    ("drive", self.drive.as_ref()),
+                ]);
+            }
+            HotplugAction::Remove => {
+                if self.driver.is_some()
+                    || self.bus.is_some()
+                    || self.port.is_some()
+                    || self.drive.is_some()
+                {
+                    return Err(String::from(
+                        "[[host_hotplug]] action \"remove\" names only the id",
+                    ));
+                }
+            }
+        }
+        for (what, v) in names {
+            let Some(v) = v else { continue };
             if v.is_empty()
                 || !v
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
             {
                 return Err(format!(
-                    "[host_hotplug] {what} {v:?}: letters, digits, '.', '_' and '-' only"
+                    "[[host_hotplug]] {what} {v:?}: letters, digits, '.', '_' and '-' only"
                 ));
             }
         }
@@ -232,6 +284,20 @@ pub struct HostInput {
     /// finger on a touchpad does (incident 0058: about 100 moves a second).
     pub mouse_steps: Option<(u32, i32, i32, u64)>,
     pub click: Option<String>,
+    /// A button pressed after the click and left held when the stage ends
+    /// (a device unplugged with it down must release it).
+    pub button_down: Option<String>,
+    /// A drag after that: the left button down, a move by (dx, dy), and up.
+    pub drag: Option<(i32, i32)>,
+    /// A drag as a hand makes it, after `drag`: the left button down, `[count,
+    /// dx, dy, every_ms]` as in `mouse_steps`, and up (ADR 0085: a resize that
+    /// asks a program for many sizes while the button is held).
+    pub drag_steps: Option<(u32, i32, i32, u64)>,
+    /// A key held for this many ms, after `keys` are typed.
+    pub hold_key: Option<(String, u64)>,
+    /// A picture of the screen, kept as `NAME.ppm` in the scenario's directory:
+    /// taken after `wait_ms` and before anything is sent.
+    pub screendump: Option<String>,
     /// A pause after the marker, before anything is sent (ms): a stage
     /// that must come a while after the one before it (ADR 0077).
     #[serde(default)]
@@ -257,6 +323,41 @@ pub struct HostInput {
 const DEVICE_QUEUE: usize = 16;
 
 impl HostInput {
+    /// Button and key names go into hand-written QMP JSON: QEMU qcode and
+    /// button names only (letters, digits, '_' and '-', with '+' joining a
+    /// key combination).
+    fn check_names(&self) -> std::result::Result<(), String> {
+        let plain = |v: &str, plus: bool| {
+            !v.is_empty()
+                && v.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b) || (plus && b == b'+'))
+        };
+        let names = [
+            ("click", &self.click),
+            ("button_down", &self.button_down),
+            ("screendump", &self.screendump),
+        ];
+        for (what, v) in names {
+            if let Some(v) = v.as_deref().filter(|v| !plain(v, false)) {
+                return Err(format!(
+                    "[host_input] {what} {v:?}: a plain name (letters, digits, '_', '-')"
+                ));
+            }
+        }
+        let keys = self
+            .keys
+            .iter()
+            .chain(self.hold_key.as_ref().map(|(k, _)| k));
+        for k in keys {
+            if !plain(k, true) {
+                return Err(format!(
+                    "[host_input] key {k:?}: QEMU qcode names (letters, digits, '_', '-', '+')"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Incident 0022: the keys typed between two waits for the guest
     /// (`typing::plan` with `echo_prompt`, all of them without it) must fit
     /// in a device queue, counted in PS/2 bytes; a wall-clock delay does
@@ -345,6 +446,9 @@ pub struct Expect {
     pub killed: bool,
     /// The kernel seed store after this boot (ADR 0043).
     pub seed_store: Option<SeedStore>,
+    /// A `screenshot` in the serial log, "WIDTHxHEIGHT": decoded whole and checked
+    /// against the length and SHA-256 its last line gives ([`check_screenshot`]).
+    pub screenshot: Option<String>,
 }
 
 impl Expect {
@@ -356,7 +460,47 @@ impl Expect {
             && self.serial_once.is_empty()
             && !self.killed
             && self.seed_store.is_none()
+            && self.screenshot.is_none()
     }
+}
+
+/// The first `screenshot` in `serial`, checked whole: the Base64 lines between its
+/// markers, their length and SHA-256 as its last line says, and a QOI image of
+/// `size` ("WIDTHxHEIGHT") that decodes to exactly its pixels. The image's bytes,
+/// or what is wrong.
+pub fn check_screenshot(serial: &str, size: &str) -> std::result::Result<Vec<u8>, String> {
+    let lines: Vec<&str> = serial.lines().map(|l| l.trim_end_matches('\r')).collect();
+    let begin = lines
+        .iter()
+        .position(|l| *l == "-----BEGIN QOI-----")
+        .ok_or("screenshot: no begin marker")?;
+    let end = begin
+        + lines[begin..]
+            .iter()
+            .position(|l| *l == "-----END QOI-----")
+            .ok_or("screenshot: no end marker")?;
+    let text: String = lines[begin + 1..end].concat();
+    let data = aricode_ssh::base64::decode(text.as_bytes()).ok_or("screenshot: not Base64")?;
+    let said = lines
+        .get(end + 1)
+        .and_then(|l| l.strip_prefix("screenshot: "))
+        .ok_or("screenshot: no length line")?;
+    let digest: String = aricode_crypto::sha256::sha256(&data)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let want = format!("{} bytes, SHA-256 {digest}", data.len());
+    if said != want {
+        return Err(format!(
+            "screenshot: the shell said '{said}', the log holds '{want}'"
+        ));
+    }
+    let image = aricode_qoi::decode(&data).ok_or("screenshot: not a whole QOI image")?;
+    let got = format!("{}x{}", image.width, image.height);
+    if got != size {
+        return Err(format!("screenshot: {got}, not {size}"));
+    }
+    Ok(data)
 }
 
 /// Index in `order` of the first text not found after the previous one in
@@ -417,6 +561,11 @@ pub struct Scenario {
     /// output shows `prompt` (the first one at the first prompt).
     #[serde(default)]
     pub stdin: Vec<String>,
+    /// The console lines wait until every `[host_input]` stage is done: a
+    /// scenario that ends with `shutdown` once its last stage has run,
+    /// instead of after a fixed `sleep` that a loaded host outlasts.
+    #[serde(default)]
+    pub stdin_after_input: bool,
     /// Text announcing that the system is waiting for a line.
     #[serde(default = "default_prompt")]
     pub prompt: String,
@@ -431,9 +580,10 @@ pub struct Scenario {
     /// after the screen changed hands).
     #[serde(default)]
     pub host_input_then: Vec<HostInput>,
-    /// A device plugged in over QMP (`device_add`) `delay_ms` after the
-    /// guest prints `marker`: hot-plug detection.
-    pub host_hotplug: Option<HostHotplug>,
+    /// Devices plugged in and out over QMP (`device_add`, `device_del`), a
+    /// stage at a time (`[[host_hotplug]]`): hot-plug detection.
+    #[serde(default)]
+    pub host_hotplug: Vec<HostHotplug>,
     #[serde(default)]
     pub host_ssh: Option<HostSsh>,
     /// Plain TCP connections held open against a guest listener (incident
@@ -508,6 +658,14 @@ pub struct Scenario {
     /// there is no virtio-blk: usbd serves it as a block service (ADR 0023).
     #[serde(default)]
     pub usb_storage: bool,
+    /// An xHCI with nothing attached at boot and eight USB 2 ports, for
+    /// devices plugged in later (`[[host_hotplug]]` on bus `xhci.0`).
+    #[serde(default)]
+    pub usb_xhci: bool,
+    /// A blank 1 MiB drive `spare`, attached to nothing: a `[[host_hotplug]]`
+    /// stage plugs it in as a second USB stick (`drive = "spare"`).
+    #[serde(default)]
+    pub usb_spare_disk: bool,
     /// Also adds an EHCI with no devices: init launches the EHCI driver
     /// for it next to the xHCI driver (ADR 0031).
     #[serde(default)]
@@ -603,6 +761,7 @@ impl Expect {
             serial_once: all(&self.serial_once),
             killed: self.killed,
             seed_store: self.seed_store,
+            screenshot: self.screenshot.clone(),
         }
     }
 
@@ -694,7 +853,8 @@ pub fn load_from(dir: &Path) -> Result<Vec<Scenario>> {
             s.check_placeholders()
                 .map_err(|e| format!("{}: {e}", path.display()))?;
             for h in s.host_input.iter().chain(&s.host_input_then) {
-                h.check_queue()
+                h.check_names()
+                    .and_then(|_| h.check_queue())
                     .map_err(|e| format!("{}: {e}", path.display()))?;
             }
             if !s.host_input_then.is_empty() && s.host_input.is_none() {
@@ -703,15 +863,18 @@ pub fn load_from(dir: &Path) -> Result<Vec<Scenario>> {
                     path.display()
                 ));
             }
-            if let Some(h) = &s.host_hotplug {
+            // QEMU's QMP socket serves one client at a time: the runner
+            // runs a hot-plug stage only while no input stage holds it.
+            for h in &s.host_hotplug {
                 h.check().map_err(|e| format!("{}: {e}", path.display()))?;
-                // QEMU's QMP socket serves one client at a time, and the
-                // input probe holds its connection through all its keys.
-                if s.host_input.is_some() {
-                    return Err(format!(
-                        "{}: [host_hotplug] and [host_input] share QEMU's single QMP connection: use one",
-                        path.display()
-                    ));
+                // The only drive a stage can plug in is the spare one.
+                if let Some(d) = &h.drive {
+                    if d != "spare" || !s.usb_spare_disk {
+                        return Err(format!(
+                            "{}: [[host_hotplug]] drive {d:?}: only \"spare\", with usb_spare_disk = true",
+                            path.display()
+                        ));
+                    }
                 }
             }
             s.file = path;
@@ -778,6 +941,20 @@ impl Scenario {
     }
 }
 
+/// The scenarios named in `names` (comma-separated), whatever their level: running a
+/// slow one while working on what it covers. A name that does not exist is an error.
+pub fn by_name<'a>(all: &'a [Scenario], names: &str) -> Result<Vec<&'a Scenario>> {
+    names
+        .split(',')
+        .map(|name| {
+            let name = name.trim();
+            all.iter()
+                .find(|s| s.name == name)
+                .ok_or_else(|| format!("--only: no scenario named '{name}'"))
+        })
+        .collect()
+}
+
 /// Selects scenarios by level and areas. For smoke/full, an empty selection
 /// is an error: a mistyped filter must not succeed without booting anything.
 pub fn select<'a>(
@@ -818,19 +995,120 @@ pub fn select<'a>(
 mod tests {
     use super::*;
 
+    fn screenshot_log(width: u32, height: u32) -> (String, Vec<u8>) {
+        let mut data = Vec::new();
+        let mut e = aricode_qoi::Encoder::new(width, height, |b: &[u8]| data.extend_from_slice(b));
+        for i in 0..width * height {
+            e.push(i.wrapping_mul(2_654_435_761));
+        }
+        e.finish();
+        let mut log = String::from(
+            "ari> screenshot\r\nscreenshot: 4x3, QOI in Base64 follows\r\n-----BEGIN QOI-----\r\n",
+        );
+        for chunk in data.chunks(57) {
+            log.push_str(std::str::from_utf8(&aricode_ssh::base64::encode(chunk, true)).unwrap());
+            log.push_str("\r\n");
+        }
+        let digest: String = aricode_crypto::sha256::sha256(&data)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        log.push_str(&format!(
+            "-----END QOI-----\r\nscreenshot: {} bytes, SHA-256 {digest}\r\n",
+            data.len()
+        ));
+        (log, data)
+    }
+
+    #[test]
+    fn a_screenshot_is_checked_whole() {
+        let (log, data) = screenshot_log(40, 30);
+        assert_eq!(check_screenshot(&log, "40x30"), Ok(data));
+        assert!(check_screenshot(&log, "41x30").is_err());
+        // A line lost on the way: the length and digest no longer match.
+        let mut lines: Vec<&str> = log.lines().collect();
+        lines.remove(4);
+        assert!(check_screenshot(&lines.join("\n"), "40x30").is_err());
+        // No end: the session lost output.
+        let cut = log.replace("-----END QOI-----", "");
+        assert!(check_screenshot(&cut, "40x30").is_err());
+        assert!(check_screenshot("nothing here", "40x30").is_err());
+    }
+
     #[test]
     fn hotplug_names_are_plain() {
         let h = |driver: &str| HostHotplug {
             marker: String::from("m"),
             delay_ms: 0,
-            driver: driver.to_string(),
-            bus: String::from("ehci.0"),
+            action: HotplugAction::Add,
+            driver: Some(driver.to_string()),
+            bus: Some(String::from("ehci.0")),
+            port: Some(String::from("2")),
+            drive: Some(String::from("spare")),
             id: String::from("hot-1"),
         };
         assert!(h("usb-kbd").check().is_ok());
         for bad in ["", "usb\"kbd", "a b", "x}{"] {
             assert!(h(bad).check().is_err(), "{bad:?}");
         }
+        let mut bad_port = h("usb-kbd");
+        bad_port.port = Some(String::from("1\","));
+        assert!(bad_port.check().is_err());
+    }
+
+    #[test]
+    fn hotplug_stages_name_what_their_action_needs() {
+        let stages: Scenario = toml::from_str(
+            r#"
+name = "x.y"
+description = "d"
+level = "release"
+areas = ["usb"]
+[[host_hotplug]]
+marker = "a"
+driver = "usb-mouse"
+bus = "xhci.0"
+id = "m1"
+[[host_hotplug]]
+marker = "b"
+action = "remove"
+id = "m1"
+"#,
+        )
+        .unwrap();
+        assert_eq!(stages.host_hotplug.len(), 2);
+        assert_eq!(stages.host_hotplug[0].action, HotplugAction::Add);
+        assert_eq!(stages.host_hotplug[1].action, HotplugAction::Remove);
+        assert!(stages.host_hotplug.iter().all(|h| h.check().is_ok()));
+        let remove_with_driver = HostHotplug {
+            marker: String::from("m"),
+            delay_ms: 0,
+            action: HotplugAction::Remove,
+            driver: Some(String::from("usb-kbd")),
+            bus: None,
+            port: None,
+            drive: None,
+            id: String::from("k"),
+        };
+        assert!(remove_with_driver.check().is_err());
+        let add_without_bus = HostHotplug {
+            action: HotplugAction::Add,
+            driver: Some(String::from("usb-kbd")),
+            ..remove_with_driver
+        };
+        assert!(add_without_bus.check().is_err());
+    }
+
+    #[test]
+    fn only_names_exact_scenarios_of_any_level() {
+        let all = [
+            scenario("a.quick", "full", "\"a\""),
+            scenario("a.slow", "release", "\"a\""),
+        ];
+        let got = by_name(&all, "a.slow, a.quick").unwrap();
+        assert_eq!(got[0].name, "a.slow");
+        assert_eq!(got[1].name, "a.quick");
+        assert!(by_name(&all, "a").is_err(), "a name, not a prefix");
     }
 
     #[test]
@@ -922,6 +1200,26 @@ mod tests {
         let err = input("").check_queue().unwrap_err();
         assert!(err.contains("types 18 key codes"), "{err}");
         input("echo_prompt = \"ari> \"").check_queue().unwrap();
+    }
+
+    #[test]
+    fn input_names_that_would_break_the_qmp_json_are_refused() {
+        let input = |body: &str| -> HostInput {
+            toml::from_str(&format!("marker = \"M\"\n{body}")).unwrap()
+        };
+        input("keys = [\"shift+dot\", \"kp_add\"]\nclick = \"wheel-up\"\nbutton_down = \"right\"")
+            .check_names()
+            .unwrap();
+        for bad in [
+            "click = \"left\\\"\"",
+            "button_down = \"a b\"",
+            "keys = [\"x}\"]",
+            "hold_key = [\"a,\", 10]",
+            "button_down = \"\"",
+            "screendump = \"../x\"",
+        ] {
+            assert!(input(bad).check_names().is_err(), "{bad}");
+        }
     }
 
     fn scenario(name: &str, level: &str, areas: &str) -> Scenario {

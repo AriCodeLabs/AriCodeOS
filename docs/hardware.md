@@ -4,6 +4,23 @@ Guide for the first boot on the test laptop. The order and the precautions
 follow sections 95 to 97 of the master document: **the internal disk is
 never touched**; AriCodeOS boots from and writes only to its own USB stick.
 
+## The reference laptop is a test machine
+
+The owner's rule (2026-11-06): the reference laptop exists for tests, and anything may
+be installed on it, Debian and Mesa included. Two things must never follow from that:
+
+- **Nothing from it reaches production.** Sticks for it carry the host's SSH key, a
+  development source on this LAN and a fixed host key. Published images are built
+  without them (`docs/WORKFLOW.md`, "Publishing a version"). Reference systems run from
+  their own stick, and their tools and results live outside the repository, in
+  `~/aricode-scratch/`; only figures reach documents.
+- **No data on it may endanger another machine.** It holds no private signing key:
+  the release and development keys stay on the host, which signs what the laptop
+  fetches. The SSH key it trusts is public; the host key on its stick is used by no
+  other machine, and a stick written for it is not given to anyone.
+
+Heavy runs on it get a thermal watch, as on the host.
+
 ## What you need
 
 - An x86-64 laptop with UEFI firmware (UEFI boot, not CSM/legacy) and
@@ -13,7 +30,9 @@ never touched**; AriCodeOS boots from and writes only to its own USB stick.
 - Keyboard: the built-in one (PS/2 via i8042) serves as the kernel console.
   USB keyboards and mice (boot HID) are handled by `usbd` on top of the xHCI
   and by `usb_ehci` on the EHCI ports (ADR 0031), and reach the shell
-  through the console bridge and the compositor with `gui`.
+  through the console bridge and the compositor with `gui`. Both drivers
+  take devices plugged in or out after boot (on the xHCI: root ports only,
+  ADR 0087).
 - Without a serial port, the screen is the diagnostic channel: the kernel
   writes its console to the GOP framebuffer unless `gui` is set.
 
@@ -92,7 +111,8 @@ The test clients (`fs_client`, `blk_client`, `net_client`, `tcp_client`,
 the QEMU scenarios: `cargo xtask usb-image --cmdline` refuses it, like
 every other test-only key (`qemu_exit`, `test=`, `usb_fault`, `blk_fault`,
 `restart_storm`, `service_hang`, `init_fail_late`, `input_restart`,
-`input_orphan`, `shell_fault`, `fsd_fault`, `pci_fault`, `gui_trace`) and the keys AriBoot adds itself (`boot_slot`,
+`input_orphan`, `shell_fault`, `fsd_fault`, `fsd_mutate`, `pci_fault`, `gui_trace`,
+`gui_notice`, `poweroff_ignored`, `poweroff_from`) and the keys AriBoot adds itself (`boot_slot`,
 `boot_pending`). If a stick's
 `cmdline.txt` is edited by hand to carry it, the screen says `AriInit:
 selftest: running the test-only boot checks` and the boot stops at
@@ -159,6 +179,29 @@ cargo xtask fs-cat build/usb-dump.img diag.txt   # uptime, memory, CPUs, entropy
 The 166 MiB cover the ARI0 partition of the USB image, last since ADR 0072
 (LBA 208896 to 339967). A stick written before it has ARI0 at LBA 133120
 to 139263, and 70 MiB are enough; `fs-cat` reads either version of AriFS.
+
+### The screen without photos
+
+Over SSH, `screenshot` gives the desktop's screen as last composed, as a QOI
+image in Base64 between two marker lines; the line after them gives its length
+and SHA-256. Only the owner's shells get it: the console's, an SSH session's or
+the Terminal's (so the signed Terminal app can read the screen through its
+shell, as it can run anything else there); the launcher's endpoint is refused.
+Init logs each copy and which kind of shell asked, the desktop shows "Screen
+copied for the owner's shell", so whoever sits at the machine knows, and one
+copy every 2 s is the most it gives.
+
+```bash
+ssh ari@LAPTOP screenshot > shot.txt
+tr -d '\r' < shot.txt | sed -n '/^-----BEGIN QOI-----$/,/^-----END QOI-----$/{//!p}' | base64 -d > screen.qoi
+tail -1 shot.txt; sha256sum screen.qoi   # the two must agree
+ffmpeg -loglevel error -i screen.qoi screen.png
+```
+
+Only the exact marker lines are dropped: a data line may contain the letters
+`QOI`. `tr` removes the carriage returns a session with a terminal (`ssh -t`)
+adds. If the session cannot take the output fast enough the shell stops,
+prints no end marker and says that the image is incomplete.
 
 ### Entropy: does the laptop have `rdrand`?
 
@@ -231,6 +274,7 @@ system) or regenerate the image with `--cmdline`:
 | "usb-ehci: ... transfer to address A endpoint E (... speed) failed: ..." | A failed USB transfer on the EHCI with its qTD token (ADR 0028); it is also in `diag` as `ehci ...`. Boot with `strict` to stop at the first one with a dump of the controller |
 | "usb-ehci: USB storage unusable until it is plugged in again" | The Bulk-Only Reset Recovery failed after a transfer failure; replug the stick and note down the lines before |
 | "usb-input: port N: …" with an INQUIRY, TEST UNIT READY or READ CAPACITY error | The USB stick does not respond to the bulk-only protocol; note down the line |
+| A USB mouse or keyboard plugged in after boot does nothing | usbd enumerates devices plugged into the xHCI's root ports after boot (ADR 0087): look for `usb-input: port N status change` and `port N: device plugged in`. No such line: the port is on an EHCI (`usb-ehci:` lines) or behind an external hub (not supported on the xHCI). `enumeration failed: ...` says why; `all 4 device entries are in use` means four devices are already served. USB storage plugged in after boot is not served. A device that needs a longer debounce or reset recovery: `usb.hotplug=debounce:300,recovery:100` on the cmdline (ADR 0087) |
 | "AriInit: no ARI0 partition on the disk" | The USB stick does not carry the `cargo xtask usb-image` image (or something else was written over it) |
 | "process: the ELF does not fit in the user region" when launching a program | The binary was not linked into the user region (it lacks a `build.rs` with `aricode_build::user_program`); `cargo xtask build` now detects this before generating the image |
 | "rtl-net: no link (cable unplugged?)" | The PHY sees no carrier: the cable, or the firmware did not leave autonegotiation done (rtl-net does not program the PHY yet) |
@@ -263,6 +307,22 @@ earlier.
 | White, green and orange, no text | Between kernel entry and its console (initrd hash), or the console does not draw |
 | Kernel text | Follow the traces; see the previous table |
 
+## Graphics: the HD Graphics 4000 (ADR 0079, ADR 0083)
+
+Ivy Bridge GT2, `8086:0166`, at 00:02.0: BAR 0 at `f7800000` (2 MiB of registers, then
+2 MiB of GTT), the aperture at `e0000000` (256 MiB), 64 MiB of stolen memory at
+`dbe00000`, the GPU's clock from 350 to 1050 MHz.
+
+- **The screen** (ADR 0079): the kernel gives it the panel's own 1366x768 on the
+  firmware's running pipe. `video=firmware` keeps the firmware's mode.
+- **The GPU's engine** (ADR 0083): the kernel takes it at boot and `diag` says
+  `gpu     blitter ready, 350 MHz (350 to 1050), N batches, N resets`, or why it was left
+  alone. The firmware leaves forcewake held and the GTT beyond its 64 MiB full of stale
+  entries: the kernel releases the first and clears the second before anything runs.
+  `run gpu_probe` fills and copies with the blitter beside the CPU and checks that what
+  must be refused is. `gpu=off` in `cmdline.txt` leaves the engine as the firmware set
+  it; `gpu.mhz=N` asks for another clock.
+
 ## Storage
 
 The first boot does not need to write anything. When the block service on
@@ -274,9 +334,20 @@ and always on the USB stick itself or a dedicated USB drive.
 
 - `shutdown` powers the machine off through ACPI S5: at boot the kernel
   reads the FADT and the `\_S5_` package of the DSDT and logs
-  `acpi: power-off through S5 (SLP_TYP a/b, PM1a ..., PM1b ...)`. If the
+  `acpi: power-off through S5 (SLP_TYP a/b, PM1a cnt ..., PM1b cnt ...,
+  PM1a evt ..., GPE0 ..., GPE1 ...; FADT rev ..., ... bytes)`. If the
   firmware ignores the request, the console says
-  `ACPI power-off had no effect; halting (it is safe to switch off)`.
+  `ACPI power-off had no effect (...); halting (it is safe to switch off)`,
+  with what was written, from which CPU and, on the office laptop's Intel
+  500 Series PCH (`8086:a082`), whether the chipset traps the write into
+  the firmware (`SMI on SLP_EN`, the datasheet's `SMI_ON_SLP_EN`).
+  `diag` prints the FADT's power-off facts in its `power` lines, and
+  `acpidump NAME` saves the DSDT, the SSDTs and the FADT (never MSDM or
+  SLIC, which may carry a licence key): send both with any report of a
+  machine that does not power off. `poweroff.wait_ms=N` sets how long each
+  S5 write is given (3000 by default, 500 to 60000) and `poweroff.cpu=N`
+  the processor that makes it (the boot CPU, 0, by default); a refused
+  value is logged.
 - The shell edits the line like a terminal: Left/Right, Home/End
   (Ctrl-A/Ctrl-E), insert and delete anywhere (Backspace, Delete), Ctrl-U to
   clear, Up/Down for the history.

@@ -43,6 +43,8 @@ const CONSOLE_IN: Handle = Handle(0x0001_0008);
 const FRAMEBUFFER: Handle = Handle(0x0001_0009);
 /// The PS/2 stream, when the machine has an i8042 (ADR 0075).
 const PS2: Handle = Handle(sys::abi::handle::INIT_PS2);
+/// The GPU (ADR 0083): always here; its calls say `NotFound` without an engine.
+const GPU: Handle = Handle(sys::abi::handle::INIT_GPU);
 
 /// Bits of the service mask passed to the shell.
 const SERVICE_BLOCK: u64 = 1;
@@ -811,6 +813,18 @@ fn report_network_address(net_service: Handle, wait_ms: u64) {
 
 /// Bound of each wait (send, reply) of a network health request.
 const NET_CALL_MS: u64 = 250;
+/// How long init waits for the compositor to copy the screen: a copy of the
+/// largest screen takes milliseconds, and the compositor may be in a frame. Its
+/// queue is waited for less: a compositor that takes no request is hung.
+const SCREEN_CALL_MS: u64 = 1000;
+const SCREEN_SEND_MS: u64 = 250;
+/// At most one copy of the screen this often: a hung compositor costs init 1.25 s
+/// a copy, and a loop of them must not keep it there.
+const SCREEN_EVERY_MS: u64 = 2000;
+/// How often the desktop's bar is told the network's address.
+const NETWORK_REPORT_MS: u64 = 5000;
+/// And after a service did not answer.
+const NETWORK_RETRY_MS: u64 = 30_000;
 /// Pause between network health requests while DHCP is pending.
 const NET_POLL_MS: u64 = 20;
 /// How long the health check waits for DHCP on virtio-net, where QEMU's
@@ -1329,7 +1343,13 @@ impl Supervisor {
                     }
                     Err(Error::Limit)
                 } else {
-                    start_driver(r.name, pci_index, r.endpoint, &extras[..n], r.driver_arg)
+                    let granted = if with_system {
+                        driver_arg::WITH_SYSTEM
+                    } else {
+                        0
+                    };
+                    let arg = r.driver_arg | granted;
+                    start_driver(r.name, pci_index, r.endpoint, &extras[..n], arg)
                 }
             }
             Kind::Fs {
@@ -1827,6 +1847,7 @@ fn run_shell(
         broker.serve_one(20, sup);
         broker.serve_apps();
         broker.serve_settings();
+        broker.report_network();
         // The session ends with its launcher or with its compositor (audit
         // of phase B, M1): with the compositor gone and nothing done, the
         // input services would have no reader. The compositor is looked at
@@ -2166,6 +2187,12 @@ struct Broker {
     running: [Option<Running>; MAX_RUNNING + DESKTOP_SLOTS],
     /// The installed applications the launcher may offer, as last listed.
     offered: Offered,
+    /// When the bar is next told the network's address, and what it was told last.
+    network_due: Option<u64>,
+    network_said: alloc::string::String,
+    /// When the screen was last copied for a shell: one copy every
+    /// `SCREEN_EVERY_MS`, so a loop of them cannot keep init waiting.
+    screen_copied: Option<u64>,
     /// Where `terminal` holders ask for session shells (ADR 0074 phase C).
     terminals: Sessions,
     /// Where `settings` holders ask (ADR 0074 phase C).
@@ -2344,6 +2371,9 @@ impl Broker {
             compositor,
             running: [None; MAX_RUNNING + DESKTOP_SLOTS],
             offered: Offered::new(),
+            network_due: None,
+            screen_copied: None,
+            network_said: alloc::string::String::new(),
             terminals: Sessions {
                 endpoint: sys::endpoint_create()?,
                 children: [None; MAX_SESSIONS],
@@ -2655,6 +2685,10 @@ impl Broker {
         let Some(req) = LaunchRequest::decode(&msg[..n]) else {
             return refuse(LaunchStatus::Invalid);
         };
+        // A copy of the screen: the second handle is its buffer, not a console.
+        if req.is_screen() {
+            return self.copy_screen(&req, reply_to, console, from_shell.is_some());
+        }
         // A console comes only with the flag that announces it, and never
         // for a detached program, which may outlive the session. A list is
         // the launcher's, and unknown flags are nobody's.
@@ -2702,6 +2736,71 @@ impl Broker {
         }
     }
 
+    /// `SCREEN`: a copy of the screen for the owner's shell, the console's, an SSH
+    /// session's or a terminal's (the only holders of the endpoints served here; the
+    /// launcher's refuses it). Each copy is said here, and on the desktop by the
+    /// compositor.
+    fn copy_screen(
+        &mut self,
+        req: &LaunchRequest,
+        reply_to: Handle,
+        buffer: Option<Handle>,
+        terminal: bool,
+    ) {
+        let refuse = |status, why: &[u8]| {
+            if let Some(b) = buffer {
+                let _ = sys::handle_close(b);
+            }
+            sys::print(b"AriInit: screen copy refused: ");
+            sys::print(why);
+            sys::print(b"\n");
+            reply(reply_to, LaunchReply::status(status));
+        };
+        if req.flags != LaunchRequest::SCREEN || !req.name_str().is_empty() || req.arg != 0 {
+            return refuse(LaunchStatus::Invalid, b"malformed request");
+        }
+        let Some(buffer) = buffer else {
+            return refuse(LaunchStatus::Invalid, b"no buffer");
+        };
+        let Some(compositor) = self.compositor else {
+            return refuse(LaunchStatus::NotFound, b"no desktop runs");
+        };
+        let now = now_ms();
+        if self
+            .screen_copied
+            .is_some_and(|at| now.saturating_sub(at) < SCREEN_EVERY_MS)
+        {
+            return refuse(LaunchStatus::Limit, b"one copy every 2 s");
+        }
+        self.screen_copied = Some(now);
+        let who: &[u8] = if terminal {
+            b"a Terminal's shell"
+        } else {
+            b"the console's or an SSH session's shell"
+        };
+        // `capture` gives the buffer to the compositor, or closes it.
+        match sys::window::capture(compositor, buffer, SCREEN_SEND_MS, SCREEN_CALL_MS) {
+            Ok((w, h)) => {
+                let mut b = [0u8; 20];
+                sys::print(b"AriInit: the screen (");
+                sys::print(aricode_rt::fmt_u64(u64::from(w), &mut b));
+                sys::print(b"x");
+                sys::print(aricode_rt::fmt_u64(u64::from(h), &mut b));
+                sys::print(b") was copied for ");
+                sys::print(who);
+                sys::print(b"\n");
+                let value = u64::from(w) | u64::from(h) << 32;
+                reply(reply_to, LaunchReply::exited(value));
+            }
+            Err(_) => {
+                sys::print(b"AriInit: the compositor did not copy the screen for ");
+                sys::print(who);
+                sys::print(b"\n");
+                reply(reply_to, LaunchReply::status(LaunchStatus::Failed));
+            }
+        }
+    }
+
     /// Serves the terminals' session shells and stops what an ended
     /// terminal shell started (audit of the terminal, M2): its programs
     /// would otherwise run on with nobody to read them, holding a slot.
@@ -2740,6 +2839,41 @@ impl Broker {
     /// for, and the one change it may make, the session. It never reaches
     /// a file itself; a change is said on the console and logged in the
     /// install history, as from the shell.
+    /// Tells the bar the network's address, every few seconds and when it changes. The
+    /// compositor holds no network capability, and needs none for this. Each try costs
+    /// init at most `NET_CALL_MS` twice for each service, and one that does not answer
+    /// is asked again less often: nothing else stops for the bar.
+    fn report_network(&mut self) {
+        let (Some(compositor), Some(net)) = (self.compositor, self.net) else {
+            return;
+        };
+        let now = sys::time::uptime_ms(SYSTEM).unwrap_or(0);
+        if self.network_due.is_some_and(|due| now < due) {
+            return;
+        }
+        let mut text = alloc::string::String::new();
+        address_text(net, &mut text);
+        let mut answered = !text.starts_with("the network service");
+        // The bar has room for an address; the long reasons are in the settings.
+        if !text.starts_with(|c: char| c.is_ascii_digit()) {
+            text = alloc::string::String::from("no network");
+        }
+        if text != self.network_said {
+            if sys::window::set_network(compositor, &text, NET_CALL_MS).is_ok() {
+                self.network_said = text;
+            } else {
+                answered = false;
+            }
+        }
+        let wait = if answered {
+            NETWORK_REPORT_MS
+        } else {
+            NETWORK_RETRY_MS
+        };
+        // From now, after the calls: a slow answer never makes them back to back.
+        self.network_due = Some(sys::time::uptime_ms(SYSTEM).unwrap_or(now) + wait);
+    }
+
     fn serve_settings(&mut self) {
         use aricode_proto::settings::{Item, Op, Reply, Request, Status};
         let mut msg = [0u8; Request::LEN];
@@ -2770,8 +2904,15 @@ impl Broker {
         if req.op == Op::SetSession && (req.item != Item::Session || req.value > 1) {
             return refuse(b"a change other than the session's");
         }
+        if req.op == Op::SetAppearance && (req.item != Item::Appearance || req.value > 1) {
+            return refuse(b"an appearance that does not exist");
+        }
+        if req.op == Op::SetTimezone && (req.item != Item::Timezone || req.value > 26) {
+            return refuse(b"a time zone that does not exist");
+        }
         let mut text = alloc::string::String::new();
         let net = self.net;
+        let comp = self.compositor;
         let status = match self.fs.as_mut() {
             None => {
                 text.push_str("no file service");
@@ -2781,6 +2922,16 @@ impl Broker {
                 (Op::Get, Item::Session) => session_text(fs, &mut text),
                 (Op::SetSession, _) if req.value == 0 => set_session(fs, Session::Shell, &mut text),
                 (Op::SetSession, _) => set_session(fs, Session::Desktop, &mut text),
+                (Op::Get, Item::Appearance) => {
+                    text.push_str(if appearance_dark(fs) { "dark" } else { "light" });
+                    Status::Ok
+                }
+                (Op::SetAppearance, _) => set_appearance(fs, comp, req.value == 1, &mut text),
+                (Op::Get, Item::Timezone) => {
+                    zone_text(saved_zone(fs), &mut text);
+                    Status::Ok
+                }
+                (Op::SetTimezone, _) => set_zone(fs, comp, req.value as i32 - 12, &mut text),
                 (Op::Get, Item::UpdateSource) => sources_text(fs, &mut text),
                 (Op::Get, Item::Address) => match net {
                     Some(net) => address_text(net, &mut text),
@@ -2843,6 +2994,10 @@ impl Broker {
             let _ = sys::ipc_send(reply_to, &entry.encode(), &[], 0);
             let _ = sys::handle_close(reply_to);
             return;
+        }
+        if req.is_screen() {
+            sys::print(b"AriInit: refused, the launcher asked for a copy of the screen\n");
+            return refuse(LaunchStatus::Denied);
         }
         let name = req.name_str();
         if !req.is_detached() || req.has_console() || nh == 2 || req.flags != LaunchRequest::DETACH
@@ -3114,7 +3269,7 @@ impl Broker {
             };
             // A session of its own (ADR 0052): its windows are its alone and
             // close when it is gone. Same rights as before: send only.
-            let session = match sys::window::attach(comp) {
+            let session = match sys::window::attach(comp, name) {
                 Ok((h, id)) => {
                     window = Some(WindowSession {
                         compositor: comp,
@@ -3172,6 +3327,15 @@ impl Broker {
                 Ok(h) => granted.push(h),
                 Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
             }
+        }
+        // The GPU (ADR 0083): the kernel makes the first process to use it
+        // its only client, and the buffers it maps come from `dma_alloc`.
+        if caps.contains(Caps::GPU) {
+            match sys::handle_duplicate(GPU, rights::WRITE | rights::READ | rights::TRANSFER) {
+                Ok(h) => granted.push(h),
+                Err(_) => return Launched::Reply(LaunchReply::status(LaunchStatus::Failed)),
+            }
+            needs_hw = true;
         }
         if needs_hw {
             match sys::handle_duplicate(HARDWARE, rights::MANAGE | rights::TRANSFER) {
@@ -3321,6 +3485,85 @@ fn session_text(
 
 /// Chooses the session from the next boot for the desktop's settings,
 /// said and logged as the shell's `session` does.
+/// The file that keeps how the desktop looks: `dark`, or anything else for light.
+const APPEARANCE_FILE: &str = "appearance";
+
+fn appearance_dark(fs: &mut FsClient) -> bool {
+    let mut buf = [0u8; 16];
+    matches!(read_small(fs, APPEARANCE_FILE, &mut buf), Ok(Some(n)) if &buf[..n] == b"dark")
+}
+
+/// Keeps the owner's choice and shows it at once. A choice that cannot be kept is not
+/// shown: it would be gone at the next boot, against what the owner was told.
+fn set_appearance(
+    fs: &mut FsClient,
+    compositor: Option<Handle>,
+    dark: bool,
+    text: &mut alloc::string::String,
+) -> aricode_proto::settings::Status {
+    use aricode_proto::settings::Status;
+    let name = if dark { "dark" } else { "light" };
+    if update_index::client::save(fs, APPEARANCE_FILE, name.as_bytes()).is_err() {
+        text.push_str("the appearance file cannot be saved");
+        return Status::Failed;
+    }
+    if let Some(compositor) = compositor {
+        if sys::window::set_appearance(compositor, dark).is_err() {
+            text.push_str("saved; the desktop did not answer: from the next boot");
+            return Status::Failed;
+        }
+    }
+    text.push_str(name);
+    Status::Ok
+}
+
+/// The file that keeps the clock's zone: hours from UTC, as text. None is UTC.
+const ZONE_FILE: &str = "timezone";
+
+fn saved_zone(fs: &mut FsClient) -> i32 {
+    let mut buf = [0u8; 8];
+    let Ok(Some(n)) = read_small(fs, ZONE_FILE, &mut buf) else {
+        return 0;
+    };
+    core::str::from_utf8(&buf[..n])
+        .ok()
+        .and_then(|t| t.trim().parse::<i32>().ok())
+        .filter(|h| (-12..=14).contains(h))
+        .unwrap_or(0)
+}
+
+/// `UTC`, or `UTC+1`, `UTC-5`.
+fn zone_text(hours: i32, text: &mut alloc::string::String) {
+    use core::fmt::Write;
+    text.push_str("UTC");
+    if hours != 0 {
+        let _ = write!(text, "{hours:+}");
+    }
+}
+
+/// Keeps the zone and sets the clock, as `set_appearance` does.
+fn set_zone(
+    fs: &mut FsClient,
+    compositor: Option<Handle>,
+    hours: i32,
+    text: &mut alloc::string::String,
+) -> aricode_proto::settings::Status {
+    use aricode_proto::settings::Status;
+    let saved = alloc::format!("{hours}");
+    if update_index::client::save(fs, ZONE_FILE, saved.as_bytes()).is_err() {
+        text.push_str("the time zone file cannot be saved");
+        return Status::Failed;
+    }
+    if let Some(compositor) = compositor {
+        if sys::window::set_timezone(compositor, hours * 60).is_err() {
+            text.push_str("saved; the desktop did not answer: from the next boot");
+            return Status::Failed;
+        }
+    }
+    zone_text(hours, text);
+    Status::Ok
+}
+
 fn set_session(
     fs: &mut FsClient,
     chosen: Session,
@@ -4299,6 +4542,16 @@ fn main(arg: u64) -> u64 {
             match run_gui(gui_eps) {
                 Ok(g) => {
                     services |= SERVICE_GUI;
+                    // The owner's choice, before any window opens.
+                    if fs_client.as_mut().is_some_and(appearance_dark)
+                        && sys::window::set_appearance(g.endpoint, true).is_err()
+                    {
+                        say(b"the compositor did not take the appearance");
+                    }
+                    let zone = fs_client.as_mut().map_or(0, saved_zone);
+                    if zone != 0 && sys::window::set_timezone(g.endpoint, zone * 60).is_err() {
+                        say(b"the compositor did not take the time zone");
+                    }
                     gui = Some(g);
                     say(b"desktop session: compositor started");
                 }

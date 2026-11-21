@@ -1,0 +1,11 @@
+[package]
+name = "aricode-smbios"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The machine's make and model from the firmware's SMBIOS tables, read only (no_std)"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]

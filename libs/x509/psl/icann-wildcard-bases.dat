@@ -7,9 +7,9 @@
 // Extract of the Public Suffix List (https://publicsuffix.org/), ICANN
 // section: rules of two labels or more, wildcard and exception rules,
 // labels in punycode. Made by update.sh; do not edit by hand.
-// Source version: 2026-10-31_14-17-28_UTC
-// Source SHA-256: 617d1b276660e5a01209d7b58159450e400cf636634a7a9c2cfd50a1c6675d01
-// Rules: 5509
+// Source version: 2026-11-19_08-30-20_UTC
+// Source SHA-256: 0588ac64698535068470db495dbaef84f57b2598ab8c4d3f80d09860738291af
+// Rules: 5512
 com.ac
 edu.ac
 gov.ac
@@ -5374,7 +5374,9 @@ k12.vi
 net.vi
 org.vi
 ac.vn
+ad.vn
 ai.vn
+ap.vn
 biz.vn
 com.vn
 edu.vn
@@ -5386,6 +5388,7 @@ int.vn
 io.vn
 name.vn
 net.vn
+on.vn
 org.vn
 pro.vn
 angiang.vn

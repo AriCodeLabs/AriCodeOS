@@ -56,12 +56,18 @@ impl Caps {
     /// init tells and the session it changes, never a file. Only for
     /// `settings`, and only when it is an installed, signed package.
     pub const SETTINGS: Caps = Caps(1 << 13);
+    /// The GPU's engine (ADR 0083): the program maps its own DMA buffers
+    /// into a GPU address space of its own and runs batches there,
+    /// non-secure; nothing else is reachable through it. One program at a
+    /// time is the GPU's client.
+    pub const GPU: Caps = Caps(1 << 14);
 
     pub const NONE: Caps = Caps(0);
     /// The ones the broker grants to normal applications.
-    pub const APP_ALLOWED: Caps = Caps(Caps::SYSTEM.0 | Caps::FS.0 | Caps::NET.0 | Caps::WINDOW.0);
+    pub const APP_ALLOWED: Caps =
+        Caps(Caps::SYSTEM.0 | Caps::FS.0 | Caps::NET.0 | Caps::WINDOW.0 | Caps::GPU.0);
 
-    const NAMES: [(&'static str, Caps); 14] = [
+    const NAMES: [(&'static str, Caps); 15] = [
         ("system", Caps::SYSTEM),
         ("fs", Caps::FS),
         ("net", Caps::NET),
@@ -76,6 +82,7 @@ impl Caps {
         ("terminal", Caps::TERMINAL),
         ("home", Caps::HOME),
         ("settings", Caps::SETTINGS),
+        ("gpu", Caps::GPU),
     ];
 
     /// System applications that may also ask for `block`.
@@ -167,8 +174,9 @@ pub enum ManifestError {
 
 /// Default memory limit when the manifest does not state one.
 pub const DEFAULT_MEMORY_KIB: u32 = 1024;
-/// Maximum limit a manifest can ask for (8 MiB, `DMA_MAX_LEN`).
-pub const MAX_MEMORY_KIB: u32 = 8 * 1024;
+/// Maximum limit a manifest can ask for: 64 GiB (ADR 0084). The kernel
+/// grants at most `mem.app_max_pct` of the machine's usable memory.
+pub const MAX_MEMORY_KIB: u32 = 64 * 1024 * 1024;
 
 /// Files shared in read mode that a manifest can ask for.
 pub const MAX_READ_FILES: usize = 4;
@@ -178,7 +186,8 @@ pub struct Manifest {
     pub name: [u8; MAX_NAME],
     pub name_len: u8,
     pub caps: Caps,
-    /// Memory (DMA buffers) it can allocate, in KiB.
+    /// Memory (DMA buffers and `MEM` objects, ADR 0084) it can hold at once,
+    /// in KiB.
     pub memory_kib: u32,
     /// AriFS files (full name) it receives in read mode, in
     /// manifest order (ADR 0016).
@@ -284,14 +293,16 @@ fn valid_file_name(name: &str) -> bool {
         && !RESERVED_FILES.contains(&name)
 }
 
-/// `64K`, `2M` or KiB without a suffix; bounded by [`MAX_MEMORY_KIB`].
+/// `64K`, `2M`, `1G` or KiB without a suffix; bounded by [`MAX_MEMORY_KIB`].
 fn parse_memory(v: &str) -> Option<u32> {
-    let (num, mult) = match v.strip_suffix(['K', 'k']) {
-        Some(n) => (n, 1u32),
-        None => match v.strip_suffix(['M', 'm']) {
-            Some(n) => (n, 1024u32),
-            None => (v, 1u32),
-        },
+    let (num, mult) = if let Some(n) = v.strip_suffix(['K', 'k']) {
+        (n, 1u32)
+    } else if let Some(n) = v.strip_suffix(['M', 'm']) {
+        (n, 1024)
+    } else if let Some(n) = v.strip_suffix(['G', 'g']) {
+        (n, 1024 * 1024)
+    } else {
+        (v, 1)
     };
     let n: u32 = num.trim().parse().ok()?;
     let kib = n.checked_mul(mult)?;
@@ -422,6 +433,10 @@ mod tests {
         assert_eq!(m.memory_kib, DEFAULT_MEMORY_KIB);
         assert!(m.caps.is_empty());
         assert_eq!(
+            Manifest::parse("name = x\nmemory = 2G").unwrap().memory_kib,
+            2 * 1024 * 1024
+        );
+        assert_eq!(
             Manifest::parse("name = x\nmemory = 2M").unwrap().memory_kib,
             2048
         );
@@ -456,7 +471,7 @@ mod tests {
             Err(ManifestError::BadMemory)
         );
         assert_eq!(
-            Manifest::parse("name = x\nmemory = 9M"),
+            Manifest::parse("name = x\nmemory = 65G"),
             Err(ManifestError::BadMemory)
         );
         assert_eq!(Manifest::parse("no equals"), Err(ManifestError::Syntax));

@@ -14,6 +14,10 @@ use aricode_handles::{Handle, Rights};
 use log::warn;
 
 pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
+    // A thread of a process whose end began does nothing more (ADR 0082, audit M1).
+    if let Some(why) = process::current_kill_reason() {
+        process::kill_current(why);
+    }
     let h = Handle(frame.rdi as u32);
     let result: Result<u64, Error> = match frame.number {
         nr::PROCESS_EXIT => process::exit_current(frame.rdi),
@@ -29,7 +33,13 @@ pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
         nr::THREAD_GET_TID => Ok(scheduler::current_tid().0 as u64),
         nr::ABI_VERSION => Ok(ABI_VERSION as u64),
         nr::HANDLE_CLOSE => {
-            let r = with_handles(|t| t.remove(h).map(|_| 0).map_err(abi_error));
+            // The last handle of a DMA buffer frees it, page by page: outside
+            // the lock of the process table (audit of the quota refund).
+            let removed = with_handles(|t| t.remove(h).map_err(abi_error));
+            let r = removed.map(|object| {
+                drop(object);
+                0
+            });
             process::settle_lingering();
             r
         }
@@ -64,6 +74,7 @@ pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
         nr::REGION_LEN => with_handles(|t| match lookup(t, h, Rights::READ)?.kind {
             ObjectKind::Mmio(ref r) => Ok(r.len),
             ObjectKind::Dma(ref d) => Ok(d.region.len),
+            ObjectKind::Mem(ref m) => Ok(m.len()),
             _ => Err(Error::Invalid),
         }),
         nr::DMA_ALLOC => dma_alloc(h, frame.rsi),
@@ -105,6 +116,20 @@ pub fn dispatch(frame: &mut SyscallFrame) -> i64 {
         nr::SYSTEM_POWER => system_power(h, frame.rsi),
         nr::INITRD_READ => initrd_read(h, frame.rsi, frame.rdx, frame.r10, frame.r8),
         nr::PS2_READ => ps2_read(h, frame.rsi, frame.rdx),
+        nr::THREAD_CREATE => process::create_thread(frame.rdi, frame.rsi),
+        nr::THREAD_EXIT => process::exit_thread(frame.rdi),
+        nr::THREAD_JOIN => process::join_thread(frame.rdi, deadline_from(frame.rsi)),
+        nr::FUTEX_WAIT => super::futex::wait(frame.rdi, frame.rsi as u32, deadline_from(frame.rdx)),
+        nr::FUTEX_WAKE => super::futex::wake(frame.rdi, frame.rsi),
+        nr::GPU_MAP => gpu_map(h, Handle(frame.rsi as u32), frame.rdx),
+        nr::GPU_UNMAP => gpu_object(h)
+            .and_then(|_| crate::gpu::unmap(frame.rsi))
+            .map(|()| 0),
+        nr::GPU_SUBMIT => gpu_object(h).and_then(|_| crate::gpu::submit(frame.rsi, frame.rdx)),
+        nr::GPU_WAIT => gpu_object(h).and_then(|_| crate::gpu::wait(frame.rsi, frame.rdx)),
+        nr::MEM_CREATE => mem_create(frame.rdi),
+        nr::GPU_FREQUENCY => gpu_object(h).and_then(|_| crate::gpu::frequency(frame.rsi)),
+        nr::GPU_DISPATCH => gpu_object(h).and_then(|_| crate::gpu::dispatch(frame.rsi, frame.rdx)),
         n => {
             warn!("unknown syscall {n} from rip={:#x}", frame.user_rip);
             Err(Error::NoSys)
@@ -289,6 +314,24 @@ fn system_info(h: Handle, kind: u64, ptr: u64, len: u64) -> Result<u64, Error> {
             }
             v
         }
+        sysinfo::DMA_FAULT_SITES => {
+            let max = (len as usize) / sysinfo::DmaFaultSite::LEN;
+            let caller = process::current_pid().map_or(0, |p| p.0);
+            let manages = system_object(h, Rights::MANAGE).is_ok();
+            crate::iommu::fault_sites(caller, manages)
+                .iter()
+                .take(max)
+                .flat_map(|s| s.encode())
+                .collect()
+        }
+        sysinfo::IOMMU_RESERVED => {
+            let max = (len as usize) / sysinfo::ReservedRegion::LEN;
+            crate::iommu::reserved_regions()
+                .iter()
+                .take(max)
+                .flat_map(|r| r.encode())
+                .collect()
+        }
         sysinfo::IOMMU => {
             let (units, domains, faults) = crate::iommu::stats();
             let mut v = units.to_le_bytes().to_vec();
@@ -311,6 +354,29 @@ fn system_info(h: Handle, kind: u64, ptr: u64, len: u64) -> Result<u64, Error> {
         sysinfo::RANDOM_SOURCE => crate::random::source().encode().to_vec(),
         sysinfo::FRAMEBUFFER => match crate::framebuffer::abi_info() {
             Some(fb) => fb.encode().to_vec(),
+            None => return Err(Error::NotFound),
+        },
+        sysinfo::TEMPERATURE => match crate::arch::x86_64::thermal::read() {
+            Some((degrees, limit)) => {
+                let mut v = degrees.to_le_bytes().to_vec();
+                v.extend_from_slice(&limit.to_le_bytes());
+                v
+            }
+            None => return Err(Error::NotFound),
+        },
+        sysinfo::GPU => crate::gpu::report().encode().to_vec(),
+        sysinfo::ACPI_AML_LEN => (crate::acpi::aml_tables().len() as u64)
+            .to_le_bytes()
+            .to_vec(),
+        sysinfo::ACPI_AML => crate::acpi::aml_tables(),
+        sysinfo::MACHINE => {
+            let mut text = crate::machine::report().into_bytes();
+            text.truncate(len as usize);
+            text
+        }
+        sysinfo::MEMORY_PROMISED => (crate::hw::promised() as u64).to_le_bytes().to_vec(),
+        sysinfo::DISPLAY => match crate::framebuffer::abi_display() {
+            Some(d) => d.encode().to_vec(),
             None => return Err(Error::NotFound),
         },
         sysinfo::PROCESSES => {
@@ -474,7 +540,13 @@ fn ipc_send(
         unreachable!()
     };
     endpoint.send_with(timeout_ms, || {
+        // Looked at again and taken in one hold of the table: another thread of
+        // the process may have closed one since the early check, and a take that
+        // failed half-way would lose those taken before it (ADR 0082).
         let handles: Vec<(Cap, Rights)> = with_handles(|t| {
+            for uh in &user_handles {
+                lookup(t, *uh, Rights::TRANSFER)?;
+            }
             user_handles
                 .iter()
                 .map(|uh| t.take(*uh).map_err(abi_error))
@@ -519,8 +591,28 @@ fn ipc_receive(
             .collect())
     })?;
     let raw: Vec<u8> = received.iter().flat_map(|h| h.to_le_bytes()).collect();
-    process::copy_to_user(out_ptr, &raw)?;
+    copy_handles_out(out_ptr, &raw)?;
     Ok(n as u64 | ((received.len() as u64) << 32))
+}
+
+/// The numbers of handles just inserted, to the program: should the copy fail
+/// (another thread unmapped the buffer since it was checked, ADR 0082), the
+/// handles are taken back, so the program holds none it does not know of (audit
+/// L2). They drop after the table's lock.
+fn copy_handles_out(out_ptr: u64, raw: &[u8]) -> Result<(), Error> {
+    let Err(e) = process::copy_to_user(out_ptr, raw) else {
+        return Ok(());
+    };
+    let taken: Vec<_> = with_handles(|t| {
+        Ok(raw
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter_map(|b| t.remove(Handle(u32::from_le_bytes(*b))).ok())
+            .collect())
+    })?;
+    drop(taken);
+    Err(e)
 }
 
 /// A member of an `ipc_receive_any` set (ADR 0044): an interrupt line the
@@ -605,7 +697,7 @@ fn ipc_receive_any(
             .collect())
     })?;
     let raw: Vec<u8> = received.iter().flat_map(|h| h.to_le_bytes()).collect();
-    process::copy_to_user(out_ptr, &raw)?;
+    copy_handles_out(out_ptr, &raw)?;
     Ok(receive_any::message(index, n, received.len()))
 }
 
@@ -687,7 +779,10 @@ fn spawn_from_bytes(
     limits: u64,
 ) -> Result<u64, Error> {
     let handles_len = aricode_abi::spawn_limits::handles(limits) as u64;
-    let dma_quota = aricode_abi::spawn_limits::memory_kib(limits) as u64 * 1024;
+    // At most the share of the machine one process may hold (ADR 0084).
+    let dma_quota =
+        process::grantable_quota(aricode_abi::spawn_limits::memory_kib(limits) as u64 * 1024);
+    let threads = aricode_abi::spawn_limits::threads(limits);
     let console_first = aricode_abi::spawn_limits::console_first(limits);
     if handles_len as usize > IPC_MAX_HANDLES * 4 {
         return Err(Error::TooBig);
@@ -728,7 +823,8 @@ fn spawn_from_bytes(
         let (taken, _) = extra.remove(0);
         Cap::new(taken.object().clone(), Rights::WRITE)
     });
-    let pid = match process::spawn_with_caps(name, elf, session_console, extra, arg, dma_quota) {
+    let limits = (dma_quota, threads);
+    let pid = match process::spawn_with_caps(name, elf, session_console, extra, arg, limits) {
         Ok(pid) => pid,
         Err(e) => {
             warn!("process_spawn '{name}': {e}");
@@ -775,11 +871,19 @@ fn pci_claim(root: Handle, index: usize, out_ptr: u64) -> Result<u64, Error> {
         warn!("pci_claim {index}: {e}");
         Error::NotFound
     })?;
+    // Room looked at again in the hold that inserts: another thread of the
+    // process may have filled the table since (ADR 0082). What is not inserted
+    // stays in `slots` and drops after the table's lock: the claim's drop takes
+    // the PCI locks.
+    let mut slots = claimed.handles;
     let raw: Vec<u8> = with_handles(|t| {
+        if t.room() < aricode_abi::PCI_CLAIM_HANDLES {
+            return Err(Error::Limit);
+        }
         let mut out = Vec::with_capacity(aricode_abi::PCI_CLAIM_HANDLES * 4);
-        for slot in claimed.handles {
-            let value = match slot {
-                // Room was checked above; this process is single-threaded.
+        for slot in slots.iter_mut() {
+            let value = match slot.take() {
+                // Room for all of them was checked in this hold.
                 Some((obj, rights)) => insert(t, obj, rights)?.0,
                 None => 0,
             };
@@ -787,6 +891,7 @@ fn pci_claim(root: Handle, index: usize, out_ptr: u64) -> Result<u64, Error> {
         }
         Ok(out)
     })?;
+    drop(slots);
     if let Err(e) = process::copy_to_user(out_ptr, &raw) {
         // The caller never learns the handles: take them back (dropped
         // here, outside the table's lock: the claim's drop takes the PCI
@@ -865,6 +970,28 @@ fn ps2_read(h: Handle, ptr: u64, len: u64) -> Result<u64, Error> {
     Ok(n as u64)
 }
 
+/// Checks that `h` is the GPU, with `WRITE` (ADR 0083).
+fn gpu_object(h: Handle) -> Result<(), Error> {
+    with_handles(|t| match lookup(t, h, Rights::WRITE)?.kind {
+        ObjectKind::Gpu => Ok(()),
+        _ => Err(Error::Invalid),
+    })
+}
+
+/// `gpu_map`: the GPU with `WRITE`, the buffer with `READ|WRITE`, since the
+/// GPU can write every page it sees (no read-only mappings on this family).
+fn gpu_map(h: Handle, dma: Handle, address: u64) -> Result<u64, Error> {
+    gpu_object(h)?;
+    let buffer = with_handles(|t| {
+        let o = lookup(t, dma, Rights::READ.union(Rights::WRITE))?;
+        match o.kind {
+            ObjectKind::Dma(_) | ObjectKind::Mem(_) => Ok(o.clone()),
+            _ => Err(Error::Invalid),
+        }
+    })?;
+    crate::gpu::map(buffer, address).map(|()| 0)
+}
+
 fn irq_wait(h: Handle, timeout_ms: u64) -> Result<u64, Error> {
     let obj = with_handles(|t| {
         let o = lookup(t, h, Rights::WAIT)?;
@@ -882,15 +1009,24 @@ fn irq_wait(h: Handle, timeout_ms: u64) -> Result<u64, Error> {
 }
 
 fn mmio_map(h: Handle) -> Result<u64, Error> {
-    let (phys, len, cacheable, source_id, dma) = with_handles(|t| {
+    let mem = with_handles(|t| {
+        let o = lookup(t, h, Rights::READ.union(Rights::WRITE))?;
+        Ok(matches!(o.kind, ObjectKind::Mem(_)).then(|| o.clone()))
+    })?;
+    if let Some(mem) = mem {
+        return process::map_memory(mem).map(|m| m.virt);
+    }
+    let (phys, len, caching, source_id, dma) = with_handles(|t| {
         let o = lookup(t, h, Rights::READ.union(Rights::WRITE))?;
         match o.kind {
-            ObjectKind::Mmio(ref r) => Ok((r.phys, r.len, r.cacheable, r.source_id, None)),
+            ObjectKind::Mmio(ref r) => Ok((r.phys, r.len, r.caching, r.source_id, None)),
+            // Mapped above; here only if another thread swapped the handle.
+            ObjectKind::Mem(_) => Err(Error::Invalid),
             // The mapping holds the buffer (ADR 0038).
             ObjectKind::Dma(ref d) => Ok((
                 d.region.phys,
                 d.region.len,
-                d.region.cacheable,
+                d.region.caching,
                 None,
                 Some(o.clone()),
             )),
@@ -904,7 +1040,7 @@ fn mmio_map(h: Handle) -> Result<u64, Error> {
         virt,
         created,
         screen,
-    } = process::map_foreign(phys, len, cacheable, dma)?;
+    } = process::map_foreign(phys, len, caching, dma)?;
     // IOMMU (Phase 33): mapping a device assigns it to the process's
     // domain; mapping a foreign DMA buffer makes it visible to its devices.
     if let Some(pid) = process::current_pid() {
@@ -913,12 +1049,15 @@ fn mmio_map(h: Handle) -> Result<u64, Error> {
             // A buffer this call put in the domain leaves it with the
             // mapping (`mmio_unmap`) or with the last handle after it; one
             // the process allocated stays.
-            None if held.is_some() => crate::iommu::map_region(pid.0, phys, len).map(|added| {
-                if added && !process::foreign_in_domain(phys) {
-                    // Unmapped meanwhile by another thread of the process.
-                    crate::iommu::unmap_region(pid.0, phys);
-                }
-            }),
+            None if held.is_some() => {
+                crate::iommu::map_region(pid.0, phys, len, aricode_abi::sysinfo::dma_site::CLIENT)
+                    .map(|added| {
+                        if added && !process::foreign_in_domain(phys) {
+                            // Unmapped meanwhile by another thread of the process.
+                            crate::iommu::unmap_region(pid.0, phys);
+                        }
+                    })
+            }
             None => Ok(()),
         };
         if let Err(e) = r {
@@ -954,6 +1093,29 @@ fn event_record(code: Handle, name_ptr: u64, name_len: u64) -> Result<u64, Error
     Ok(0)
 }
 
+/// `mem_create` (ADR 0084): a memory object charged to the process's quota
+/// and promised out of the machine's free memory, its pages taken on touch.
+fn mem_create(len: u64) -> Result<u64, Error> {
+    if len == 0 || !len.is_multiple_of(4096) {
+        return Err(Error::Invalid);
+    }
+    let Ok(charge) = process::charge_memory(len) else {
+        process::record_event(aricode_abi::sysinfo::EventKind::DmaQuota, len, "mem_create");
+        return Err(Error::Limit);
+    };
+    let mem =
+        crate::hw::mem_alloc(len, process::KERNEL_RESERVE_FRAMES, Some(charge)).map_err(|e| {
+            warn!("mem_create: {e} ({len} bytes)");
+            Error::Limit
+        })?;
+    let rights = Rights::READ
+        .union(Rights::WRITE)
+        .union(Rights::DUPLICATE)
+        .union(Rights::TRANSFER);
+    // A refused object goes with `mem`, outside the table's lock.
+    with_handles(|t| insert(t, mem.clone(), rights).map(|h| h.0 as u64))
+}
+
 fn dma_alloc(h: Handle, len: u64) -> Result<u64, Error> {
     let is_hw = with_handles(|t| {
         lookup(t, h, Rights::MANAGE).map(|o| matches!(o.kind, ObjectKind::Hardware))
@@ -967,20 +1129,25 @@ fn dma_alloc(h: Handle, len: u64) -> Result<u64, Error> {
     // Process quota (set by its launcher): the size rounded up to pages is
     // charged, since that is what gets allocated.
     let charge = len.next_multiple_of(4096);
-    if !process::charge_dma(charge) {
+    let Ok(charge) = process::charge_dma(charge) else {
         process::record_event(aricode_abi::sysinfo::EventKind::DmaQuota, len, "dma_alloc");
         return Err(Error::Limit);
-    }
-    // Only a buffer the process gets stays charged: every failure below
-    // gives the charge back (incident 0047). The buffer itself goes with
-    // the error (its drop leaves the IOMMU domains and frees the frames).
-    let granted = (|| {
-        let dma = crate::hw::dma_alloc(len).map_err(|e| {
+    };
+    // Only a buffer the process gets stays charged: on every failure below
+    // the charge goes back with the buffer (incident 0047), whose drop also
+    // leaves the IOMMU domains and frees the frames.
+    (|| {
+        let dma = crate::hw::dma_alloc(len, Some(charge)).map_err(|e| {
             warn!("dma_alloc: {e} ({len} bytes)");
             Error::Limit
         })?;
         if let (Some(pid), ObjectKind::Dma(d)) = (process::current_pid(), &dma.kind) {
-            if let Err(e) = crate::iommu::map_region(pid.0, d.region.phys, d.region.len) {
+            if let Err(e) = crate::iommu::map_region(
+                pid.0,
+                d.region.phys,
+                d.region.len,
+                aricode_abi::sysinfo::dma_site::OWN,
+            ) {
                 warn!("dma_alloc: {e}");
                 return Err(Error::Limit);
             }
@@ -989,10 +1156,7 @@ fn dma_alloc(h: Handle, len: u64) -> Result<u64, Error> {
             .union(Rights::WRITE)
             .union(Rights::DUPLICATE)
             .union(Rights::TRANSFER);
-        with_handles(|t| insert(t, dma, rights).map(|h| h.0 as u64))
-    })();
-    if granted.is_err() {
-        process::refund_dma(charge);
-    }
-    granted
+        // A refused buffer goes with `dma`, outside the table's lock.
+        with_handles(|t| insert(t, dma.clone(), rights).map(|h| h.0 as u64))
+    })()
 }

@@ -20,10 +20,12 @@ mod console_input;
 mod cpu;
 mod events;
 mod framebuffer;
+mod gpu;
 mod hw;
 mod initrd;
 mod iommu;
 mod ipc;
+mod machine;
 mod memory;
 mod object;
 mod pci;
@@ -47,6 +49,9 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// If `true`, the kernel terminates QEMU when done or on panic.
 /// Set once from the command line, before any possible panic.
 static QEMU_EXIT: AtomicBool = AtomicBool::new(false);
+/// `poweroff_ignored`: `shutdown` skips the S5 write, as firmware that
+/// ignores it does (incident 0065), so the path after it is tested.
+static POWEROFF_IGNORED: AtomicBool = AtomicBool::new(false);
 
 /// Entry point. See `boot_protocol::KernelEntry` for the contract.
 ///
@@ -78,8 +83,9 @@ pub unsafe extern "C" fn kernel_entry(boot_info: *const BootInfo) -> ! {
     // SAFETY: AriBoot copied the cmdline to kernel memory reachable through the physical map.
     let cmdline = CmdLine::new(unsafe { info.cmdline() });
     QEMU_EXIT.store(cmdline.has(keys::QEMU_EXIT), Ordering::Relaxed);
+    POWEROFF_IGNORED.store(cmdline.has(keys::POWEROFF_IGNORED), Ordering::Relaxed);
 
-    framebuffer::set_info(info.framebuffer);
+    framebuffer::set_info(info.framebuffer, info.video());
     // With `gui` the screen belongs to the user compositor: the kernel only
     // writes to serial.
     let gui = cmdline.has(keys::GUI);
@@ -100,6 +106,12 @@ pub unsafe extern "C" fn kernel_entry(boot_info: *const BootInfo) -> ! {
         info!("cmdline: {}", cmdline.raw().trim());
     }
     trace!("logger active at level {level}");
+    // After the logger: a refused value is logged.
+    arch::x86_64::power::configure(
+        cmdline.get(keys::POWEROFF_CPU),
+        cmdline.get(keys::POWEROFF_WAIT_MS),
+        cmdline.get(keys::POWEROFF_FROM),
+    );
 
     report_framebuffer(info, has_fb, gui);
     report_kernel(info);
@@ -166,6 +178,7 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
     boot_args::set(cmdline.raw());
 
     acpi::init(info);
+    machine::init(info);
     arch::x86_64::pic::disable();
     arch::x86_64::apic::init();
     arch::x86_64::ioapic::init();
@@ -175,6 +188,8 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
 
     task::init();
     console::start_cursor_thread();
+    hw::start_reclaim();
+    arch::x86_64::thermal::start_watch(cmdline.get(keys::THERMAL_OFF).and_then(|v| v.parse().ok()));
     if cmdline.get(keys::SMP) == Some("off") {
         info!("smp: disabled on the command line (smp=off); 1 CPU");
     } else {
@@ -206,6 +221,26 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
         Some("bar") => pci::Lie::BarInRam,
         _ => pci::Lie::None,
     });
+    framebuffer::use_panel_size(cmdline.get(keys::VIDEO).is_some());
+    if let Some(pct) = cmdline
+        .get(keys::MEM_APP_MAX_PCT)
+        .and_then(|v| v.parse().ok())
+    {
+        user::process::set_app_max_pct(pct);
+    }
+    if let Some(mib) = cmdline
+        .get(keys::MEM_SERVICE_MAX_MIB)
+        .and_then(|v| v.parse().ok())
+    {
+        user::process::set_service_max_mib(mib);
+    }
+    gpu::init(
+        cmdline.get(keys::GPU) == Some("off"),
+        cmdline.get(keys::GPU_MHZ).and_then(|v| v.parse().ok()),
+        cmdline.get(keys::GPU_HANG_MS).and_then(|v| v.parse().ok()),
+        cmdline.get(keys::GPU_MAX_MHZ).and_then(|v| v.parse().ok()),
+        cmdline.get(keys::GPU_HOT_C).and_then(|v| v.parse().ok()),
+    );
     if cmdline.get(keys::PCI_FLR) == Some("off") {
         pci::set_flr_enabled(false);
         info!("pci: function level resets disabled on the command line (pci.flr=off)");
@@ -213,11 +248,11 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
     if cmdline.get(keys::IOMMU) == Some("off") {
         info!("iommu: disabled on the command line (iommu=off); untranslated DMA");
     } else {
-        iommu::init(&info.framebuffer);
+        iommu::init(&framebuffer::current());
     }
 
     if cmdline.get(keys::TEST).is_some() {
-        run_requested_test(&cmdline, info);
+        run_requested_test(&cmdline);
     } else {
         let mut init_flags = 0;
         if cmdline.has(keys::SHELL) {
@@ -243,7 +278,7 @@ extern "C" fn kernel_main(info: *const BootInfo) -> ! {
         if cmdline.has(keys::SERVICE_HANG) {
             init_flags |= aricode_abi::init_arg::SERVICE_HANG;
         }
-        run_init(init_flags, info.framebuffer);
+        run_init(init_flags, framebuffer::current());
     }
 
     println!("ARICODEOS_KERNEL_READY");
@@ -349,7 +384,7 @@ fn report_memory(info: &BootInfo) {
 }
 
 /// Deliberate faults for the test scenarios (`test=<name>`).
-fn run_requested_test(cmdline: &CmdLine, info: &BootInfo) {
+fn run_requested_test(cmdline: &CmdLine) {
     let Some(name) = cmdline.get(keys::TEST) else {
         return;
     };
@@ -371,7 +406,7 @@ fn run_requested_test(cmdline: &CmdLine, info: &BootInfo) {
         "ipc_late" => ipc::late_reply_selftest(),
         "ipc_peer" => ipc::peer_closed_selftest(),
         "wait_set" => ipc::wait_set_selftest(),
-        "drivers" => hw::selftest(info),
+        "drivers" => hw::selftest(),
         "usb_hid" => hw::usb_hid_selftest(),
         "random" => random::selftest(),
         "console_input" => console_input::selftest(),
@@ -380,9 +415,12 @@ fn run_requested_test(cmdline: &CmdLine, info: &BootInfo) {
         "process_reap" => user::process::reap_selftest(),
         "spawn_oom" => user::process::spawn_oom_selftest(),
         "dma_lifetime" => user::process::dma_lifetime_selftest(),
+        "thread_unmap" => user::process::thread_unmap_selftest(),
+        "thread_kill" => user::process::thread_kill_selftest(),
         "pci_reap" => pci::reap_selftest(),
         "pci_stale_line" => pci::stale_line_selftest(),
         "fpu" => arch::x86_64::fpu::selftest(),
+        "usercopy" => arch::x86_64::usercopy::selftest(),
         other if other.starts_with("user_") => run_user_program(&other[5..]),
         // W^X: writing to .rodata -> protection #PF.
         "write_rodata" => {
@@ -456,8 +494,8 @@ fn run_init(arg: u64, fb: boot_protocol::FramebufferInfo) {
     let console_in = object::KernelObject::new(object::ObjectKind::Console);
     let framebuffer = object::KernelObject::new(object::ObjectKind::Mmio(hw::Region {
         phys: fb.address,
-        len: fb.size,
-        cacheable: false,
+        len: framebuffer::screen_bytes(&fb),
+        caching: hw::Caching::WriteCombining,
         source_id: None,
         claim: None,
     }));
@@ -504,6 +542,15 @@ fn run_init(arg: u64, fb: boot_protocol::FramebufferInfo) {
                 .union(Rights::TRANSFER)
         ),
     ];
+    // The GPU, always, so it is `INIT_GPU` whether or not the kernel took
+    // the engine (ADR 0083).
+    handles.push((
+        object::KernelObject::new(object::ObjectKind::Gpu),
+        Rights::READ
+            .union(Rights::WRITE)
+            .union(Rights::DUPLICATE)
+            .union(Rights::TRANSFER),
+    ));
     // The PS/2 stream, last, so it is `INIT_PS2` when there is one (ADR 0075).
     if console_input::ps2_stream_kinds().is_some() {
         handles.push((
@@ -534,15 +581,75 @@ fn run_user_program(name: &str) {
     info!("user: '{name}' exited: {status:?}");
 }
 
-/// Orderly shutdown requested from user space (`system_power`): with
-/// `qemu_exit` it terminates QEMU successfully; otherwise it powers the
-/// machine off through ACPI S5 and, if the firmware does not cooperate,
-/// halts the CPU.
+/// Turns of the spin loop `shutdown` waits for the other CPUs to halt
+/// (interrupts are off: no clock); well over a second on any machine.
+const HALT_WAIT_SPINS: u64 = 200_000_000;
+
+/// Orderly shutdown requested from user space (`system_power`) or by the
+/// thermal watch: with `qemu_exit` it terminates QEMU successfully;
+/// otherwise it powers the machine off through ACPI S5 and, if the firmware
+/// does not cooperate, halts.
+///
+/// The order is the proven one (audit `2026-11-11-acpi-power-off-study`):
+/// first the calling thread moves to the boot CPU (`poweroff.cpu`), as
+/// Linux's `migrate_to_reboot_cpu` and FreeBSD's `kern_reboot` do; then
+/// interrupts go off and the other CPUs are halted, as Linux's
+/// `native_machine_shutdown` stops them, so no process runs from here on;
+/// then the S5 sequence (`power::acpi_poweroff`). If the power stays on,
+/// the console takes the screen back from whoever held it (the desktop)
+/// and shows the last line, which says what was written and with what.
 pub fn shutdown() -> ! {
     println!("ARICODEOS_SHUTDOWN");
     if !QEMU_EXIT.load(Ordering::Relaxed) {
-        arch::x86_64::power::acpi_poweroff();
-        println!("AriCodeOS: ACPI power-off had no effect; halting (it is safe to switch off)");
+        use arch::x86_64::power::{self, PowerOff};
+        power::move_to_poweroff_cpu();
+        let prepared = power::prepare();
+        // SAFETY: interrupts off for good on this CPU: nothing is scheduled
+        // here again, and the halt below then never wakes.
+        unsafe { core::arch::asm!("cli", options(nomem, nostack)) };
+        arch::x86_64::smp::halt_others();
+        let all = arch::x86_64::smp::others_halted(HALT_WAIT_SPINS);
+        println!(
+            "AriCodeOS: {} for the power-off",
+            if all {
+                "the other CPUs are halted"
+            } else {
+                "not every other CPU halted in time"
+            }
+        );
+        let screen = framebuffer::current();
+        let off = "halting (it is safe to switch off)";
+        let cpu = cpu::id();
+        match power::acpi_poweroff(&prepared, !POWEROFF_IGNORED.load(Ordering::Relaxed)) {
+            PowerOff::NoFadt => console::last_words(
+                screen,
+                format_args!("AriCodeOS: no ACPI power-off here (no valid FADT); {off}"),
+            ),
+            PowerOff::NoS5 => console::last_words(
+                screen,
+                format_args!(
+                    "AriCodeOS: no ACPI power-off here (no \\_S5_ in the DSDT or SSDTs); {off}"
+                ),
+            ),
+            PowerOff::Refused(why) => console::last_words(
+                screen,
+                format_args!("AriCodeOS: no ACPI power-off here ({why}); {off}"),
+            ),
+            PowerOff::Skipped(done) => {
+                println!("AriCodeOS: power-off prepared on CPU {cpu}: {done}");
+                console::last_words(
+                    screen,
+                    format_args!("AriCodeOS: poweroff_ignored: the S5 write was skipped; {off}"),
+                )
+            }
+            PowerOff::Ignored(done) => console::last_words(
+                screen,
+                format_args!(
+                    "AriCodeOS: ACPI power-off had no effect (on CPU {cpu}; {done}; {}); {off}",
+                    prepared.smi
+                ),
+            ),
+        };
     }
     finish(qemu::ExitCode::Success)
 }

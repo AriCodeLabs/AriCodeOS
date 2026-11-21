@@ -18,7 +18,7 @@ bench = false
 
 [dependencies]
 aricode-rt = { path = "../../sdk/runtime" }
-aricode-gfx = { path = "../../libs/gfx" }
+aricode-ui = { path = "../../libs/ui" }
 
 [build-dependencies]
 aricode-build = { path = "../../sdk/build" }

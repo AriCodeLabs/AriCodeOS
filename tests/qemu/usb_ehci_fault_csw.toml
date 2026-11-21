@@ -10,7 +10,7 @@
 # full repaint of the screen console (incident 0031).
 name = "usb.ehci_fault_csw"
 description = "EHCI driver: a real STALL on bulk IN is cleared per USB 2.0/BOT, the request answers Io and the next one succeeds"
-level = "full"
+level = "release"
 areas = ["usb", "storage", "diag"]
 usb_ehci_storage = true
 cmdline = "qemu_exit shell usb_fault=idle:csw"

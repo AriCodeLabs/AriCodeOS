@@ -76,6 +76,11 @@ pub trait Surface {
             }
         }
     }
+    /// Draws a cell by its code (`cell_code`): the console's font by default, and a
+    /// surface with a better one draws the character itself.
+    fn cell(&mut self, x: usize, y: usize, code: u8, fg: Rgb, bg: Rgb) {
+        self.glyph(x, y, glyph(code), fg, bg);
+    }
     /// Fills `rows` full pixel rows starting at `y`.
     fn fill_rows(&mut self, y: usize, rows: usize, color: Rgb) {
         for yy in y..(y + rows).min(self.height()) {
@@ -219,6 +224,53 @@ impl<S: Surface> Console<S> {
         self.clear();
     }
 
+    /// The screen changed size: the console starts over on `surface`, with
+    /// its text gone and nothing painted yet, so the caller can paint it
+    /// in steps with [`redraw`](Self::redraw).
+    pub fn resize(&mut self, surface: S) {
+        let cols = (surface.width() / GLYPH_WIDTH).max(1);
+        let rows = (surface.height() / GLYPH_HEIGHT).max(1);
+        self.cols = cols;
+        self.rows = rows.min(MAX_CELLS / cols);
+        self.surface = Some(surface);
+        self.cells[..self.cols * self.rows].fill(b' ');
+        self.cursor_col = 0;
+        self.cursor_row = 0;
+        self.cursor_drawn = None;
+        self.invalidate();
+    }
+
+    /// A window changed size: the text stays, cut to what fits, with the rows up to the
+    /// cursor in view. Nothing is painted yet; [`redraw`](Self::redraw) does that.
+    pub fn resize_keeping(&mut self, surface: S) {
+        let (old_cols, old_rows) = (self.cols, self.rows);
+        let cols = (surface.width() / GLYPH_WIDTH).max(1);
+        let rows = (surface.height() / GLYPH_HEIGHT)
+            .max(1)
+            .min(MAX_CELLS / cols);
+        // `drawn` is no use from here on: it holds the old text meanwhile.
+        let used = old_cols * old_rows;
+        self.drawn[..used].copy_from_slice(&self.cells[..used]);
+        self.cells[..cols * rows].fill(b' ');
+        let above = (self.cursor_row + 1).saturating_sub(rows);
+        for row in 0..rows.min(old_rows.saturating_sub(above)) {
+            let from = (above + row) * old_cols;
+            let take = cols.min(old_cols);
+            self.cells[row * cols..row * cols + take]
+                .copy_from_slice(&self.drawn[from..from + take]);
+        }
+        self.cols = cols;
+        self.rows = rows;
+        self.surface = Some(surface);
+        self.cursor_row -= above;
+        self.cursor_col = self.cursor_col.min(cols - 1);
+        self.cursor_drawn = None;
+        // A range marked for the old grid means nothing in this one.
+        self.dirty_from = 0;
+        self.dirty_to = 0;
+        self.invalidate();
+    }
+
     pub fn is_attached(&self) -> bool {
         self.surface.is_some()
     }
@@ -237,7 +289,27 @@ impl<S: Surface> Console<S> {
     /// next [`redraw`](Self::redraw), which the caller may do in steps.
     pub fn reattach(&mut self, surface: S) {
         self.surface = Some(surface);
+        self.clear_margins();
         self.invalidate();
+    }
+
+    /// Paints the strips past the text grid in the background colour: the
+    /// right one narrower than a cell, and the bottom one shorter than a
+    /// row (8 pixel rows at 1080 lines), which no cell covers, so what a
+    /// borrower left there would stay (audit of incident 0065).
+    fn clear_margins(&mut self) {
+        let (text_w, text_h) = (self.cols * GLYPH_WIDTH, self.rows * GLYPH_HEIGHT);
+        let bg = self.bg;
+        let Some(s) = self.surface.as_mut() else {
+            return;
+        };
+        let (w, h) = (s.width(), s.height());
+        for y in 0..text_h.min(h) {
+            for x in text_w..w {
+                s.put(x, y, bg);
+            }
+        }
+        s.fill_rows(text_h, h.saturating_sub(text_h), bg);
     }
 
     /// Creates the console with a screen and clears it (host tests: the grid
@@ -489,14 +561,7 @@ impl<S: Surface> Console<S> {
         let Some(surface) = self.surface.as_mut() else {
             return;
         };
-        let glyph = glyph(b);
-        surface.glyph(
-            col * GLYPH_WIDTH,
-            row * GLYPH_HEIGHT,
-            glyph,
-            self.fg,
-            self.bg,
-        );
+        surface.cell(col * GLYPH_WIDTH, row * GLYPH_HEIGHT, b, self.fg, self.bg);
     }
 }
 
@@ -619,6 +684,43 @@ mod tests {
     }
 
     type C = Console<Mem>;
+
+    #[test]
+    fn a_new_size_keeps_the_text_and_the_cursor_in_view() {
+        let mut c = Console::empty();
+        c.attach(Mem::new(80, 80));
+        // Ten columns and five rows.
+        for line in ["one", "two", "three", "four", "five"] {
+            let _ = write!(c, "{line}\n");
+        }
+        // Scrolled: "two" is on top, the cursor on the last row.
+        let _ = write!(c, "ab");
+        let surface = c.detach().unwrap();
+        // Three rows, narrower: the cursor's row stays, what is above goes.
+        c.resize_keeping(Mem::new(32, 48));
+        drop(surface);
+        assert_eq!((c.cols(), c.rows()), (4, 3));
+        assert_eq!(
+            &c.cells[..12],
+            b"four"
+                .iter()
+                .chain(b"five")
+                .chain(b"ab  ")
+                .copied()
+                .collect::<std::vec::Vec<u8>>()
+                .as_slice()
+        );
+        assert_eq!((c.cursor_col, c.cursor_row), (2, 2));
+        assert!(c.redraw(usize::MAX));
+        // Wider and taller: the kept text stays where it was, and more room is below.
+        let _ = c.detach();
+        c.resize_keeping(Mem::new(80, 96));
+        assert_eq!((c.cols(), c.rows()), (10, 6));
+        assert_eq!(&c.cells[..10], b"four      ");
+        assert_eq!(&c.cells[20..30], b"ab        ");
+        assert_eq!(&c.cells[30..40], b"          ");
+        assert_eq!((c.cursor_col, c.cursor_row), (2, 2));
+    }
 
     #[test]
     fn grid_size_and_clear() {
@@ -776,6 +878,32 @@ mod tests {
         assert_eq!(glyph(0x81), glyph(b'?'), "codes that show nothing");
     }
 
+    /// Reattached on a screen that is not a whole number of cells (1366
+    /// wide, 1080 high): the strips past the grid, which no cell covers,
+    /// lose what the borrower painted there too.
+    #[test]
+    fn reattach_clears_the_margins_past_the_grid() {
+        let (w, h) = (8 * 10 + 6, 16 * 4 + 8);
+        let mut c = C::new(Mem::new(w, h));
+        let mut screen = c.detach().expect("attached");
+        let painted = Rgb(0xFF, 0x88, 0x00);
+        screen.fill_rows(0, h, painted);
+        c.reattach(screen);
+        assert!(c.redraw(usize::MAX));
+        let s = c.surface().unwrap();
+        for y in 0..h {
+            for x in 0..w {
+                assert_ne!(
+                    s.at(x, y),
+                    painted,
+                    "pixel ({x},{y}) kept the borrower's colour"
+                );
+            }
+        }
+        assert_eq!(s.at(w - 1, 0), C::DEFAULT_BG, "right strip");
+        assert_eq!(s.at(0, h - 1), C::DEFAULT_BG, "bottom strip");
+    }
+
     /// A detached console keeps its text and draws nothing; reattaching
     /// draws all of it again over what the borrower painted.
     #[test]
@@ -795,7 +923,7 @@ mod tests {
         c.reattach(screen);
         assert!(c.is_attached());
         assert!(c.needs_redraw(), "nothing is drawn until the redraw");
-        assert_eq!(c.surface().unwrap().at(639, 479), painted);
+        assert_eq!(c.surface().unwrap().at(320, 240), painted);
         assert!(c.redraw(usize::MAX));
         assert_screen_matches_cells(&c);
         let s = c.surface().unwrap();

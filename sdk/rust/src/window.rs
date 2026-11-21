@@ -6,7 +6,9 @@
 use crate::{self as sys, rights, rpc, Error, Handle};
 use aricode_gfx::Canvas;
 pub use aricode_proto::window::Event;
-use aricode_proto::window::{Op, Reply, Request, Status};
+pub use aricode_proto::window::{mods, wants, DamageRect, KeyState, Status, MAX_DOCK_APPS};
+use aricode_proto::window::{Op, Reply, Request, MAX_CLIPBOARD, MAX_DAMAGE, MAX_TITLE};
+use core::cell::Cell;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowError {
@@ -19,10 +21,19 @@ pub enum WindowError {
 pub struct Window {
     service: Handle,
     id: u32,
-    dma: Handle,
-    pixels: u64,
+    /// The buffer [`canvas`](Self::canvas) draws on, and where it is mapped. Cells, so
+    /// that presenting, which swaps the buffers, needs no `&mut`.
+    draw: Cell<(Handle, u64)>,
+    /// The other buffer, when the window has two ([`double_buffer`](Self::double_buffer)):
+    /// the one shown, which the compositor reads, so nothing here writes to it.
+    shown: Cell<Option<(Handle, u64)>>,
+    /// The compositor's slot of `draw`: 0 for the buffer of `Create` or `Resize`, 1
+    /// for the second.
+    draw_slot: Cell<u32>,
     width: u32,
     height: u32,
+    /// The desktop was dark when this opened.
+    dark: bool,
 }
 
 impl Window {
@@ -35,6 +46,19 @@ impl Window {
         height: u32,
         title: &str,
     ) -> Result<Self, WindowError> {
+        Self::create_wanting(service, hardware, width, height, title, 0)
+    }
+
+    /// As [`create`](Self::create), asking for the events in `events`
+    /// ([`wants`]).
+    pub fn create_wanting(
+        service: Handle,
+        hardware: Handle,
+        width: u32,
+        height: u32,
+        title: &str,
+        events: u32,
+    ) -> Result<Self, WindowError> {
         if width == 0 || height == 0 {
             return Err(WindowError::Invalid);
         }
@@ -46,17 +70,21 @@ impl Window {
             .ok_or(WindowError::Invalid)?;
         req.width = width;
         req.height = height;
+        req.events = events;
         let mut w = Self {
             service,
             id: 0,
-            dma,
-            pixels,
+            dark: false,
+            draw: Cell::new((dma, pixels)),
+            shown: Cell::new(None),
+            draw_slot: Cell::new(0),
             width,
             height,
         };
         w.canvas().fill(0);
         let r = w.call(req, true)?;
         w.id = r.value as u32;
+        w.dark = (r.value >> 32) & 1 != 0;
         Ok(w)
     }
 
@@ -64,21 +92,71 @@ impl Window {
         self.id
     }
 
-    /// Canvas over the content buffer.
+    /// Whether the desktop was dark when this window opened: what its first picture
+    /// follows. [`wants::APPEARANCE`](super::window::wants) tells of a change after that.
+    pub fn starts_dark(&self) -> bool {
+        self.dark
+    }
+
+    /// Gives the window a second buffer, so a frame is drawn on one while the other
+    /// shows and [`present`](Self::present) swaps them: no frame shows half drawn,
+    /// whenever the compositor reads (incident 0063, ADR 0081). From then on the
+    /// canvas holds the frame before last, not the last one: draw each frame whole.
+    /// The program's quota pays for both. Should the answer be lost in a timeout, the
+    /// compositor may keep the buffer this lets go, until the window closes.
+    pub fn double_buffer(&mut self, hardware: Handle) -> Result<(), WindowError> {
+        if self.shown.get().is_some() {
+            return Ok(());
+        }
+        let len = self.width as u64 * self.height as u64 * 4;
+        let dma = sys::dma_alloc(hardware, len).map_err(WindowError::Ipc)?;
+        let pixels = match sys::mmio_map(dma) {
+            Ok(p) => p,
+            Err(e) => {
+                let _ = sys::handle_close(dma);
+                return Err(WindowError::Ipc(e));
+            }
+        };
+        match self.call_with(self.request(Op::SecondBuffer), Some(dma)) {
+            Ok(_) => {
+                self.shown.set(Some(self.draw.get()));
+                self.draw.set((dma, pixels));
+                self.draw_slot.set(1);
+                Ok(())
+            }
+            Err(e) => {
+                let _ = sys::mmio_unmap(pixels);
+                let _ = sys::handle_close(dma);
+                Err(e)
+            }
+        }
+    }
+
+    /// Whether the window has two buffers now: a resize asks for the second again,
+    /// and may not get it.
+    pub fn is_double(&self) -> bool {
+        self.shown.get().is_some()
+    }
+
+    /// Canvas over the content buffer: the one not shown, when there are two.
     pub fn canvas(&mut self) -> Canvas<'_> {
         let n = (self.width * self.height) as usize;
         // SAFETY: our own DMA buffer of `width*height*4` bytes, mapped RW.
-        let pixels = unsafe { core::slice::from_raw_parts_mut(self.pixels as *mut u32, n) };
+        let pixels = unsafe { core::slice::from_raw_parts_mut(self.draw.get().1 as *mut u32, n) };
         Canvas::new(pixels, self.width, self.height, self.width).expect("window buffer")
     }
 
     fn call(&self, req: Request, with_buffer: bool) -> Result<Reply, WindowError> {
+        self.call_with(req, with_buffer.then_some(self.draw.get().0))
+    }
+
+    fn call_with(&self, req: Request, buffer: Option<Handle>) -> Result<Reply, WindowError> {
         let mut extra = [Handle(0); 1];
         let mut n = 0;
-        if with_buffer {
+        if let Some(buffer) = buffer {
             // `mmio_map` requires READ|WRITE even though the compositor only reads.
             extra[0] =
-                sys::handle_duplicate(self.dma, rights::READ | rights::WRITE | rights::TRANSFER)
+                sys::handle_duplicate(buffer, rights::READ | rights::WRITE | rights::TRANSFER)
                     .map_err(WindowError::Ipc)?;
             n = 1;
         }
@@ -109,7 +187,188 @@ impl Window {
     /// Asks the compositor to repaint the content: what was painted since
     /// the last `present` reaches the screen with its next frame (ADR 0046).
     pub fn present(&self) -> Result<(), WindowError> {
-        self.call(self.request(Op::Present), false).map(|_| ())
+        let req = self.presenting(self.request(Op::Present));
+        let reply = self.call(req, false)?;
+        self.swapped(reply.value);
+        Ok(())
+    }
+
+    /// As [`present`](Self::present), for what changed: at most
+    /// [`MAX_DAMAGE`] rectangles reach the compositor; more mean all of it. With two
+    /// buffers the whole window goes: the one drawn on holds the frame before last.
+    pub fn present_rects(&self, rects: &[DamageRect]) -> Result<(), WindowError> {
+        let mut req = self.presenting(self.request(Op::Present));
+        if !self.is_double() && rects.len() <= MAX_DAMAGE {
+            req.damage[..rects.len()].copy_from_slice(rects);
+            req.damage_len = rects.len() as u8;
+        }
+        let reply = self.call(req, false)?;
+        self.swapped(reply.value);
+        Ok(())
+    }
+
+    /// A present that shows the buffer drawn on, when there are two.
+    fn presenting(&self, mut req: Request) -> Request {
+        if self.is_double() {
+            req.width = 1 + self.draw_slot.get();
+        }
+        req
+    }
+
+    /// After a present the compositor answered with the slot it shows: the buffer
+    /// drawn on next is the other one, which it no longer reads. Taken from the
+    /// answer, not assumed, so a present whose answer was lost puts nothing out of
+    /// step for longer than one frame.
+    fn swapped(&self, shown: u64) {
+        if let Some(other) = self.shown.get() {
+            if shown == u64::from(self.draw_slot.get()) {
+                self.shown.set(Some(self.draw.get()));
+                self.draw.set(other);
+                self.draw_slot.set(1 - self.draw_slot.get());
+            }
+        }
+    }
+
+    /// Adds to this window's menus in the bar: `id` 0 names menu `menu`, and any other
+    /// `id` adds an item, told back as `Event::Menu` when the owner chooses it. A tab in
+    /// `label` puts what follows at the row's right end. Menus come in order.
+    pub fn menu_add(&self, menu: u32, label: &str, id: u32) -> Result<(), WindowError> {
+        let mut req = self
+            .request(Op::MenuAdd)
+            .with_title(label)
+            .ok_or(WindowError::Invalid)?;
+        req.width = menu;
+        req.height = id;
+        self.call(req, false).map(|_| ())
+    }
+
+    /// The launcher's only: the dock offers application `index` as `name`, its
+    /// package's name; an empty name ends the list there. The owner choosing it comes
+    /// back as [`Event::Launch`].
+    pub fn dock_app(&self, index: u32, name: &str) -> Result<(), WindowError> {
+        let mut req = self
+            .request(Op::DockApp)
+            .with_title(name)
+            .ok_or(WindowError::Invalid)?;
+        req.width = index;
+        self.call(req, false).map(|_| ())
+    }
+
+    /// Sends the window to the dock, as its minimize circle does.
+    pub fn minimize(&self) -> Result<(), WindowError> {
+        self.call(self.request(Op::Minimize), false).map(|_| ())
+    }
+
+    /// A buffer of `len` bytes for a clipboard request, given to `use_it` mapped.
+    fn with_buffer<R>(
+        hardware: Handle,
+        len: usize,
+        use_it: impl FnOnce(Handle, *mut u8) -> Result<R, WindowError>,
+    ) -> Result<R, WindowError> {
+        let dma = sys::dma_alloc(hardware, len.max(1) as u64).map_err(WindowError::Ipc)?;
+        let result = match sys::mmio_map(dma) {
+            Ok(virt) => {
+                let result = use_it(dma, virt as *mut u8);
+                let _ = sys::mmio_unmap(virt);
+                result
+            }
+            Err(e) => Err(WindowError::Ipc(e)),
+        };
+        let _ = sys::handle_close(dma);
+        result
+    }
+
+    /// The owner's clipboard becomes `text`: what a program does when the owner copies.
+    /// Refused while the window lacks the focus.
+    pub fn clipboard_set(&self, hardware: Handle, text: &str) -> Result<(), WindowError> {
+        if text.len() > MAX_CLIPBOARD {
+            return Err(WindowError::Invalid);
+        }
+        Self::with_buffer(hardware, text.len(), |dma, virt| {
+            // SAFETY: our own new buffer, of at least this many bytes.
+            unsafe { core::ptr::copy_nonoverlapping(text.as_ptr(), virt, text.len()) };
+            let mut req = self.request(Op::ClipboardSet);
+            req.width = text.len() as u32;
+            self.call_with(req, Some(dma)).map(|_| ())
+        })
+    }
+
+    /// Reads the owner's clipboard into `take`, once for each Ctrl+V the owner pressed
+    /// in this window: at any other time it is refused, so call it for that key.
+    pub fn clipboard_get<R>(
+        &self,
+        hardware: Handle,
+        take: impl FnOnce(&str) -> R,
+    ) -> Result<R, WindowError> {
+        Self::with_buffer(hardware, MAX_CLIPBOARD, |dma, virt| {
+            let reply = self.call_with(self.request(Op::ClipboardGet), Some(dma))?;
+            let len = (reply.value as usize).min(MAX_CLIPBOARD);
+            // SAFETY: our own buffer, of `MAX_CLIPBOARD` bytes, and the compositor is done.
+            let bytes = unsafe { core::slice::from_raw_parts(virt, len) };
+            let text = core::str::from_utf8(bytes).map_err(|_| WindowError::Invalid)?;
+            Ok(take(text))
+        })
+    }
+
+    /// Gives the content a new size, in a new buffer that `paint` draws first: the
+    /// compositor shows the new size with its picture, never blank. The old buffer
+    /// goes once the compositor lets it go: for this call, the program's quota must
+    /// hold both, or all three with two buffers. A window with two asks for its second
+    /// again after, of the new size; should that fail it keeps one
+    /// ([`is_double`](Self::is_double)). Should the answer be lost in a timeout, the
+    /// compositor may hold the new buffer while this keeps the old one, until the
+    /// next resize.
+    pub fn resize(
+        &mut self,
+        hardware: Handle,
+        width: u32,
+        height: u32,
+        paint: impl FnOnce(&mut Canvas),
+    ) -> Result<(), WindowError> {
+        if width == 0 || height == 0 {
+            return Err(WindowError::Invalid);
+        }
+        let dma =
+            sys::dma_alloc(hardware, width as u64 * height as u64 * 4).map_err(WindowError::Ipc)?;
+        let pixels = match sys::mmio_map(dma) {
+            Ok(p) => p,
+            Err(e) => {
+                let _ = sys::handle_close(dma);
+                return Err(WindowError::Ipc(e));
+            }
+        };
+        let old = (self.draw.get(), self.width, self.height);
+        (self.width, self.height) = (width, height);
+        self.draw.set((dma, pixels));
+        paint(&mut self.canvas());
+        let mut req = self.request(Op::Resize);
+        req.width = width;
+        req.height = height;
+        match self.call(req, true) {
+            Ok(_) => {
+                let _ = sys::mmio_unmap(old.0 .1);
+                let _ = sys::handle_close(old.0 .0);
+                // The compositor dropped the second buffer, of the old size: a new one.
+                self.draw_slot.set(0);
+                if let Some((dma, pixels)) = self.shown.take() {
+                    let _ = sys::mmio_unmap(pixels);
+                    let _ = sys::handle_close(dma);
+                    let _ = self.double_buffer(hardware);
+                }
+                Ok(())
+            }
+            Err(e) => {
+                let _ = sys::mmio_unmap(pixels);
+                let _ = sys::handle_close(dma);
+                self.draw.set(old.0);
+                (self.width, self.height) = (old.1, old.2);
+                Err(e)
+            }
+        }
+    }
+
+    pub fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
     }
 
     /// Next event, or `None` if the deadline expires.
@@ -141,8 +400,18 @@ impl Window {
         Ok(reply)
     }
 
+    /// Closes the window and lets its buffers go: the compositor keeps a buffer only
+    /// while a window shows or holds it.
     pub fn close(self) -> Result<(), WindowError> {
-        self.call(self.request(Op::Close), false).map(|_| ())
+        let closed = self.call(self.request(Op::Close), false).map(|_| ());
+        for (dma, pixels) in [Some(self.draw.get()), self.shown.get()]
+            .into_iter()
+            .flatten()
+        {
+            let _ = sys::mmio_unmap(pixels);
+            let _ = sys::handle_close(dma);
+        }
+        closed
     }
 }
 
@@ -157,12 +426,83 @@ pub fn poll_reply(msg: &[u8]) -> Result<Option<Event>, WindowError> {
     }
 }
 
+/// Init only, over the compositor's main endpoint: the desktop becomes dark or light.
+pub fn set_appearance(compositor: Handle, dark: bool) -> Result<(), WindowError> {
+    let mut req = Request::new(Op::Appearance);
+    req.width = u32::from(dark);
+    main_request(compositor, req)
+}
+
+/// Init only, over the compositor's main endpoint: the clock's minutes from UTC.
+pub fn set_timezone(compositor: Handle, minutes: i32) -> Result<(), WindowError> {
+    let mut req = Request::new(Op::Timezone);
+    req.width = minutes as u32;
+    main_request(compositor, req)
+}
+
+/// Init only, over the compositor's main endpoint: what the bar says of the network.
+/// Waits `wait_ms` at most: init does this on its own, in its main loop.
+pub fn set_network(compositor: Handle, text: &str, wait_ms: u64) -> Result<(), WindowError> {
+    let req = Request::new(Op::Network)
+        .with_title(text)
+        .ok_or(WindowError::Invalid)?;
+    main_request_within(compositor, req, wait_ms)
+}
+
+/// Init only, over the compositor's main endpoint, for the owner's shell: the screen
+/// as last composed into `buffer` (a DMA buffer, given up whatever the outcome),
+/// `0x00RRGGBB` rows; its width and height. Waits `send_ms` at most for the
+/// compositor to take the request, and `reply_ms` for its answer.
+pub fn capture(
+    compositor: Handle,
+    buffer: Handle,
+    send_ms: u64,
+    reply_ms: u64,
+) -> Result<(u32, u32), WindowError> {
+    let mut msg = [0u8; Reply::LEN];
+    let len = rpc::call(
+        compositor,
+        &Request::new(Op::Capture).encode(),
+        &[buffer],
+        send_ms,
+        reply_ms,
+        &mut msg,
+    )
+    .map_err(WindowError::Ipc)?;
+    match Reply::decode(&msg[..len]) {
+        Some(r) if r.status == Status::Ok => Ok((r.value as u32, (r.value >> 32) as u32)),
+        Some(r) => Err(WindowError::Status(r.status)),
+        None => Err(WindowError::Ipc(Error::Invalid)),
+    }
+}
+
+fn main_request(compositor: Handle, req: Request) -> Result<(), WindowError> {
+    main_request_within(compositor, req, rpc::GRACE_MS)
+}
+
+fn main_request_within(compositor: Handle, req: Request, wait_ms: u64) -> Result<(), WindowError> {
+    let mut msg = [0u8; Reply::LEN];
+    let len = rpc::call(compositor, &req.encode(), &[], wait_ms, wait_ms, &mut msg)
+        .map_err(WindowError::Ipc)?;
+    match Reply::decode(&msg[..len]).map(|r| r.status) {
+        Some(Status::Ok) => Ok(()),
+        Some(s) => Err(WindowError::Status(s)),
+        None => Err(WindowError::Ipc(Error::Invalid)),
+    }
+}
+
 /// Broker and init only, over the compositor's main endpoint: a session
 /// for one client (ADR 0052); returns its send side (`WRITE`,
 /// transferable) and its id for [`detach`]. Windows created through it are
 /// that client's alone.
-pub fn attach(compositor: Handle) -> Result<(Handle, u32), WindowError> {
-    let req = Request::new(Op::Attach);
+///
+/// `program` is its name from its manifest, which the bar and the dock show for its
+/// windows, whatever titles it gives them.
+pub fn attach(compositor: Handle, program: &str) -> Result<(Handle, u32), WindowError> {
+    let name = program.get(..program.floor_char_boundary(MAX_TITLE));
+    let req = Request::new(Op::Attach)
+        .with_title(name.unwrap_or(""))
+        .ok_or(WindowError::Invalid)?;
     let mut msg = [0u8; Reply::LEN];
     let mut handles = [Handle(0); sys::abi::IPC_MAX_HANDLES];
     let (len, nh) = rpc::call_handles(

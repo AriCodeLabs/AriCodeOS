@@ -137,6 +137,7 @@ pub fn on_tick(now: u64, bsp: bool, from_user: bool) {
     if woke > 0 {
         kick_idle();
     }
+    cpu::current().count_tick();
     let expired = cpu::current().quantum_tick(QUANTUM_TICKS);
     if expired || woke > 0 {
         // Counted only when another thread takes the CPU: a lone thread
@@ -205,6 +206,43 @@ pub fn wake(tid: Tid) -> Result<(), aricode_sched::SchedError> {
 /// Sets the CPU `tid` may run on (`None` = any).
 pub fn set_affinity(tid: Tid, cpu: Option<usize>) -> Result<(), aricode_sched::SchedError> {
     with(|s| s.policy.set_affinity(tid, cpu))
+}
+
+/// How long [`move_current_to`] watches the target CPU's tick before
+/// pinning: ten ticks.
+const ALIVE_WAIT_MS: u64 = 10 * crate::time::MS_PER_TICK;
+
+/// Moves the calling thread to CPU `target` and keeps it there (the
+/// power-off, `arch::x86_64::power::move_to_poweroff_cpu`): pinned, then
+/// yielding until that CPU picks it up at its next switch, within its next
+/// tick (every CPU ticks; an idle one looks for ready threads on each).
+/// With interrupts on.
+///
+/// A pinned thread waits for its CPU without limit, so the target is first
+/// seen alive: its tick count must advance within [`ALIVE_WAIT_MS`], or
+/// nothing is pinned and the caller goes on where it is. A CPU that wedges
+/// in the instant between that check and the pin would still hold the
+/// thread; the window is one tick.
+pub fn move_current_to(target: usize) -> Result<(), &'static str> {
+    if target >= cpu::MAX_CPUS || !cpu::slot(target).is_online() {
+        return Err("is not online");
+    }
+    if cpu::id() as usize == target {
+        return Ok(());
+    }
+    let seen = cpu::slot(target).ticks();
+    let deadline = crate::time::uptime_us() + ALIVE_WAIT_MS * 1000;
+    while cpu::slot(target).ticks() == seen {
+        if crate::time::uptime_us() > deadline {
+            return Err("does not tick: left alone");
+        }
+        yield_now();
+    }
+    set_affinity(current_tid(), Some(target)).map_err(|_| "cannot be chosen")?;
+    while cpu::id() as usize != target {
+        yield_now();
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -423,6 +461,9 @@ fn switch_with(decide: impl FnOnce(&mut RoundRobin, usize) -> Option<Tid>) {
             unsafe {
                 core::arch::asm!("mov {}, cr3", out(reg) current_cr3, options(nomem, nostack))
             };
+            // Said before the load: a shootdown for this address space either finds
+            // this CPU or comes before it reads the tables (ADR 0082).
+            crate::cpu::current().set_cr3(cr3);
             if cr3 != current_cr3 {
                 // SAFETY: `cr3` is a PML4 built by the VMM or by `process::spawn`.
                 unsafe { core::arch::asm!("mov cr3, {}", in(reg) cr3, options(nostack)) };
@@ -459,7 +500,7 @@ fn reap() {
     for z in zombies {
         debug!("task: reap {:?} '{}'", z.tid, z.name);
         if let Some(pid) = z.process {
-            crate::user::process::release_address_space(pid);
+            crate::user::process::thread_reaped(pid);
         }
         drop(z);
     }
@@ -506,6 +547,9 @@ pub fn threads_selftest() {
         }
     }
     assert_eq!(current_tid(), MAIN_TID, "the self-test runs on main");
+    // The kernel's own threads (cursor, reclaim, gpu, thermal, idle) vary
+    // with the machine; the test's own must all be gone at the end.
+    let baseline = thread_count();
     // Strict alternation only makes sense on one CPU: the three threads are
     // pinned to CPU 0.
     set_affinity(MAIN_TID, Some(0)).unwrap();
@@ -556,12 +600,10 @@ pub fn threads_selftest() {
         "frames not returned after reap: {}",
         free_before - free_after
     );
-    // main, the console cursor thread and one idle thread per CPU.
-    let expected = 2 + cpu::online_count();
     assert_eq!(
         thread_count(),
-        expected,
-        "only main, the cursor thread and one idle per CPU"
+        baseline,
+        "every thread the self-test made is reaped"
     );
     assert_eq!(current_tid(), MAIN_TID);
     info!(

@@ -9,7 +9,7 @@
 # terminal shell that ends takes what it spawned with it.
 name = "apps.terminal_rules"
 description = "terminal: interactive shells only, four at most, and only for the package named terminal"
-level = "full"
+level = "release"
 areas = ["apps", "shell", "init"]
 cmdline = "qemu_exit shell"
 install = ["examples/test_terminal", "examples/fake_terminal"]

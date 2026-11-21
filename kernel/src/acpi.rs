@@ -20,6 +20,13 @@ pub struct AcpiInfo {
     /// the DSDT (`None`: no ACPI power-off on this machine).
     pub fadt: Option<Fadt>,
     pub s5: Option<(u8, u8)>,
+    /// Device identifiers the DSDT and SSDTs declare, for `diag`.
+    pub ids: Vec<aricode_acpi::DeviceId>,
+    /// Where the DSDT and SSDTs are, and their lengths: the AML a device
+    /// study reads (`sysinfo::ACPI_AML`).
+    pub aml: Vec<(u64, u32)>,
+    /// Where the FADT is, and its length: saved along with the AML.
+    pub fadt_table: Option<(u64, u32)>,
 }
 
 static ACPI: IrqLock<Option<AcpiInfo>> = IrqLock::new(None);
@@ -89,24 +96,44 @@ pub fn init(info: &BootInfo) {
                 Err(e) => warn!("acpi: invalid DMAR ({e:?})"),
             },
             b"FACP" => match aricode_acpi::parse_fadt(table) {
-                Ok(f) => acpi.fadt = Some(f),
+                Ok(f) => {
+                    if !f.checksum_ok {
+                        warn!("acpi: FADT checksum does not add up; used anyway, as ACPICA does");
+                    }
+                    acpi.fadt = Some(f);
+                    acpi.fadt_table = Some((addr, head.length));
+                }
                 Err(e) => warn!("acpi: invalid FADT ({e:?})"),
             },
-            b"SSDT" if acpi.s5.is_none() => acpi.s5 = aricode_acpi::find_s5(table),
+            b"SSDT" => {
+                acpi.aml.push((addr, head.length));
+                if acpi.s5.is_none() {
+                    acpi.s5 = aricode_acpi::find_s5(table);
+                }
+                acpi.ids.extend(aricode_acpi::device_ids(table));
+            }
             _ => {}
         }
     }
     // \_S5_ normally lives in the DSDT, which only the FADT points to.
     if let Some(f) = acpi.fadt {
-        if let Some((dsdt, _)) = table_at(f.dsdt) {
+        if let Some((dsdt, head)) = table_at(f.dsdt) {
+            acpi.aml.insert(0, (f.dsdt, head.length));
             if let Some(s5) = aricode_acpi::find_s5(dsdt) {
                 acpi.s5 = Some(s5);
             }
+            let ssdt = core::mem::take(&mut acpi.ids);
+            acpi.ids = aricode_acpi::device_ids(dsdt);
+            acpi.ids.extend(ssdt);
         }
         match acpi.s5 {
+            Some((a, b)) if f.hw_reduced() => info!(
+                "acpi: power-off through S5 (SLP_TYP {a}/{b}, hardware-reduced: sleep control {:#x}, status {:#x})",
+                f.sleep_control.address, f.sleep_status.address
+            ),
             Some((a, b)) => info!(
-                "acpi: power-off through S5 (SLP_TYP {a}/{b}, PM1a {:#x}, PM1b {:#x})",
-                f.pm1a_cnt, f.pm1b_cnt
+                "acpi: power-off through S5 (SLP_TYP {a}/{b}, PM1a cnt {}, PM1b cnt {}, PM1a evt {}, GPE0 {}, GPE1 {}; FADT rev {}.{}, {} bytes)",
+                f.pm1a_cnt, f.pm1b_cnt, f.pm1a_evt, f.gpe0, f.gpe1, f.revision, f.minor_revision, f.length
             ),
             None => warn!("acpi: no \\_S5_ package; shutdown will only halt the CPU"),
         }
@@ -155,6 +182,29 @@ pub fn init(info: &BootInfo) {
     *ACPI.lock() = Some(acpi);
 }
 
+/// The DSDT and SSDTs, then the FADT, one after another, each whole with
+/// its header: the firmware's description of the machine's devices and of
+/// its power-off registers, for a study on the build host. Only these:
+/// other tables may hold what is not ours to copy (MSDM and SLIC carry a
+/// Windows licence key). The FADT holds addresses, flags and port numbers,
+/// no serial and no key.
+pub fn aml_tables() -> Vec<u8> {
+    let (mut at, fadt) = with(|a| (a.aml.clone(), a.fadt_table));
+    at.extend(fadt);
+    let mut out = Vec::new();
+    for (addr, len) in at {
+        if let Some(t) = phys_slice(addr, len as usize) {
+            out.extend_from_slice(t);
+        }
+    }
+    out
+}
+
+/// Bytes at physical `addr`, for other firmware tables (SMBIOS).
+pub fn firmware_bytes(addr: u64, len: usize) -> Option<&'static [u8]> {
+    phys_slice(addr, len)
+}
+
 /// Access to the ACPI information (empty if it could not be read).
 pub fn with<R>(f: impl FnOnce(&AcpiInfo) -> R) -> R {
     static EMPTY: AcpiInfo = AcpiInfo {
@@ -168,6 +218,9 @@ pub fn with<R>(f: impl FnOnce(&AcpiInfo) -> R) -> R {
         dmar: None,
         fadt: None,
         s5: None,
+        ids: Vec::new(),
+        aml: Vec::new(),
+        fadt_table: None,
     };
     let guard = ACPI.lock();
     f(guard.as_ref().unwrap_or(&EMPTY))

@@ -4,7 +4,7 @@
 # system and does not touch the data partition.
 name = "update.rollback_keeps_data"
 description = "three failed boots of B, rollback to A and the AriFS data intact"
-level = "full"
+level = "release"
 areas = ["update", "boot", "init", "shell"]
 timeout_secs = 120
 

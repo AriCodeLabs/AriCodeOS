@@ -1,0 +1,21 @@
+[package]
+name = "ari-app-gpu-probe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Stages A and B of ADR 0080 (ADR 0083, 0086): fill and copy with the GPU's blitter, timed beside the CPU, a hung batch reset, what non-secure batches can reach, and EU kernels dispatched on the render engine"
+publish = false
+
+[[bin]]
+name = "gpu_probe"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+aricode-rt = { path = "../../sdk/runtime" }
+aricode-intel-gt = { path = "../../libs/intel-gt" }
+aricode-gen7-eu = { path = "../../libs/gen7-eu" }
+
+[build-dependencies]
+aricode-build = { path = "../../sdk/build" }

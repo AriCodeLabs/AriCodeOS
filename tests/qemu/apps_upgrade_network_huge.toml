@@ -6,7 +6,7 @@
 # it.
 name = "apps.upgrade_network_huge"
 description = "upgrade: a package at the 8 MiB limit downloaded, staged, installed and launched"
-level = "full"
+level = "release"
 areas = ["apps", "update", "network", "shell"]
 install = ["examples/hello_ext"]
 timeout_secs = 300

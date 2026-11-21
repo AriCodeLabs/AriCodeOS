@@ -117,7 +117,12 @@ impl Driver {
         match tag {
             ps2::TAG_RESET => self.reset(at),
             ps2::TAG_KEYBOARD => {
-                if let Some(ev) = self.keyboard.feed(byte) {
+                if let Some(mut ev) = self.keyboard.feed(byte) {
+                    // The keyboard repeats a held key as a new press: say what
+                    // it is, so nothing takes it for a press (ADR 0078).
+                    if ev.value == 1 && self.keys.is_down(ev.code) {
+                        ev.value = 2;
+                    }
                     self.keys.follow(&ev);
                     self.push(ev, at);
                     self.push(SYN, at);

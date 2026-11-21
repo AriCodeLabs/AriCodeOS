@@ -1,0 +1,11 @@
+[package]
+name = "aricode-gen7-eu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "An assembler for the execution units of Intel Ivy Bridge graphics (gen7), for hand-written compute kernels (no_std)"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]

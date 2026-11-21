@@ -3,7 +3,7 @@
 //! Test level orchestration: unit (host) -> smoke/full (QEMU), the QEMU
 //! scenarios run `--jobs N` at a time (ADR 0040).
 
-use crate::scenario::{self, Level, Scenario};
+use crate::scenario::{self, HotplugAction, Level, Scenario};
 use crate::{build, image, parallel, ports, qemu, suite_lock, Cli, Result};
 use std::fmt::Write as _;
 use std::path::Path;
@@ -40,7 +40,10 @@ pub fn run(cli: &Cli, release: bool) -> Result {
     };
 
     let all = scenario::load_all()?;
-    let selected = scenario::select(&all, level, &areas)?;
+    let mut selected = match cli.value("--only") {
+        Some(names) => scenario::by_name(&all, names)?,
+        None => scenario::select(&all, level, &areas)?,
+    };
 
     if cli.flag("--list") {
         for s in &all {
@@ -92,10 +95,24 @@ pub fn run(cli: &Cli, release: bool) -> Result {
         }
     };
 
+    // A pass that steps aside for another suite (the CI container) comes back to
+    // what it had not run.
+    let progress = std::env::var("ARICODEOS_SUITE_YIELD")
+        .ok()
+        .filter(|p| !p.is_empty());
+    let earlier = progress
+        .as_ref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .unwrap_or_default();
+    let (ran, mut failed) = earlier_outcomes(&earlier);
+    selected.retain(|s| !ran.contains(&s.name.as_str()));
+
     // Unit level: always, even when filtering by area (a feature may want
     // only its QEMU scenarios; unit tests are still cheap and run anyway).
-    println!("[xtask] unit tests (host)");
-    build::unit_tests()?;
+    if earlier.is_empty() {
+        println!("[xtask] unit tests (host)");
+        build::unit_tests()?;
+    }
     if level == Level::Unit {
         return Ok(());
     }
@@ -109,22 +126,44 @@ pub fn run(cli: &Cli, release: bool) -> Result {
         selected.len()
     );
     let start = Instant::now();
-    let mut failed = Vec::new();
     let mut busy = Duration::ZERO;
-    parallel::run_ordered(
+    let result = parallel::run_ordered(
         &order,
         jobs,
         |i| selected[i].serial,
-        |i| run_scenario(&base, selected[i], cpus_override),
+        |i| {
+            if progress.is_some() && suite_lock::someone_waits() {
+                return Err(String::from(STEPPED_ASIDE));
+            }
+            run_scenario(&base, selected[i], cpus_override)
+        },
         |i, outcome| {
             print!("{}", outcome.report);
             let _ = std::io::Write::flush(&mut std::io::stdout());
             busy += outcome.elapsed;
+            let name = &selected[i].name;
             if !outcome.ok {
-                failed.push(selected[i].name.clone());
+                failed.push(name.clone());
+            }
+            if let Some(path) = &progress {
+                let word = if outcome.ok { "PASS" } else { "FAIL" };
+                let line = format!("{word} {name}\n");
+                let written = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+                if let Err(e) = written {
+                    println!("[xtask] {path}: {e}: this scenario will run again");
+                }
             }
         },
-    )?;
+    );
+    if matches!(&result, Err(e) if e == STEPPED_ASIDE) {
+        println!("[xtask] another suite is waiting: stepping aside");
+        std::process::exit(EXIT_STEPPED_ASIDE);
+    }
+    result?;
     println!(
         "[xtask] QEMU wall clock {}, {} of scenario time",
         minutes(start.elapsed()),
@@ -140,6 +179,26 @@ pub fn run(cli: &Cli, release: bool) -> Result {
     } else {
         Err(format!("failed scenarios: {}", failed.join(", ")))
     }
+}
+
+/// The answer of a scenario not started because another suite is waiting.
+const STEPPED_ASIDE: &str = "stepped aside";
+/// What the CI script looks for: come back to the rest later (`EX_TEMPFAIL`).
+const EXIT_STEPPED_ASIDE: i32 = 75;
+
+/// What a pass that stepped aside had already run: the names, and those that failed.
+fn earlier_outcomes(text: &str) -> (Vec<&str>, Vec<String>) {
+    let mut ran = Vec::new();
+    let mut failed = Vec::new();
+    for line in text.lines() {
+        if let Some((word, name)) = line.split_once(' ') {
+            ran.push(name);
+            if word == "FAIL" {
+                failed.push(String::from(name));
+            }
+        }
+    }
+    (ran, failed)
 }
 
 /// `1m05s`.
@@ -603,6 +662,7 @@ pub fn run_scenario(
         let input = qemu::Input {
             prompt: &s.prompt,
             lines: &run.stdin,
+            after_input: s.stdin_after_input,
         };
         let probe = s.host_tcp.as_ref().map(|h| qemu::TcpProbe {
             marker: &h.marker,
@@ -619,17 +679,33 @@ pub fn run_scenario(
                 mouse_steps: h.mouse_steps,
                 wait_ms: h.wait_ms,
                 click: h.click.as_deref(),
+                button_down: h.button_down.as_deref(),
+                drag: h.drag,
+                drag_steps: h.drag_steps,
+                hold_key: h.hold_key.as_ref().map(|(k, ms)| (k.as_str(), *ms)),
+                screendump: h.screendump.as_deref(),
                 key_delay_ms: h.key_delay_ms,
                 echo_prompt: h.echo_prompt.as_deref(),
             })
             .collect();
-        let hotplug = s.host_hotplug.as_ref().map(|h| qemu::Hotplug {
-            marker: &h.marker,
-            delay: Duration::from_millis(h.delay_ms),
-            driver: &h.driver,
-            bus: &h.bus,
-            id: &h.id,
-        });
+        let hotplug = s
+            .host_hotplug
+            .iter()
+            .map(|h| qemu::Hotplug {
+                marker: &h.marker,
+                delay: Duration::from_millis(h.delay_ms),
+                action: match h.action {
+                    HotplugAction::Add => qemu::HotplugAction::Add {
+                        driver: h.driver.as_deref().unwrap_or_default(),
+                        bus: h.bus.as_deref().unwrap_or_default(),
+                        port: h.port.as_deref(),
+                        drive: h.drive.as_deref(),
+                    },
+                    HotplugAction::Remove => qemu::HotplugAction::Remove,
+                },
+                id: &h.id,
+            })
+            .collect();
         let ssh_probe = match (&s.host_ssh, &ssh_key) {
             (Some(h), Some(key)) => Some(qemu::SshProbe {
                 marker: &h.marker,
@@ -667,6 +743,8 @@ pub fn run_scenario(
                 hid_only_input: s.usb_hid_only_input || s.no_virtio_input,
                 legacy_controller: s.usb_legacy_controller,
                 storage: s.usb_storage,
+                xhci: s.usb_xhci,
+                spare_disk: s.usb_spare_disk,
                 ehci_hid: s.usb_ehci_hid,
                 ehci_storage: s.usb_ehci_storage,
                 ehci_companion_kbd: s.usb_ehci_companion_kbd,
@@ -742,11 +820,34 @@ pub fn run_scenario(
                 problems.push(format!("{prefix}missing '{needle}' (the moved host key)"));
             }
         }
+        // A stage that never came sent nothing, so what follows proves nothing.
+        // Its line also quotes the marker, which would satisfy a search for
+        // that text (incident 0059). A hot-plug stage QEMU refused did not
+        // happen either.
+        for needle in [
+            "[host] QMP: marker '",
+            "[host] flood: marker '",
+            "[host] hotplug: marker '",
+            qemu::HOTPLUG_FAILED,
+        ] {
+            if let Some(line) = cap.serial.lines().find(|l| l.contains(needle)) {
+                problems.push(format!("{prefix}{line}"));
+            }
+        }
         if let Some(i) = scenario::first_out_of_order(&cap.serial, &expect.serial_order) {
             problems.push(format!(
                 "{prefix}'{}' not found after the texts before it in serial_order",
                 expect.serial_order[i]
             ));
+        }
+        if let Some(size) = &expect.screenshot {
+            match scenario::check_screenshot(&cap.serial, size) {
+                // Kept beside the log, for a look with any QOI viewer or ffmpeg.
+                Ok(image) => {
+                    let _ = std::fs::write(workdir.join("screenshot.qoi"), image);
+                }
+                Err(why) => problems.push(format!("{prefix}{why}")),
+            }
         }
         if cap.timed_out {
             problems.push(format!("{prefix}timeout {}s", s.timeout_secs));
@@ -963,4 +1064,18 @@ fn https_servers(dir: &std::path::Path, ports: (u16, u16, u16)) -> Result<(Https
         }
     }
     Ok((servers, ca))
+}
+
+#[cfg(test)]
+mod stepping_aside {
+    use super::earlier_outcomes;
+
+    #[test]
+    fn a_pass_comes_back_to_what_it_had_not_run() {
+        let (ran, failed) = earlier_outcomes("PASS a\nFAIL b\nPASS c\n");
+        assert_eq!(ran, ["a", "b", "c"]);
+        assert_eq!(failed, ["b"], "a failure stays one when it comes back");
+        let (ran, failed) = earlier_outcomes("");
+        assert!(ran.is_empty() && failed.is_empty());
+    }
 }

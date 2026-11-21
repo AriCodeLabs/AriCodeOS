@@ -12,8 +12,15 @@
 //! the handles [`handle::SELF_PROCESS`], [`handle::MAIN_THREAD`] and
 //! [`handle::CONSOLE`].
 //!
-//! During `0.x` the ABI may change (section 74). Current version: 8
-//! (ADR 0075: the `PS2` object, `ps2_read` and `INIT_PS2`). Version 7
+//! During `0.x` the ABI may change (section 74). Current version: 13
+//! (ADR 0086: `gpu_dispatch` and [`gpu::Dispatch`]; `gpu_wait` takes its
+//! numbers too; `gpu_submit` no longer takes `MI_BATCH_BUFFER_START`). Version 12 (ADR 0083: `gpu_frequency`). Version 11 (ADR 0084: the `MEM` object, `mem_create`, and `mmio_map` and `gpu_map`
+//! taking it). Version 10 (ADR 0083: the `GPU` object at `INIT_GPU`, which moves `INIT_PS2` one
+//! on; `gpu_map`, `gpu_unmap`, `gpu_submit`, `gpu_wait`; `Error::Busy` and
+//! `Error::Hung`; `sysinfo::GPU`). Version 9 (ADR 0082: threads in a
+//! process, `thread_create`, `thread_exit`, `thread_join`, `futex_wait`,
+//! `futex_wake`, and the thread limit in `spawn_limits`). Version 8 (ADR 0075): the `PS2` object, `ps2_read` and
+//! `INIT_PS2`. Version 7
 //! (ADR 0047): `spawn_limits::CONSOLE_FIRST` gives the child a session
 //! console. Version 6 (ADR 0044): `ipc_receive_any` also waits on
 //! interrupt lines. Version 5
@@ -23,7 +30,7 @@
 
 #![no_std]
 
-pub const ABI_VERSION: u32 = 8;
+pub const ABI_VERSION: u32 = 13;
 
 /// Kernel base signature (SHA-512), required to check and verify the origin
 /// and authorship of an AriCodeOS build. It is part of the fixed ABI: it is
@@ -52,10 +59,15 @@ pub mod handle {
     pub const INIT_CONSOLE_IN: u32 = 0x0001_0008;
     /// Handle through which `init` receives the framebuffer (`MMIO`, `READ|WRITE`).
     pub const INIT_FRAMEBUFFER: u32 = 0x0001_0009;
+    /// Handle through which `init` receives the GPU (`GPU`,
+    /// `READ|WRITE|DUPLICATE|TRANSFER`, ADR 0083). Always present; on a
+    /// machine whose GPU engine the kernel did not take, its calls return
+    /// `NotFound` and `sysinfo::GPU` says why.
+    pub const INIT_GPU: u32 = 0x0001_000A;
     /// Handle through which `init` receives the PS/2 stream (`PS2`,
     /// `READ|WAIT|DUPLICATE|TRANSFER`), only if the machine has an i8042 that passed
     /// its self-test (ADR 0075). Absent otherwise: the handle is invalid.
-    pub const INIT_PS2: u32 = 0x0001_000A;
+    pub const INIT_PS2: u32 = 0x0001_000B;
 }
 
 /// Bits of the `arg` the kernel passes to `init`.
@@ -84,6 +96,10 @@ pub mod init_arg {
 /// Bits of the `arg` init passes to a PCI driver (`start_driver`), above
 /// the BAR (bits 0..5) and IRQ (bit 15) bits.
 pub mod driver_arg {
+    /// Init gave this driver a `SYSTEM` handle, its first extra. A driver that takes one
+    /// only for some boots asks here, since any other handle may be at that place.
+    pub const WITH_SYSTEM: u64 = 1 << 14;
+
     /// The driver is relaunched after serving the system disk (ADR 0031):
     /// bits 17..63 carry the first 47 bits of that disk's GPT disk GUID,
     /// and the driver serves no other disk.
@@ -145,6 +161,146 @@ pub mod kind {
     pub const SYSTEM: u64 = 11;
     /// The i8042's bytes while a process holds the screen (ADR 0075).
     pub const PS2: u64 = 12;
+    /// The GPU's engine (ADR 0083): memory mapped for it, batches run on it.
+    pub const GPU: u64 = 13;
+    /// Memory that need not be contiguous, backed on first touch (ADR 0084).
+    pub const MEM: u64 = 14;
+}
+
+/// The GPU (ADR 0083). One process at a time is its client: the first that
+/// maps memory or submits a batch, until it ends. Its address space (a PPGTT)
+/// holds only the DMA buffers it mapped there; batches run non-secure in it.
+pub mod gpu {
+    /// The client's address space: addresses below this.
+    pub const SIZE: u64 = 2 << 30;
+    /// Mappings start at or above this, so an address of 0 never names memory.
+    pub const FIRST: u64 = 0x1_0000;
+    /// Mappings are made of whole pages of this size.
+    pub const PAGE: u64 = 4096;
+    /// Numbers `gpu_dispatch` returns carry this bit, so `gpu_wait` knows
+    /// them from the blitter's.
+    pub const DISPATCH_NUMBER: u64 = 1 << 32;
+
+    /// A compute dispatch on the render engine's GPGPU pipe (ADR 0086):
+    /// what `gpu_dispatch` runs. The kernel writes the commands from it; the
+    /// state it points at (interface descriptors, CURBE data, binding tables,
+    /// surface states, EU code) is the client's, in its mappings. Addresses
+    /// are in the client's GPU address space; offsets are from the base
+    /// named. Field names follow Intel's PRM (Vol 2 Part 2, 1.8).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct Dispatch {
+        /// `STATE_BASE_ADDRESS`: 4 KiB-aligned bases.
+        pub general_base: u32,
+        pub surface_base: u32,
+        pub dynamic_base: u32,
+        pub instruction_base: u32,
+        /// `MEDIA_VFE_STATE`: the scratch space, a 1 KiB-aligned offset from
+        /// the general base with each thread's size code in bits 3:0, at
+        /// most 11 (the 2012 PRM reads it as 1 to 12 KiB, Mesa writes it as
+        /// powers of two from 1 KiB; nothing here spills yet, so neither is
+        /// measured); 0 when no kernel spills.
+        pub scratch: u32,
+        /// Threads that may run at once, from 1 to the GPU's.
+        pub max_threads: u16,
+        /// URB entries (at most 64) and each one's size in 256-bit
+        /// registers (at least 1 when there are entries).
+        pub urb_entries: u8,
+        pub urb_entry_regs: u16,
+        /// The URB space for CURBE data, in 256-bit registers.
+        pub curbe_regs: u16,
+        /// `MEDIA_CURBE_LOAD`: the CURBE data's offset from the dynamic base
+        /// and its length in bytes, both multiples of 32; length 0 loads
+        /// none.
+        pub curbe_offset: u32,
+        pub curbe_len: u32,
+        /// `MEDIA_INTERFACE_DESCRIPTOR_LOAD`: the descriptors' offset from
+        /// the dynamic base (a multiple of 32) and their number (1 to 32).
+        pub descriptor_offset: u32,
+        pub descriptors: u8,
+        /// `GPGPU_WALKER`: the descriptor it uses, the SIMD width (8, 16 or
+        /// 32), the threads of a group in width, height and depth (each from
+        /// 1, at most 64 in all, 32 at SIMD32), the first group and the
+        /// number of groups on each axis, and the channels on in the last
+        /// thread of a row and of a column.
+        pub descriptor: u8,
+        pub simd: u8,
+        pub group: [u8; 3],
+        pub start: [u32; 3],
+        pub groups: [u32; 3],
+        pub right_mask: u32,
+        pub bottom_mask: u32,
+    }
+
+    impl Dispatch {
+        /// Bytes `gpu_dispatch` reads.
+        pub const LEN: usize = 80;
+
+        pub fn encode(&self) -> [u8; Self::LEN] {
+            let w: [u32; Self::LEN / 4] = [
+                self.general_base,
+                self.surface_base,
+                self.dynamic_base,
+                self.instruction_base,
+                self.scratch,
+                self.max_threads as u32
+                    | (self.urb_entries as u32) << 16
+                    | (self.descriptors as u32) << 24,
+                self.urb_entry_regs as u32 | (self.curbe_regs as u32) << 16,
+                self.curbe_offset,
+                self.curbe_len,
+                self.descriptor_offset,
+                self.simd as u32 | (self.descriptor as u32) << 8,
+                self.group[0] as u32 | (self.group[1] as u32) << 8 | (self.group[2] as u32) << 16,
+                self.start[0],
+                self.start[1],
+                self.start[2],
+                self.groups[0],
+                self.groups[1],
+                self.groups[2],
+                self.right_mask,
+                self.bottom_mask,
+            ];
+            let mut b = [0u8; Self::LEN];
+            for (i, v) in w.iter().enumerate() {
+                b[4 * i..4 * i + 4].copy_from_slice(&v.to_le_bytes());
+            }
+            b
+        }
+
+        pub fn decode(b: &[u8]) -> Option<Self> {
+            if b.len() != Self::LEN {
+                return None;
+            }
+            let w =
+                |i: usize| u32::from_le_bytes([b[4 * i], b[4 * i + 1], b[4 * i + 2], b[4 * i + 3]]);
+            // Bits no field uses must be clear, so a later field can take them.
+            if w(10) >> 16 != 0 || w(11) >> 24 != 0 {
+                return None;
+            }
+            Some(Self {
+                general_base: w(0),
+                surface_base: w(1),
+                dynamic_base: w(2),
+                instruction_base: w(3),
+                scratch: w(4),
+                max_threads: w(5) as u16,
+                urb_entries: (w(5) >> 16) as u8,
+                descriptors: (w(5) >> 24) as u8,
+                urb_entry_regs: w(6) as u16,
+                curbe_regs: (w(6) >> 16) as u16,
+                curbe_offset: w(7),
+                curbe_len: w(8),
+                descriptor_offset: w(9),
+                simd: w(10) as u8,
+                descriptor: (w(10) >> 8) as u8,
+                group: [w(11) as u8, (w(11) >> 8) as u8, (w(11) >> 16) as u8],
+                start: [w(12), w(13), w(14)],
+                groups: [w(15), w(16), w(17)],
+                right_mask: w(18),
+                bottom_mask: w(19),
+            })
+        }
+    }
 }
 
 /// The PS/2 stream (ADR 0075): `ps2_read` copies entries of two bytes, a
@@ -245,7 +401,8 @@ pub mod nr {
     /// `IPC_RECEIVE_ANY` (ADR 0044).
     pub const IRQ_WAIT: u64 = 16;
     /// `mmio_map(region) -> virtual address`; requires `READ|WRITE` on an
-    /// MMIO or DMA object. Mapping a region the process already maps
+    /// MMIO, DMA or `MEM` object (a `MEM` object's pages are taken as they are
+    /// first touched, ADR 0084). Mapping a region the process already maps
     /// returns the existing mapping. A DMA buffer stays allocated while any
     /// process maps it, even after every handle to it is closed (ADR 0038);
     /// with a memory quota, the DMA bytes a process keeps mapped count
@@ -331,6 +488,98 @@ pub mod nr {
     /// can be a member of `ipc_receive_any` (`WAIT`), ready while entries
     /// are queued, and reported like an interrupt line.
     pub const PS2_READ: u64 = 37;
+    /// `thread_create(entry, arg) -> tid` (ADR 0082): a thread of the calling
+    /// process starts at `entry(arg)` in ring 3, on a 64 KiB stack of its own
+    /// the kernel gives it, with a guard page below. It must end with
+    /// `thread_exit`: a return from `entry` faults. [`Error::Limit`] past the
+    /// process's thread limit (`spawn_limits`), the main thread and threads
+    /// ended but not joined counted.
+    pub const THREAD_CREATE: u64 = 38;
+    /// `thread_exit(value)`: ends the calling thread, `value` for whoever joins
+    /// it. From the main thread it ends the process, as `process_exit`, and so
+    /// does any end of the process: every other thread of it ends too.
+    pub const THREAD_EXIT: u64 = 39;
+    /// `thread_join(tid, timeout_ms) -> value`: waits for thread `tid` of the
+    /// calling process to end and forgets it, freeing its place for a new one.
+    /// [`Error::Invalid`] for the main thread or the caller itself,
+    /// [`Error::NotFound`] for a thread not of this process or already joined.
+    pub const THREAD_JOIN: u64 = 40;
+    /// `futex_wait(addr, expected, timeout_ms)`: if the aligned `u32` at `addr`
+    /// holds `expected`, sleeps until a `futex_wake` on `addr`, the timeout
+    /// ([`Error::Timeout`]) or a spurious wake; returns at once if it does not.
+    /// Private to the process; no priority inheritance, no requeue (ADR 0082).
+    pub const FUTEX_WAIT: u64 = 41;
+    /// `futex_wake(addr, count) -> woken`: wakes up to `count` threads of the
+    /// calling process waiting on `addr`, the oldest first.
+    pub const FUTEX_WAKE: u64 = 42;
+    /// `gpu_map(gpu, dma, address)` (ADR 0083): maps the whole DMA buffer or
+    /// `MEM` object (every page of which is taken first, ADR 0084) into the
+    /// client's GPU address space at `address`, a multiple of
+    /// [`gpu::PAGE`](crate::gpu::PAGE) in `[gpu::FIRST, gpu::SIZE)`, not
+    /// overlapping another mapping. Requires `WRITE` on the `GPU` and
+    /// `READ|WRITE` on the buffer (the GPU can write every page it sees).
+    /// The buffer stays allocated while mapped. `Busy` if another process
+    /// is the GPU's client; `Limit` past 256 mappings; `Hung` once a reset
+    /// has failed; `NotFound` without a GPU engine.
+    pub const GPU_MAP: u64 = 43;
+    /// `gpu_unmap(gpu, address)`: removes the mapping made at `address`.
+    /// `Busy` while the engine has not finished the client's batches, or if
+    /// another process is the client; `Invalid` for no mapping there; `Hung`
+    /// once a reset has failed (the buffer then stays the GPU's for good).
+    pub const GPU_UNMAP: u64 = 44;
+    /// `gpu_submit(gpu, ptr, len) -> number`: runs the batch of `len` bytes
+    /// at `ptr` in the caller's memory (8 to 4096, a multiple of 8) after those
+    /// submitted before. The kernel copies it, checks the copy and writes its
+    /// commands into the blitter's ring, where they address the client's
+    /// GPU address space (ADR 0083, 0086): `MI_NOOP`, `MI_BATCH_BUFFER_END`
+    /// (the end of the batch), `MI_FLUSH_DW` without a store, linear 32-bit
+    /// `XY_COLOR_BLT` (raster operation 0xF0) and `XY_SRC_COPY_BLT` (0xCC)
+    /// at 4-byte aligned addresses, entirely inside the client's mappings
+    /// (source and destination may overlap only as the same surface with a
+    /// pitch of whole 64 bytes). Anything else, `MI_BATCH_BUFFER_START`
+    /// included since ABI 13: `Denied`, nothing runs, and a `Fault` event
+    /// records where the check stopped. The number names the batch for
+    /// `gpu_wait`. `Busy` while the ring is full, or if another process is
+    /// the client; `Hung` once a reset has failed.
+    pub const GPU_SUBMIT: u64 = 45;
+    /// `gpu_wait(gpu, number, timeout_ms)`: until the batch has finished.
+    /// `Timeout` at the deadline; `Hung` if no batch finished for
+    /// `gpu.hang_ms` with work pending and the engine was reset, which loses
+    /// every batch given until then; `Invalid` for a number not given;
+    /// `Busy` if another process is the client; `Killed` if the caller is
+    /// being ended.
+    pub const GPU_WAIT: u64 = 46;
+    /// `mem_create(len) -> handle` (ADR 0084): `len` bytes (whole pages) of
+    /// zeroed memory that need not be contiguous, with
+    /// `READ|WRITE|DUPLICATE|TRANSFER`. Its whole size is charged to the
+    /// process's memory quota and promised out of the machine's free memory
+    /// now; each page is taken when first touched, and is always there then.
+    /// Mapped with `mmio_map` and unmapped with `mmio_unmap`, as a DMA buffer
+    /// is; it lives while any handle or mapping holds it. `Limit` beyond the
+    /// quota or what the machine can promise; `Invalid` for a size that is
+    /// 0 or not whole pages. `dma_phys` refuses it.
+    pub const MEM_CREATE: u64 = 47;
+    /// `gpu_frequency(gpu, mhz) -> mhz` (ADR 0083): asks for the GPU's clock;
+    /// the answer is the clock asked of the GPU, within its limits and
+    /// `gpu.max_mhz`, and the lowest while the machine is hot (`gpu.hot_c`);
+    /// the GPU takes it within moments (`sysinfo::GPU` says the one it runs
+    /// at). Without a heat brake (no sensor) the most is the boot's clock
+    /// unless `gpu.max_mhz` is set. Requires `WRITE`; makes the caller the
+    /// client, like `gpu_map`. The next client starts at the boot's clock.
+    /// `Busy` if another process is the client or the GPU could not be told;
+    /// `Hung` once a reset has failed; `NotFound` without a GPU engine.
+    pub const GPU_FREQUENCY: u64 = 48;
+    /// `gpu_dispatch(gpu, ptr, len) -> number` (ADR 0086): runs the
+    /// [`gpu::Dispatch`](crate::gpu::Dispatch) of `len` bytes at `ptr`
+    /// (`Dispatch::LEN`) on the render engine; its number carries
+    /// [`gpu::DISPATCH_NUMBER`](crate::gpu::DISPATCH_NUMBER), for `gpu_wait`.
+    /// The kernel writes every command; the state and the EU code it names
+    /// are the client's, in its mappings, and its EU threads can write any
+    /// page mapped there. Requires `WRITE`; makes the caller the client.
+    /// `Invalid` for a descriptor the hardware would not take; `Busy` while
+    /// the ring is full; `Hung` once a reset of the render engine has failed;
+    /// `NotFound` without a GPU engine or a render ring.
+    pub const GPU_DISPATCH: u64 = 49;
 }
 
 /// `process_spawn_from` request (48 bytes in caller memory).
@@ -419,6 +668,20 @@ pub mod spawn_limits {
     pub const fn console_first(raw: u64) -> bool {
         raw & CONSOLE_FIRST != 0
     }
+    /// Threads the child may have at once, the main one and those ended but
+    /// not joined counted (ADR 0082): bits 40..47, 0 for [`DEFAULT_THREADS`].
+    pub const fn threads(raw: u64) -> usize {
+        match (raw >> 40) & 0xFF {
+            0 => DEFAULT_THREADS,
+            n => n as usize,
+        }
+    }
+    /// With [`pack`]: the thread limit, at most 255.
+    pub const fn with_threads(raw: u64, threads: u8) -> u64 {
+        raw & !(0xFF << 40) | (threads as u64) << 40
+    }
+    /// Each thread costs the kernel a 32 KiB stack and an FPU area.
+    pub const DEFAULT_THREADS: usize = 8;
 }
 
 /// `system_info` queries and the format of their replies.
@@ -477,6 +740,152 @@ pub mod sysinfo {
     /// D): `size` is the memory reserved that way (`.bss`, a runtime's heap
     /// arena), `touched` what the process has made the kernel back so far.
     pub const ON_DEMAND: u64 = 14;
+    /// One [`Display`] (280 bytes): what the loader did with the screen
+    /// (ADR 0078, stage 0), so `diag` can tell it on a machine without a
+    /// serial console. `NotFound` without a screen.
+    pub const DISPLAY: u64 = 15;
+    /// Two `u32`s: the CPU's temperature in degrees and the limit at which it
+    /// throttles itself. `NotFound` if it cannot be read here.
+    pub const TEMPERATURE: u64 = 16;
+    /// A [`GpuReport`]: whether the kernel took the GPU's engine and, if not,
+    /// why (ADR 0083).
+    pub const GPU: u64 = 17;
+    /// One `u64`: frames promised to memory objects and not taken yet (ADR
+    /// 0084). They count as free in [`MEMORY`] but no allocation other than
+    /// their objects' own pages can have them.
+    pub const MEMORY_PROMISED: u64 = 18;
+    /// Text: which machine this is, as `diag` prints it (ABI 13): a
+    /// `machine` line with the make and model from SMBIOS (never the
+    /// serial), then `acpi` lines with each device's identifiers from the
+    /// DSDT and SSDTs. Read only; the buffer gets as much as fits.
+    pub const MACHINE: u64 = 19;
+    /// One `u64`: the bytes [`ACPI_AML`] answers with (ABI 13).
+    pub const ACPI_AML_LEN: u64 = 20;
+    /// The firmware's DSDT and SSDTs, then its FADT (since incident 0065:
+    /// the power-off registers), one after another, each whole with its
+    /// header, for a device study on another machine (ABI 13). No other
+    /// table: some hold what is not ours to copy (a Windows licence key in
+    /// MSDM or SLIC). `TooBig` if the buffer is short.
+    pub const ACPI_AML: u64 = 21;
+    /// As many [`DmaFaultSite`] as fit, one per DMA fault the kernel kept
+    /// (the first of the boot, [`DMA_FAULT_SITES_KEPT`] at most), oldest first: where
+    /// each faulting page lay against its device's domain, the firmware's
+    /// memory map and the allocator (ABI 13; incident 0064). `mine` is set
+    /// in the entries whose device belongs to the caller. Whole only for a
+    /// caller with `MANAGE` on `SYSTEM`; the device's driver gets its own
+    /// entries without `other_owner` and `frame`, anyone else only the
+    /// fault and the page's memory-map kind.
+    pub const DMA_FAULT_SITES: u64 = 22;
+    /// As many [`ReservedRegion`] as fit: the firmware's reserved memory
+    /// regions for DMA (DMAR RMRR, VT-d 4.0 8.4) with the devices they
+    /// name (ABI 13; incident 0064). Empty without an IOMMU.
+    pub const IOMMU_RESERVED: u64 = 23;
+    /// DMA faults whose site the kernel keeps: the first ones of the boot,
+    /// which a loop of later ones must not push out; at most two per
+    /// device, one per page.
+    pub const DMA_FAULT_SITES_KEPT: usize = 8;
+
+    /// The state of the GPU's engine ([`GPU`]).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct GpuReport {
+        /// One of the `GPU_*` states.
+        pub state: u8,
+        /// With [`GPU_REFUSED`]: the reason, as `aricode_intel_gt::Refusal`.
+        pub refusal: u8,
+        /// The client's pid, 0 if none.
+        pub client: u32,
+        /// The GPU's clock now, and its limits, in MHz.
+        pub mhz: u16,
+        pub mhz_lowest: u16,
+        pub mhz_highest: u16,
+        /// Batches submitted, and engine resets, since boot.
+        pub requests: u64,
+        pub resets: u64,
+        /// A dword of the kernel's status page that nothing should write, and
+        /// the blitter's watchdog threshold register: both stay as they were
+        /// unless a non-secure batch could reach them (ADR 0083's
+        /// measurements).
+        pub canary: u32,
+        pub watchdog: u32,
+        /// The status page's address in the global GTT, for those
+        /// measurements.
+        pub status_page: u32,
+        /// KiB the client has mapped.
+        pub mapped_kib: u32,
+        /// The render engine's ring (ADR 0086): 0 not taken, 1 ready, 2 left
+        /// off after its boot check failed; and the time its boot check's
+        /// empty request took, in microseconds.
+        pub render: u8,
+        pub render_us: u16,
+        /// The GPU's EU threads; and of the last residue clear at a change
+        /// of client (ADR 0086), the threads it reached (0 before any) and
+        /// its time in microseconds.
+        pub threads: u16,
+        pub cleared_threads: u16,
+        pub clear_us: u32,
+    }
+
+    /// No Intel GPU of a supported family.
+    pub const GPU_ABSENT: u8 = 0;
+    pub const GPU_READY: u8 = 1;
+    /// Found but left as the firmware set it; `refusal` says why.
+    pub const GPU_REFUSED: u8 = 2;
+    /// `gpu=off` on the command line.
+    pub const GPU_OFF: u8 = 3;
+
+    impl GpuReport {
+        pub const LEN: usize = 56;
+
+        pub fn encode(&self) -> [u8; Self::LEN] {
+            let mut b = [0u8; Self::LEN];
+            b[0] = self.state;
+            b[1] = self.refusal;
+            b[2] = self.render;
+            b[14..16].copy_from_slice(&self.render_us.to_le_bytes());
+            b[4..8].copy_from_slice(&self.client.to_le_bytes());
+            b[8..10].copy_from_slice(&self.mhz.to_le_bytes());
+            b[10..12].copy_from_slice(&self.mhz_lowest.to_le_bytes());
+            b[12..14].copy_from_slice(&self.mhz_highest.to_le_bytes());
+            b[16..24].copy_from_slice(&self.requests.to_le_bytes());
+            b[24..32].copy_from_slice(&self.resets.to_le_bytes());
+            b[32..36].copy_from_slice(&self.canary.to_le_bytes());
+            b[36..40].copy_from_slice(&self.watchdog.to_le_bytes());
+            b[40..44].copy_from_slice(&self.status_page.to_le_bytes());
+            b[44..48].copy_from_slice(&self.mapped_kib.to_le_bytes());
+            b[48..50].copy_from_slice(&self.threads.to_le_bytes());
+            b[50..52].copy_from_slice(&self.cleared_threads.to_le_bytes());
+            b[52..56].copy_from_slice(&self.clear_us.to_le_bytes());
+            b
+        }
+
+        pub fn decode(b: &[u8]) -> Option<Self> {
+            if b.len() < Self::LEN {
+                return None;
+            }
+            let u16_at = |i: usize| u16::from_le_bytes([b[i], b[i + 1]]);
+            let u32_at = |i: usize| u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
+            let u64_at = |i: usize| (u32_at(i) as u64) | (u32_at(i + 4) as u64) << 32;
+            Some(Self {
+                state: b[0],
+                refusal: b[1],
+                render: b[2],
+                render_us: u16_at(14),
+                client: u32_at(4),
+                mhz: u16_at(8),
+                mhz_lowest: u16_at(10),
+                mhz_highest: u16_at(12),
+                requests: u64_at(16),
+                resets: u64_at(24),
+                canary: u32_at(32),
+                watchdog: u32_at(36),
+                status_page: u32_at(40),
+                mapped_kib: u32_at(44),
+                threads: u16_at(48),
+                cleared_threads: u16_at(50),
+                clear_us: u32_at(52),
+            })
+        }
+    }
 
     /// What seeded the kernel generator. The number is the code of the
     /// `net tcp secret weak` and `ssh entropy weak` fault events.
@@ -675,7 +1084,8 @@ pub mod sysinfo {
         ProcessExited = 2,
         /// `pid`, `name` = kernel reason (exception).
         ProcessKilled = 3,
-        /// `code` = `bus << 8 | dev << 3 | fn` of the device, `name` = reason.
+        /// `code` = [`dma_fault_code`]: the device, the access and the page;
+        /// `name` = the reason, short.
         DmaFault = 4,
         /// `pid`, `name`, `code` = bytes requested above the quota.
         DmaQuota = 5,
@@ -699,6 +1109,24 @@ pub mod sysinfo {
     }
 
     pub const EVENT_NAME_LEN: usize = 24;
+
+    /// A DMA fault event's `code` (ABI 13; incident 0064): bits 15:0 the
+    /// device (`bus << 8 | dev << 3 | fn`), bit 16 a write, bits 24:17 the
+    /// IOMMU's reason, bits 63:32 the page (address >> 12). Older kernels
+    /// set only the device.
+    pub fn dma_fault_code(source: u16, write: bool, reason: u8, address: u64) -> u64 {
+        source as u64 | (write as u64) << 16 | (reason as u64) << 17 | (address >> 12) << 32
+    }
+
+    /// The parts of a [`dma_fault_code`]: device, write, reason, address.
+    pub fn dma_fault_parts(code: u64) -> (u16, bool, u8, u64) {
+        (
+            code as u16,
+            code & 1 << 16 != 0,
+            (code >> 17) as u8,
+            (code >> 32) << 12,
+        )
+    }
 
     /// Kernel event (48 bytes): timestamp in us, class, pid, code and
     /// name or reason.
@@ -769,6 +1197,244 @@ pub mod sysinfo {
         }
     }
 
+    /// Codes of a [`DmaFaultSite`] (incident 0064).
+    pub mod dma_site {
+        /// What a region of a domain holds.
+        pub const OWN: u8 = 1;
+        pub const CLIENT: u8 = 2;
+        pub const RESERVED: u8 = 3;
+        pub const FRAMEBUFFER: u8 = 4;
+
+        pub fn tag_name(tag: u8) -> &'static str {
+            match tag {
+                OWN => "own DMA buffer",
+                CLIENT => "client buffer",
+                RESERVED => "firmware RMRR",
+                FRAMEBUFFER => "framebuffer",
+                _ => "region",
+            }
+        }
+
+        /// The page against the domain (`aricode_iommu::site::Relation`).
+        pub const IN_REGION: u8 = 1;
+        pub const IN_UNMAPPED: u8 = 2;
+        pub const OUTSIDE: u8 = 3;
+        pub const NO_REGIONS: u8 = 4;
+
+        /// The page in the firmware's memory map (the kernel keeps an exact
+        /// copy, `aricode_pmm::KindMap`); `MEM_UNKNOWN | MEM_APPROXIMATE`
+        /// when no kept entry holds it and some entries did not fit.
+        pub const MEM_UNKNOWN: u8 = 0;
+        pub const MEM_FREE: u8 = 1;
+        pub const MEM_BOOT: u8 = 2;
+        pub const MEM_FIRMWARE: u8 = 3;
+        pub const MEM_ACPI: u8 = 4;
+        pub const MEM_RESERVED: u8 = 5;
+        pub const MEM_NONE: u8 = 6;
+        pub const MEM_MMIO: u8 = 7;
+        pub const MEM_APPROXIMATE: u8 = 0x80;
+
+        pub fn memory_name(memory: u8) -> &'static str {
+            match memory & !MEM_APPROXIMATE {
+                MEM_FREE => "RAM free at boot",
+                MEM_BOOT => "loader or boot services memory (returned to the allocator)",
+                MEM_FIRMWARE => "runtime services memory",
+                MEM_ACPI => "ACPI memory",
+                MEM_RESERVED => "firmware-reserved memory",
+                MEM_NONE => "in no range of the memory map",
+                MEM_MMIO => "MMIO in the memory map",
+                _ => "unknown memory",
+            }
+        }
+
+        /// The page's frame in the allocator when the fault came.
+        pub const FRAME_FREE: u8 = 1;
+        pub const FRAME_IN_USE: u8 = 2;
+        pub const FRAME_UNMANAGED: u8 = 3;
+
+        pub fn frame_name(frame: u8) -> &'static str {
+            match frame {
+                FRAME_FREE => "free",
+                FRAME_IN_USE => "in use",
+                FRAME_UNMANAGED => "not the allocator's",
+                _ => "not given",
+            }
+        }
+
+        /// `other_owner` for a firmware identity domain.
+        pub const FIRMWARE_DOMAIN: u32 = u32::MAX;
+    }
+
+    /// A region of a domain as a [`DmaFaultSite`] reports it: `len` 0 for
+    /// none; times in ms since boot, `unmapped_ms` 0 while mapped.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct SiteRegion {
+        pub start: u64,
+        pub len: u64,
+        pub tag: u8,
+        pub mapped_ms: u32,
+        pub unmapped_ms: u32,
+    }
+
+    impl SiteRegion {
+        pub const LEN: usize = 32;
+
+        pub fn present(&self) -> bool {
+            self.len != 0
+        }
+
+        fn encode(&self, b: &mut [u8]) {
+            b[..8].copy_from_slice(&self.start.to_le_bytes());
+            b[8..16].copy_from_slice(&self.len.to_le_bytes());
+            b[16..20].copy_from_slice(&self.mapped_ms.to_le_bytes());
+            b[20..24].copy_from_slice(&self.unmapped_ms.to_le_bytes());
+            b[24] = self.tag;
+        }
+
+        fn decode(b: &[u8]) -> Self {
+            let u64_at = |o: usize| u64::from_le_bytes(b[o..o + 8].try_into().unwrap_or([0; 8]));
+            let u32_at = |o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap_or([0; 4]));
+            Self {
+                start: u64_at(0),
+                len: u64_at(8),
+                mapped_ms: u32_at(16),
+                unmapped_ms: u32_at(20),
+                tag: b[24],
+            }
+        }
+    }
+
+    /// Where the page of a DMA fault lay ([`DMA_FAULT_SITES`], 136 bytes):
+    /// the fault (time, address, device, access, reason, the process whose
+    /// domain had the device), the page against that domain (`relation`:
+    /// `dma_site::IN_REGION`..; `region` the region it is or was in, `below`
+    /// and `above` the nearest live ones), against the memory map and the
+    /// allocator, whether another domain maps it (`other_owner`, a pid or
+    /// `FIRMWARE_DOMAIN`, 0 none) and which reserved region holds it
+    /// (`rmrr`, 1-based index into [`IOMMU_RESERVED`], 0 none). Addresses
+    /// and sizes only: no contents.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct DmaFaultSite {
+        pub at_us: u64,
+        pub address: u64,
+        pub source: u16,
+        pub write: bool,
+        pub reason: u8,
+        pub owner: u32,
+        pub relation: u8,
+        pub memory: u8,
+        pub frame: u8,
+        pub mine: bool,
+        pub other_owner: u32,
+        pub rmrr: u8,
+        /// Live regions of the domain, and regions it unmapped in all.
+        pub regions: u16,
+        pub unmapped_total: u32,
+        pub region: SiteRegion,
+        pub below: SiteRegion,
+        pub above: SiteRegion,
+    }
+
+    impl DmaFaultSite {
+        pub const LEN: usize = 40 + 3 * SiteRegion::LEN;
+
+        pub fn encode(&self) -> [u8; Self::LEN] {
+            let mut b = [0u8; Self::LEN];
+            b[..8].copy_from_slice(&self.at_us.to_le_bytes());
+            b[8..16].copy_from_slice(&self.address.to_le_bytes());
+            b[16..18].copy_from_slice(&self.source.to_le_bytes());
+            b[18] = self.write as u8;
+            b[19] = self.reason;
+            b[20..24].copy_from_slice(&self.owner.to_le_bytes());
+            b[24] = self.relation;
+            b[25] = self.memory;
+            b[26] = self.frame;
+            b[27] = self.mine as u8;
+            b[28..32].copy_from_slice(&self.other_owner.to_le_bytes());
+            b[32] = self.rmrr;
+            b[34..36].copy_from_slice(&self.regions.to_le_bytes());
+            b[36..40].copy_from_slice(&self.unmapped_total.to_le_bytes());
+            self.region.encode(&mut b[40..72]);
+            self.below.encode(&mut b[72..104]);
+            self.above.encode(&mut b[104..136]);
+            b
+        }
+
+        pub fn decode(b: &[u8]) -> Option<Self> {
+            if b.len() < Self::LEN {
+                return None;
+            }
+            let u32_at = |o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap_or([0; 4]));
+            Some(Self {
+                at_us: u64::from_le_bytes(b[..8].try_into().ok()?),
+                address: u64::from_le_bytes(b[8..16].try_into().ok()?),
+                source: u16::from_le_bytes([b[16], b[17]]),
+                write: b[18] != 0,
+                reason: b[19],
+                owner: u32_at(20),
+                relation: b[24],
+                memory: b[25],
+                frame: b[26],
+                mine: b[27] != 0,
+                other_owner: u32_at(28),
+                rmrr: b[32],
+                regions: u16::from_le_bytes([b[34], b[35]]),
+                unmapped_total: u32_at(36),
+                region: SiteRegion::decode(&b[40..72]),
+                below: SiteRegion::decode(&b[72..104]),
+                above: SiteRegion::decode(&b[104..136]),
+            })
+        }
+    }
+
+    /// A reserved memory region of the firmware's DMAR ([`IOMMU_RESERVED`],
+    /// 32 bytes): `[base, limit]` (limit inclusive, VT-d 4.0 8.4) and up to
+    /// [`ReservedRegion::SCOPES`] of the devices it names (`bus << 8 | dev
+    /// << 3 | fn`), out of `devices`; a device behind a bridge (a path of
+    /// more than one step) is named by its first step and counts in
+    /// `bridged`, since the kernel gives identity domains only to devices
+    /// on the root bus.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct ReservedRegion {
+        pub base: u64,
+        pub limit: u64,
+        pub devices: u8,
+        pub bridged: u8,
+        pub scopes: [u16; ReservedRegion::SCOPES],
+    }
+
+    impl ReservedRegion {
+        pub const LEN: usize = 32;
+        pub const SCOPES: usize = 4;
+
+        pub fn encode(&self) -> [u8; Self::LEN] {
+            let mut b = [0u8; Self::LEN];
+            b[..8].copy_from_slice(&self.base.to_le_bytes());
+            b[8..16].copy_from_slice(&self.limit.to_le_bytes());
+            b[16] = self.devices;
+            b[17] = self.bridged;
+            for (i, s) in self.scopes.iter().enumerate() {
+                b[18 + 2 * i..20 + 2 * i].copy_from_slice(&s.to_le_bytes());
+            }
+            b
+        }
+
+        pub fn decode(b: &[u8]) -> Option<Self> {
+            if b.len() < Self::LEN {
+                return None;
+            }
+            Some(Self {
+                base: u64::from_le_bytes(b[..8].try_into().ok()?),
+                limit: u64::from_le_bytes(b[8..16].try_into().ok()?),
+                devices: b[16],
+                bridged: b[17],
+                scopes: core::array::from_fn(|i| {
+                    u16::from_le_bytes([b[18 + 2 * i], b[19 + 2 * i]])
+                }),
+            })
+        }
+    }
+
     /// Framebuffer pixel format (32 bpp).
     pub const FB_FORMAT_RGB: u8 = 0;
     pub const FB_FORMAT_BGR: u8 = 1;
@@ -817,6 +1483,173 @@ pub mod sysinfo {
                 green_mask: u32::from_le_bytes(b[28..32].try_into().ok()?),
                 blue_mask: u32::from_le_bytes(b[32..36].try_into().ok()?),
             })
+        }
+    }
+
+    /// How the screen got its mode. The numbers are the loader's
+    /// (`boot_protocol::video_source`).
+    #[repr(u8)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub enum DisplaySource {
+        /// A loader that predates the report.
+        #[default]
+        Unknown = 0,
+        /// The size asked for with `video=`.
+        Requested = 1,
+        /// The panel's preferred size, from its EDID.
+        Edid = 2,
+        /// The firmware's own mode, kept.
+        Firmware = 3,
+        /// A better mode was chosen but the firmware failed to set it.
+        SetFailed = 4,
+        /// The firmware's mode is missing from its own list; it was kept.
+        NotListed = 5,
+        /// The panel's size, not offered by the firmware, set on the running
+        /// pipe (ADR 0079).
+        OnRunningPipe = 6,
+        /// `video=firmware` kept the firmware's mode.
+        Kept = 7,
+    }
+
+    impl DisplaySource {
+        pub fn from_u32(v: u32) -> Self {
+            match v {
+                1 => Self::Requested,
+                2 => Self::Edid,
+                3 => Self::Firmware,
+                4 => Self::SetFailed,
+                5 => Self::NotListed,
+                6 => Self::OnRunningPipe,
+                7 => Self::Kept,
+                _ => Self::Unknown,
+            }
+        }
+    }
+
+    /// Why the panel's size could not be set on the running pipe (ADR 0079).
+    /// The numbers are those of `aricode_intel_display::Refusal`.
+    pub const fn display_refusal(code: u8) -> Option<&'static str> {
+        Some(match code {
+            1 => "no support for this graphics device",
+            2 => "its PCI addresses are not as needed",
+            3 => "the VGA plane is on",
+            4 => "not exactly one pipe is running",
+            5 => "the pipe is interlaced",
+            6 => "the pipe is not at the panel's size",
+            7 => "the pipe's source is not the firmware's mode",
+            8 => "no panel fitter fills the panel",
+            9 => "the plane does not show the framebuffer as described",
+            10 => "the panel's width is odd",
+            11 => "the screen would not fit",
+            12 => "the firmware's GTT does not map the whole screen",
+            13 => "the pipe stopped counting frames",
+            14 => "a register did not take its value",
+            15 => "its watermarks are set for a smaller screen",
+            16 => "the display could not keep up at that size",
+            17 => "compression or a sprite is on",
+            _ => return None,
+        })
+    }
+
+    /// Why the kernel left the GPU's engine as the firmware set it (ADR
+    /// 0083). The numbers are those of `aricode_intel_gt::Refusal`.
+    pub const fn gpu_refusal(code: u8) -> Option<&'static str> {
+        Some(match code {
+            1 => "no support for this graphics device",
+            2 => "its PCI addresses are not as needed",
+            3 => "the device does not answer",
+            4 => "an engine's ring is already running",
+            5 => "an engine already has its own page tables",
+            6 => "a reset is under way",
+            7 => "forcewake was not acknowledged",
+            8 => "an engine is not idle",
+            9 => "an engine reports a fault",
+            10 => "its GTT is not as this family has it",
+            11 => "its frequency limits are not sane",
+            12 => "the engine did not respond in time",
+            13 => "no memory for the engine's pages",
+            14 => "taking it failed halfway; it was stopped",
+            _ => return None,
+        })
+    }
+
+    /// One mode the firmware offered, in [`Display`].
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct DisplayMode {
+        pub width: u16,
+        pub height: u16,
+        /// The system can draw on it (RGB or BGR, within the size limit).
+        pub usable: bool,
+        /// The screen's mode.
+        pub chosen: bool,
+    }
+
+    /// The reply to [`DISPLAY`].
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct Display {
+        pub source: DisplaySource,
+        /// Modes the firmware offered; the first `listed` are in `modes`.
+        pub offered: u32,
+        pub listed: u8,
+        /// `video=` was given but is not `WxH`.
+        pub bad_request: bool,
+        /// [`display_refusal`], 0 if the panel's size was not asked of the
+        /// hardware or it took it.
+        pub native_refused: u8,
+        /// The size asked for with `video=`, 0x0 if none.
+        pub requested: (u32, u32),
+        /// The panel's preferred size, 0x0 if the firmware gave no EDID.
+        pub preferred: (u32, u32),
+        pub modes: [DisplayMode; Display::MODES],
+    }
+
+    impl Display {
+        pub const MODES: usize = 32;
+        pub const LEN: usize = 24 + Self::MODES * 8;
+
+        pub fn encode(&self) -> [u8; Self::LEN] {
+            let mut b = [0u8; Self::LEN];
+            b[0] = self.source as u8;
+            b[1] = self.listed;
+            b[2] = self.bad_request as u8;
+            b[3] = self.native_refused;
+            b[4..8].copy_from_slice(&self.offered.to_le_bytes());
+            b[8..12].copy_from_slice(&self.requested.0.to_le_bytes());
+            b[12..16].copy_from_slice(&self.requested.1.to_le_bytes());
+            b[16..20].copy_from_slice(&self.preferred.0.to_le_bytes());
+            b[20..24].copy_from_slice(&self.preferred.1.to_le_bytes());
+            for (m, c) in self.modes.iter().zip(b[24..].as_chunks_mut::<8>().0) {
+                c[0..2].copy_from_slice(&m.width.to_le_bytes());
+                c[2..4].copy_from_slice(&m.height.to_le_bytes());
+                c[4] = m.usable as u8 | (m.chosen as u8) << 1;
+            }
+            b
+        }
+
+        pub fn decode(b: &[u8]) -> Option<Self> {
+            if b.len() < Self::LEN {
+                return None;
+            }
+            let word = |i: usize| u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
+            let mut d = Self {
+                source: DisplaySource::from_u32(b[0] as u32),
+                listed: b[1].min(Self::MODES as u8),
+                bad_request: b[2] != 0,
+                native_refused: b[3],
+                offered: word(4),
+                requested: (word(8), word(12)),
+                preferred: (word(16), word(20)),
+                modes: [DisplayMode::default(); Self::MODES],
+            };
+            for (m, c) in d.modes.iter_mut().zip(b[24..Self::LEN].as_chunks::<8>().0) {
+                *m = DisplayMode {
+                    width: u16::from_le_bytes([c[0], c[1]]),
+                    height: u16::from_le_bytes([c[2], c[3]]),
+                    usable: c[4] & 1 != 0,
+                    chosen: c[4] & 2 != 0,
+                };
+            }
+            Some(d)
         }
     }
 
@@ -1142,6 +1975,12 @@ pub enum Error {
     /// service is relaunched on the same endpoint, so a later request may
     /// be served; retry after a short pause.
     ReplyLost = 15,
+    /// Someone else holds the resource for now (ADR 0083: another process is
+    /// the GPU's client, or the engine has work pending).
+    Busy = 16,
+    /// The GPU's engine stopped making progress and was reset; the work
+    /// waited for was lost (ADR 0083).
+    Hung = 17,
 }
 
 impl Error {
@@ -1175,6 +2014,8 @@ impl Error {
             13 => Some(Error::PeerClosed),
             14 => Some(Error::ServiceGone),
             15 => Some(Error::ReplyLost),
+            16 => Some(Error::Busy),
+            17 => Some(Error::Hung),
             _ => None,
         }
     }
@@ -1262,6 +2103,7 @@ mod tests {
         other[0] = 0;
         assert_ne!(expected_digest(arg), Some(digest(&other)));
         assert_eq!(expected_digest(0x3F | 1 << 15), None);
+        assert_eq!(expected_digest(WITH_SYSTEM), None, "a bit of its own");
     }
 
     #[test]
@@ -1288,6 +2130,41 @@ mod tests {
         };
         assert_eq!(Framebuffer::decode(&f.encode()), Some(f));
         assert!(Framebuffer::decode(&[0u8; 10]).is_none());
+    }
+
+    #[test]
+    fn display_report_round_trip() {
+        use super::sysinfo::*;
+        let mut d = Display {
+            source: DisplaySource::Edid,
+            offered: 21,
+            listed: 2,
+            bad_request: true,
+            native_refused: 8,
+            requested: (0, 0),
+            preferred: (1366, 768),
+            modes: [DisplayMode::default(); Display::MODES],
+        };
+        d.modes[0] = DisplayMode {
+            width: 800,
+            height: 600,
+            usable: true,
+            chosen: false,
+        };
+        d.modes[1] = DisplayMode {
+            width: 1366,
+            height: 768,
+            usable: true,
+            chosen: true,
+        };
+        assert_eq!(Display::decode(&d.encode()), Some(d));
+        assert!(Display::decode(&[0u8; Display::LEN - 1]).is_none());
+        let mut b = d.encode();
+        b[0] = 99;
+        b[1] = 200;
+        let odd = Display::decode(&b).unwrap();
+        assert_eq!(odd.source, DisplaySource::Unknown);
+        assert_eq!(odd.listed as usize, Display::MODES, "never past the array");
     }
 
     #[test]
@@ -1580,6 +2457,135 @@ mod tests {
         // Never negative: an error is `-4095..=-1` in the same register.
         assert!((irq(last, u32::MAX) as i64) > 0);
         assert!((message(last, IPC_MAX_DATA, IPC_MAX_HANDLES) as i64) > 0);
+    }
+
+    #[test]
+    fn dma_fault_code_round_trip() {
+        use super::sysinfo::{dma_fault_code, dma_fault_parts};
+        let c = dma_fault_code(0x00A0, false, 6, 0x7_8912_3000);
+        assert_eq!(dma_fault_parts(c), (0x00A0, false, 6, 0x7_8912_3000));
+        assert_eq!(
+            dma_fault_parts(dma_fault_code(0xFFFF, true, 0xFF, 0)),
+            (0xFFFF, true, 0xFF, 0)
+        );
+        // An older kernel's code: the device only.
+        assert_eq!(dma_fault_parts(0x00A0), (0x00A0, false, 0, 0));
+    }
+
+    #[test]
+    fn gpu_report_round_trip() {
+        use super::sysinfo::GpuReport;
+        let r = GpuReport {
+            state: 1,
+            refusal: 2,
+            client: 77,
+            mhz: 650,
+            mhz_lowest: 350,
+            mhz_highest: 1050,
+            requests: 1 << 40,
+            resets: 3,
+            canary: 0xDEAD_BEEF,
+            watchdog: 0x15_0000,
+            status_page: 0x1234_5000,
+            mapped_kib: 6144,
+            render: 1,
+            render_us: 3,
+            threads: 128,
+            cleared_threads: 127,
+            clear_us: 70_000,
+        };
+        assert_eq!(GpuReport::decode(&r.encode()), Some(r));
+    }
+
+    #[test]
+    fn dispatch_round_trip() {
+        use super::gpu::Dispatch;
+        let d = Dispatch {
+            general_base: 0x1_0000,
+            surface_base: 0x2_0000,
+            dynamic_base: 0x3_0000,
+            instruction_base: 0x4_0000,
+            scratch: 0x400 | 3,
+            max_threads: 128,
+            urb_entries: 64,
+            urb_entry_regs: 2,
+            curbe_regs: 1,
+            curbe_offset: 0x40,
+            curbe_len: 32,
+            descriptor_offset: 0x80,
+            descriptors: 32,
+            descriptor: 31,
+            simd: 16,
+            group: [4, 2, 1],
+            start: [1, 2, 3],
+            groups: [u32::MAX, 5, 6],
+            right_mask: 0xFF,
+            bottom_mask: u32::MAX,
+        };
+        assert_eq!(Dispatch::decode(&d.encode()), Some(d));
+        assert_eq!(Dispatch::decode(&d.encode()[..79]), None);
+        // Unused bits must be clear.
+        let mut b = d.encode();
+        b[10 * 4 + 2] = 1;
+        assert_eq!(Dispatch::decode(&b), None);
+        let mut b = d.encode();
+        b[11 * 4 + 3] = 1;
+        assert_eq!(Dispatch::decode(&b), None);
+    }
+
+    #[test]
+    fn dma_fault_site_and_reserved_region_round_trip() {
+        use super::sysinfo::{dma_site, DmaFaultSite, ReservedRegion, SiteRegion};
+        let site = DmaFaultSite {
+            at_us: 11_466_000,
+            address: 0x43B7_6000,
+            source: 0x00A0,
+            write: false,
+            reason: 6,
+            owner: 8,
+            relation: dma_site::OUTSIDE,
+            memory: dma_site::MEM_BOOT | dma_site::MEM_APPROXIMATE,
+            frame: dma_site::FRAME_FREE,
+            mine: true,
+            other_owner: dma_site::FIRMWARE_DOMAIN,
+            rmrr: 2,
+            regions: 3,
+            unmapped_total: 70_000,
+            region: SiteRegion::default(),
+            below: SiteRegion {
+                start: 0x43B5_0000,
+                len: 0x2_4000,
+                tag: dma_site::OWN,
+                mapped_ms: 1281,
+                unmapped_ms: 0,
+            },
+            above: SiteRegion {
+                start: 0x5000_0000,
+                len: 0x1000,
+                tag: dma_site::CLIENT,
+                mapped_ms: 14_700,
+                unmapped_ms: 14_800,
+            },
+        };
+        let bytes = site.encode();
+        assert_eq!(bytes.len(), DmaFaultSite::LEN);
+        assert_eq!(DmaFaultSite::decode(&bytes), Some(site));
+        assert_eq!(DmaFaultSite::decode(&bytes[..DmaFaultSite::LEN - 1]), None);
+        assert!(!site.region.present() && site.below.present());
+        assert_eq!(
+            dma_site::memory_name(site.memory),
+            dma_site::memory_name(dma_site::MEM_BOOT)
+        );
+
+        let r = ReservedRegion {
+            base: 0x3E2E_0000,
+            limit: 0x3E2F_FFFF,
+            devices: 5,
+            bridged: 1,
+            scopes: [0x00A0, 0x0010, 0x0100, 0xFFFF],
+        };
+        assert_eq!(ReservedRegion::decode(&r.encode()), Some(r));
+        assert_eq!(ReservedRegion::decode(&r.encode()[..31]), None);
     }
 
     #[test]

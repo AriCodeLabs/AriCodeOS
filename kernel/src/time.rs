@@ -62,6 +62,27 @@ pub fn tsc_cycles_to_ms(cycles: u64) -> Option<u64> {
     }
 }
 
+/// Busy-waits at least `us` microseconds by the TSC, whatever the
+/// interrupt state (the power-off waits with interrupts off). Before
+/// calibration it spins `us * 100` pause instructions instead, a rough
+/// stand-in.
+pub fn spin_us(us: u64) {
+    match TSC_PER_MS.load(Ordering::Relaxed) {
+        0 => {
+            for _ in 0..us.saturating_mul(100) {
+                core::hint::spin_loop();
+            }
+        }
+        per_ms => {
+            let cycles = us.saturating_mul(per_ms) / 1000;
+            let start = rdtsc();
+            while rdtsc().wrapping_sub(start) < cycles {
+                core::hint::spin_loop();
+            }
+        }
+    }
+}
+
 pub fn ticks() -> u64 {
     TICKS.load(Ordering::Relaxed)
 }

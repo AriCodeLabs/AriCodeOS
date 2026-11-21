@@ -18,6 +18,8 @@ aricode-fb-console = { path = "../libs/fb-console" }
 aricode-x86-cpu = { path = "../libs/x86-cpu" }
 aricode-pmm = { path = "../libs/pmm" }
 aricode-x86-paging = { path = "../libs/x86-paging" }
+aricode-intel-display = { path = "../libs/intel-display" }
+aricode-intel-gt = { path = "../libs/intel-gt" }
 aricode-heap = { path = "../libs/heap" }
 aricode-sync = { path = "../libs/sync" }
 aricode-sched = { path = "../libs/sched" }
@@ -27,6 +29,7 @@ aricode-vranges = { path = "../libs/vranges" }
 aricode-elf = { path = "../libs/elf" }
 aricode-initrd = { path = "../libs/initrd" }
 aricode-acpi = { path = "../libs/acpi" }
+aricode-smbios = { path = "../libs/smbios" }
 aricode-pci = { path = "../libs/pci" }
 # Portable backends: no SIMD in the trusted base (ADR 0066).
 aricode-crypto = { path = "../libs/crypto", features = ["soft"] }

@@ -101,6 +101,47 @@ pub fn thread_get_tid() -> u64 {
     call(nr::THREAD_GET_TID, 0, 0, 0, 0).unwrap_or(0)
 }
 
+/// `thread_create` (ADR 0082): a thread of this process starts at `entry(arg)` on
+/// a stack of its own and must end with [`thread_exit`]; its id.
+/// `aricode_rt::thread::spawn` is the way most programs want.
+pub fn thread_create(entry: extern "C" fn(u64) -> !, arg: u64) -> Result<u64, Error> {
+    call(nr::THREAD_CREATE, entry as usize as u64, arg, 0, 0)
+}
+
+/// Ends the calling thread with `value` for whoever joins it; from the main
+/// thread, ends the process.
+pub fn thread_exit(value: u64) -> ! {
+    let _ = call(nr::THREAD_EXIT, value, 0, 0, 0);
+    unreachable!("thread_exit returned")
+}
+
+/// Waits for thread `tid` of this process to end and gives its value.
+pub fn thread_join(tid: u64, timeout_ms: u64) -> Result<u64, Error> {
+    call(nr::THREAD_JOIN, tid, timeout_ms, 0, 0)
+}
+
+/// Sleeps while `word` holds `expected`, until a [`futex_wake`] on it, the timeout
+/// ([`Error::Timeout`]) or a spurious wake: callers look at the word again.
+pub fn futex_wait(
+    word: &core::sync::atomic::AtomicU32,
+    expected: u32,
+    timeout_ms: u64,
+) -> Result<(), Error> {
+    call(
+        nr::FUTEX_WAIT,
+        word.as_ptr() as u64,
+        expected as u64,
+        timeout_ms,
+        0,
+    )
+    .map(|_| ())
+}
+
+/// Wakes up to `count` threads waiting on `word`; how many it woke.
+pub fn futex_wake(word: &core::sync::atomic::AtomicU32, count: u32) -> u64 {
+    call(nr::FUTEX_WAKE, word.as_ptr() as u64, count as u64, 0, 0).unwrap_or(0)
+}
+
 pub fn abi_version() -> u64 {
     call(nr::ABI_VERSION, 0, 0, 0, 0).unwrap_or(0)
 }
@@ -368,6 +409,59 @@ pub fn region_len(region: Handle) -> Result<u64, Error> {
 /// Allocates a DMA buffer (requires `MANAGE` on a `HARDWARE` object).
 pub fn dma_alloc(hardware: Handle, len: u64) -> Result<Handle, Error> {
     call(nr::DMA_ALLOC, hardware.0 as u64, len, 0, 0).map(|v| Handle(v as u32))
+}
+
+/// Maps the DMA buffer `dma` into this process's GPU address space at
+/// `address` (ADR 0083; see `abi::nr::GPU_MAP`).
+pub fn gpu_map(gpu: Handle, dma: Handle, address: u64) -> Result<(), Error> {
+    call(nr::GPU_MAP, gpu.0 as u64, dma.0 as u64, address, 0).map(|_| ())
+}
+
+/// Removes the GPU mapping made at `address`; `Busy` while batches run.
+pub fn gpu_unmap(gpu: Handle, address: u64) -> Result<(), Error> {
+    call(nr::GPU_UNMAP, gpu.0 as u64, address, 0, 0).map(|_| ())
+}
+
+/// Runs `batch` on the GPU, after the kernel has checked its own copy of
+/// it; its number, for [`gpu_wait`] (see `abi::nr::GPU_SUBMIT`).
+pub fn gpu_submit(gpu: Handle, batch: &[u32]) -> Result<u64, Error> {
+    call(
+        nr::GPU_SUBMIT,
+        gpu.0 as u64,
+        batch.as_ptr() as u64,
+        core::mem::size_of_val(batch) as u64,
+        0,
+    )
+}
+
+/// Runs `dispatch` on the render engine's GPGPU pipe; its number, for
+/// [`gpu_wait`] (see `abi::nr::GPU_DISPATCH`).
+pub fn gpu_dispatch(gpu: Handle, dispatch: &aricode_abi::gpu::Dispatch) -> Result<u64, Error> {
+    let bytes = dispatch.encode();
+    call(
+        nr::GPU_DISPATCH,
+        gpu.0 as u64,
+        bytes.as_ptr() as u64,
+        bytes.len() as u64,
+        0,
+    )
+}
+
+/// Asks for the GPU's clock in MHz; the clock set (see
+/// `abi::nr::GPU_FREQUENCY`).
+pub fn gpu_frequency(gpu: Handle, mhz: u64) -> Result<u64, Error> {
+    call(nr::GPU_FREQUENCY, gpu.0 as u64, mhz, 0, 0)
+}
+
+/// Waits for batch `number`: `Timeout`, or `Hung` if the engine was reset.
+pub fn gpu_wait(gpu: Handle, number: u64, timeout_ms: u64) -> Result<(), Error> {
+    call(nr::GPU_WAIT, gpu.0 as u64, number, timeout_ms, 0).map(|_| ())
+}
+
+/// A memory object of `len` bytes, whole pages, taken as they are first
+/// touched (ADR 0084): map it with [`mmio_map`].
+pub fn mem_create(len: u64) -> Result<Handle, Error> {
+    call(nr::MEM_CREATE, len, 0, 0, 0).map(|v| Handle(v as u32))
 }
 
 pub fn dma_phys(dma: Handle) -> Result<u64, Error> {

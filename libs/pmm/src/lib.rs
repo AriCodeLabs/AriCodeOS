@@ -12,7 +12,9 @@
 
 #![no_std]
 
+pub mod kinds;
 mod ranges;
+pub use kinds::KindMap;
 pub use ranges::RangeSet;
 
 pub const FRAME_SIZE: u64 = 4096;

@@ -4,7 +4,7 @@
 # written before the update is still there on every boot.
 name = "update.full_cycle"
 description = "install B, reboot, confirm B and boot from the active B while keeping the AriFS data"
-level = "full"
+level = "release"
 areas = ["update", "boot", "init", "shell"]
 timeout_secs = 120
 

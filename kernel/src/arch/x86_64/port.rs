@@ -36,6 +36,15 @@ pub unsafe fn inw(port: u16) -> u16 {
     value
 }
 
+/// # Safety
+/// Reading a port may have side effects on the device.
+#[inline]
+pub unsafe fn inl(port: u16) -> u32 {
+    let value: u32;
+    asm!("in eax, dx", out("eax") value, in("dx") port, options(nomem, nostack, preserves_flags));
+    value
+}
+
 /// Classic short delay: a write to an unused port.
 #[inline]
 pub fn io_wait() {

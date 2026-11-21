@@ -86,6 +86,11 @@ pub mod fault {
     /// A passed READ or WRITE whose data stage or CSW residue shows bytes
     /// not moved (`bytes_not_moved`); the code is the count (incident 0010).
     pub const SHORT_DATA: &str = "usb short data";
+    /// The device refused `SYNCHRONIZE CACHE` as a command it does not
+    /// have (`Sense::command_unsupported`): it keeps no cache to write
+    /// back and the flush becomes a no-op; the code is the sense key
+    /// (incident 0064, where a bare `usb sense 5 20 00` named no command).
+    pub const SYNC_UNSUPPORTED: &str = "usb no sync cache";
 
     /// `prefix` followed by `lba`; `None` if it does not fit `out`.
     pub fn lba_name<'a>(prefix: &str, lba: u64, out: &'a mut [u8; NAME_LEN]) -> Option<&'a str> {
@@ -727,6 +732,7 @@ mod tests {
         // Never negative when more arrived than asked for.
         assert_eq!(bytes_not_moved(0, 512, 600), 0);
         assert!(fault::SHORT_DATA.len() <= fault::NAME_LEN);
+        assert!(fault::SYNC_UNSUPPORTED.len() <= fault::NAME_LEN);
     }
 
     #[test]

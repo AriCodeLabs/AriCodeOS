@@ -18,7 +18,7 @@
 # (incident 0043), so the two boots take about a minute longer.
 name = "storage.late_completion"
 description = "virtio-blk: a timed-out request's buffer is kept until the device is reset, so a late completion never lands in reused memory"
-level = "full"
+level = "release"
 areas = ["storage", "virtio", "drivers"]
 timeout_secs = 180
 

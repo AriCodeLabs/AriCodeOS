@@ -13,7 +13,7 @@
 # full repaint of the screen console (incident 0031).
 name = "usb.ehci_short_csw"
 description = "EHCI driver: an 8-byte CSW is invalid (BOT 5.2), never a success; Reset Recovery follows, the request answers Io and the next write succeeds"
-level = "full"
+level = "release"
 areas = ["usb", "storage", "diag"]
 usb_ehci_storage = true
 cmdline = "qemu_exit shell usb_fault=idle:short-csw"

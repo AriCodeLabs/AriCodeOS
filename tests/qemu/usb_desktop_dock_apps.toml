@@ -1,0 +1,51 @@
+# The dock offers the launcher's applications (the owner, 2026-11-11: the list should
+# not stay on screen). The launcher gives them to the dock: its own window first, then
+# terminal and editor, three 44-pixel places 4 apart, centred on the 1280x800
+# screen's bottom edge: x 570, 618 and 666, y 756 to 796. A click on terminal's
+# place, from the pointer at the screen's centre, asks the launcher, which starts it
+# and goes to the dock; terminal's icon now marks it running. A click on the
+# launcher's place brings it back.
+name = "usb.desktop_dock_apps"
+description = "the dock offers the launcher's applications, opens one on a click, and the launcher steps aside"
+level = "release"
+areas = ["usb", "apps", "gui"]
+cmdline = "qemu_exit shell"
+selftest = false
+disk = "usb-image"
+install = ["desktop/launcher", "desktop/terminal", "desktop/editor"]
+stick_profiles = ["desktop:launcher,terminal,editor"]
+stdin = ["sleep 16000", "shutdown"]
+timeout_secs = 120
+
+[host_input]
+marker = "launcher: gave the dock its applications"
+wait_ms = 800
+screendump = "offered"
+mouse_rel = [0, 376]
+click = "left"
+
+[[host_input_then]]
+marker = "terminal: shell started"
+wait_ms = 800
+screendump = "opened"
+mouse_rel = [-48, 0]
+click = "left"
+
+[[host_input_then]]
+marker = "back from the dock"
+wait_ms = 800
+screendump = "back"
+
+[expect]
+exit = 33
+serial_contains = [
+    "launcher: offers terminal",
+    "launcher: offers editor",
+    "launcher: gave the dock its applications",
+    "launcher: started terminal",
+    "terminal: shell started",
+    "compositor: window 1 back from the dock",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_order = ["launcher: gave the dock its applications", "launcher: started terminal", "terminal: shell started"]
+serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "offered applications in the dock: refused", "with no launcher to start it"]

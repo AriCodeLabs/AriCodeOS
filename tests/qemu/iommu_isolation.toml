@@ -4,7 +4,9 @@
 # the process. A client buffer the driver unmapped and whose handle it
 # closed is out of the device's reach too, while one whose handle it holds
 # stays reachable (audit 2026-10-25 C, L11; incident 0017). Also (audit 3eb4965, finding 2) a function reassigned
-# to another domain keeps its context when the previous one is freed.
+# to another domain keeps its context when the previous one is freed. The
+# fault's event names the device, the write, the reason and the page
+# (incident 0064).
 name = "iommu.isolation"
 description = "test=iommu: legitimate DMA translated, DMA to foreign memory blocked and logged, domain freed"
 level = "full"

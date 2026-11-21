@@ -18,4 +18,4 @@ serial_contains = [
     "AriInit: block service ok",
     "ARICODEOS_KERNEL_READY",
 ]
-serial_absent = ["KERNEL PANIC", "initialization failed", "corrupt GPT table", "no GPT"]
+serial_absent = ["KERNEL PANIC", "initialization failed", "corrupt GPT table", "no GPT", "cannot read the command line"]

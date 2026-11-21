@@ -10,7 +10,7 @@
 # boot runs stable 2, and `update --channel dev` only reports the offer.
 name = "update.dev_channel"
 description = "dev channel: closed by default, opt-in source, upgrade --channel dev, diag shows the build, explicit switch back to a lower stable"
-level = "full"
+level = "release"
 areas = ["update", "network", "shell", "boot", "diag"]
 disk = "update-empty"
 timeout_secs = 300

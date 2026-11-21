@@ -1,0 +1,34 @@
+# The owner's remote screen: `screenshot` in a shell asks init, init asks the
+# compositor over its main endpoint, and the screen as last composed comes back
+# as a QOI image in Base64, which the runner decodes whole and checks against the
+# length and SHA-256 the shell gives. Init says each copy, the desktop shows that it
+# was taken, and a second copy within 2 s is refused. The launcher's endpoint is
+# refused (`apps.launch`).
+name = "gui.screenshot"
+description = "screenshot: a shell gets the desktop's screen as QOI, said by init and on the desktop"
+level = "release"
+areas = ["gui", "shell", "init"]
+cmdline = "qemu_exit gui shell"
+stdin = ["sleep 3000", "screenshot", "screenshot", "shutdown"]
+timeout_secs = 90
+
+[expect]
+exit = 33
+screenshot = "1280x800"
+serial_contains = [
+    "screenshot: 1280x800, QOI in Base64 follows",
+    "-----BEGIN QOI-----",
+    "cW9pZgAABQAAAAMgAw",
+    "-----END QOI-----",
+    "AriInit: the screen (1280x800) was copied for the console's or an SSH session's shell",
+    "AriInit: screen copy refused: one copy every 2 s",
+    "screenshot: one copy every 2 s at most; try again",
+    "compositor: notice: Screen copied for the owner's shell",
+    "ARICODEOS_SHUTDOWN",
+]
+serial_order = [
+    "AriInit: the screen (1280x800) was copied for the console's or an SSH session's shell",
+    "-----BEGIN QOI-----",
+    "-----END QOI-----",
+]
+serial_absent = ["KERNEL PANIC", "USER STACK OVERFLOW", "refused: malformed request", "refused: no buffer", "did not copy the screen", "could not be copied", "image is incomplete"]

@@ -5,38 +5,40 @@
 //! capability: a directory session of fsd on that folder), with their
 //! sizes, and creates, renames and deletes them. A name typed in the field
 //! is what New creates and what Rename gives the selected file; a rename
-//! never replaces a file that already has the name. Delete asks for a
-//! second press. From the keyboard: Tab moves between the list and the
-//! field, Enter in the field creates, Ctrl+R renames, Delete deletes.
+//! never replaces a file that already has the name. Delete asks first.
+//! From the keyboard: Tab moves between the controls, Enter
+//! in the field creates, Ctrl+R renames, Delete deletes, Esc goes back to
+//! the list. Built on the toolkit (ADR 0078, stage 2).
 //!
 //! Handles, in the broker's order: the folder's file session, its
 //! compositor session (both endpoints) and `HARDWARE`.
 #![no_std]
 #![no_main]
 
-use aricode_gfx::widgets::{self, Button, Key, KeyDecoder, List, TextField, PAD, ROW_H};
-use aricode_gfx::Rect;
+extern crate alloc;
+
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
 use aricode_proto::fs::Status as FsStatus;
 use aricode_rt::sys::fs::{FsClient, FsError};
-use aricode_rt::sys::window::{Event, Window};
+use aricode_rt::sys::window::{wants, Event, Window};
 use aricode_rt::sys::{self, kind, permissions};
+use aricode_ui::{
+    Action, Dialog, Fill, Id, ListIcons, Space, Stack, Style, Theme, Tone, Ui, EDIT_MENU,
+};
 
 const W: u32 = 480;
 const H: u32 = 400;
 /// Files listed at most.
 const MAX_FILES: usize = 64;
+/// The numbers of its File menu.
+const MENU_NEW: u32 = 1;
+const MENU_RENAME: u32 = 2;
+const MENU_DELETE: u32 = 3;
+const MENU_REFRESH: u32 = 4;
 /// The longest name fsd keeps inside `home/` (32 bytes in all).
 const NAME_MAX: usize = 32 - 5;
-
-const LIST_RECT: Rect = Rect::new(PAD, PAD + ROW_H as i32, W - 2 * PAD as u32, 9 * ROW_H);
-const FIELD_Y: i32 = LIST_RECT.y + LIST_RECT.h as i32 + PAD;
-const NAME_RECT: Rect = Rect::new(PAD + 48, FIELD_Y, 200, ROW_H);
-const BUTTONS_Y: i32 = FIELD_Y + ROW_H as i32 + PAD;
-const NEW: Button = Button::at(PAD, BUTTONS_Y, "New");
-const RENAME: Button = Button::at(PAD + 48, BUTTONS_Y, "Rename");
-const DELETE: Button = Button::at(PAD + 120, BUTTONS_Y, "Delete");
-const REFRESH: Button = Button::at(PAD + 192, BUTTONS_Y, "Refresh");
-const STATUS_Y: i32 = BUTTONS_Y + ROW_H as i32 + PAD;
 
 fn say(parts: &[&[u8]]) {
     sys::print(b"files: ");
@@ -46,44 +48,43 @@ fn say(parts: &[&[u8]]) {
     sys::print(b"\n");
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Focus {
-    List,
-    Name,
-}
-
 struct Files {
     fs: FsClient,
-    names: [[u8; 32]; MAX_FILES],
-    lens: [u8; MAX_FILES],
-    /// The rows as shown: name and size.
-    rows: [[u8; 48]; MAX_FILES],
-    row_lens: [u8; MAX_FILES],
-    list: List,
-    field: TextField<NAME_MAX>,
-    focus: Focus,
-    /// The file a first Delete was pressed on.
-    armed: Option<usize>,
+    ui: Ui,
+    list: Id,
+    field: Id,
+    new: Id,
+    rename: Id,
+    delete: Id,
+    refresh: Id,
+    status: Id,
+    /// The names in the list's rows.
+    names: Vec<String>,
+    /// Deleting asks first.
+    deleting: Dialog,
     /// More files than `MAX_FILES`: the list shows the first ones.
     more: bool,
     /// Files in subfolders of `home/`, not listed.
     nested: usize,
-    status: [u8; 80],
-    status_len: usize,
-    error: bool,
 }
 
 impl Files {
     fn set_status(&mut self, error: bool, parts: &[&[u8]]) {
-        let mut n = 0;
+        let mut text = Vec::new();
         for p in parts {
-            let take = p.len().min(self.status.len() - n);
-            self.status[n..n + take].copy_from_slice(&p[..take]);
-            n += take;
+            text.extend_from_slice(p);
         }
-        self.status_len = n;
-        self.error = error;
+        self.ui
+            .set_text(self.status, &String::from_utf8_lossy(&text));
+        let tone = if error { Tone::Error } else { Tone::Secondary };
+        self.ui.set_tone(self.status, tone);
         say(parts);
+    }
+
+    /// The selected file's name.
+    fn selected(&self) -> Option<(usize, String)> {
+        let i = self.ui.selected(self.list)?;
+        Some((i, self.names.get(i)?.clone()))
     }
 
     /// Lists `home/` again; `select` is the name to select afterwards
@@ -91,12 +92,9 @@ impl Files {
     /// follows the name, not the row; audit of the file manager, M1).
     /// `false`, said, when the folder could not be listed.
     fn refresh(&mut self, select: Option<&str>) -> bool {
-        let before = self.list.selected.map(|i| {
-            let mut n = [0u8; 32];
-            n[..self.lens[i] as usize].copy_from_slice(&self.names[i][..self.lens[i] as usize]);
-            (n, self.lens[i] as usize)
-        });
-        let mut count = 0;
+        let before = self.selected().map(|(_, name)| name);
+        let mut names = Vec::new();
+        let mut rows = Vec::new();
         let mut index = 0;
         let mut entry = [0u8; 32];
         let mut listed = true;
@@ -107,23 +105,14 @@ impl Files {
                 // Files made in subfolders from the shell cannot be renamed
                 // or deleted from here: counted, not listed (audit, L7).
                 Ok(Some((n, _))) if entry[..n].contains(&b'/') => self.nested += 1,
-                Ok(Some(_)) if count == MAX_FILES => {
+                Ok(Some(_)) if names.len() == MAX_FILES => {
                     self.more = true;
                     break;
                 }
                 Ok(Some((n, size))) => {
-                    self.names[count] = entry;
-                    self.lens[count] = n as u8;
-                    let mut row = [b' '; 48];
-                    row[..n].copy_from_slice(&entry[..n]);
-                    let mut b = [0u8; 20];
-                    let digits = aricode_rt::fmt_u64(size, &mut b);
-                    let at = 34usize.max(n + 1);
-                    let end = (at + digits.len()).min(row.len());
-                    row[at..end].copy_from_slice(&digits[..end - at]);
-                    self.rows[count] = row;
-                    self.row_lens[count] = end as u8;
-                    count += 1;
+                    let name = String::from_utf8_lossy(&entry[..n]).into_owned();
+                    rows.push(format!("{name}\t{size}"));
+                    names.push(name);
                 }
                 Ok(None) => break,
                 Err(_) => {
@@ -134,16 +123,13 @@ impl Files {
             }
             index += 1;
         }
-        self.list.set_count(count);
-        self.armed = None;
-        let wanted = match select {
-            Some(name) => Some(name.as_bytes()),
-            None => before.as_ref().map(|(n, len)| &n[..*len]),
-        };
-        if let Some(row) =
-            wanted.and_then(|w| (0..count).find(|&i| &self.names[i][..self.lens[i] as usize] == w))
+        self.ui.set_rows(self.list, rows.iter().map(String::as_str));
+        self.names = names;
+        if let Some(row) = select
+            .or(before.as_deref())
+            .and_then(|w| self.names.iter().position(|n| n == w))
         {
-            self.list.select(row);
+            self.ui.select(self.list, Some(row));
         }
         listed
     }
@@ -152,7 +138,7 @@ impl Files {
     fn say_count(&mut self) {
         let mut b = [0u8; 20];
         let mut c = [0u8; 20];
-        let count = aricode_rt::fmt_u64(self.list.count as u64, &mut b);
+        let count = aricode_rt::fmt_u64(self.names.len() as u64, &mut b);
         let nested = aricode_rt::fmt_u64(self.nested as u64, &mut c);
         match (self.more, self.nested) {
             (true, _) => self.set_status(false, &[b"the first ", count, b" files of home/"]),
@@ -169,60 +155,49 @@ impl Files {
         }
     }
 
-    fn row(&self, i: usize) -> &str {
-        core::str::from_utf8(&self.rows[i][..self.row_lens[i] as usize]).unwrap_or("?")
-    }
-
-    fn typed(&mut self) -> Option<[u8; NAME_MAX]> {
-        if self.field.text().is_empty() {
+    fn typed(&mut self) -> Option<String> {
+        let text = String::from(self.ui.text(self.field));
+        if text.is_empty() {
             self.set_status(true, &[b"type a name in the field first"]);
-            self.focus = Focus::Name;
+            self.ui.focus(self.field);
             return None;
         }
-        if !aricode_proto::fs::valid_plain_name(self.field.text(), NAME_MAX) {
+        if !aricode_proto::fs::valid_plain_name(&text, NAME_MAX) {
             self.set_status(
                 true,
                 &["names: a-z, 0-9, . _ - (no accents or ñ)".as_bytes()],
             );
-            self.focus = Focus::Name;
+            self.ui.focus(self.field);
             return None;
         }
-        let mut n = [0u8; NAME_MAX];
-        n[..self.field.text().len()].copy_from_slice(self.field.text().as_bytes());
-        Some(n)
+        Some(text)
     }
 
     fn create(&mut self) {
-        let Some(buf) = self.typed() else { return };
-        let name = name_of(&buf);
+        let Some(name) = self.typed() else { return };
         // fsd's create refuses an existing name itself (`Exists`).
-        match self.fs.create(name) {
+        match self.fs.create(&name) {
             Ok(fd) => {
                 let _ = self.fs.close(fd);
-                self.field.clear();
-                if self.refresh(Some(name)) {
+                self.ui.set_text(self.field, "");
+                if self.refresh(Some(&name)) {
                     self.set_status(false, &[b"created ", name.as_bytes()]);
                 }
             }
-            Err(e) => self.failed(b"cannot create ", name, e),
+            Err(e) => self.failed(b"cannot create ", &name, e),
         }
     }
 
     fn rename(&mut self) {
-        let Some(i) = self.list.selected else {
+        let Some((_, old)) = self.selected() else {
             return self.set_status(true, &[b"select a file first"]);
         };
-        let Some(buf) = self.typed() else { return };
-        let new = name_of(&buf);
-        let mut old = [0u8; 32];
-        let n = self.lens[i] as usize;
-        old[..n].copy_from_slice(&self.names[i][..n]);
-        let old = core::str::from_utf8(&old[..n]).unwrap_or("");
+        let Some(new) = self.typed() else { return };
         // Never over a file of the new name: fsd checks it in the same
         // step, whatever this list shows (audit of the file manager, H1).
-        let renamed = match self.fs.open(old) {
+        let renamed = match self.fs.open(&old) {
             Ok(fd) => {
-                let r = self.fs.rename_keeping(fd, new);
+                let r = self.fs.rename_keeping(fd, &new);
                 let _ = self.fs.close(fd);
                 r
             }
@@ -230,37 +205,38 @@ impl Files {
         };
         match renamed {
             Ok(()) => {
-                self.field.clear();
-                if self.refresh(Some(new)) {
+                self.ui.set_text(self.field, "");
+                if self.refresh(Some(&new)) {
                     self.set_status(
                         false,
                         &[b"renamed ", old.as_bytes(), b" to ", new.as_bytes()],
                     );
                 }
             }
-            Err(e) => self.failed(b"cannot rename ", old, e),
+            Err(e) => self.failed(b"cannot rename ", &old, e),
         }
     }
 
-    fn delete(&mut self) {
-        let Some(i) = self.list.selected else {
+    fn ask_to_delete(&mut self) {
+        let Some((_, name)) = self.selected() else {
             return self.set_status(true, &[b"select a file first"]);
         };
-        let mut name = [0u8; 32];
-        let n = self.lens[i] as usize;
-        name[..n].copy_from_slice(&self.names[i][..n]);
-        let name = core::str::from_utf8(&name[..n]).unwrap_or("");
-        if self.armed != Some(i) {
-            self.armed = Some(i);
-            return self.set_status(false, &[b"press Delete again to delete ", name.as_bytes()]);
-        }
-        match self.fs.delete(name) {
+        let question = format!("Delete {name}? It cannot be brought back.");
+        self.ui.ask(&self.deleting, &question, "Delete");
+        say(&[b"asks to delete ", name.as_bytes()]);
+    }
+
+    fn delete(&mut self) {
+        let Some((_, name)) = self.selected() else {
+            return;
+        };
+        match self.fs.delete(&name) {
             Ok(()) => {
                 if self.refresh(None) {
                     self.set_status(false, &[b"deleted ", name.as_bytes()]);
                 }
             }
-            Err(e) => self.failed(b"cannot delete ", name, e),
+            Err(e) => self.failed(b"cannot delete ", &name, e),
         }
     }
 
@@ -276,49 +252,53 @@ impl Files {
         self.set_status(true, &[what, name.as_bytes(), why]);
     }
 
-    fn key(&mut self, key: Key) {
-        match (key, self.focus) {
-            (Key::Tab, Focus::List) => self.focus = Focus::Name,
-            (Key::Tab | Key::Escape, Focus::Name) => self.focus = Focus::List,
-            (Key::Delete, Focus::List) => self.delete(),
-            (Key::Enter, Focus::Name) => self.create(),
-            (Key::Ctrl(b'r'), _) => self.rename(),
-            (k, Focus::List) => {
-                if self.list.key(k) {
-                    self.armed = None;
-                }
-            }
-            (k, Focus::Name) => {
-                self.field.key(k);
-            }
+    fn show(&mut self, win: &mut Window) {
+        let frame = self.ui.paint(&mut win.canvas());
+        if !frame.is_empty() {
+            let _ = win.present_rects(frame.rects());
         }
-    }
-
-    fn draw(&self, win: &mut Window) {
-        let mut c = win.canvas();
-        c.fill(widgets::BG);
-        c.text(PAD, PAD + 4, "home/", widgets::FG, None);
-        self.list.draw(&mut c, |i| self.row(i));
-        c.text(PAD, FIELD_Y + 4, "Name", widgets::FG, None);
-        self.field
-            .draw(&mut c, &NAME_RECT, self.focus == Focus::Name);
-        NEW.draw(&mut c, false);
-        RENAME.draw(&mut c, false);
-        DELETE.draw(&mut c, self.armed.is_some());
-        REFRESH.draw(&mut c, false);
-        let status = widgets::utf8_prefix(&self.status[..self.status_len]);
-        let color = if self.error {
-            widgets::ERROR
-        } else {
-            widgets::MUTED
-        };
-        c.text(PAD, STATUS_Y, status, color, None);
     }
 }
 
-fn name_of(buf: &[u8; NAME_MAX]) -> &str {
-    let n = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-    core::str::from_utf8(&buf[..n]).unwrap_or("")
+/// The window's widgets, and the folder they show.
+fn build(fs: FsClient, dark: bool) -> Files {
+    let mut ui = Ui::new(Theme::of(dark), W, H);
+    let title = ui.label("home/", Style::Headline, Tone::Primary);
+    let list = ui.list();
+    ui.set_list_icons(list, ListIcons::Documents);
+    ui.set_flex(list, 1);
+    let caption = ui.label("Name", Style::Body, Tone::Primary);
+    let field = ui.field(NAME_MAX, "a-z, 0-9, . _ -");
+    ui.set_flex(field, 1);
+    let name = ui.stack(Stack::row(), &[caption, field]);
+    let new = ui.button("New");
+    let rename = ui.button("Rename");
+    let delete = ui.button("Delete");
+    let refresh = ui.button("Refresh");
+    let buttons = ui.stack(Stack::row(), &[new, rename, delete, refresh]);
+    let status = ui.paragraph("", Style::Callout, Tone::Secondary);
+    let root = ui.stack(
+        Stack::column().pad(Space::Margin).fill(Fill::Window),
+        &[title, list, name, status, buttons],
+    );
+    ui.set_root(root);
+    ui.focus(list);
+    let deleting = ui.dialog("Delete", "Keep");
+    Files {
+        fs,
+        ui,
+        list,
+        field,
+        new,
+        rename,
+        delete,
+        refresh,
+        status,
+        names: Vec::new(),
+        deleting,
+        more: false,
+        nested: 0,
+    }
 }
 
 fn main(_arg: u64) -> u64 {
@@ -341,35 +321,38 @@ fn main(_arg: u64) -> u64 {
         say(&[b"cannot reach home/"]);
         return 2;
     };
-    let Ok(mut win) = Window::create(session, hw, W, H, "Files") else {
+    let wanted = wants::POINTER | wants::KEY_CODES | wants::RESIZE | wants::APPEARANCE;
+    let Ok(mut win) = Window::create_wanting(session, hw, W, H, "Files", wanted) else {
         say(&[b"could not create its window"]);
         return 3;
     };
-    let mut f = Files {
-        fs,
-        names: [[0; 32]; MAX_FILES],
-        lens: [0; MAX_FILES],
-        rows: [[0; 48]; MAX_FILES],
-        row_lens: [0; MAX_FILES],
-        list: List::new(LIST_RECT),
-        field: TextField::new(),
-        focus: Focus::List,
-        armed: None,
-        more: false,
-        nested: 0,
-        status: [0; 80],
-        status_len: 0,
-        error: false,
-    };
+    let file = [
+        ("File", 0),
+        ("New", MENU_NEW),
+        ("Rename\tCtrl+R", MENU_RENAME),
+        ("Delete\tDelete", MENU_DELETE),
+        ("Refresh", MENU_REFRESH),
+    ];
+    let menus = file
+        .iter()
+        .map(|&(label, id)| win.menu_add(0, label, id))
+        .chain(
+            EDIT_MENU
+                .iter()
+                .map(|&(label, id)| win.menu_add(1, label, id)),
+        );
+    if menus.into_iter().any(|added| added.is_err()) {
+        say(&[b"the bar did not take its menus"]);
+    }
+    let mut f = build(fs, win.starts_dark());
     if f.refresh(None) {
         f.say_count();
     }
-    f.draw(&mut win);
-    if win.present().is_err() {
+    let frame = f.ui.paint(&mut win.canvas());
+    if frame.is_empty() || win.present().is_err() {
         return 4;
     }
     say(&[b"ready"]);
-    let mut keys = KeyDecoder::new();
     loop {
         let event = match win.poll(1000) {
             Ok(Some(e)) => e,
@@ -378,40 +361,64 @@ fn main(_arg: u64) -> u64 {
             Err(_) => return 5,
         };
         match event {
-            Event::Key(byte) => {
-                for key in keys.feed(byte).into_iter().flatten() {
-                    f.key(key);
-                }
-            }
-            Event::Click { x, y, .. } => {
-                if let Some(row) = f.list.hit(x, y) {
-                    f.focus = Focus::List;
-                    if f.list.selected != Some(row) {
-                        f.armed = None;
-                    }
-                    f.list.select(row);
-                } else if NAME_RECT.contains(x, y) {
-                    f.focus = Focus::Name;
-                } else if NEW.contains(x, y) {
-                    f.create();
-                } else if RENAME.contains(x, y) {
-                    f.rename();
-                } else if DELETE.contains(x, y) {
-                    f.delete();
-                } else if REFRESH.contains(x, y) && f.refresh(None) {
-                    f.say_count();
-                }
-            }
             // Nothing to save: it closes at once (ADR 0077).
             Event::Close => {
                 say(&[b"closed"]);
                 let _ = win.close();
                 return 0;
             }
-            _ => {}
+            Event::Configure { width, height } => {
+                let _ = f.ui.configure(width, height, |ui| {
+                    win.resize(hw, width, height, |c| ui.paint_all(c))
+                });
+            }
+            event => f.ui.handle(event),
         }
-        f.draw(&mut win);
-        let _ = win.present();
+        while let Some(action) = f.ui.next_action() {
+            match action {
+                Action::Pressed(id) if id == f.deleting.yes => {
+                    f.ui.answered();
+                    f.delete();
+                }
+                Action::Pressed(id) if id == f.deleting.no => {
+                    f.ui.answered();
+                    say(&[b"kept the file"]);
+                }
+                Action::DeleteRow(..) | Action::Menu(MENU_DELETE) => f.ask_to_delete(),
+                Action::Menu(MENU_NEW) => f.create(),
+                Action::Menu(MENU_RENAME) => f.rename(),
+                Action::Menu(MENU_REFRESH) if f.refresh(None) => f.say_count(),
+                Action::Submitted(_) => f.create(),
+                Action::Shortcut(b'r') => f.rename(),
+                Action::Cancel => f.ui.focus(f.list),
+                Action::Pressed(id) if id == f.new => f.create(),
+                Action::Pressed(id) if id == f.rename => f.rename(),
+                Action::Pressed(id) if id == f.delete => f.ask_to_delete(),
+                Action::Pressed(id) if id == f.refresh && f.refresh(None) => f.say_count(),
+                Action::Copied => {
+                    if let Some(text) = f.ui.take_copied() {
+                        if win.clipboard_set(hw, &text).is_err() {
+                            f.set_status(true, &[b"could not copy"]);
+                        }
+                    }
+                }
+                Action::Cut(id) => {
+                    if let Some(text) = f.ui.take_copied() {
+                        match win.clipboard_set(hw, &text) {
+                            Ok(()) => f.ui.cut_done(id),
+                            Err(_) => f.set_status(true, &[b"could not cut: the text stays"]),
+                        }
+                    }
+                }
+                Action::Paste(id) => match win.clipboard_get(hw, |text| f.ui.paste(id, text)) {
+                    Ok(true) => {}
+                    Ok(false) => f.set_status(true, &[b"only part of it fits in a name"]),
+                    Err(_) => f.set_status(true, &[b"could not paste"]),
+                },
+                _ => {}
+            }
+        }
+        f.show(&mut win);
     }
 }
 

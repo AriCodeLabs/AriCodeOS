@@ -6,7 +6,7 @@
 # the next boot tries.
 name = "update.installed_unknown"
 description = "a system whose installed version cannot be verified is only replaced with --allow-downgrade"
-level = "full"
+level = "release"
 areas = ["update", "network", "shell", "boot"]
 disk = "a-corrupt"
 timeout_secs = 180

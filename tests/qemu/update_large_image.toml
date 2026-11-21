@@ -7,7 +7,7 @@
 # header, and AriBoot boots the large image from B.
 name = "update.large_image"
 description = "an image larger than the updater's memory verifies in place, installs with apply and boots"
-level = "full"
+level = "release"
 areas = ["update", "boot", "shell"]
 disk = "large-a"
 timeout_secs = 180
